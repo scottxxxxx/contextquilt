@@ -1,0 +1,2306 @@
+[
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_0",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 0 covering identity/declared/onboarding/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_1",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 1 covering identity/declared/onboarding/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_2",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 2 covering identity/declared/onboarding/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_3",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 3 covering identity/declared/onboarding/secret"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_4",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 4 covering identity/declared/user_chat/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_5",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 5 covering identity/declared/user_chat/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_6",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 6 covering identity/declared/user_chat/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_7",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 7 covering identity/declared/user_chat/secret"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_8",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 8 covering identity/declared/archivist/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_9",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 9 covering identity/declared/archivist/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_10",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 10 covering identity/declared/archivist/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_11",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 11 covering identity/declared/archivist/secret"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_12",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 12 covering identity/declared/system_migration/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_13",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 13 covering identity/declared/system_migration/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_14",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 14 covering identity/declared/system_migration/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_15",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 15 covering identity/declared/system_migration/secret"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_16",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 16 covering identity/inferred/onboarding/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_17",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 17 covering identity/inferred/onboarding/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_18",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 18 covering identity/inferred/onboarding/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_19",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 19 covering identity/inferred/onboarding/secret"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_20",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 20 covering identity/inferred/user_chat/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_21",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 21 covering identity/inferred/user_chat/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_22",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 22 covering identity/inferred/user_chat/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_23",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 23 covering identity/inferred/user_chat/secret"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_24",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 24 covering identity/inferred/archivist/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_25",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 25 covering identity/inferred/archivist/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_26",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 26 covering identity/inferred/archivist/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_27",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 27 covering identity/inferred/archivist/secret"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_28",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 28 covering identity/inferred/system_migration/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_29",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 29 covering identity/inferred/system_migration/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_30",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 30 covering identity/inferred/system_migration/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_31",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 31 covering identity/inferred/system_migration/secret"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_32",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 32 covering identity/derived/onboarding/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_33",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 33 covering identity/derived/onboarding/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_34",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 34 covering identity/derived/onboarding/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_35",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 35 covering identity/derived/onboarding/secret"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_36",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 36 covering identity/derived/user_chat/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_37",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 37 covering identity/derived/user_chat/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_38",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 38 covering identity/derived/user_chat/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_39",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 39 covering identity/derived/user_chat/secret"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_40",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 40 covering identity/derived/archivist/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_41",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 41 covering identity/derived/archivist/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_42",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 42 covering identity/derived/archivist/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_43",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 43 covering identity/derived/archivist/secret"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Name is John Doe"
+    },
+    "patch_name": "seed_identity_44",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 44 covering identity/derived/system_migration/normal"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Role is Software Architect"
+    },
+    "patch_name": "seed_identity_45",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 45 covering identity/derived/system_migration/pii"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Employed by TechCorp"
+    },
+    "patch_name": "seed_identity_46",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 46 covering identity/derived/system_migration/phi"
+  },
+  {
+    "patch_type": "identity",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Location is Austin, TX"
+    },
+    "patch_name": "seed_identity_47",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 47 covering identity/derived/system_migration/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_48",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 48 covering preference/declared/onboarding/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_49",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 49 covering preference/declared/onboarding/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_50",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 50 covering preference/declared/onboarding/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_51",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 51 covering preference/declared/onboarding/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_52",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 52 covering preference/declared/user_chat/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_53",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 53 covering preference/declared/user_chat/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_54",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 54 covering preference/declared/user_chat/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_55",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 55 covering preference/declared/user_chat/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_56",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 56 covering preference/declared/archivist/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_57",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 57 covering preference/declared/archivist/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_58",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 58 covering preference/declared/archivist/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_59",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 59 covering preference/declared/archivist/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_60",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 60 covering preference/declared/system_migration/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_61",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 61 covering preference/declared/system_migration/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_62",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 62 covering preference/declared/system_migration/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_63",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 63 covering preference/declared/system_migration/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_64",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 64 covering preference/inferred/onboarding/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_65",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 65 covering preference/inferred/onboarding/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_66",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 66 covering preference/inferred/onboarding/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_67",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 67 covering preference/inferred/onboarding/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_68",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 68 covering preference/inferred/user_chat/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_69",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 69 covering preference/inferred/user_chat/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_70",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 70 covering preference/inferred/user_chat/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_71",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 71 covering preference/inferred/user_chat/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_72",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 72 covering preference/inferred/archivist/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_73",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 73 covering preference/inferred/archivist/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_74",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 74 covering preference/inferred/archivist/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_75",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 75 covering preference/inferred/archivist/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_76",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 76 covering preference/inferred/system_migration/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_77",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 77 covering preference/inferred/system_migration/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_78",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 78 covering preference/inferred/system_migration/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_79",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 79 covering preference/inferred/system_migration/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_80",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 80 covering preference/derived/onboarding/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_81",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 81 covering preference/derived/onboarding/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_82",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 82 covering preference/derived/onboarding/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_83",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 83 covering preference/derived/onboarding/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_84",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 84 covering preference/derived/user_chat/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_85",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 85 covering preference/derived/user_chat/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_86",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 86 covering preference/derived/user_chat/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_87",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 87 covering preference/derived/user_chat/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_88",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 88 covering preference/derived/archivist/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_89",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 89 covering preference/derived/archivist/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_90",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 90 covering preference/derived/archivist/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_91",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 91 covering preference/derived/archivist/secret"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Prefers Dark Mode"
+    },
+    "patch_name": "seed_preference_92",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 92 covering preference/derived/system_migration/normal"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Likes concise answers"
+    },
+    "patch_name": "seed_preference_93",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 93 covering preference/derived/system_migration/pii"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Dislikes Java"
+    },
+    "patch_name": "seed_preference_94",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 94 covering preference/derived/system_migration/phi"
+  },
+  {
+    "patch_type": "preference",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Wants git commands included"
+    },
+    "patch_name": "seed_preference_95",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 95 covering preference/derived/system_migration/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_96",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 96 covering trait/declared/onboarding/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_97",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 97 covering trait/declared/onboarding/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_98",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 98 covering trait/declared/onboarding/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_99",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 99 covering trait/declared/onboarding/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_100",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 100 covering trait/declared/user_chat/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_101",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 101 covering trait/declared/user_chat/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_102",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 102 covering trait/declared/user_chat/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_103",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 103 covering trait/declared/user_chat/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_104",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 104 covering trait/declared/archivist/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_105",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 105 covering trait/declared/archivist/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_106",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 106 covering trait/declared/archivist/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_107",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 107 covering trait/declared/archivist/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_108",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 108 covering trait/declared/system_migration/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_109",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 109 covering trait/declared/system_migration/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_110",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 110 covering trait/declared/system_migration/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_111",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 111 covering trait/declared/system_migration/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_112",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 112 covering trait/inferred/onboarding/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_113",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 113 covering trait/inferred/onboarding/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_114",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 114 covering trait/inferred/onboarding/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_115",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 115 covering trait/inferred/onboarding/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_116",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 116 covering trait/inferred/user_chat/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_117",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 117 covering trait/inferred/user_chat/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_118",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 118 covering trait/inferred/user_chat/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_119",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 119 covering trait/inferred/user_chat/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_120",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 120 covering trait/inferred/archivist/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_121",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 121 covering trait/inferred/archivist/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_122",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 122 covering trait/inferred/archivist/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_123",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 123 covering trait/inferred/archivist/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_124",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 124 covering trait/inferred/system_migration/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_125",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 125 covering trait/inferred/system_migration/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_126",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 126 covering trait/inferred/system_migration/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_127",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 127 covering trait/inferred/system_migration/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_128",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 128 covering trait/derived/onboarding/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_129",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 129 covering trait/derived/onboarding/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_130",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 130 covering trait/derived/onboarding/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_131",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 131 covering trait/derived/onboarding/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_132",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 132 covering trait/derived/user_chat/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_133",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 133 covering trait/derived/user_chat/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_134",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 134 covering trait/derived/user_chat/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_135",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 135 covering trait/derived/user_chat/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_136",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 136 covering trait/derived/archivist/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_137",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 137 covering trait/derived/archivist/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_138",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 138 covering trait/derived/archivist/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_139",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 139 covering trait/derived/archivist/secret"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Highly technical"
+    },
+    "patch_name": "seed_trait_140",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 140 covering trait/derived/system_migration/normal"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Visual learner"
+    },
+    "patch_name": "seed_trait_141",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 141 covering trait/derived/system_migration/pii"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Skeptical of AI"
+    },
+    "patch_name": "seed_trait_142",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 142 covering trait/derived/system_migration/phi"
+  },
+  {
+    "patch_type": "trait",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Detail-oriented"
+    },
+    "patch_name": "seed_trait_143",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 143 covering trait/derived/system_migration/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_144",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 144 covering experience/declared/onboarding/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_145",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 145 covering experience/declared/onboarding/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_146",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 146 covering experience/declared/onboarding/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_147",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 147 covering experience/declared/onboarding/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_148",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 148 covering experience/declared/user_chat/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_149",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 149 covering experience/declared/user_chat/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_150",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 150 covering experience/declared/user_chat/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_151",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 151 covering experience/declared/user_chat/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_152",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 152 covering experience/declared/archivist/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_153",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 153 covering experience/declared/archivist/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_154",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 154 covering experience/declared/archivist/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_155",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 155 covering experience/declared/archivist/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_156",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 156 covering experience/declared/system_migration/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_157",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 157 covering experience/declared/system_migration/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_158",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 158 covering experience/declared/system_migration/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "declared",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_159",
+    "confidence": 1.0,
+    "description": "Auto-generated patch 159 covering experience/declared/system_migration/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_160",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 160 covering experience/inferred/onboarding/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_161",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 161 covering experience/inferred/onboarding/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_162",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 162 covering experience/inferred/onboarding/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_163",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 163 covering experience/inferred/onboarding/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_164",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 164 covering experience/inferred/user_chat/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_165",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 165 covering experience/inferred/user_chat/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_166",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 166 covering experience/inferred/user_chat/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_167",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 167 covering experience/inferred/user_chat/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_168",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 168 covering experience/inferred/archivist/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_169",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 169 covering experience/inferred/archivist/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_170",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 170 covering experience/inferred/archivist/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_171",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 171 covering experience/inferred/archivist/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_172",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 172 covering experience/inferred/system_migration/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_173",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 173 covering experience/inferred/system_migration/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_174",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 174 covering experience/inferred/system_migration/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "inferred",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_175",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 175 covering experience/inferred/system_migration/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_176",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 176 covering experience/derived/onboarding/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_177",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 177 covering experience/derived/onboarding/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_178",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 178 covering experience/derived/onboarding/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "onboarding",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_179",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 179 covering experience/derived/onboarding/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_180",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 180 covering experience/derived/user_chat/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_181",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 181 covering experience/derived/user_chat/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_182",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 182 covering experience/derived/user_chat/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "user_chat",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_183",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 183 covering experience/derived/user_chat/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_184",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 184 covering experience/derived/archivist/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_185",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 185 covering experience/derived/archivist/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_186",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 186 covering experience/derived/archivist/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "archivist",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_187",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 187 covering experience/derived/archivist/secret"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "normal",
+    "value": {
+      "text": "Debugged production incident #123"
+    },
+    "patch_name": "seed_experience_188",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 188 covering experience/derived/system_migration/normal"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "pii",
+    "value": {
+      "text": "Attended Q4 Planning"
+    },
+    "patch_name": "seed_experience_189",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 189 covering experience/derived/system_migration/pii"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "phi",
+    "value": {
+      "text": "Migrated database to Postgres"
+    },
+    "patch_name": "seed_experience_190",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 190 covering experience/derived/system_migration/phi"
+  },
+  {
+    "patch_type": "experience",
+    "origin_mode": "derived",
+    "source_prompt": "system_migration",
+    "sensitivity": "secret",
+    "value": {
+      "text": "Deployed v2.0"
+    },
+    "patch_name": "seed_experience_191",
+    "confidence": 0.75,
+    "description": "Auto-generated patch 191 covering experience/derived/system_migration/secret"
+  }
+]
