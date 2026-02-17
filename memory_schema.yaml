@@ -1,0 +1,27 @@
+# Context Quilt Memory Schema
+# Defines the structure of "Context Patches"
+
+context_patches:
+  - name: "food_allergies"
+    patch_type: "preference" # Maps to PatchCategory.PREFERENCE (Content/Choices)
+    persistence: "permanent" # Maps to PatchPersistence.PERMANENT
+    data_type: "list"
+    description: "Critical food restrictions."
+
+  - name: "communication_style"
+    patch_type: "trait" # Maps to PatchCategory.TRAIT (Style/How)
+    persistence: "sticky" # Maps to PatchPersistence.STICKY
+    data_type: "json"
+    description: "User's preferred tone and verbosity."
+
+  - name: "last_project_context"
+    patch_type: "experience" # Maps to PatchCategory.EXPERIENCE
+    persistence: "ephemeral" # Maps to PatchPersistence.EPHEMERAL
+    data_type: "string"
+    description: "Context from the user's most recent project activity."
+
+  - name: "job_title"
+    patch_type: "identity" # Maps to PatchCategory.IDENTITY
+    persistence: "sticky" # Maps to PatchPersistence.STICKY
+    data_type: "string"
+    description: "User's professional role."
