@@ -1,0 +1,692 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ContextQuilt | Nexus Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="style.css?v=2">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="brand">
+                <i class="fa-solid fa-layer-group"></i>
+                <span>ContextQuilt</span>
+            </div>
+
+            <nav class="nav-menu">
+                <a href="#" class="nav-item active" data-view="dashboard">
+                    <i class="fa-solid fa-grid-2"></i>
+                    <span>Dashboard</span>
+                </a>
+                <a href="#" class="nav-item" data-view="insights">
+                    <i class="fa-solid fa-lightbulb"></i>
+                    <span>Insights Stream</span>
+                </a>
+                <a href="#" class="nav-item" data-view="users">
+                    <i class="fa-solid fa-users"></i>
+                    <span>The User Quilt</span>
+                </a>
+                <a href="#" class="nav-item" data-view="schema">
+                    <i class="fa-solid fa-wand-magic-sparkles"></i>
+                    <span>Schema & Discovery</span>
+                </a>
+                <a href="#" class="nav-item" data-view="playground">
+                    <i class="fa-solid fa-flask"></i>
+                    <span>Pipeline Playground</span>
+                </a>
+                <a href="#" class="nav-item" data-view="roi">
+                    <i class="fa-solid fa-chart-line"></i>
+                    <span>Performance & ROI</span>
+                </a>
+                <a href="#" class="nav-item" data-view="system">
+                    <i class="fa-solid fa-server"></i>
+                    <span>System Health</span>
+                </a>
+                <a href="#" class="nav-item" data-view="developer">
+                    <i class="fa-solid fa-key"></i>
+                    <span>Application Access</span>
+                </a>
+            </nav>
+
+            <div class="sidebar-footer">
+                <div class="status-indicator">
+                    <span class="dot online"></span>
+                    <span>System Online</span>
+                </div>
+                <div class="version">v3.9.0</div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Header -->
+            <header class="top-bar">
+                <div class="search-bar">
+                    <i class="fa-solid fa-search"></i>
+                    <input type="text" placeholder="Search insights, users, or logs...">
+                </div>
+                <div class="header-actions">
+                    <button class="icon-btn"><i class="fa-regular fa-bell"></i></button>
+                    <div class="user-profile">
+                        <div class="avatar">A</div>
+                        <span>Admin</span>
+                    </div>
+                </div>
+            </header>
+
+            <!-- Dashboard View -->
+            <div id="dashboard-view" class="view-container active">
+                <div class="page-header">
+                    <h1>System Overview</h1>
+                    <div class="time-display" id="clock">00:00:00</div>
+                </div>
+
+                <!-- KPI Cards -->
+                <div class="kpi-grid">
+                    <div class="card kpi-card">
+                        <div class="kpi-icon blue"><i class="fa-solid fa-brain"></i></div>
+                        <div class="kpi-content">
+                            <h3>Total Memories</h3>
+                            <div class="value" id="total-facts">--</div>
+                            <div class="trend positive"><i class="fa-solid fa-arrow-up"></i> <span
+                                    id="facts-trend">--</span> this week</div>
+                        </div>
+                    </div>
+                    <div class="card kpi-card">
+                        <div class="kpi-icon purple"><i class="fa-solid fa-users"></i></div>
+                        <div class="kpi-content">
+                            <h3>Active Users</h3>
+                            <div class="value" id="total-users">--</div>
+                            <div class="trend neutral"><i class="fa-solid fa-minus"></i> Stable</div>
+                        </div>
+                    </div>
+                    <div class="card kpi-card">
+                        <div class="kpi-icon green"><i class="fa-solid fa-bolt"></i></div>
+                        <div class="kpi-content">
+                            <h3>Cache Hit Rate</h3>
+                            <div class="value">98.2%</div>
+                            <div class="trend positive"><i class="fa-solid fa-arrow-up"></i> +0.5%</div>
+                        </div>
+                    </div>
+                    <div class="card kpi-card">
+                        <div class="kpi-icon orange"><i class="fa-solid fa-clock"></i></div>
+                        <div class="kpi-content">
+                            <h3>Avg Latency</h3>
+                            <div class="value">42ms</div>
+                            <div class="trend negative"><i class="fa-solid fa-arrow-down"></i> -12ms (Improved)</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Time Range Section -->
+                <div class="card"
+                    style="margin-bottom: 2rem; padding: 1.5rem; display: flex; align-items: center; justify-content: space-between;">
+                    <div>
+                        <h3 style="margin: 0; display: flex; align-items: center; gap: 0.5rem;">
+                            <i class="fa-solid fa-calendar-days" style="color: var(--primary-color)"></i>
+                            Time Range
+                        </h3>
+                        <p style="margin: 0.25rem 0 0 0; font-size: 0.875rem; color: var(--text-muted);">Filter all
+                            metrics by time.</p>
+                    </div>
+
+                    <div class="time-controls" style="display: flex; gap: 1.5rem; align-items: center;">
+                        <!-- Presets -->
+                        <div class="chart-controls">
+                            <button class="sm-btn active" onclick="updateChartGranularity(1, 'hour')">24h</button>
+                            <button class="sm-btn" onclick="updateChartGranularity(7, 'day')">7d</button>
+                            <button class="sm-btn" onclick="updateChartGranularity(30, 'day')">30d</button>
+                        </div>
+
+                        <!-- Separator -->
+                        <div style="height: 24px; width: 1px; background: rgba(148, 163, 184, 0.1);"></div>
+
+                        <!-- Custom Date Range -->
+                        <div class="date-range-picker" style="display: flex; gap: 0.5rem; align-items: center;">
+                            <input type="date" id="start-date" class="date-input"
+                                style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(148, 163, 184, 0.1); color: var(--text-primary); padding: 0.4rem; border-radius: 0.375rem; font-family: var(--font-mono); font-size: 0.875rem; color-scheme: dark;">
+                            <span style="color: var(--text-muted)">—</span>
+                            <input type="date" id="end-date" class="date-input"
+                                style="background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(148, 163, 184, 0.1); color: var(--text-primary); padding: 0.4rem; border-radius: 0.375rem; font-family: var(--font-mono); font-size: 0.875rem; color-scheme: dark;">
+                            <button class="sm-btn" onclick="applyCustomDateRange()">Apply</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Charts Row -->
+                <div class="charts-grid">
+                    <div class="card chart-card wide">
+                        <div class="card-header">
+                            <h2>Context Patch Ingestion</h2>
+                        </div>
+                        <div class="chart-legend"
+                            style="display: flex; gap: 1rem; margin-bottom: 0.5rem; justify-content: flex-end; font-size: 0.8rem;">
+                            <!-- Legend Items -->
+                            <span style="color: #3b82f6"><i class="fa-solid fa-circle"></i> Identity</span>
+                            <span style="color: #10b981"><i class="fa-solid fa-circle"></i> Preference</span>
+                            <span style="color: #8b5cf6"><i class="fa-solid fa-circle"></i> Trait</span>
+                            <span style="color: #f59e0b"><i class="fa-solid fa-circle"></i> Experience</span>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="ingestionChart"></canvas>
+                        </div>
+                    </div>
+                    <div class="card chart-card">
+                        <div class="card-header">
+                            <h2>Knowledge Distribution</h2>
+                            <div class="card-actions">
+                                <select id="distribution-selector" class="filter-select">
+                                    <option value="patch_type">By Patch Type</option>
+                                    <option value="origin">By Origin Mode</option>
+                                    <option value="source_prompt">By Source Prompt</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="chart-container">
+                            <canvas id="categoryChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Recent Activity Row -->
+                <div class="grid-row">
+                    <div class="card table-card">
+                        <div class="card-header">
+                            <h2>Live Insights Stream</h2>
+                            <div class="table-actions">
+                                <select id="patch-filter" class="filter-select">
+                                    <option value="">All Types</option>
+                                    <!-- Populated by JS -->
+                                </select>
+                                <button class="icon-btn" onclick="fetchDashboardData()"><i
+                                        class="fa-solid fa-arrows-rotate"></i></button>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th onclick="sortData('created_at')" class="sortable">Time <i
+                                                class="fa-solid fa-sort"></i></th>
+                                        <th onclick="sortData('user_id')" class="sortable">User <i
+                                                class="fa-solid fa-sort"></i></th>
+                                        <th onclick="sortData('origin')" class="sortable">Origin <i
+                                                class="fa-solid fa-sort"></i></th>
+                                        <th onclick="sortData('patch_type')" class="sortable">Type <i
+                                                class="fa-solid fa-sort"></i></th>
+                                        <th onclick="sortData('patch_name')" class="sortable">Key <i
+                                                class="fa-solid fa-sort"></i></th>
+                                        <th>Value</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="recent-facts-body">
+                                    <!-- Populated by JS -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- User Quilt View -->
+            <div id="users-view" class="view-container">
+                <div class="page-header">
+                    <h1>Users</h1>
+                    <div class="header-actions">
+                        <div class="search-bar" style="width: 300px;">
+                            <i class="fa-solid fa-search"></i>
+                            <input type="text" id="user-search-input" placeholder="Search user ID...">
+                        </div>
+                    </div>
+                </div>
+
+                <style>
+                    .toggle-icon {
+                        cursor: pointer;
+                        transition: transform 0.3s ease;
+                        width: 32px;
+                        height: 32px;
+                        display: flex;
+                        align-items: center;
+                        justify-content: center;
+                        border-radius: 6px;
+                    }
+
+                    .toggle-icon:hover {
+                        background: rgba(255, 255, 255, 0.05);
+                    }
+
+                    .toggle-icon.collapsed {
+                        transform: rotate(180deg);
+                    }
+
+                    .card-body-content {
+                        transition: all 0.3s ease;
+                    }
+
+                    .card-body-content.hidden {
+                        display: none !important;
+                    }
+                </style>
+
+                <div class="quilt-layout">
+                    <!-- 1. User Directory Card -->
+                    <div class="card user-list-card wide" id="card-users"
+                        style="flex: 0 0 auto; max-height: none; transition: all 0.3s ease;">
+                        <div class="card-header">
+                            <h2><i class="fa-solid fa-users"></i> User Directory <span id="directory-user-count"
+                                    class="count-badge">0</span></h2>
+                            <div class="table-actions">
+                                <button class="icon-btn" onclick="fetchUsers()"><i
+                                        class="fa-solid fa-arrows-rotate"></i></button>
+                                <i class="fa-solid fa-chevron-up toggle-icon" onclick="toggleCard('card-users')"></i>
+                            </div>
+                        </div>
+                        <div class="table-responsive card-body-content" id="body-users" style="max-height: 500px;">
+                            <!-- Limit height of list -->
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th onclick="sortUsers('user_id')" class="sortable">User ID <i
+                                                class="fa-solid fa-sort"></i></th>
+                                        <th onclick="sortUsers('first_name')" class="sortable">First Name <i
+                                                class="fa-solid fa-sort"></i></th>
+                                        <th onclick="sortUsers('last_name')" class="sortable">Last Name <i
+                                                class="fa-solid fa-sort"></i></th>
+                                        <th onclick="sortUsers('patch_count')" class="sortable">Memory Patches <i
+                                                class="fa-solid fa-sort"></i></th>
+                                        <th onclick="sortUsers('last_updated')" class="sortable">Last Updated <i
+                                                class="fa-solid fa-sort"></i></th>
+                                        <th onclick="sortUsers('last_provided')" class="sortable">Last Context Provided
+                                            <i class="fa-solid fa-sort"></i>
+                                        </th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="users-table-body">
+                                    <!-- Populated by JS -->
+                                    <tr>
+                                        <td colspan="5" class="loading-spinner">Loading...</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- 2. Activity History Card -->
+                    <div class="card timeline-card" id="card-history" style="display: none; flex: 0 0 auto;">
+                        <div class="card-header"
+                            style="border-bottom: 1px solid rgba(148, 163, 184, 0.1); padding: 1rem;">
+                            <h3>Activity History</h3>
+                            <div style="display: flex; gap: 1rem; align-items: center;">
+                                <div class="timeline-controls" style="display: flex; gap: 0.5rem;">
+                                    <button id="btn-timeline-7" class="sm-btn"
+                                        onclick="updateUserTimelineRange(7)">7d</button>
+                                    <button id="btn-timeline-30" class="sm-btn active"
+                                        onclick="updateUserTimelineRange(30)">30d</button>
+                                    <button id="btn-timeline-90" class="sm-btn"
+                                        onclick="updateUserTimelineRange(90)">90d</button>
+                                </div>
+                                <i class="fa-solid fa-chevron-up toggle-icon" onclick="toggleCard('card-history')"></i>
+                            </div>
+                        </div>
+                        <div id="body-history" class="card-body-content" style="height: 350px; padding: 1rem;">
+                            <canvas id="userTimelineChart"></canvas>
+                        </div>
+                    </div>
+
+                    <!-- 3. Context Details Card -->
+                    <div class="card" id="card-details"
+                        style="display: none; flex: 1; display: flex; flex-direction: column; overflow: hidden; height: auto;">
+                        <div class="card-header">
+                            <h2>Context Insights & Details</h2>
+                            <div class="header-actions">
+                                <i class="fa-solid fa-chevron-up toggle-icon" onclick="toggleCard('card-details')"></i>
+                            </div>
+                        </div>
+
+                        <div id="body-details" class="card-body-content" style="overflow-y: auto; padding: 0.5rem;">
+                            <!-- Details Inner Content -->
+                            <div class="quilt-details-section">
+                                <!-- Identity Header -->
+                                <div class="card identity-header" style="margin-bottom: 1.5rem;">
+                                    <div class="user-avatar-large">
+                                        <span id="quilt-user-initial">U</span>
+                                    </div>
+                                    <div class="user-info-main">
+                                        <h2 id="quilt-user-id">User ID</h2>
+                                        <div class="user-badges" id="quilt-identity-badges"></div>
+                                    </div>
+                                    <div class="context-stats">
+                                        <div class="stat-item">
+                                            <span class="label">Patches</span>
+                                            <span class="value" id="quilt-patch-count">0</span>
+                                        </div>
+                                        <div class="stat-item">
+                                            <span class="label">Last Active</span>
+                                            <span class="value" id="quilt-last-active">-</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div class="quilt-grid-layout">
+                                    <!-- Patchwork Grid -->
+                                    <div class="patchwork-section">
+                                        <h3 class="section-title">Context Patchwork</h3>
+                                        <div class="table-responsive">
+                                            <table class="data-table">
+                                                <thead>
+                                                    <tr>
+                                                        <th onclick="sortQuiltData('created_at')" class="sortable">Time
+                                                            <i class="fa-solid fa-sort"></i>
+                                                        </th>
+                                                        <th onclick="sortQuiltData('user_id')" class="sortable">User <i
+                                                                class="fa-solid fa-sort"></i></th>
+                                                        <th onclick="sortQuiltData('origin_mode')" class="sortable">
+                                                            Origin <i class="fa-solid fa-sort"></i></th>
+                                                        <th onclick="sortQuiltData('patch_type')" class="sortable">Type
+                                                            <i class="fa-solid fa-sort"></i>
+                                                        </th>
+                                                        <th onclick="sortQuiltData('patch_name')" class="sortable">Key
+                                                            <i class="fa-solid fa-sort"></i>
+                                                        </th>
+                                                        <th onclick="sortQuiltData('source_prompt')" class="sortable">
+                                                            Prompt <i class="fa-solid fa-sort"></i></th>
+                                                        <th onclick="sortQuiltData('confidence')" class="sortable">Conf.
+                                                            <i class="fa-solid fa-sort"></i>
+                                                        </th>
+                                                        <th onclick="sortQuiltData('sensitivity')" class="sortable">
+                                                            Sens. <i class="fa-solid fa-sort"></i></th>
+                                                        <th>Value</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody id="quilt-patch-table-body">
+                                                    <!-- Populated by JS -->
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+
+                                    <!-- Timeline -->
+                                    <div class="timeline-section">
+                                        <h3 class="section-title">Episodic Timeline</h3>
+                                        <div class="card timeline-card">
+                                            <div class="timeline" id="quilt-timeline"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Empty State (Hidden) -->
+                    <div class="quilt-content empty-state" id="quilt-empty-state" style="display: none;"></div>
+                </div>
+            </div>
+
+            <!-- Application Access View -->
+            <div id="developer-view" class="view-container">
+                <div class="page-header">
+                    <h1>Application Access</h1>
+                    <div class="time-display" id="clock-dev">00:00:00</div>
+                </div>
+
+                <div class="grid-row">
+                    <!-- API Documentation Card -->
+                    <div class="card kpi-card wide">
+                        <div class="kpi-icon blue"><i class="fa-solid fa-book"></i></div>
+                        <div class="kpi-content">
+                            <h3>API Documentation</h3>
+                            <p style="color: var(--text-muted); margin-bottom: 1rem;">Access the full Swagger UI
+                                documentation to explore endpoints and test requests.</p>
+                            <a href="/docs" target="_blank" class="sm-btn active"
+                                style="text-decoration: none; display: inline-block;">Open Swagger UI <i
+                                    class="fa-solid fa-external-link-alt"></i></a>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="grid-row">
+                    <!-- App IDs Card -->
+                    <div class="card table-card">
+                        <div class="card-header">
+                            <h2>Registered Applications</h2>
+                            <div class="table-actions">
+                                <button class="icon-btn" onclick="fetchApplications()"><i
+                                        class="fa-solid fa-arrows-rotate"></i></button>
+                            </div>
+                        </div>
+                        <div class="table-responsive">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Application Name</th>
+                                        <th>Application ID</th>
+                                        <th>Enforce Auth</th>
+                                        <th>Created</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="dev-apps-body">
+                                    <!-- Populated by JS -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <!-- Register App Card -->
+                    <div class="card chart-card">
+                        <div class="card-header">
+                            <h2>Register New Application</h2>
+                        </div>
+                        <div style="padding: 1.5rem; display: flex; flex-direction: column; gap: 1rem;">
+                            <p style="color: var(--text-muted);">Create a new application to get an API Key (Client
+                                Secret).</p>
+                            <div style="display: flex; gap: 0.5rem;">
+                                <input type="text" id="new-app-name" placeholder="Application Name (e.g. n8n)"
+                                    style="flex: 1; background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(148, 163, 184, 0.1); padding: 0.5rem; color: var(--text-primary); border-radius: 0.375rem;">
+                                <button class="sm-btn active" onclick="registerApplication()">Register</button>
+                            </div>
+                            <div id="new-app-credentials"
+                                style="display: none; background: rgba(16, 185, 129, 0.1); padding: 1rem; border-radius: 0.5rem; border: 1px solid rgba(16, 185, 129, 0.2);">
+                                <h4 style="color: #10b981; margin-bottom: 0.5rem;">Application Created!</h4>
+                                <p style="font-size: 0.875rem; margin-bottom: 0.5rem;">Save this Client Secret. It
+                                    will
+                                    not be shown again.</p>
+                                <div style="display: grid; gap: 0.5rem;">
+                                    <div>
+                                        <label style="font-size: 0.75rem; color: var(--text-muted);">Client
+                                            ID</label>
+                                        <div style="display: flex; gap: 0.5rem;">
+                                            <input type="text" id="created-client-id" readonly
+                                                style="width: 100%; background: rgba(0,0,0,0.2); border: none; padding: 0.25rem; color: var(--text-primary); font-family: monospace;">
+                                            <button class="icon-btn" onclick="copyToClipboard('created-client-id')"><i
+                                                    class="fa-regular fa-copy"></i></button>
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label style="font-size: 0.75rem; color: var(--text-muted);">Client
+                                            Secret</label>
+                                        <div style="display: flex; gap: 0.5rem;">
+                                            <input type="text" id="created-client-secret" readonly
+                                                style="width: 100%; background: rgba(0,0,0,0.2); border: none; padding: 0.25rem; color: var(--text-primary); font-family: monospace;">
+                                            <button class="icon-btn"
+                                                onclick="copyToClipboard('created-client-secret')"><i
+                                                    class="fa-regular fa-copy"></i></button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Pipeline Playground View -->
+            <div id="playground-view" class="view-container">
+                <div class="page-header">
+                    <h1>Pipeline Playground</h1>
+                    <p style="color: var(--text-muted);">Test chat conversations against the learning pipeline
+                        without
+                        saving
+                        data.</p>
+                </div>
+
+                <div class="grid-row" style="height: calc(100vh - 180px);">
+                    <!-- Input Column -->
+                    <div class="card" style="flex: 1; display: flex; flex-direction: column;">
+                        <div class="card-header">
+                            <h2><i class="fa-solid fa-comments"></i> Conversation Input</h2>
+                            <div class="header-actions">
+                                <button class="sm-btn" onclick="loadSampleConversation()">Load Sample</button>
+                                <button class="sm-btn active" onclick="runPipelineTest()"><i
+                                        class="fa-solid fa-play"></i> Run
+                                    Test</button>
+                            </div>
+                        </div>
+                        <div style="flex: 1; padding: 1rem; display: flex; flex-direction: column;">
+                            <textarea id="playground-input"
+                                placeholder="Paste JSON messages array or plain text conversation..."
+                                style="flex: 1; width: 100%; resize: none; background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(148, 163, 184, 0.1); color: var(--text-primary); padding: 1rem; border-radius: 0.5rem; font-family: 'JetBrains Mono', monospace; font-size: 0.875rem; line-height: 1.5;"></textarea>
+                            <div style="margin-top: 0.5rem; font-size: 0.75rem; color: var(--text-muted);">
+                                Accepts JSON array of messages or simple text.
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Output Column -->
+                    <div class="card" style="flex: 1; display: flex; flex-direction: column; overflow: hidden;">
+                        <div class="card-header">
+                            <h2><i class="fa-solid fa-microchip"></i> Pipeline Output</h2>
+                            <div class="header-actions">
+                                <span id="pipeline-status" class="status-badge" style="display: none;">Ready</span>
+                            </div>
+                        </div>
+                        <div
+                            style="flex: 1; overflow-y: auto; padding: 1.5rem; display: flex; flex-direction: column; gap: 1.5rem;">
+
+                            <!-- Pipeline Visualizer -->
+                            <div class="pipeline-visualizer">
+                                <div class="pipeline-steps">
+                                    <div class="step" id="step-picker">
+                                        <div class="step-icon"><i class="fa-solid fa-filter"></i></div>
+                                        <div class="step-label">Picker</div>
+                                        <div class="step-metrics">
+                                            <div class="metric"><i class="fa-regular fa-clock"></i> <span
+                                                    class="val-time">--</span></div>
+                                            <div class="metric"><i class="fa-solid fa-coins"></i> <span
+                                                    class="val-tokens">--</span></div>
+                                        </div>
+                                    </div>
+                                    <div class="connector" id="conn-1"></div>
+                                    <div class="step" id="step-stitcher">
+                                        <div class="step-icon"><i class="fa-solid fa-wand-magic-sparkles"></i></div>
+                                        <div class="step-label">Stitcher</div>
+                                        <div class="step-metrics">
+                                            <div class="metric"><i class="fa-regular fa-clock"></i> <span
+                                                    class="val-time">--</span></div>
+                                            <div class="metric"><i class="fa-solid fa-coins"></i> <span
+                                                    class="val-tokens">--</span></div>
+                                        </div>
+                                    </div>
+                                    <div class="connector" id="conn-2"></div>
+                                    <div class="step" id="step-designer">
+                                        <div class="step-icon"><i class="fa-solid fa-layer-group"></i></div>
+                                        <div class="step-label">Designer</div>
+                                        <div class="step-metrics">
+                                            <div class="metric"><i class="fa-regular fa-clock"></i> <span
+                                                    class="val-time">--</span></div>
+                                            <div class="metric"><i class="fa-solid fa-coins"></i> <span
+                                                    class="val-tokens">--</span></div>
+                                        </div>
+                                    </div>
+                                    <div class="connector" id="conn-3"></div>
+                                    <div class="step" id="step-cataloger">
+                                        <div class="step-icon"><i class="fa-solid fa-database"></i></div>
+                                        <div class="step-label">Cataloger</div>
+                                        <div class="step-metrics">
+                                            <div class="metric"><i class="fa-regular fa-clock"></i> <span
+                                                    class="val-time">--</span></div>
+                                            <div class="metric"><i class="fa-solid fa-coins"></i> <span
+                                                    class="val-tokens">--</span></div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <!-- Performance Stats (Hidden until run) -->
+                                <div id="pipeline-stats" class="pipeline-stats" style="display: none;">
+                                    <div class="stat-item">
+                                        <span class="label">Total Time</span>
+                                        <span class="value" id="stat-time">--</span>
+                                    </div>
+                                    <div class="divider"></div>
+                                    <div class="stat-item">
+                                        <span class="label">Tokens</span>
+                                        <span class="value" id="stat-tokens">--</span>
+                                    </div>
+                                    <div class="divider"></div>
+                                    <div class="stat-item">
+                                        <span class="label">Speed</span>
+                                        <span class="value" id="stat-speed">--</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Results Section -->
+                            <div id="playground-results" style="display: none;">
+                                <h3
+                                    style="font-size: 0.875rem; margin-bottom: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">
+                                    Extracted Context Patches</h3>
+                                <div class="table-responsive"
+                                    style="margin-bottom: 1.5rem; border: 1px solid rgba(148, 163, 184, 0.1); border-radius: 0.5rem; overflow: hidden;">
+                                    <table class="data-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Prompt</th>
+                                                <th>Name</th>
+                                                <th>Type</th>
+                                                <th>Value (Fact)</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="playground-patches-body">
+                                            <!-- Rows -->
+                                        </tbody>
+                                    </table>
+                                </div>
+
+                                <h3
+                                    style="font-size: 0.875rem; margin-bottom: 0.75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em;">
+                                    Raw Analysis (Chain of Thought)</h3>
+                                <div id="playground-raw"
+                                    style="background: rgba(0,0,0,0.2); padding: 1rem; border-radius: 0.5rem; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; white-space: pre-wrap; color: var(--text-muted);">
+                                    <!-- Raw response -->
+                                </div>
+                            </div>
+
+                            <!-- Empty State -->
+                            <div id="playground-empty"
+                                style="height: 100%; display: flex; align-items: center; justify-content: center; color: var(--text-muted); flex-direction: column; gap: 1rem;">
+                                <i class="fa-solid fa-flask" style="font-size: 2rem; opacity: 0.5;"></i>
+                                <p>Run a test to see results</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <link rel="stylesheet" href="style.css?v=3">
+    <script src="app.js?v=21"></script>
+</body>
+
+</html>

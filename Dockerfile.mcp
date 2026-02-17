@@ -1,0 +1,19 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies
+COPY pyproject.toml .
+# Create a dummy src directory to install dependencies
+RUN mkdir -p src/contextquilt
+RUN touch src/contextquilt/__init__.py
+RUN pip install --no-cache-dir .
+
+# Copy actual source code
+COPY src src
+
+# Set python path
+ENV PYTHONPATH=/app/src
+
+# Run the server
+CMD ["python", "-m", "contextquilt.mcp_server.server"]
