@@ -1,219 +1,56 @@
-name: Build and Deploy to GCP
+name: Build & Deploy
 
 on:
   push:
-    branches: ["main"]
+    branches: [main]
   workflow_dispatch:
 
 env:
-  PROJECT_ID: contextquilt-dev-scottguida
-  GAR_LOCATION: us-central1
-  REGION: us-central1
+  REGISTRY: ghcr.io
 
 jobs:
-  deploy:
+  build-and-deploy:
     runs-on: ubuntu-latest
     permissions:
-      contents: "read"
-      packages: "write"
+      contents: read
+      packages: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Lowercase Repo Name
-        run: echo "REPO_LC=${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
-      # ------------------------------------------------------------------
-      # 1. Login to GitHub Container Registry (GHCR)
-      # ------------------------------------------------------------------
-      - name: Log in to the Container registry
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Get version from pyproject.toml
-        run: |
-          VERSION=$(grep 'version = ' pyproject.toml | head -n 1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "TAG_VERSION=$VERSION" >> $GITHUB_ENV
-          echo "Detected version: $VERSION"
-
-      # ------------------------------------------------------------------
-      # 2. Build and Push Docker Images
-      # ------------------------------------------------------------------
-      - name: Build and Push API Image
+      - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ env.REPO_LC }}/api:latest
-            ghcr.io/${{ env.REPO_LC }}/api:${{ env.TAG_VERSION }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
 
-      # ------------------------------------------------------------------
-      # 3. Deploy to GCP Compute Engine via SSH
-      # ------------------------------------------------------------------
-      - name: Deploy via SSH
+      - name: Deploy to GCP via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.GCP_HOST }}
           username: ${{ secrets.GCP_USERNAME }}
           key: ${{ secrets.GCP_SSH_KEY }}
           passphrase: ${{ secrets.GCP_SSH_PASSPHRASE }}
-          timeout: 30m
-          command_timeout: 30m
           script: |
-            # ------------------------------------------------------------------
-            # STEP 0: AGGRESSIVE CLEANUP FIRST
-            # ------------------------------------------------------------------
-            echo "Starting pre-deployment cleanup..."
-            sudo docker stop $(sudo docker ps -aq) 2>/dev/null || true
-            sudo docker rm -f $(sudo docker ps -aq) 2>/dev/null || true
-            sudo docker system prune -af --volumes
-            echo "Cleanup complete. Disk Usage:"
-            df -h
+            cd /opt/contextquilt
 
-            # ------------------------------------------------------------------
-            # STEP 1: Login to GHCR
-            # ------------------------------------------------------------------
+            # Login to GHCR
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-            # ------------------------------------------------------------------
-            # STEP 2: Write docker-compose.prod.yml on the server
-            # ------------------------------------------------------------------
-            cat <<EOF | sudo tee docker-compose.prod.yml > /dev/null
-            version: '3.8'
-            services:
-              caddy:
-                image: caddy:2-alpine
-                restart: unless-stopped
-                ports:
-                  - "80:80"
-                  - "443:443"
-                volumes:
-                  - caddy_data:/data
-                  - caddy_config:/config
-                entrypoint: ["/bin/sh", "-c"]
-                command:
-                  - |
-                    echo "contextquilt.scottguida.com {
-                      reverse_proxy /health context-quilt:8000
-                      reverse_proxy /api/* context-quilt:8000
-                      reverse_proxy /v1/* context-quilt:8000
-                      reverse_proxy /docs context-quilt:8000
-                      reverse_proxy /openapi.json context-quilt:8000
-                      reverse_proxy /dashboard/* context-quilt:8000
-                      reverse_proxy * context-quilt:8000
-                    }" > /etc/caddy/Caddyfile
-                    caddy run --config /etc/caddy/Caddyfile
-
-              context-quilt:
-                image: ghcr.io/${{ env.REPO_LC }}/api:latest
-                expose:
-                  - "8000"
-                environment:
-                  - ENVIRONMENT=production
-                  - POSTGRES_HOST=postgres
-                  - POSTGRES_PORT=5432
-                  - POSTGRES_DB=context_quilt
-                  - POSTGRES_USER=postgres
-                  - POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
-                  - DATABASE_URL=postgresql://postgres:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/context_quilt
-                  - REDIS_HOST=redis
-                  - REDIS_PORT=6379
-                  - REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }}
-                  - OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}
-                  - ANTHROPIC_API_KEY=${{ secrets.ANTHROPIC_API_KEY }}
-                  - CONTEXT_QUILT_LOG_LEVEL=INFO
-                  - ENABLE_CACHING=true
-                  - OLLAMA_URL=http://ollama:11434/api/generate
-                depends_on:
-                  postgres:
-                    condition: service_healthy
-                  redis:
-                    condition: service_healthy
-                restart: unless-stopped
-
-              context-quilt-worker:
-                image: ghcr.io/${{ env.REPO_LC }}/api:latest
-                command: python src/worker.py
-                environment:
-                  - ENVIRONMENT=production
-                  - POSTGRES_HOST=postgres
-                  - POSTGRES_PORT=5432
-                  - POSTGRES_DB=context_quilt
-                  - POSTGRES_USER=postgres
-                  - POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
-                  - DATABASE_URL=postgresql://postgres:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/context_quilt
-                  - REDIS_HOST=redis
-                  - REDIS_PORT=6379
-                  - REDIS_PASSWORD=${{ secrets.REDIS_PASSWORD }}
-                  - REDIS_URL=redis://:${{ secrets.REDIS_PASSWORD }}@redis:6379/0
-                  - OLLAMA_URL=http://ollama:11434/api/generate
-                depends_on:
-                  postgres:
-                    condition: service_healthy
-                  redis:
-                    condition: service_healthy
-                  ollama:
-                    condition: service_healthy
-                restart: unless-stopped
-
-              ollama:
-                image: ollama/ollama:latest
-                expose:
-                  - "11434"
-                volumes:
-                  - ollama-data:/root/.ollama
-                restart: unless-stopped
-                healthcheck:
-                  test: ["CMD", "ollama", "list"]
-                  interval: 10s
-                  timeout: 5s
-                  retries: 5
-
-              postgres:
-                image: postgres:15-alpine
-                environment:
-                  - POSTGRES_DB=context_quilt
-                  - POSTGRES_USER=postgres
-                  - POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
-                  - PGDATA=/var/lib/postgresql/data/pgdata
-                volumes:
-                  - postgres-data:/var/lib/postgresql/data
-                restart: unless-stopped
-                healthcheck:
-                  test: ["CMD-SHELL", "pg_isready -U postgres"]
-                  interval: 10s
-                  timeout: 5s
-                  retries: 5
-
-              redis:
-                image: redis:7-alpine
-                command: redis-server --requirepass ${{ secrets.REDIS_PASSWORD }} --maxmemory 256mb --maxmemory-policy allkeys-lru
-                volumes:
-                  - redis-data:/data
-                restart: unless-stopped
-                healthcheck:
-                  test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
-                  interval: 10s
-                  timeout: 3s
-                  retries: 5
-
-            volumes:
-              ollama-data:
-              postgres-data:
-              redis-data:
-              caddy_data:
-              caddy_config:
-            EOF
-
-            # ------------------------------------------------------------------
-            # STEP 3: Pull latest images and restart
-            # ------------------------------------------------------------------
-            sudo docker system prune -af --volumes
+            # Pull latest and restart (only CQ containers, does NOT touch CloudZap)
             sudo docker compose -f docker-compose.prod.yml pull
             sudo docker compose -f docker-compose.prod.yml up -d
+            sudo docker image prune -af --filter "until=24h"
