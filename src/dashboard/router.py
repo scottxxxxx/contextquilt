@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from typing import List, Dict, Any, Optional
 import asyncpg
 import os
@@ -12,6 +12,21 @@ from src.contextquilt.gateway.extraction import classify_fact, extract_facts_fro
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
+
+# Admin key authentication (same pattern as CloudZap)
+CQ_ADMIN_KEY = os.getenv("CQ_ADMIN_KEY", "")
+
+async def verify_admin_key(x_admin_key: str = Header(default="")):
+    """Verify the admin key. If CQ_ADMIN_KEY is not set, access is open (dev mode)."""
+    if CQ_ADMIN_KEY and x_admin_key != CQ_ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+
+@router.get("/verify-key")
+async def verify_key(x_admin_key: str = Header(default="")):
+    """Endpoint for the dashboard login to verify the admin key."""
+    if CQ_ADMIN_KEY and x_admin_key != CQ_ADMIN_KEY:
+        raise HTTPException(status_code=403, detail="Invalid admin key")
+    return {"status": "ok"}
 
 # Database Configuration
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/context_quilt")
@@ -42,7 +57,7 @@ class TypeItem(BaseModel):
     label: str
     count: int
 
-@router.get("/stats", response_model=DashboardStats)
+@router.get("/stats", response_model=DashboardStats, dependencies=[Depends(verify_admin_key)])
 async def get_stats(days: Optional[int] = None, start_date: Optional[str] = None, end_date: Optional[str] = None):
     conn = await asyncpg.connect(DATABASE_URL)
     try:
@@ -66,7 +81,7 @@ async def get_stats(days: Optional[int] = None, start_date: Optional[str] = None
     finally:
         await conn.close()
 
-@router.get("/patches/recent", response_model=List[PatchItem])
+@router.get("/patches/recent", response_model=List[PatchItem], dependencies=[Depends(verify_admin_key)])
 async def get_recent_patches(
     limit: int = 100, 
     patch_type: Optional[str] = None,
@@ -128,7 +143,7 @@ class HistoryItem(BaseModel):
     date: str
     counts: Dict[str, int]
 
-@router.get("/patches/history", response_model=List[HistoryItem])
+@router.get("/patches/history", response_model=List[HistoryItem], dependencies=[Depends(verify_admin_key)])
 async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str] = None, end_date: Optional[str] = None):
     conn = await asyncpg.connect(DATABASE_URL)
     try:
@@ -232,7 +247,7 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
     finally:
         await conn.close()
 
-@router.get("/apps", response_model=List[str])
+@router.get("/apps", response_model=List[str], dependencies=[Depends(verify_admin_key)])
 async def get_apps():
     conn = await asyncpg.connect(DATABASE_URL)
     try:
@@ -255,7 +270,7 @@ class SystemPrompt(BaseModel):
     version_num: int
     updated_at: datetime
 
-@router.get("/prompts", response_model=List[SystemPrompt])
+@router.get("/prompts", response_model=List[SystemPrompt], dependencies=[Depends(verify_admin_key)])
 async def get_prompts():
     conn = await asyncpg.connect(DATABASE_URL)
     try:
@@ -277,7 +292,7 @@ class UpdatePromptRequest(BaseModel):
     prompt_text: str
     change_reason: Optional[str] = "Manual update via dashboard"
 
-@router.put("/prompts/{prompt_key}")
+@router.put("/prompts/{prompt_key}", dependencies=[Depends(verify_admin_key)])
 async def update_prompt(prompt_key: str, request: UpdatePromptRequest):
     conn = await asyncpg.connect(DATABASE_URL)
     try:
@@ -317,7 +332,7 @@ class DistributionItem(BaseModel):
     label: str
     count: int
 
-@router.get("/patches/distribution", response_model=List[DistributionItem])
+@router.get("/patches/distribution", response_model=List[DistributionItem], dependencies=[Depends(verify_admin_key)])
 async def get_patches_distribution(
     group_by: str = "patch_type", 
     days: Optional[int] = None, 
@@ -381,7 +396,7 @@ class UserSummaryItem(BaseModel):
     first_name: Optional[str]
     last_name: Optional[str]
 
-@router.get("/users", response_model=List[UserSummaryItem])
+@router.get("/users", response_model=List[UserSummaryItem], dependencies=[Depends(verify_admin_key)])
 async def get_users():
     conn = await asyncpg.connect(DATABASE_URL)
     try:
@@ -452,7 +467,7 @@ class UserQuilt(BaseModel):
     patches: List[QuiltPatch]
     timeline: List[TimelineEvent]
 
-@router.get("/users/{user_id}/quilt", response_model=UserQuilt)
+@router.get("/users/{user_id}/quilt", response_model=UserQuilt, dependencies=[Depends(verify_admin_key)])
 async def get_user_quilt(user_id: str):
     conn = await asyncpg.connect(DATABASE_URL)
     try:
@@ -516,7 +531,7 @@ class CandidateVariable(BaseModel):
     frequency: str # "15% of users"
     sample: str # "User mentions 'size 10'"
 
-@router.get("/schema", response_model=List[SchemaItem])
+@router.get("/schema", response_model=List[SchemaItem], dependencies=[Depends(verify_admin_key)])
 async def get_schema():
     # Mock data from memory_schema.yaml
     # in real app, parse the yaml or DB
@@ -527,7 +542,7 @@ async def get_schema():
         SchemaItem(name="job_title", type="identity", description="User's professional role.", status="active")
     ]
 
-@router.get("/schema/candidates", response_model=List[CandidateVariable])
+@router.get("/schema/candidates", response_model=List[CandidateVariable], dependencies=[Depends(verify_admin_key)])
 async def get_candidates():
     # Mock discovery inbox
     return [
@@ -536,7 +551,7 @@ async def get_candidates():
         CandidateVariable(id="3", name="timezone", frequency="35% of users", sample="I'm in PST")
     ]
 
-@router.post("/schema/candidates/{id}/{action}")
+@router.post("/schema/candidates/{id}/{action}", dependencies=[Depends(verify_admin_key)])
 async def handle_candidate(id: str, action: str):
     # Mock action
     return {"status": "success", "message": f"Candidate {id} {action}d"}
@@ -547,7 +562,7 @@ class ROIMetrics(BaseModel):
     sentiment_lift_percent: int
     cost_saved_usd: float
 
-@router.get("/roi", response_model=ROIMetrics)
+@router.get("/roi", response_model=ROIMetrics, dependencies=[Depends(verify_admin_key)])
 async def get_roi_metrics():
     # Mock ROI data
     # In reality, this would query conversations/tokens tables
@@ -572,7 +587,7 @@ class TestPipelineResponse(BaseModel):
 from fastapi.responses import StreamingResponse
 import time
 
-@router.post("/test-pipeline")
+@router.post("/test-pipeline", dependencies=[Depends(verify_admin_key)])
 async def test_learning_pipeline(request: TestPipelineRequest):
     """
     Dry-run the learning pipeline with streaming progress updates (SSE).
