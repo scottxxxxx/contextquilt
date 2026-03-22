@@ -199,6 +199,124 @@ async def store_action_items(
     return stored
 
 
+async def store_entities(
+    db,
+    redis_client,
+    user_id: str,
+    entities: list[dict],
+    metadata: dict | None = None,
+):
+    """
+    Store extracted entities to Postgres. Upserts by (user_id, name, entity_type).
+    Updates the Redis entity name index for hot path matching.
+    """
+    if not entities:
+        return 0
+
+    stored = 0
+    for ent in entities:
+        name = ent.get("name", "").strip()
+        entity_type = ent.get("type", "").strip()
+        description = ent.get("description", "")
+        if not name or not entity_type:
+            continue
+
+        # Upsert: insert or update mention count + last_seen
+        await db.execute(
+            """
+            INSERT INTO entities (user_id, name, entity_type, description, metadata)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id, name, entity_type) DO UPDATE SET
+                description = COALESCE(NULLIF(EXCLUDED.description, ''), entities.description),
+                last_seen_at = NOW(),
+                mention_count = entities.mention_count + 1,
+                metadata = entities.metadata || EXCLUDED.metadata
+            """,
+            user_id, name, entity_type, description,
+            json.dumps(metadata or {}),
+        )
+        stored += 1
+
+    # Update Redis entity name index for this user
+    await _rebuild_entity_index(db, redis_client, user_id)
+
+    return stored
+
+
+async def store_relationships(
+    db,
+    user_id: str,
+    relationships: list[dict],
+    metadata: dict | None = None,
+):
+    """
+    Store extracted relationships between entities.
+    Resolves entity names to entity_ids. Upserts by (user_id, from, to, type).
+    """
+    if not relationships:
+        return 0
+
+    stored = 0
+    for rel in relationships:
+        from_name = rel.get("from", "").strip()
+        to_name = rel.get("to", "").strip()
+        rel_type = rel.get("type", "").strip()
+        context = rel.get("context", "")
+        if not from_name or not to_name or not rel_type:
+            continue
+
+        # Resolve entity IDs by name (match any type for this user)
+        from_row = await db.fetchrow(
+            "SELECT entity_id FROM entities WHERE user_id = $1 AND name = $2 LIMIT 1",
+            user_id, from_name
+        )
+        to_row = await db.fetchrow(
+            "SELECT entity_id FROM entities WHERE user_id = $1 AND name = $2 LIMIT 1",
+            user_id, to_name
+        )
+
+        if not from_row or not to_row:
+            logger.debug("relationship_skipped", reason="entity_not_found",
+                         from_name=from_name, to_name=to_name)
+            continue
+
+        from_id = from_row["entity_id"]
+        to_id = to_row["entity_id"]
+
+        await db.execute(
+            """
+            INSERT INTO relationships (user_id, from_entity_id, to_entity_id, relationship_type, context, metadata)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (user_id, from_entity_id, to_entity_id, relationship_type) DO UPDATE SET
+                context = COALESCE(NULLIF(EXCLUDED.context, ''), relationships.context),
+                last_seen_at = NOW(),
+                mention_count = relationships.mention_count + 1
+            """,
+            user_id, from_id, to_id, rel_type, context,
+            json.dumps(metadata or {}),
+        )
+        stored += 1
+
+    return stored
+
+
+async def _rebuild_entity_index(db, redis_client, user_id: str):
+    """
+    Rebuild the Redis entity name index for a user.
+    Stores all entity names as a set for fast text matching on the hot path.
+    """
+    rows = await db.fetch(
+        "SELECT name FROM entities WHERE user_id = $1",
+        user_id
+    )
+    key = f"entity_index:{user_id}"
+    if rows:
+        names = [row["name"] for row in rows]
+        await redis_client.delete(key)
+        await redis_client.sadd(key, *names)
+        await redis_client.expire(key, 7200)  # 2 hour TTL
+
+
 class ColdPathWorker:
     def __init__(self):
         self.redis = None
@@ -418,9 +536,12 @@ class ColdPathWorker:
 
             facts = response.content.get("facts", [])
             action_items = response.content.get("action_items", [])
+            entities = response.content.get("entities", [])
+            relationships = response.content.get("relationships", [])
 
             app_id = payload.get("app_id")
             timestamp = payload.get("timestamp")
+            metadata = payload.get("metadata", {})
 
             facts_stored = await store_facts(
                 self.db, user_id, facts, "meeting_summary", app_id, timestamp
@@ -428,12 +549,20 @@ class ColdPathWorker:
             actions_stored = await store_action_items(
                 self.db, user_id, action_items, app_id, timestamp
             )
+            entities_stored = await store_entities(
+                self.db, self.redis, user_id, entities, metadata
+            )
+            relationships_stored = await store_relationships(
+                self.db, user_id, relationships, metadata
+            )
 
             logger.info(
                 "meeting_summary_complete",
                 user_id=user_id,
                 facts_stored=facts_stored,
                 actions_stored=actions_stored,
+                entities_stored=entities_stored,
+                relationships_stored=relationships_stored,
                 cost_usd=response.cost_usd,
                 model=response.model,
             )
@@ -460,12 +589,16 @@ class ColdPathWorker:
             )
 
             facts = response.content.get("facts", [])
+            entities = response.content.get("entities", [])
+            relationships = response.content.get("relationships", [])
             app_id = payload.get("app_id")
             timestamp = payload.get("timestamp")
 
             stored = await store_facts(
                 self.db, user_id, facts, "archivist", app_id, timestamp
             )
+            await store_entities(self.db, self.redis, user_id, entities)
+            await store_relationships(self.db, user_id, relationships)
 
             logger.info("trace_complete", facts_stored=stored, cost_usd=response.cost_usd)
             await self.hydrate_cache(user_id)
@@ -495,12 +628,16 @@ class ColdPathWorker:
                 )
 
                 facts = response.content.get("facts", [])
+                entities = response.content.get("entities", [])
+                relationships = response.content.get("relationships", [])
                 app_id = payload.get("app_id")
                 timestamp = payload.get("timestamp")
 
                 stored = await store_facts(
                     self.db, user_id, facts, "detective", app_id, timestamp
                 )
+                await store_entities(self.db, self.redis, user_id, entities)
+                await store_relationships(self.db, user_id, relationships)
                 total_stored += stored
 
                 logger.info("batch_complete", batch=batch_num, facts_stored=stored)
