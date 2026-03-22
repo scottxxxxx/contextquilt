@@ -119,6 +119,9 @@ class MemoryUpdate(BaseModel):
     # For 'chat_log' (Legacy/Simple)
     messages: Optional[List[Dict[str, Any]]] = None
 
+    # For 'meeting_summary' (ShoulderSurf via CloudZap)
+    summary: Optional[str] = None
+
     # Optional timestamp for backdating (e.g. historical import)
     timestamp: Optional[str] = None
     
