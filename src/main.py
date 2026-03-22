@@ -130,6 +130,19 @@ class MemoryUpdate(BaseModel):
     persistence: Optional[str] = None # 'permanent', 'sticky', 'ephemeral', 'decaying'
     source: Optional[str] = None      # 'explicit', 'inferred', 'external', 'system'
 
+class RecallRequest(BaseModel):
+    """Request to recall relevant context from the graph"""
+    user_id: str = Field(..., description="User ID")
+    text: str = Field(..., description="Query or transcript text to match entities against")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional hints (e.g., project name)")
+    max_hops: Optional[int] = Field(default=2, description="Graph traversal depth")
+
+class RecallResponse(BaseModel):
+    """Context recalled from the graph"""
+    context: str
+    matched_entities: List[str]
+    patch_count: int
+
 # ============================================
 # Helpers
 # ============================================
@@ -262,6 +275,160 @@ async def enrich_context(
         used_variables=used_vars,
         missing_variables=missing_vars
     )
+
+@app.post("/v1/recall", response_model=RecallResponse, tags=["Hot Path"])
+async def recall_context(
+    request: RecallRequest,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Intelligent Recall: Send text, get relevant context back.
+
+    Matches entity names in the text against the user's entity graph,
+    traverses relationships 1-2 hops deep, and returns a formatted
+    context block ready to inject into an LLM prompt.
+
+    No LLM call — this is pure graph traversal. Target: <10ms.
+    """
+    user_id = request.user_id
+    text_lower = request.text.lower()
+
+    # Step 1: Find matching entities from Redis index (fast)
+    entity_index_key = f"entity_index:{user_id}"
+    known_entities = await redis_client.smembers(entity_index_key)
+
+    matched_names = []
+    if known_entities:
+        for name in known_entities:
+            if name.lower() in text_lower:
+                matched_names.append(name)
+
+    # Also check metadata hints
+    if request.metadata:
+        for val in request.metadata.values():
+            if isinstance(val, str) and val not in matched_names:
+                # Check if this metadata value is a known entity
+                if known_entities and val in known_entities:
+                    matched_names.append(val)
+
+    if not matched_names:
+        return RecallResponse(context="", matched_entities=[], patch_count=0)
+
+    # Step 2: Traverse graph from matched entities (Postgres)
+    # Find entity IDs for matched names
+    entity_rows = await db_pool.fetch(
+        """
+        SELECT entity_id, name, entity_type, description
+        FROM entities
+        WHERE user_id = $1 AND name = ANY($2)
+        """,
+        user_id, matched_names
+    )
+
+    if not entity_rows:
+        return RecallResponse(context="", matched_entities=matched_names, patch_count=0)
+
+    entity_ids = [row["entity_id"] for row in entity_rows]
+
+    # Step 3: Get relationships within N hops via recursive CTE
+    max_hops = request.max_hops or 2
+    rel_rows = await db_pool.fetch(
+        """
+        WITH RECURSIVE graph AS (
+            -- Seed: relationships from/to matched entities
+            SELECT r.from_entity_id, r.to_entity_id, r.relationship_type, r.context,
+                   1 as depth
+            FROM relationships r
+            WHERE r.user_id = $1
+              AND (r.from_entity_id = ANY($2) OR r.to_entity_id = ANY($2))
+
+            UNION
+
+            -- Hop: follow edges from discovered entities
+            SELECT r.from_entity_id, r.to_entity_id, r.relationship_type, r.context,
+                   g.depth + 1
+            FROM relationships r
+            JOIN graph g ON (r.from_entity_id = g.to_entity_id OR r.from_entity_id = g.from_entity_id
+                          OR r.to_entity_id = g.from_entity_id OR r.to_entity_id = g.to_entity_id)
+            WHERE r.user_id = $1 AND g.depth < $3
+        )
+        SELECT DISTINCT g.from_entity_id, g.to_entity_id, g.relationship_type, g.context,
+               e1.name as from_name, e1.entity_type as from_type,
+               e2.name as to_name, e2.entity_type as to_type
+        FROM graph g
+        JOIN entities e1 ON g.from_entity_id = e1.entity_id
+        JOIN entities e2 ON g.to_entity_id = e2.entity_id
+        """,
+        user_id, entity_ids, max_hops
+    )
+
+    # Step 4: Get related facts (patches) for matched entities
+    fact_rows = await db_pool.fetch(
+        """
+        SELECT cp.value, cp.patch_type, cp.source_prompt
+        FROM context_patches cp
+        JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+        WHERE ps.subject_key = $1
+        ORDER BY cp.created_at DESC
+        LIMIT 20
+        """,
+        f"user:{user_id}"
+    )
+
+    # Step 5: Build context block
+    sections = []
+
+    # Entities summary
+    entity_map = {row["entity_id"]: row for row in entity_rows}
+    people = [r for r in entity_rows if r["entity_type"] == "person"]
+    projects = [r for r in entity_rows if r["entity_type"] == "project"]
+
+    if projects:
+        for p in projects:
+            sections.append(f"Project: {p['name']} — {p['description'] or ''}")
+    if people:
+        sections.append("People: " + ", ".join(
+            f"{p['name']} ({p['description']})" if p['description'] else p['name']
+            for p in people
+        ))
+
+    # Relationships
+    if rel_rows:
+        rel_lines = []
+        for r in rel_rows:
+            rel_lines.append(f"{r['from_name']} {r['relationship_type']} {r['to_name']}"
+                           + (f" ({r['context']})" if r['context'] else ""))
+        sections.append("Connections:\n" + "\n".join(f"- {l}" for l in rel_lines))
+
+    # Action items from facts
+    actions = []
+    facts_text = []
+    for row in fact_rows:
+        value = row["value"]
+        if isinstance(value, str):
+            value = json.loads(value)
+        if value.get("type") == "action_item":
+            owner = value.get("owner", "")
+            deadline = value.get("deadline", "")
+            dl = f" (by {deadline})" if deadline else ""
+            actions.append(f"{owner}: {value.get('text', '')}{dl}")
+        else:
+            facts_text.append(value.get("text", ""))
+
+    if actions:
+        sections.append("Open actions:\n" + "\n".join(f"- {a}" for a in actions))
+
+    if facts_text:
+        sections.append("Key facts:\n" + "\n".join(f"- {f}" for f in facts_text[:10]))
+
+    context = "\n\n".join(sections)
+
+    return RecallResponse(
+        context=context,
+        matched_entities=matched_names,
+        patch_count=len(fact_rows) + len(rel_rows),
+    )
+
 
 @app.get("/v1/profile/{user_id}", tags=["MCP Resource"])
 async def get_profile(
