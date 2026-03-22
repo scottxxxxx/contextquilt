@@ -117,10 +117,13 @@ async def store_facts(
         )
 
         if app_id:
-            await db.execute(
-                "INSERT INTO context_patch_acl (patch_id, app_id, can_read) VALUES ($1, $2, TRUE)",
-                patch_id, app_id
-            )
+            try:
+                await db.execute(
+                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read) VALUES ($1, $2::uuid, TRUE)",
+                    patch_id, app_id
+                )
+            except Exception:
+                pass  # Skip ACL if app_id isn't a registered UUID
 
         stored += 1
 
@@ -183,10 +186,13 @@ async def store_action_items(
         )
 
         if app_id:
-            await db.execute(
-                "INSERT INTO context_patch_acl (patch_id, app_id, can_read) VALUES ($1, $2, TRUE)",
-                patch_id, app_id
-            )
+            try:
+                await db.execute(
+                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read) VALUES ($1, $2::uuid, TRUE)",
+                    patch_id, app_id
+                )
+            except Exception:
+                pass  # Skip ACL if app_id isn't a registered UUID
 
         stored += 1
 
