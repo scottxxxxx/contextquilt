@@ -397,6 +397,200 @@ async def list_applications():
         results.append(r)
     return results
 
+# ============================================
+# User Quilt CRUD (App-scoped access control)
+# ============================================
+# Auth model: The calling app authenticates via JWT or X-App-ID.
+# CQ trusts the app to vouch for the user_id.
+# ACL is enforced per-patch: the app can only see/edit patches it created.
+# This is provider-agnostic — CQ doesn't care if the user logged in
+# via Apple, Google, email, or anything else. That's the app's job.
+
+class QuiltPatchResponse(BaseModel):
+    patch_id: str
+    fact: str
+    category: str
+    participants: List[str] = []
+    owner: Optional[str] = None
+    deadline: Optional[str] = None
+    patch_type: str = ""  # "action_item" or fact category
+    source: str = ""
+    created_at: Optional[str] = None
+
+class QuiltResponse(BaseModel):
+    user_id: str
+    facts: List[QuiltPatchResponse]
+    action_items: List[QuiltPatchResponse]
+
+class PatchUpdate(BaseModel):
+    fact: Optional[str] = None
+    category: Optional[str] = None
+
+@app.get("/v1/quilt/{user_id}", response_model=QuiltResponse, tags=["Quilt"])
+async def get_user_quilt(
+    user_id: str,
+    category: Optional[str] = Query(None, description="Filter by category: identity, preference, trait, experience"),
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Get all facts and action items CQ knows about a user.
+    Scoped to patches the calling app has read access to.
+    """
+    subject_key = f"user:{user_id}"
+
+    # Build query with ACL enforcement
+    query = """
+        SELECT cp.patch_id, cp.patch_name, cp.patch_type, cp.value,
+               cp.origin_mode, cp.source_prompt, cp.created_at
+        FROM context_patches cp
+        JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+        LEFT JOIN context_patch_acl acl ON cp.patch_id = acl.patch_id AND acl.app_id = $2
+        WHERE ps.subject_key = $1
+          AND (acl.can_read = TRUE OR acl.patch_id IS NULL)
+    """
+    params: list = [subject_key, app_id]
+
+    if category:
+        query += " AND cp.patch_type = $3"
+        params.append(category)
+
+    query += " ORDER BY cp.created_at DESC"
+
+    rows = await db_pool.fetch(query, *params)
+
+    facts = []
+    action_items = []
+
+    for row in rows:
+        value = row["value"]
+        if isinstance(value, str):
+            value = json.loads(value)
+
+        patch = QuiltPatchResponse(
+            patch_id=str(row["patch_id"]),
+            fact=value.get("text", ""),
+            category=row["patch_type"] or "",
+            participants=value.get("participants", []),
+            owner=value.get("owner"),
+            deadline=value.get("deadline"),
+            patch_type=value.get("type", row["patch_type"] or ""),
+            source=row["source_prompt"] or "",
+            created_at=row["created_at"].isoformat() if row["created_at"] else None,
+        )
+
+        if value.get("type") == "action_item":
+            action_items.append(patch)
+        else:
+            facts.append(patch)
+
+    return QuiltResponse(user_id=user_id, facts=facts, action_items=action_items)
+
+
+@app.patch("/v1/quilt/{user_id}/patches/{patch_id}", tags=["Quilt"])
+async def update_patch(
+    user_id: str,
+    patch_id: str,
+    update: PatchUpdate,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Update a fact or action item. User corrects something CQ got wrong.
+    Requires write access via ACL.
+    """
+    # Verify the patch belongs to this user
+    subject_key = f"user:{user_id}"
+    row = await db_pool.fetchrow(
+        """
+        SELECT cp.patch_id, cp.value, cp.patch_type
+        FROM context_patches cp
+        JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+        WHERE cp.patch_id = $1 AND ps.subject_key = $2
+        """,
+        patch_id, subject_key
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Patch not found for this user")
+
+    # Check write ACL
+    acl = await db_pool.fetchrow(
+        "SELECT can_write FROM context_patch_acl WHERE patch_id = $1 AND app_id = $2",
+        patch_id, app_id
+    )
+    if acl and not acl["can_write"]:
+        raise HTTPException(status_code=403, detail="Write access denied for this patch")
+
+    # Build update
+    value = row["value"]
+    if isinstance(value, str):
+        value = json.loads(value)
+
+    if update.fact is not None:
+        value["text"] = update.fact
+
+    new_type = update.category if update.category else row["patch_type"]
+
+    await db_pool.execute(
+        """
+        UPDATE context_patches
+        SET value = $1, patch_type = $2, origin_mode = 'declared', updated_at = $3
+        WHERE patch_id = $4
+        """,
+        json.dumps(value), new_type, datetime.utcnow(), patch_id
+    )
+
+    # Trigger cache refresh
+    stream_key = "memory_updates"
+    payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
+    await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
+
+    return {"status": "updated", "patch_id": patch_id}
+
+
+@app.delete("/v1/quilt/{user_id}/patches/{patch_id}", tags=["Quilt"])
+async def delete_patch(
+    user_id: str,
+    patch_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Delete a fact or action item. User removes something CQ got wrong.
+    Requires delete access via ACL (or no ACL entry = open access).
+    """
+    subject_key = f"user:{user_id}"
+    row = await db_pool.fetchrow(
+        """
+        SELECT cp.patch_id
+        FROM context_patches cp
+        JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+        WHERE cp.patch_id = $1 AND ps.subject_key = $2
+        """,
+        patch_id, subject_key
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Patch not found for this user")
+
+    # Check delete ACL
+    acl = await db_pool.fetchrow(
+        "SELECT can_delete FROM context_patch_acl WHERE patch_id = $1 AND app_id = $2",
+        patch_id, app_id
+    )
+    if acl and not acl["can_delete"]:
+        raise HTTPException(status_code=403, detail="Delete access denied for this patch")
+
+    # Delete patch and related records
+    await db_pool.execute("DELETE FROM patch_usage_metrics WHERE patch_id = $1", patch_id)
+    await db_pool.execute("DELETE FROM context_patch_acl WHERE patch_id = $1", patch_id)
+    await db_pool.execute("DELETE FROM patch_subjects WHERE patch_id = $1", patch_id)
+    await db_pool.execute("DELETE FROM context_patches WHERE patch_id = $1", patch_id)
+
+    # Trigger cache refresh
+    stream_key = "memory_updates"
+    payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
+    await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
+
+    return {"status": "deleted", "patch_id": patch_id}
+
+
 class AppUpdate(BaseModel):
     enforce_auth: bool
 

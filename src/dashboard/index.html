@@ -16,7 +16,24 @@
 </head>
 
 <body>
-    <div class="app-container">
+    <!-- Admin Login Gate -->
+    <div id="login-gate" style="display:flex; justify-content:center; align-items:center; height:100vh; background:#0a0a0f;">
+        <div style="text-align:center; font-family:Inter,sans-serif; color:#e0e0e0;">
+            <i class="fa-solid fa-layer-group" style="font-size:48px; color:#6c5ce7; margin-bottom:24px; display:block;"></i>
+            <h2 style="margin-bottom:24px; font-weight:500;">ContextQuilt Admin</h2>
+            <input type="password" id="admin-key-input" placeholder="Admin Key"
+                style="padding:12px 20px; width:300px; border-radius:8px; border:1px solid #333; background:#1a1a2e; color:#fff; font-size:14px; font-family:Inter,sans-serif;"
+                autocomplete="off">
+            <br>
+            <button onclick="loginAdmin()"
+                style="margin-top:16px; padding:10px 32px; border-radius:8px; border:none; background:#6c5ce7; color:#fff; font-size:14px; cursor:pointer; font-family:Inter,sans-serif;">
+                Enter
+            </button>
+            <p id="login-error" style="color:#e74c3c; margin-top:12px; font-size:13px;"></p>
+        </div>
+    </div>
+
+    <div class="app-container" id="app-container" style="display:none;">
         <!-- Sidebar -->
         <aside class="sidebar">
             <div class="brand">
@@ -686,7 +703,57 @@
         </main>
     </div>
     <link rel="stylesheet" href="style.css?v=3">
-    <script src="app.js?v=21"></script>
+    <script>
+        // Admin key auth (same pattern as CloudZap)
+        let cqAdminKey = '';
+
+        function loginAdmin() {
+            cqAdminKey = document.getElementById('admin-key-input').value;
+            fetch('/api/dashboard/verify-key', {
+                headers: { 'X-Admin-Key': cqAdminKey }
+            })
+            .then(r => {
+                if (r.ok) {
+                    localStorage.setItem('cq_admin_key', cqAdminKey);
+                    document.getElementById('login-gate').style.display = 'none';
+                    document.getElementById('app-container').style.display = '';
+                } else {
+                    document.getElementById('login-error').textContent = 'Invalid admin key';
+                }
+            })
+            .catch(() => {
+                document.getElementById('login-error').textContent = 'Connection error';
+            });
+        }
+
+        // Auto-login if key saved
+        const savedKey = localStorage.getItem('cq_admin_key');
+        if (savedKey) {
+            cqAdminKey = savedKey;
+            document.getElementById('admin-key-input').value = savedKey;
+            loginAdmin();
+        }
+
+        // Enter key to submit
+        document.getElementById('admin-key-input').addEventListener('keydown', e => {
+            if (e.key === 'Enter') loginAdmin();
+        });
+
+        // Override fetch to inject admin key header on all dashboard API calls
+        const _origFetch = window.fetch;
+        window.fetch = function(url, opts = {}) {
+            if (typeof url === 'string' && (url.includes('/api/dashboard') || url.includes('/v1/'))) {
+                opts.headers = opts.headers || {};
+                if (opts.headers instanceof Headers) {
+                    opts.headers.set('X-Admin-Key', cqAdminKey);
+                } else {
+                    opts.headers['X-Admin-Key'] = cqAdminKey;
+                }
+            }
+            return _origFetch.call(this, url, opts);
+        };
+    </script>
+    <script src="app.js?v=22"></script>
 </body>
 
 </html>
