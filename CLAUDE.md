@@ -80,19 +80,29 @@ When building integrations:
 - Maintain provider neutrality
 
 
-# Context Quilt Project
+# Documentation
 
-See comprehensive documentation in:
-- `llm-gateway-project.md` - Full technical specification
-- `GETTING_STARTED.md` - Setup instructions
-- `README.md` - Project overview
+## V3 Architecture (Current)
+See `docs/architecture/` for the complete V3 specification:
+- `00-overview.md` — What CQ is, core concepts
+- `01-memory-model.md` — Three tiers, graph layer, entities/relationships
+- `02-pipeline.md` — Extraction pipeline, four roles, model selection
+- `03-queue-and-lifecycle.md` — Meeting queue, batching, context budgeting
+- `04-recall.md` — Intelligent recall, entity matching, hot path
+- `05-integration.md` — CloudZap/ShoulderSurf flow, capture points, metadata
+- `06-configuration.md` — All settings, env vars, admin dashboard
+- `07-api-reference.md` — Complete API endpoint documentation
 
-## Quick Context
-This is Context Quilt - an LLM gateway with unified memory management.
-Currently in MVP phase with FastAPI + OpenAI integration.
+## Other Resources
+- `GETTING_STARTED.md` — Setup instructions
+- `README.md` — Project overview
+- `docs/sales/` — Sales and marketing materials
+- `docs/archive/` — Previous architecture versions (V1, V2, 3.7-3.10)
 
-Next priorities:
-1. Replace in-memory storage with PostgreSQL + Redis
-2. Add proper authentication
-3. Implement A/B testing framework
-Recommended Next Commands
+## Current Status
+- PostgreSQL + Redis deployed on GCP VM (35.239.227.192)
+- Cold path worker using Mistral Small 3.1 via OpenRouter
+- Admin dashboard live at cq.shouldersurf.com/dashboard/
+- Graph memory layer (entities + relationships) — next to build
+- Recall endpoint — next to build
+- Queue/batching system — next to build
