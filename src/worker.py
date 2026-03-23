@@ -572,9 +572,23 @@ class ColdPathWorker:
             await self._buffer_event(payload, meeting_id)
             return
 
-        # No meeting_id — process immediately (legacy behavior)
-        if task_type == "meeting_summary":
+        # No meeting_id — process immediately
+        if task_type in ("meeting_summary", "summary"):
             await self.handle_meeting_summary(payload)
+        elif task_type in ("query", "analysis"):
+            # Treat standalone queries as meeting summaries (extract facts from content+response)
+            content = payload.get("content", "")
+            response = payload.get("response", "")
+            if content or response:
+                combined = ""
+                if content:
+                    combined += f"[QUERY] {content}\n"
+                if response:
+                    combined += f"[RESPONSE] {response}\n"
+                payload["summary"] = combined
+                await self.handle_meeting_summary(payload)
+            else:
+                logger.info("query_no_content", type=task_type, user_id=user_id)
         elif task_type == "trace":
             await self.handle_passive_learning(payload)
         elif task_type == "chat_log":
