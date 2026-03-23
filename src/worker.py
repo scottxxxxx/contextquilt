@@ -35,6 +35,23 @@ logger = structlog.get_logger()
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/context_quilt")
 
+# Queue settings
+QUEUE_MAX_WAIT_MINUTES = int(os.getenv("CQ_QUEUE_MAX_WAIT_MINUTES", "60"))
+QUEUE_BUDGET_THRESHOLD = float(os.getenv("CQ_QUEUE_BUDGET_THRESHOLD", "0.8"))
+QUEUE_CHECK_INTERVAL_SECONDS = 30  # How often to check queues for processing
+
+# Known context windows for common models (tokens)
+KNOWN_CONTEXT_WINDOWS = {
+    "mistralai/mistral-small-3.1-24b-instruct": 128000,
+    "gpt-4.1-nano": 128000,
+    "gpt-4o-mini": 128000,
+    "gpt-5.4-nano": 128000,
+    "qwen/qwen-turbo": 131000,
+    "gemini-2.5-flash-lite": 1000000,
+    "cohere/command-r7b-12-2024": 128000,
+}
+DEFAULT_CONTEXT_WINDOW = 128000
+
 
 def batch_messages(messages: List[Dict], batch_size: int = 10) -> List[List[Dict]]:
     """Batch long conversations into chunks to prevent LLM timeout."""
@@ -348,12 +365,26 @@ class ColdPathWorker:
         self.db = await asyncpg.connect(DATABASE_URL)
         self.llm = LLMClient()  # Configured via CQ_LLM_* env vars
 
+        # Get context window for budget calculation
+        model_name = self.llm.model
+        self.context_window = int(os.getenv(
+            "CQ_LLM_CONTEXT_WINDOW",
+            str(KNOWN_CONTEXT_WINDOWS.get(model_name, DEFAULT_CONTEXT_WINDOW))
+        ))
+        # Available budget = window - prompt overhead - output reserve
+        self.context_budget = int((self.context_window - 2800) * QUEUE_BUDGET_THRESHOLD)
+
         self.running = True
         logger.info("worker_ready",
                      model=self.llm.model,
-                     base_url=self.llm.base_url)
+                     base_url=self.llm.base_url,
+                     context_budget=self.context_budget)
 
-        await self.consume_stream()
+        # Run stream consumer and queue checker concurrently
+        await asyncio.gather(
+            self.consume_stream(),
+            self.check_queues_loop(),
+        )
 
     async def stop(self):
         """Cleanup connections"""
@@ -400,18 +431,148 @@ class ColdPathWorker:
                 logger.error("stream_error", error=str(e))
                 await asyncio.sleep(1)
 
+    async def check_queues_loop(self):
+        """Periodically check meeting queues and process any that are ready."""
+        while self.running:
+            try:
+                await asyncio.sleep(QUEUE_CHECK_INTERVAL_SECONDS)
+                await self._process_ready_queues()
+            except Exception as e:
+                logger.error("queue_check_error", error=str(e))
+
+    async def _process_ready_queues(self):
+        """Find queues that have exceeded the time window and process them."""
+        # Scan for meeting queue keys
+        cursor = b"0"
+        while True:
+            cursor, keys = await self.redis.scan(cursor=cursor, match="meeting_queue:*", count=100)
+            for key in keys:
+                # Check last event timestamp
+                last_ts_str = await self.redis.get(f"{key}:last_event")
+                if not last_ts_str:
+                    continue
+
+                last_event = datetime.fromisoformat(last_ts_str)
+                elapsed_minutes = (datetime.utcnow() - last_event).total_seconds() / 60
+
+                if elapsed_minutes >= QUEUE_MAX_WAIT_MINUTES:
+                    # Time trigger: queue is quiet for long enough
+                    meeting_key = key if isinstance(key, str) else key.decode()
+                    meeting_id = meeting_key.replace("meeting_queue:", "")
+                    logger.info("queue_time_trigger", meeting_id=meeting_id, elapsed_minutes=round(elapsed_minutes))
+                    await self._process_queue(meeting_id)
+
+            if cursor == b"0" or cursor == 0:
+                break
+
+    async def _buffer_event(self, payload: Dict[str, Any], meeting_id: str):
+        """Add an event to a meeting's queue. Check budget trigger."""
+        queue_key = f"meeting_queue:{meeting_id}"
+        event_json = json.dumps(payload)
+
+        await self.redis.rpush(queue_key, event_json)
+        await self.redis.set(f"{queue_key}:last_event", datetime.utcnow().isoformat())
+        # Keep queues alive for 24 hours max
+        await self.redis.expire(queue_key, 86400)
+        await self.redis.expire(f"{queue_key}:last_event", 86400)
+
+        # Check budget trigger — estimate tokens from content length
+        queue_size = await self.redis.llen(queue_key)
+        total_chars = 0
+        events = await self.redis.lrange(queue_key, 0, -1)
+        for evt in events:
+            evt_data = json.loads(evt)
+            total_chars += len(evt_data.get("summary", ""))
+            total_chars += len(evt_data.get("content", ""))
+            total_chars += len(evt_data.get("response", ""))
+
+        # Rough estimate: 4 chars ≈ 1 token
+        estimated_tokens = total_chars // 4
+
+        if estimated_tokens >= self.context_budget:
+            logger.info("queue_budget_trigger", meeting_id=meeting_id,
+                        estimated_tokens=estimated_tokens, budget=self.context_budget)
+            await self._process_queue(meeting_id)
+        else:
+            logger.info("event_buffered", meeting_id=meeting_id,
+                        queue_size=queue_size, estimated_tokens=estimated_tokens)
+
+    async def _process_queue(self, meeting_id: str):
+        """Consolidate all events in a meeting queue and run one extraction."""
+        queue_key = f"meeting_queue:{meeting_id}"
+
+        # Pop all events from the queue
+        events = await self.redis.lrange(queue_key, 0, -1)
+        if not events:
+            return
+
+        await self.redis.delete(queue_key)
+        await self.redis.delete(f"{queue_key}:last_event")
+
+        # Parse events and consolidate
+        user_id = None
+        metadata = {}
+        sections = []
+
+        for evt_json in events:
+            evt = json.loads(evt_json)
+            if not user_id:
+                user_id = evt.get("user_id")
+            if evt.get("metadata"):
+                metadata.update(evt["metadata"])
+
+            evt_type = evt.get("interaction_type", "unknown")
+            if evt.get("summary"):
+                sections.append(f"[SUMMARY] {evt['summary']}")
+            if evt.get("content"):
+                sections.append(f"[QUERY] {evt['content']}")
+            if evt.get("response"):
+                sections.append(f"[RESPONSE] {evt['response']}")
+            if evt_type == "sentiment" and evt.get("content"):
+                sections.append(f"[SENTIMENT] {evt['content']}")
+
+        if not user_id or not sections:
+            logger.warning("queue_empty_after_consolidation", meeting_id=meeting_id)
+            return
+
+        consolidated_text = "\n\n".join(sections)
+        logger.info("queue_processing", meeting_id=meeting_id,
+                     events=len(events), consolidated_length=len(consolidated_text))
+
+        # Run as a single meeting_summary extraction
+        consolidated_payload = {
+            "user_id": user_id,
+            "interaction_type": "meeting_summary",
+            "summary": consolidated_text,
+            "metadata": metadata,
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+        await self.handle_meeting_summary(consolidated_payload)
+
     async def process_task(self, payload: Dict[str, Any]):
-        """Router for different task types"""
+        """Router for different task types. Buffers events with meeting_id."""
         task_type = payload.get("interaction_type") or payload.get("type")
         user_id = payload.get("user_id")
+        metadata = payload.get("metadata", {})
+        meeting_id = metadata.get("meeting_id") if metadata else None
 
-        logger.info("processing_task", type=task_type, user_id=user_id)
+        logger.info("processing_task", type=task_type, user_id=user_id, meeting_id=meeting_id)
 
+        # System tasks — always process immediately
         if task_type == "hydrate":
             await self.hydrate_cache(user_id)
-        elif task_type == "tool_call":
+            return
+        if task_type == "tool_call":
             await self.handle_active_learning(payload)
-        elif task_type == "meeting_summary":
+            return
+
+        # If event has a meeting_id, buffer it for consolidated processing
+        if meeting_id and task_type in ("meeting_summary", "query", "summary", "sentiment"):
+            await self._buffer_event(payload, meeting_id)
+            return
+
+        # No meeting_id — process immediately (legacy behavior)
+        if task_type == "meeting_summary":
             await self.handle_meeting_summary(payload)
         elif task_type == "trace":
             await self.handle_passive_learning(payload)
