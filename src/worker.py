@@ -458,16 +458,18 @@ class ColdPathWorker:
                 if elapsed_minutes >= QUEUE_MAX_WAIT_MINUTES:
                     # Time trigger: queue is quiet for long enough
                     meeting_key = key if isinstance(key, str) else key.decode()
-                    meeting_id = meeting_key.replace("meeting_queue:", "")
-                    logger.info("queue_time_trigger", meeting_id=meeting_id, elapsed_minutes=round(elapsed_minutes))
-                    await self._process_queue(meeting_id)
+                    # Key format: meeting_queue:{user_id}:{meeting_id}
+                    # Extract the full suffix after "meeting_queue:"
+                    queue_suffix = meeting_key.replace("meeting_queue:", "")
+                    logger.info("queue_time_trigger", queue=queue_suffix, elapsed_minutes=round(elapsed_minutes))
+                    await self._process_queue_by_key(meeting_key)
 
             if cursor == b"0" or cursor == 0:
                 break
 
     async def _buffer_event(self, payload: Dict[str, Any], meeting_id: str):
         """Add an event to a meeting's queue. Check budget trigger."""
-        queue_key = f"meeting_queue:{meeting_id}"
+        queue_key = f"meeting_queue:{payload.get('user_id', 'unknown')}:{meeting_id}"
         event_json = json.dumps(payload)
 
         await self.redis.rpush(queue_key, event_json)
@@ -492,14 +494,13 @@ class ColdPathWorker:
         if estimated_tokens >= self.context_budget:
             logger.info("queue_budget_trigger", meeting_id=meeting_id,
                         estimated_tokens=estimated_tokens, budget=self.context_budget)
-            await self._process_queue(meeting_id)
+            await self._process_queue_by_key(queue_key)
         else:
             logger.info("event_buffered", meeting_id=meeting_id,
                         queue_size=queue_size, estimated_tokens=estimated_tokens)
 
-    async def _process_queue(self, meeting_id: str):
+    async def _process_queue_by_key(self, queue_key: str):
         """Consolidate all events in a meeting queue and run one extraction."""
-        queue_key = f"meeting_queue:{meeting_id}"
 
         # Pop all events from the queue
         events = await self.redis.lrange(queue_key, 0, -1)
