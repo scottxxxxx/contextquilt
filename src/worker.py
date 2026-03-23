@@ -305,16 +305,20 @@ async def _rebuild_entity_index(db, redis_client, user_id: str):
     Rebuild the Redis entity name index for a user.
     Stores all entity names as a set for fast text matching on the hot path.
     """
-    rows = await db.fetch(
-        "SELECT name FROM entities WHERE user_id = $1",
-        user_id
-    )
-    key = f"entity_index:{user_id}"
-    if rows:
-        names = [row["name"] for row in rows]
-        await redis_client.delete(key)
-        await redis_client.sadd(key, *names)
-        await redis_client.expire(key, 7200)  # 2 hour TTL
+    try:
+        rows = await db.fetch(
+            "SELECT name FROM entities WHERE user_id = $1",
+            user_id
+        )
+        key = f"entity_index:{user_id}"
+        if rows:
+            names = [row["name"] for row in rows]
+            await redis_client.delete(key)
+            await redis_client.sadd(key, *names)
+            await redis_client.expire(key, 7200)  # 2 hour TTL
+            logger.info("entity_index_rebuilt", user_id=user_id, count=len(names))
+    except Exception as e:
+        logger.error("entity_index_rebuild_failed", user_id=user_id, error=str(e))
 
 
 class ColdPathWorker:
