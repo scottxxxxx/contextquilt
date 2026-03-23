@@ -99,10 +99,36 @@ See `docs/architecture/` for the complete V3 specification:
 - `docs/sales/` — Sales and marketing materials
 - `docs/archive/` — Previous architecture versions (V1, V2, 3.7-3.10)
 
-## Current Status
-- PostgreSQL + Redis deployed on GCP VM (35.239.227.192)
-- Cold path worker using Mistral Small 3.1 via OpenRouter
-- Admin dashboard live at cq.shouldersurf.com/dashboard/
-- Graph memory layer (entities + relationships) — next to build
-- Recall endpoint — next to build
-- Queue/batching system — next to build
+## Current Status (March 22, 2026)
+
+**Live deployment:** `https://cq.shouldersurf.com`
+**Admin dashboard:** `https://cq.shouldersurf.com/dashboard/` (protected by CQ_ADMIN_KEY)
+**GCP VM:** `35.239.227.192` (shared with CloudZap via Project Bifrost)
+
+### What's built and deployed:
+- PostgreSQL + Redis on GCP VM
+- Cold path worker using Mistral Small 3.1 via OpenRouter ($0.00009/extraction)
+- Graph memory layer — entities and relationships extracted and stored
+- `POST /v1/recall` — entity matching + graph traversal, returns context block
+- `GET/PATCH/DELETE /v1/quilt/{user_id}` — user quilt CRUD with ACL
+- Meeting queue with 60-min batching and context budget triggers
+- Generic metadata system (meeting_id, project, any key-value pairs)
+- Admin dashboard with login gate (CQ_ADMIN_KEY)
+- Provider-agnostic LLM client (OpenRouter, OpenAI, Gemini, Ollama, etc.)
+
+### CloudZap integration:
+- CloudZap calls `/v1/recall` before LLM queries when `context_quilt: true`
+- CloudZap POSTs query+response to `/v1/memory` after LLM responds (async)
+- Response headers `X-CQ-Matched` and `X-CQ-Entities` for iOS UI indicator
+
+### Next priorities:
+1. Deploy CloudZap with CQ config enabled
+2. End-to-end test: ShoulderSurf → CloudZap → CQ → graph → recall
+3. Build CQ indicator UI in ShoulderSurf response bubbles
+4. Settings page in admin dashboard for runtime config changes
+
+## Related Projects
+
+- **CloudZap** (`/Users/scottguida/cloudzap/`) — LLM gateway, CQ integration point
+- **ShoulderSurf** (`/Users/scottguida/ShoulderSurf/`) — iOS meeting copilot, first CQ consumer
+- **Project Bifrost** (`/Users/scottguida/bifrost/`) — Nginx Proxy Manager on shared GCP VM
