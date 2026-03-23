@@ -122,9 +122,17 @@ class MemoryUpdate(BaseModel):
     # For 'meeting_summary' (ShoulderSurf via CloudZap)
     summary: Optional[str] = None
 
+    # For 'query' (user query + optional LLM response)
+    content: Optional[str] = None
+    response: Optional[str] = None
+
     # Optional timestamp for backdating (e.g. historical import)
     timestamp: Optional[str] = None
-    
+
+    # Generic metadata — app-defined key-value pairs (e.g., meeting_id, project)
+    # CQ stores these alongside extracted facts for filtering and grouping.
+    metadata: Optional[Dict[str, Any]] = None
+
     # Memory classification (for decay system)
     patch_type: Optional[str] = None  # 'identity', 'preference', 'trait', 'context', 'relationship'
     persistence: Optional[str] = None # 'permanent', 'sticky', 'ephemeral', 'decaying'
