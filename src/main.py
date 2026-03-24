@@ -508,7 +508,7 @@ async def prewarm_cache(
 
 @app.get("/health", tags=["Ops"])
 async def health():
-    return {"status": "healthy", "version": "3.9.0"}
+    return {"status": "healthy", "version": "3.10.0"}
 
 @app.post("/v1/auth/register", response_model=auth.ApplicationResponse, tags=["Authentication"])
 async def register_application(app_data: auth.ApplicationCreate):
