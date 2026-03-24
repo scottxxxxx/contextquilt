@@ -390,6 +390,8 @@ async def get_patches_distribution(
         await conn.close()
 class UserSummaryItem(BaseModel):
     user_id: str
+    display_name: Optional[str]
+    email: Optional[str]
     patch_count: int
     last_updated: Optional[datetime]
     last_provided: Optional[str] # Mocked for now (e.g. "2 hours ago")
@@ -400,47 +402,48 @@ class UserSummaryItem(BaseModel):
 async def get_users():
     conn = await asyncpg.connect(DATABASE_URL)
     try:
-        # Fetch users from profiles table (Source of Truth) and join with facts for aggregation
         query = """
-            SELECT 
+            SELECT
                 p.user_id,
+                p.display_name,
+                p.email,
                 p.variables,
                 COUNT(ps.patch_id) as patch_count,
                 MAX(cp.created_at) as last_updated
             FROM profiles p
             LEFT JOIN patch_subjects ps ON ps.subject_key = 'user:' || p.user_id
             LEFT JOIN context_patches cp ON cp.patch_id = ps.patch_id
-            GROUP BY p.user_id, p.variables
+            GROUP BY p.user_id, p.display_name, p.email, p.variables
             ORDER BY last_updated DESC NULLS LAST
         """
         rows = await conn.fetch(query)
-        
+
         results = []
         import json
         for row in rows:
-            # Mock "Last Provided" logic
             mock_last_provided = "1 hour ago"
-            
-            # Extract names from variables
+
             variables = row['variables']
             if isinstance(variables, str):
                 try:
                     variables = json.loads(variables)
                 except:
                     variables = {}
-            
+
             first_name = variables.get('first_name')
             last_name = variables.get('last_name')
-            
+
             results.append(UserSummaryItem(
                 user_id=row['user_id'] or "Unknown",
+                display_name=row['display_name'],
+                email=row['email'],
                 patch_count=row['patch_count'],
                 last_updated=row['last_updated'],
                 last_provided=mock_last_provided,
                 first_name=first_name,
-                last_name=last_name
+                last_name=last_name,
             ))
-            
+
         return results
     finally:
         await conn.close()
@@ -464,6 +467,8 @@ class TimelineEvent(BaseModel):
 
 class UserQuilt(BaseModel):
     user_id: str
+    display_name: Optional[str] = None
+    email: Optional[str] = None
     patches: List[QuiltPatch]
     timeline: List[TimelineEvent]
 
@@ -473,7 +478,12 @@ async def get_user_quilt(user_id: str):
     try:
         # Construct subject_key (assuming user:ID format)
         subject_key = f"user:{user_id}"
-        
+
+        # Fetch profile identity
+        profile_row = await conn.fetchrow(
+            "SELECT display_name, email FROM profiles WHERE user_id = $1", user_id
+        )
+
         # Get Patches from context_patches (via patch_subjects)
         patch_rows = await conn.fetch("""
             SELECT cp.patch_id, cp.patch_name, cp.value, cp.patch_type, cp.origin_mode, cp.created_at,
@@ -512,8 +522,10 @@ async def get_user_quilt(user_id: str):
 
         return UserQuilt(
             user_id=user_id,
+            display_name=profile_row['display_name'] if profile_row else None,
+            email=profile_row['email'] if profile_row else None,
             patches=patches,
-            timeline=timeline[:20] 
+            timeline=timeline[:20]
         )
 
     finally:

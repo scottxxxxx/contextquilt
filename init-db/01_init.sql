@@ -1,8 +1,12 @@
 CREATE TABLE IF NOT EXISTS profiles (
     user_id TEXT PRIMARY KEY,
+    display_name TEXT,
+    email TEXT,
     variables JSONB DEFAULT '{}'::jsonb,
     last_updated TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_profiles_email ON profiles (email);
 
 CREATE TABLE IF NOT EXISTS facts (
     id SERIAL PRIMARY KEY,

@@ -99,11 +99,12 @@ See `docs/architecture/` for the complete V3 specification:
 - `docs/sales/` — Sales and marketing materials
 - `docs/archive/` — Previous architecture versions (V1, V2, 3.7-3.10)
 
-## Current Status (March 22, 2026)
+## Current Status (March 24, 2026)
 
 **Live deployment:** `https://cq.shouldersurf.com`
 **Admin dashboard:** `https://cq.shouldersurf.com/dashboard/` (protected by CQ_ADMIN_KEY)
 **GCP VM:** `35.239.227.192` (shared with CloudZap via Project Bifrost)
+**Version:** 3.10.0
 
 ### What's built and deployed:
 - PostgreSQL + Redis on GCP VM
@@ -115,17 +116,22 @@ See `docs/architecture/` for the complete V3 specification:
 - Generic metadata system (meeting_id, project, any key-value pairs)
 - Admin dashboard with login gate (CQ_ADMIN_KEY)
 - Provider-agnostic LLM client (OpenRouter, OpenAI, Gemini, Ollama, etc.)
+- User profile identity (display_name, email) via metadata passthrough
+- Smart persistence: identity/preference/trait facts are `sticky`, experience/action items are `decaying`
+- Relevance-filtered extraction prompts to reduce noise
 
 ### CloudZap integration:
 - CloudZap calls `/v1/recall` before LLM queries when `context_quilt: true`
 - CloudZap POSTs query+response to `/v1/memory` after LLM responds (async)
 - Response headers `X-CQ-Matched` and `X-CQ-Entities` for iOS UI indicator
+- Can pass `display_name` and `email` in metadata to populate user profiles
 
 ### Next priorities:
-1. Deploy CloudZap with CQ config enabled
+1. Update CloudZap to pass display_name/email in metadata from Apple Sign-In
 2. End-to-end test: ShoulderSurf → CloudZap → CQ → graph → recall
 3. Build CQ indicator UI in ShoulderSurf response bubbles
 4. Settings page in admin dashboard for runtime config changes
+5. Implement active decay scoring in recall path (weight by recency + access count)
 
 ## Related Projects
 

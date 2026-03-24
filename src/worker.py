@@ -93,6 +93,11 @@ async def store_facts(
             fact_text = fact_item.get("fact", str(fact_item))
             # Use LLM-provided category if available, fall back to Python classifier
             category = fact_item.get("category", classify_fact(fact_text))
+            # Facts about other participants must be stored as "experience",
+            # not identity/preference/trait (those describe the submitting user only)
+            about_user = fact_item.get("about_user", True)
+            if not about_user and category in ("identity", "preference", "trait"):
+                category = "experience"
         elif isinstance(fact_item, str):
             fact_text = fact_item
             category = classify_fact(fact_text)
@@ -117,7 +122,9 @@ async def store_facts(
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
             patch_id, patch_name, category, value_json,
-            "inferred", source_prompt, 0.8, "sticky", created_at, created_at
+            "inferred", source_prompt, 0.8,
+            "sticky" if category in ("identity", "preference", "trait") else "decaying",
+            created_at, created_at
         )
 
         await db.execute(
@@ -186,7 +193,7 @@ async def store_action_items(
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             """,
             patch_id, patch_name, "experience", value_json,
-            "inferred", "meeting_summary", 0.8, "sticky", created_at, created_at
+            "inferred", "meeting_summary", 0.8, "decaying", created_at, created_at
         )
 
         await db.execute(
@@ -559,6 +566,13 @@ class ColdPathWorker:
 
         logger.info("processing_task", type=task_type, user_id=user_id, meeting_id=meeting_id)
 
+        # Update profile identity fields if provided in metadata
+        if user_id and metadata:
+            display_name = metadata.get("display_name")
+            email = metadata.get("email")
+            if display_name or email:
+                await self._update_profile_identity(user_id, display_name, email)
+
         # System tasks — always process immediately
         if task_type == "hydrate":
             await self.hydrate_cache(user_id)
@@ -604,7 +618,7 @@ class ColdPathWorker:
         """Hydration Workflow: Postgres -> Redis"""
         try:
             row = await self.db.fetchrow(
-                "SELECT variables, last_updated FROM profiles WHERE user_id = $1", user_id
+                "SELECT variables, last_updated, display_name, email FROM profiles WHERE user_id = $1", user_id
             )
         except Exception as e:
             logger.error("db_fetch_failed", error=str(e), user_id=user_id)
@@ -620,13 +634,43 @@ class ColdPathWorker:
 
         profile_data = {
             "variables": variables,
-            "last_updated": row["last_updated"].isoformat() if row["last_updated"] else "now"
+            "last_updated": row["last_updated"].isoformat() if row["last_updated"] else "now",
+            "display_name": row["display_name"],
+            "email": row["email"],
         }
 
         cache_key = f"active_context:{user_id}"
         await self.redis.set(cache_key, json.dumps(profile_data), ex=3600)
 
         logger.info("hydration_complete", user_id=user_id)
+
+    async def _update_profile_identity(self, user_id: str, display_name: str | None, email: str | None):
+        """Update display_name and/or email on the user profile if provided."""
+        try:
+            # Ensure profile exists
+            await self.db.execute(
+                "INSERT INTO profiles (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                user_id
+            )
+            if display_name and email:
+                await self.db.execute(
+                    "UPDATE profiles SET display_name = $1, email = $2 WHERE user_id = $3",
+                    display_name, email, user_id
+                )
+            elif display_name:
+                await self.db.execute(
+                    "UPDATE profiles SET display_name = $1 WHERE user_id = $2",
+                    display_name, user_id
+                )
+            elif email:
+                await self.db.execute(
+                    "UPDATE profiles SET email = $1 WHERE user_id = $2",
+                    email, user_id
+                )
+            logger.info("profile_identity_updated", user_id=user_id,
+                        display_name=display_name, email=email)
+        except Exception as e:
+            logger.error("profile_identity_update_failed", error=str(e), user_id=user_id)
 
     async def handle_active_learning(self, payload: Dict[str, Any]):
         """Active Learning: Agent explicitly saved a fact. Direct write, no LLM needed."""
