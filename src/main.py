@@ -33,7 +33,7 @@ from src import auth
 app = FastAPI(
     title="Context Quilt API",
     description="Intelligent AI Gateway & Memory Layer",
-    version="3.9.0",
+    version="3.10.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )

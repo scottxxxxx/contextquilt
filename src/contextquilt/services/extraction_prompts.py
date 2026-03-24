@@ -18,7 +18,7 @@ Analyze this meeting summary and return a JSON object with exactly four keys:
 
 {
   "facts": [
-    {"fact": "concise statement", "category": "identity|preference|trait|experience", "participants": ["names"]}
+    {"fact": "concise statement", "category": "identity|preference|trait|experience", "about_user": true, "participants": ["names"]}
   ],
   "action_items": [
     {"action": "what needs to be done", "owner": "who is responsible", "deadline": "when or null"}
@@ -31,11 +31,16 @@ Analyze this meeting summary and return a JSON object with exactly four keys:
   ]
 }
 
-CATEGORY DEFINITIONS:
-- identity: Who someone is (role, team, title, skills, expertise)
-- preference: What someone prefers or dislikes (tools, methods, constraints)
-- trait: How someone behaves (communication style, work habits)
-- experience: What happened or is happening (projects, decisions, events, discussions)
+CATEGORY DEFINITIONS (identity, preference, trait apply ONLY to the submitting user):
+- identity: Who the submitting user is (role, team, title, skills, expertise)
+- preference: What the submitting user prefers or dislikes (tools, methods, constraints)
+- trait: How the submitting user behaves (communication style, work habits)
+- experience: What happened or is happening — use this for ALL observations about other participants, AND for events, projects, decisions, discussions
+
+ABOUT_USER FIELD:
+- Set "about_user": true ONLY when the fact describes the submitting user themselves
+- Set "about_user": false for facts about other meeting participants (their roles, preferences, behaviors, etc.)
+- Facts about other participants should ALWAYS use category "experience" regardless of content
 
 ENTITY TYPES:
 - person: Named individuals
@@ -55,15 +60,37 @@ RELATIONSHIP TYPES (use descriptive verbs):
 - budgeted_at, capped_at
 - decided, proposed, agreed_to
 
+NAME NORMALIZATION:
+- Use the FULL NAME of each person consistently throughout the extraction
+- If someone is introduced as "Bob Martinez" and later referred to as just "Bob", always use "Bob Martinez"
+- If only a first name is ever used (no last name available in the meeting), use the first name as-is
+- Never guess or infer a last name that was not mentioned in the meeting
+
+RELEVANCE FILTER — apply this test to every candidate extraction:
+"Would this fact be useful context in a FUTURE conversation on a DIFFERENT topic?"
+- YES: "Scott is the CTO of Acme Corp" — durable identity fact
+- YES: "Kumar owns the search pipeline rewrite" — role/responsibility
+- YES: "The API migration deadline is April 15" — actionable constraint
+- NO: "The team discussed prompt comparison approaches" — too vague, no lasting value
+- NO: "Cover evaluation discussion" — procedural task, not a durable fact
+- NO: "Compare default prompt output with custom prompt" — implementation detail, not memorable
+
+CONSOLIDATION:
+- Prefer ONE high-level fact over multiple granular observations about the same topic
+- Example: instead of 5 separate action items from one discussion thread, extract the key decision and who owns it
+- Action items should only be extracted if they have a clear owner AND are substantive (not sub-tasks of a larger item)
+
 EXTRACTION RULES:
 1. Extract facts about ALL participants, not just the primary user
-2. Entity names must be exact as mentioned in the text
+2. Entity names must use the normalized full name (see NAME NORMALIZATION above)
 3. Every relationship must reference entities from the entities list
 4. Capture decisions, commitments, deadlines, and constraints
 5. Include temporal relationships (deadlines, schedules)
 6. Omit greetings, small talk, and procedural meeting logistics
 7. Keep each fact to one clear sentence
-8. If any section has nothing to extract, return an empty array"""
+8. If any section has nothing to extract, return an empty array
+9. Prefer fewer, higher-quality extractions over exhaustive coverage
+10. Skip action items that are sub-tasks or implementation details of a larger item"""
 
 
 # Secondary prompt: extract from general conversation logs
