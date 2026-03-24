@@ -487,17 +487,20 @@ function renderUserTable(users) {
 
     users.forEach(user => {
         const tr = document.createElement('tr');
-        // user object: { user_id, patch_count, last_updated, last_provided }
+        // user object: { user_id, display_name, email, patch_count, last_updated, last_provided }
 
         let lastUpdatedStr = '-';
         if (user.last_updated) {
             lastUpdatedStr = new Date(user.last_updated).toLocaleString();
         }
 
+        // Show display_name if available, fall back to truncated user_id
+        const userLabel = user.display_name || user.user_id.substring(0, 12) + '...';
+
         tr.innerHTML = `
-            <td style="font-weight: 500; color: var(--text-primary);"><i class="fa-solid fa-user-circle" style="color: var(--primary-color); margin-right:8px;"></i> ${user.user_id}</td>
-            <td style="color: var(--text-primary);">${user.first_name || '-'}</td>
-            <td style="color: var(--text-primary);">${user.last_name || '-'}</td>
+            <td style="font-weight: 500; color: var(--text-primary);"><i class="fa-solid fa-user-circle" style="color: var(--primary-color); margin-right:8px;"></i> <span title="${user.user_id}">${userLabel}</span></td>
+            <td style="color: var(--text-primary);">${user.display_name || '-'}</td>
+            <td style="color: var(--text-primary);">${user.email || '-'}</td>
             <td><span class="badge" style="background: rgba(148, 163, 184, 0.1); color: #94a3b8;">${user.patch_count} Patches</span></td>
             <td style="color: var(--text-muted); font-size: 0.9em;">${lastUpdatedStr}</td>
             <td style="color: var(--text-muted); font-size: 0.9em;"><i class="fa-solid fa-clock-rotate-left"></i> ${user.last_provided}</td>
@@ -617,9 +620,10 @@ function renderQuiltView(data) {
     // Render Timeline
     renderUserTimeline(data.patches);
 
-    // Header
-    document.getElementById('quilt-user-id').textContent = data.user_id;
-    document.getElementById('quilt-user-initial').textContent = data.user_id.charAt(0).toUpperCase();
+    // Header — show display_name if available, user_id as fallback
+    const displayLabel = data.display_name || data.user_id;
+    document.getElementById('quilt-user-id').textContent = displayLabel;
+    document.getElementById('quilt-user-initial').textContent = displayLabel.charAt(0).toUpperCase();
     document.getElementById('quilt-patch-count').textContent = data.patches.length;
     // Mock Last Active
     document.getElementById('quilt-last-active').textContent = 'Just now';
