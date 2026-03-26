@@ -1050,6 +1050,21 @@ class ColdPathWorker:
                 model=response.model,
             )
 
+            # Persist extraction metrics for cost tracking dashboard
+            try:
+                await self.db.execute(
+                    """
+                    INSERT INTO extraction_metrics (user_id, model, input_tokens, output_tokens,
+                        cost_usd, latency_ms, patches_extracted, entities_extracted, source_prompt)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    """,
+                    user_id, response.model, response.input_tokens, response.output_tokens,
+                    response.cost_usd, response.latency_ms, facts_stored, entities_stored,
+                    "meeting_summary"
+                )
+            except Exception as e:
+                logger.warning("metrics_insert_failed", error=str(e))
+
             await self.hydrate_cache(user_id)
 
         except Exception as e:

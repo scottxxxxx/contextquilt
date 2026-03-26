@@ -592,59 +592,348 @@ async def delete_patch(patch_id: str):
     finally:
         await conn.close()
 
-class SchemaItem(BaseModel):
-    name: str
-    type: str
-    description: str
-    status: str # active
+# ============================================================
+# Patch Type Manager (replaces mock schema endpoints)
+# ============================================================
 
-class CandidateVariable(BaseModel):
-    id: str
-    name: str # e.g. "shoe_size"
-    frequency: str # "15% of users"
-    sample: str # "User mentions 'size 10'"
+class PatchTypeItem(BaseModel):
+    type_key: str
+    app_id: Optional[str]
+    display_name: str
+    schema_def: Any
+    persistence: str
+    default_ttl_days: Optional[int]
+    is_completable: bool
+    project_scoped: bool
 
-@router.get("/schema", response_model=List[SchemaItem], dependencies=[Depends(verify_admin_key)])
-async def get_schema():
-    # Mock data from memory_schema.yaml
-    # in real app, parse the yaml or DB
-    return [
-        SchemaItem(name="food_allergies", type="preference", description="Critical food restrictions.", status="active"),
-        SchemaItem(name="communication_style", type="trait", description="User's preferred tone and verbosity.", status="active"),
-        SchemaItem(name="last_project_context", type="experience", description="Context from most recent project.", status="active"),
-        SchemaItem(name="job_title", type="identity", description="User's professional role.", status="active")
-    ]
+class PatchTypeCreate(BaseModel):
+    type_key: str
+    display_name: str
+    persistence: str = "sticky"
+    default_ttl_days: Optional[int] = None
+    is_completable: bool = False
+    project_scoped: bool = False
 
-@router.get("/schema/candidates", response_model=List[CandidateVariable], dependencies=[Depends(verify_admin_key)])
-async def get_candidates():
-    # Mock discovery inbox
-    return [
-        CandidateVariable(id="1", name="shoe_size", frequency="15% of users", sample="I wear a size 10 nike"),
-        CandidateVariable(id="2", name="favorite_editor", frequency="8% of users", sample="I prefer VS Code over Vim"),
-        CandidateVariable(id="3", name="timezone", frequency="35% of users", sample="I'm in PST")
-    ]
+class PatchTypeUpdate(BaseModel):
+    persistence: Optional[str] = None
+    default_ttl_days: Optional[int] = None
+    is_completable: Optional[bool] = None
+    project_scoped: Optional[bool] = None
 
-@router.post("/schema/candidates/{id}/{action}", dependencies=[Depends(verify_admin_key)])
-async def handle_candidate(id: str, action: str):
-    # Mock action
-    return {"status": "success", "message": f"Candidate {id} {action}d"}
+@router.get("/patch-types", response_model=List[PatchTypeItem], dependencies=[Depends(verify_admin_key)])
+async def get_patch_types():
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch("SELECT * FROM patch_type_registry ORDER BY type_key")
+        return [PatchTypeItem(
+            type_key=r["type_key"], app_id=str(r["app_id"]) if r["app_id"] else None,
+            display_name=r["display_name"], schema_def=r["schema"],
+            persistence=r["persistence"], default_ttl_days=r["default_ttl_days"],
+            is_completable=r["is_completable"], project_scoped=r["project_scoped"]
+        ) for r in rows]
+    finally:
+        await conn.close()
 
-class ROIMetrics(BaseModel):
-    efficiency_gain_percent: int
-    token_savings_count: int # Millions
-    sentiment_lift_percent: int
-    cost_saved_usd: float
+@router.post("/patch-types", dependencies=[Depends(verify_admin_key)])
+async def create_patch_type(req: PatchTypeCreate):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute(
+            """INSERT INTO patch_type_registry (type_key, display_name, schema, persistence,
+                default_ttl_days, is_completable, project_scoped)
+            VALUES ($1, $2, '{"text": "string"}'::jsonb, $3, $4, $5, $6)""",
+            req.type_key, req.display_name, req.persistence,
+            req.default_ttl_days, req.is_completable, req.project_scoped
+        )
+        return {"status": "created", "type_key": req.type_key}
+    finally:
+        await conn.close()
 
-@router.get("/roi", response_model=ROIMetrics, dependencies=[Depends(verify_admin_key)])
-async def get_roi_metrics():
-    # Mock ROI data
-    # In reality, this would query conversations/tokens tables
-    return ROIMetrics(
-        efficiency_gain_percent=22,
-        token_savings_count=4, # 4.5M -> represented as int or float? using int for simplicity in model if count is small unit
-        sentiment_lift_percent=15,
-        cost_saved_usd=1250.00
-    )
+@router.put("/patch-types/{type_key}", dependencies=[Depends(verify_admin_key)])
+async def update_patch_type(type_key: str, req: PatchTypeUpdate):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        sets, params, idx = [], [], 1
+        if req.persistence is not None:
+            sets.append(f"persistence = ${idx}"); params.append(req.persistence); idx += 1
+        if req.default_ttl_days is not None:
+            sets.append(f"default_ttl_days = ${idx}"); params.append(req.default_ttl_days); idx += 1
+        if req.is_completable is not None:
+            sets.append(f"is_completable = ${idx}"); params.append(req.is_completable); idx += 1
+        if req.project_scoped is not None:
+            sets.append(f"project_scoped = ${idx}"); params.append(req.project_scoped); idx += 1
+        if not sets:
+            return {"status": "no_changes"}
+        params.append(type_key)
+        await conn.execute(
+            f"UPDATE patch_type_registry SET {', '.join(sets)} WHERE type_key = ${idx}", *params
+        )
+        return {"status": "updated", "type_key": type_key}
+    finally:
+        await conn.close()
+
+class ConnectionItem(BaseModel):
+    label: str
+    app_id: Optional[str]
+    role: str
+    from_types: List[str]
+    to_types: List[str]
+    description: Optional[str]
+
+class ConnectionCreate(BaseModel):
+    label: str
+    role: str
+    from_types: List[str] = []
+    to_types: List[str] = []
+    description: Optional[str] = None
+
+class ConnectionUpdate(BaseModel):
+    role: Optional[str] = None
+    from_types: Optional[List[str]] = None
+    to_types: Optional[List[str]] = None
+
+@router.get("/connections", response_model=List[ConnectionItem], dependencies=[Depends(verify_admin_key)])
+async def get_connections():
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch("SELECT * FROM connection_vocabulary ORDER BY label")
+        return [ConnectionItem(
+            label=r["label"], app_id=str(r["app_id"]) if r["app_id"] else None,
+            role=r["role"], from_types=list(r["from_types"] or []),
+            to_types=list(r["to_types"] or []), description=r.get("description")
+        ) for r in rows]
+    finally:
+        await conn.close()
+
+@router.post("/connections", dependencies=[Depends(verify_admin_key)])
+async def create_connection(req: ConnectionCreate):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute(
+            """INSERT INTO connection_vocabulary (label, app_id, role, from_types, to_types, description)
+            VALUES ($1, NULL, $2, $3, $4, $5)""",
+            req.label, req.role, req.from_types, req.to_types, req.description
+        )
+        return {"status": "created", "label": req.label}
+    finally:
+        await conn.close()
+
+@router.put("/connections/{label}", dependencies=[Depends(verify_admin_key)])
+async def update_connection(label: str, req: ConnectionUpdate):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        sets, params, idx = [], [], 1
+        if req.role is not None:
+            sets.append(f"role = ${idx}"); params.append(req.role); idx += 1
+        if req.from_types is not None:
+            sets.append(f"from_types = ${idx}"); params.append(req.from_types); idx += 1
+        if req.to_types is not None:
+            sets.append(f"to_types = ${idx}"); params.append(req.to_types); idx += 1
+        if not sets:
+            return {"status": "no_changes"}
+        params.append(label)
+        await conn.execute(
+            f"UPDATE connection_vocabulary SET {', '.join(sets)} WHERE label = ${idx}", *params
+        )
+        return {"status": "updated", "label": label}
+    finally:
+        await conn.close()
+
+# ============================================================
+# Extraction Cost Tracking (replaces mock ROI)
+# ============================================================
+
+class MetricsSummary(BaseModel):
+    total_cost: float
+    total_extractions: int
+    avg_cost: float
+    avg_latency: float
+
+class CostDataPoint(BaseModel):
+    date: str
+    cost: float
+    count: int
+
+class ModelCost(BaseModel):
+    model: str
+    cost: float
+    count: int
+
+class ExtractionMetricItem(BaseModel):
+    user_id: Optional[str]
+    model: Optional[str]
+    input_tokens: Optional[int]
+    output_tokens: Optional[int]
+    cost_usd: Optional[float]
+    latency_ms: Optional[float]
+    patches_extracted: Optional[int]
+    entities_extracted: Optional[int]
+    created_at: datetime
+
+@router.get("/metrics/summary", response_model=MetricsSummary, dependencies=[Depends(verify_admin_key)])
+async def get_metrics_summary(days: Optional[int] = 30):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        row = await conn.fetchrow(
+            """SELECT COALESCE(SUM(cost_usd), 0) as total_cost,
+                      COUNT(*) as total_extractions,
+                      COALESCE(AVG(cost_usd), 0) as avg_cost,
+                      COALESCE(AVG(latency_ms), 0) as avg_latency
+            FROM extraction_metrics
+            WHERE created_at >= NOW() - INTERVAL '1 day' * $1""", days
+        )
+        return MetricsSummary(
+            total_cost=float(row["total_cost"]),
+            total_extractions=row["total_extractions"],
+            avg_cost=float(row["avg_cost"]),
+            avg_latency=float(row["avg_latency"])
+        )
+    finally:
+        await conn.close()
+
+@router.get("/metrics/cost", response_model=List[CostDataPoint], dependencies=[Depends(verify_admin_key)])
+async def get_metrics_cost(days: Optional[int] = 30, start_date: Optional[str] = None, end_date: Optional[str] = None):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        if start_date and end_date:
+            rows = await conn.fetch(
+                """SELECT created_at::date as day, SUM(cost_usd) as cost, COUNT(*) as count
+                FROM extraction_metrics
+                WHERE created_at::date >= $1::date AND created_at::date <= $2::date
+                GROUP BY day ORDER BY day""",
+                datetime.strptime(start_date, "%Y-%m-%d").date(),
+                datetime.strptime(end_date, "%Y-%m-%d").date()
+            )
+        else:
+            rows = await conn.fetch(
+                """SELECT created_at::date as day, SUM(cost_usd) as cost, COUNT(*) as count
+                FROM extraction_metrics
+                WHERE created_at >= NOW() - INTERVAL '1 day' * $1
+                GROUP BY day ORDER BY day""", days
+            )
+        return [CostDataPoint(date=str(r["day"]), cost=float(r["cost"]), count=r["count"]) for r in rows]
+    finally:
+        await conn.close()
+
+@router.get("/metrics/models", response_model=List[ModelCost], dependencies=[Depends(verify_admin_key)])
+async def get_metrics_models(days: Optional[int] = 30):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            """SELECT model, SUM(cost_usd) as cost, COUNT(*) as count
+            FROM extraction_metrics
+            WHERE created_at >= NOW() - INTERVAL '1 day' * $1
+            GROUP BY model ORDER BY cost DESC""", days
+        )
+        return [ModelCost(model=r["model"] or "unknown", cost=float(r["cost"]), count=r["count"]) for r in rows]
+    finally:
+        await conn.close()
+
+@router.get("/metrics/recent", response_model=List[ExtractionMetricItem], dependencies=[Depends(verify_admin_key)])
+async def get_metrics_recent(limit: int = 50):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            "SELECT * FROM extraction_metrics ORDER BY created_at DESC LIMIT $1", limit
+        )
+        return [ExtractionMetricItem(
+            user_id=r["user_id"], model=r["model"],
+            input_tokens=r["input_tokens"], output_tokens=r["output_tokens"],
+            cost_usd=r["cost_usd"], latency_ms=r["latency_ms"],
+            patches_extracted=r["patches_extracted"], entities_extracted=r["entities_extracted"],
+            created_at=r["created_at"]
+        ) for r in rows]
+    finally:
+        await conn.close()
+
+# ============================================================
+# System Health
+# ============================================================
+
+import time
+import redis.asyncio as aioredis
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+
+@router.get("/health-check", dependencies=[Depends(verify_admin_key)])
+async def health_check():
+    result = {"postgres": {}, "redis": {}, "worker": {}, "llm": {}, "config": {}}
+
+    # Postgres
+    try:
+        start = time.monotonic()
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.fetchval("SELECT 1")
+        latency = (time.monotonic() - start) * 1000
+        patch_count = await conn.fetchval("SELECT COUNT(*) FROM context_patches")
+        user_count = await conn.fetchval("SELECT COUNT(*) FROM profiles")
+        await conn.close()
+        result["postgres"] = {"status": "connected", "latency_ms": round(latency, 1),
+                             "patches": patch_count, "users": user_count}
+    except Exception as e:
+        result["postgres"] = {"status": "disconnected", "error": str(e)}
+
+    # Redis
+    try:
+        r = aioredis.from_url(REDIS_URL)
+        start = time.monotonic()
+        await r.ping()
+        latency = (time.monotonic() - start) * 1000
+        queue_keys = len(await r.keys("meeting_queue:*"))
+        entity_keys = len(await r.keys("entity_index:*"))
+        # Worker queue depth
+        pending = 0
+        try:
+            groups = await r.xinfo_groups("memory_updates")
+            pending = sum(g.get("pending", 0) for g in groups)
+        except Exception:
+            pass
+        await r.close()
+        result["redis"] = {"status": "connected", "latency_ms": round(latency, 1),
+                          "queue_keys": queue_keys, "entity_keys": entity_keys}
+        result["worker"] = {"pending_events": pending}
+    except Exception as e:
+        result["redis"] = {"status": "disconnected", "error": str(e)}
+        result["worker"] = {"pending_events": -1}
+
+    # LLM config
+    result["llm"] = {
+        "model": os.getenv("CQ_LLM_MODEL", "not configured"),
+        "base_url": os.getenv("CQ_LLM_BASE_URL", "not configured"),
+    }
+
+    # Runtime config
+    result["config"] = {
+        "max_patches_per_meeting": int(os.getenv("CQ_MAX_PATCHES", "12")),
+        "max_entities_per_meeting": int(os.getenv("CQ_MAX_ENTITIES", "10")),
+        "max_relationships_per_meeting": int(os.getenv("CQ_MAX_RELATIONSHIPS", "10")),
+        "queue_max_wait_minutes": int(os.getenv("CQ_QUEUE_MAX_WAIT_MINUTES", "60")),
+        "queue_budget_threshold": float(os.getenv("CQ_QUEUE_BUDGET_THRESHOLD", "0.8")),
+    }
+
+    return result
+
+# ============================================================
+# Configuration
+# ============================================================
+
+@router.get("/config", dependencies=[Depends(verify_admin_key)])
+async def get_config():
+    return {
+        "extraction": {
+            "max_patches_per_meeting": int(os.getenv("CQ_MAX_PATCHES", "12")),
+            "max_entities_per_meeting": int(os.getenv("CQ_MAX_ENTITIES", "10")),
+            "max_relationships_per_meeting": int(os.getenv("CQ_MAX_RELATIONSHIPS", "10")),
+        },
+        "queue": {
+            "max_wait_minutes": int(os.getenv("CQ_QUEUE_MAX_WAIT_MINUTES", "60")),
+            "budget_threshold": float(os.getenv("CQ_QUEUE_BUDGET_THRESHOLD", "0.8")),
+        },
+        "llm": {
+            "model": os.getenv("CQ_LLM_MODEL", "not configured"),
+            "base_url": os.getenv("CQ_LLM_BASE_URL", "not configured"),
+        }
+    }
 
 
 class TestPipelineRequest(BaseModel):
