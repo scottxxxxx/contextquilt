@@ -249,6 +249,8 @@ async def store_connected_patches(
     app_id: str | None = None,
     timestamp: str | None = None,
     project: str | None = None,
+    project_id: str | None = None,
+    meeting_id: str | None = None,
 ):
     """
     Store typed, connected patches (Connected Quilt V2 model).
@@ -322,17 +324,22 @@ async def store_connected_patches(
             if any(c.get("role") == "parent" for c in connects_to):
                 patch_project = project
 
+        # Project-scoped patches get both the text project name and the stable project_id
+        patch_project_id = project_id if patch_type in project_scoped_types or (patch_type == "role" and patch_project) else None
+        patch_meeting_id = meeting_id if patch_type in project_scoped_types else None
+
         await db.execute(
             """
             INSERT INTO context_patches (
                 patch_id, patch_name, patch_type, value,
                 origin_mode, source_prompt, confidence, persistence,
-                project, status, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                project, project_id, meeting_id, status, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             """,
             patch_id, patch_name, patch_type, value_json,
             "inferred", source_prompt, 0.8, persistence,
-            patch_project, "active", created_at, created_at
+            patch_project, patch_project_id, patch_meeting_id,
+            "active", created_at, created_at
         )
 
         await db.execute(
@@ -1015,6 +1022,20 @@ class ColdPathWorker:
             app_id = payload.get("app_id")
             timestamp = payload.get("timestamp")
             project = metadata.get("project") if metadata else None
+            project_id = metadata.get("project_id") if metadata else None
+            meeting_id = metadata.get("meeting_id") if metadata else None
+
+            # Auto-register project if project_id provided
+            if project_id and project:
+                try:
+                    await self.db.execute(
+                        """INSERT INTO projects (project_id, user_id, name)
+                        VALUES ($1, $2, $3)
+                        ON CONFLICT (project_id) DO UPDATE SET updated_at = NOW()""",
+                        project_id, user_id, project
+                    )
+                except Exception:
+                    pass  # Table may not exist yet
 
             # Connected Quilt V2: patches with connections
             patches = response.content.get("patches", [])
@@ -1028,7 +1049,8 @@ class ColdPathWorker:
                     patches = patches[:MAX_PATCHES_PER_MEETING]
 
                 patches_stored = await store_connected_patches(
-                    self.db, user_id, patches, "meeting_summary", app_id, timestamp, project
+                    self.db, user_id, patches, "meeting_summary", app_id, timestamp,
+                    project, project_id, meeting_id
                 )
                 facts_stored = patches_stored
                 actions_stored = 0
