@@ -92,6 +92,7 @@ Each connection has a structural "role" (what the system uses) and a semantic "l
 CONNECTION DIRECTION — connections go FROM → TO. The direction matters:
 - commitment/blocker/decision → project: "belongs_to" (the item is inside the project)
 - person → project: "works_on" (the person is involved in the project)
+- commitment → blocker: "blocked_by" (MUST point to a blocker patch, NEVER to a person)
 - person → commitment/blocker/decision: "owns" (the person is RESPONSIBLE for the item)
 - commitment → blocker: "blocked_by" (the commitment depends on the blocker)
 - decision → preference: "motivated_by" (the decision was driven by the preference)
