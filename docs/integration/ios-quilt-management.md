@@ -217,9 +217,9 @@ Group patches into sections the user can scan quickly:
 ```
 
 **Section logic:**
-- "About You" = patches where `patch_type` is trait, preference, or role (with no project)
-- Project sections = group by project name from the `participants` or a future `project` field
-- "Action Items" = patches where `category` is commitment or blocker
+- "About You" = patches where `project_id` is null and `patch_type` is trait, preference, or role
+- Project sections = group by `project_id`, display using `project` (the label). Within each project, optionally sub-group by `meeting_id`.
+- "Action Items" = patches where `patch_type` is commitment or blocker
 
 ### Interactions
 
@@ -294,6 +294,29 @@ User managing their quilt:
 | `deadline` | `string?` | Due date if applicable |
 | `source` | `string` | "inferred" (CQ extracted) or "declared" (user edited) |
 | `created_at` | `string` (ISO 8601) | When this patch was created |
+| `project` | `string?` | Display name of the project (renameable) |
+| `project_id` | `string?` | Stable project UUID — never changes on rename. Group by this. |
+| `meeting_id` | `string?` | Meeting UUID — sub-group within a project |
+| `connections` | `PatchConnection[]` | Outgoing edges to other patches |
+
+### PatchConnection
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `to_patch_id` | `string` (UUID) | The patch this connects to |
+| `role` | `string` | Structural role: parent, depends_on, resolves, replaces, informs |
+| `label` | `string?` | Semantic label: belongs_to, blocked_by, motivated_by, works_on, owns |
+| `context` | `string?` | Optional explanation |
+
+### QuiltResponse
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `user_id` | `string` | The user |
+| `facts` | `QuiltPatchResponse[]` | All active patches (all types) |
+| `action_items` | `QuiltPatchResponse[]` | Legacy V1 — always empty for new patches. Ignore. |
+| `deleted` | `string[]` | Patch IDs removed since `since` timestamp (delta sync only) |
+| `server_time` | `string` (ISO 8601) | Use as `since` on next request for delta sync |
 
 ### PatchUpdate (for PATCH requests)
 
@@ -301,3 +324,75 @@ User managing their quilt:
 |-------|------|----------|-------------|
 | `fact` | `string` | No | New text for the patch |
 | `category` | `string` | No | New type classification |
+
+## Delta Sync
+
+Avoid fetching all patches every time. Use `since` for incremental updates.
+
+**First launch (full sync):**
+```
+GET /v1/quilt/{user_id}
+→ Store all patches locally + save server_time
+```
+
+**Subsequent opens (delta sync):**
+```
+GET /v1/quilt/{user_id}?since=2026-03-26T05:30:00Z
+→ facts: [only new/updated patches]
+→ deleted: ["patch-id-1", "patch-id-2"]  ← remove from local cache
+→ server_time: "2026-03-26T06:15:00Z"   ← save for next request
+```
+
+**iOS logic:**
+1. Store `server_time` from each response (UserDefaults or CoreData)
+2. First launch or cleared cache: call without `since` (full sync)
+3. Subsequent opens: call with `since` = last saved `server_time`
+4. Merge `facts` into local store (upsert by `patch_id`)
+5. Remove any `patch_id` found in `deleted`
+
+## Project Management
+
+Projects have stable IDs. Names can change without breaking the quilt.
+
+**ShoulderSurf sends in metadata to GhostPour:**
+```json
+{
+  "project_id": "proj-uuid-123",
+  "project": "Florida Blue",
+  "meeting_id": "meet-uuid-456"
+}
+```
+
+**List projects:**
+```
+GET /v1/projects/{user_id}
+→ [{"project_id": "...", "name": "Florida Blue", "status": "active", "patch_count": 9}]
+```
+
+**Rename a project:**
+```
+PATCH /v1/projects/{user_id}/{project_id}
+{"name": "FL Blue - Benefits"}
+→ Updates display name on all patches. project_id never changes.
+```
+
+**Archive a project:**
+```
+PATCH /v1/projects/{user_id}/{project_id}
+{"status": "archived"}
+→ Archives the project and cascades to all patches inside it.
+   Archived patches disappear from the quilt view.
+```
+
+## Meeting Grouping
+
+Within a project, patches can be grouped by `meeting_id`:
+
+```swift
+// Group patches: project → meeting → patches
+let byProject = Dictionary(grouping: facts.filter { $0.projectId != nil }, by: \.projectId)
+for (projectId, projectPatches) in byProject {
+    let byMeeting = Dictionary(grouping: projectPatches, by: \.meetingId)
+    // Render: Project header → Meeting sections → Patch cards
+}
+```

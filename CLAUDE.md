@@ -104,57 +104,75 @@ See `docs/architecture/` for the complete V3 specification:
 - `docs/sales/` — Sales and marketing materials
 - `docs/archive/` — Previous architecture versions (V1, V2, 3.7-3.10)
 
-## Current Status (March 25, 2026)
+## Current Status (March 26, 2026)
 
 **Live deployment:** `https://cq.shouldersurf.com`
 **Admin dashboard:** `https://cq.shouldersurf.com/dashboard/` (protected by CQ_ADMIN_KEY)
-**GCP VM:** `35.239.227.192` (shared with CloudZap via Project Bifrost)
-**Version:** 3.11.0 (Connected Quilt)
+**GCP VM:** `35.239.227.192` (shared with GhostPour via Project Bifrost)
+**Version:** 3.12.0 (Connected Quilt + Projects)
 
 ### What's built and deployed:
-- PostgreSQL + Redis on GCP VM
-- Cold path worker using Gemini 2.5 Flash via OpenRouter ($0.0017/extraction)
-- **Connected Quilt model** — typed patches (trait, preference, role, person, project, decision, commitment, blocker, takeaway) with connections (role + label)
+
+**Connected Quilt Model:**
+- Typed patches: trait, preference, role, person, project, decision, commitment, blocker, takeaway
+- Patch connections with structural roles (parent, depends_on, resolves, replaces, informs) and semantic labels (belongs_to, blocked_by, motivated_by, works_on, owns, supersedes)
 - Patch type registry and connection vocabulary tables for extensible, app-defined types
-- Five structural connection roles: parent, depends_on, resolves, replaces, informs
-- App-defined semantic labels: belongs_to, blocked_by, motivated_by, works_on, owns, supersedes
 - Lifecycle through connections: project archival cascades to children, replaces auto-archives old patches
-- `POST /v1/recall` — entity matching + graph traversal + patch connection traversal, returns structured context (grouped by: about you, decisions, commitments, blockers, roles, key facts)
-- `GET/PATCH/DELETE /v1/quilt/{user_id}` — user quilt CRUD with ACL
-- Admin dashboard with edit/delete patch management
-- Project-scoped patches — prevents cross-project context bleed
-- Submitting user identity injected into extraction ("The submitting user is: Scott") for correct trait attribution from diarized transcripts
+- Patch deduplication: same type + text for same user → reuses existing patch, bumps access count
+- Cold path worker using Gemini 2.5 Flash via OpenRouter ($0.0017/extraction)
 - Hard extraction caps: 12 patches, 10 entities, 10 relationships per meeting
-- Extraction exclusion list: ticket numbers, scheduling, troubleshooting, procedural logistics
 - Trait priority: self-disclosed traits always extracted first
-- Per-app policy column on applications table (extraction caps, budgets, decay rules)
-- `POST /v1/capture-transcript` on CloudZap for end-of-meeting full transcript capture
-- ShoulderSurf sends `fullSessionTranscript` at `stopSession()` for trait/fact extraction from raw dialogue
-- Backward compatible: V1 flat facts still work alongside V2 connected patches
+- Submitting user identity injected into extraction for correct trait attribution from diarized transcripts
 
-### CloudZap integration:
-- CloudZap calls `/v1/recall` before LLM queries when `context_quilt: true`
-- CloudZap POSTs query+response to `/v1/memory` after LLM responds (async)
-- CloudZap `POST /v1/capture-transcript` receives full transcript at meeting end from ShoulderSurf
+**Projects & Meetings:**
+- `projects` table with stable `project_id` (UUID from app) and renameable `name`
+- `project_id` and `meeting_id` columns on `context_patches` for grouping
+- `GET /v1/projects/{user_id}` — list projects with patch counts
+- `POST /v1/projects/{user_id}` — register a project
+- `PATCH /v1/projects/{user_id}/{project_id}` — rename or archive (archiving cascades to all patches)
+- Worker auto-registers projects from `metadata.project_id`
+- Renaming updates display name everywhere — project_id never changes
+
+**Quilt API (iOS CRUD):**
+- `GET /v1/quilt/{user_id}` — all active patches with connections, project_id, meeting_id
+- `GET /v1/quilt/{user_id}?since=ISO8601` — delta sync: only patches created/updated since timestamp, plus `deleted[]` array of removed patch_ids. Returns `server_time` to use as `since` on next call.
+- `PATCH /v1/quilt/{user_id}/patches/{patch_id}` — edit patch text/type
+- `DELETE /v1/quilt/{user_id}/patches/{patch_id}` — delete single patch
+- `DELETE /v1/quilt/{user_id}` — delete all patches for a user (testing/GDPR)
+- Filters out archived/completed patches (status = 'active' only)
+
+**Recall (Hot Path):**
+- `POST /v1/recall` — entity matching + graph traversal + patch connection traversal
+- Returns structured context grouped by: About you, Decisions, Open commitments, Blockers, Roles, Key facts
+- Project-scoped: only returns patches for the requested project + universal traits/preferences
+
+**Admin Dashboard (8 views, all functional):**
+- Dashboard: KPI cards, ingestion chart, distribution chart, recent patches
+- Settings: extraction config display, LLM config, prompt editor with versioning
+- User Quilt: user directory, patch detail with edit/delete
+- Patch Types: CRUD for patch_type_registry and connection_vocabulary
+- Pipeline Playground: streaming dry-run extraction
+- Extraction Costs: real cost tracking from extraction_metrics table (KPIs, charts, recent table)
+- System Health: Postgres/Redis/Worker/LLM status cards with latency
+- Application Access: app registration, auth toggle
+
+**End-of-Meeting Transcript Capture:**
+- GhostPour `POST /v1/capture-transcript` receives full transcript from ShoulderSurf at session end
+- CQ extracts traits/facts from raw dialogue (not pre-summarized)
+- Post-meeting chat queries get CQ recall (hot path) but skip capture (cold path) — no wasted tokens
+
+### GhostPour integration:
+- GhostPour calls `/v1/recall` before LLM queries when `context_quilt: true`
+- GhostPour POSTs query+response to `/v1/memory` after LLM responds (async)
+- GhostPour skips capture for `promptMode: "PostMeetingChat"` — read-only, no token cost
+- GhostPour `POST /v1/capture-transcript` receives full transcript at meeting end
 - Response headers `X-CQ-Matched` and `X-CQ-Entities` for iOS UI indicator
-- Passes `display_name`, `email`, `project` in metadata
-
-### Model benchmarks (Florida Blue transcript):
-| Model | Cost/extraction | Patches | Connections | Quality |
-|-------|----------------|---------|-------------|---------|
-| Mistral Small 3.1 | $0.00016 | 6 | 5 | Missed people, preferences |
-| Qwen3 32B | $0.00094 | 7 | 6 | Accurate but conservative |
-| GPT-4o-mini | $0.00093 | 7 | 6 | Accurate, missed decision/blocker |
-| DeepSeek V3 | $0.00109 | 11 | 10 | Strong, missed decision→preference link |
-| **Gemini 2.5 Flash** | **$0.00167** | **12** | **9** | **Best: all types, correct connections** |
+- Passes `display_name`, `email`, `project`, `project_id`, `meeting_id` in metadata
 
 ### Next priorities:
-1. Deploy migration `04_connected_quilt.sql` to GCP
-2. Switch `CQ_LLM_MODEL` to `google/gemini-2.5-flash`
-3. End-to-end test: ShoulderSurf → CloudZap → CQ → connected quilt → recall
-4. Build user-facing patch management in ShoulderSurf (cards UI)
-5. Implement decay worker (scheduled job to archive stale patches per app policy)
-6. Build domain description interface (YAML or natural language → schema generation)
+1. End-to-end test: ShoulderSurf → GhostPour → CQ → connected quilt → recall
+2. Implement decay worker (scheduled job to archive stale patches per app policy)
+3. Build domain description interface (YAML or natural language → schema generation)
 
 ## CI/CD and Deployment
 
