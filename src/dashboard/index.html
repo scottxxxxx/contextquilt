@@ -46,25 +46,25 @@
                     <i class="fa-solid fa-grid-2"></i>
                     <span>Dashboard</span>
                 </a>
-                <a href="#" class="nav-item" data-view="insights">
-                    <i class="fa-solid fa-lightbulb"></i>
-                    <span>Insights Stream</span>
+                <a href="#" class="nav-item" data-view="settings">
+                    <i class="fa-solid fa-gear"></i>
+                    <span>Settings</span>
                 </a>
                 <a href="#" class="nav-item" data-view="users">
                     <i class="fa-solid fa-users"></i>
                     <span>The User Quilt</span>
                 </a>
                 <a href="#" class="nav-item" data-view="schema">
-                    <i class="fa-solid fa-wand-magic-sparkles"></i>
-                    <span>Schema & Discovery</span>
+                    <i class="fa-solid fa-shapes"></i>
+                    <span>Patch Types</span>
                 </a>
                 <a href="#" class="nav-item" data-view="playground">
                     <i class="fa-solid fa-flask"></i>
                     <span>Pipeline Playground</span>
                 </a>
                 <a href="#" class="nav-item" data-view="roi">
-                    <i class="fa-solid fa-chart-line"></i>
-                    <span>Performance & ROI</span>
+                    <i class="fa-solid fa-dollar-sign"></i>
+                    <span>Extraction Costs</span>
                 </a>
                 <a href="#" class="nav-item" data-view="system">
                     <i class="fa-solid fa-server"></i>
@@ -701,6 +701,121 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Schema / Patch Type Manager -->
+            <div id="schema-view" class="view-container">
+                <div class="page-header"><h1>Patch Type Manager</h1></div>
+
+                <div class="card table-card" style="margin-bottom: 2rem;">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-shapes"></i> Patch Types</h2>
+                        <div class="table-actions">
+                            <button class="sm-btn active" onclick="toggleAddPatchTypeForm()"><i class="fa-solid fa-plus"></i> Add Type</button>
+                            <button class="icon-btn" onclick="fetchPatchTypes()"><i class="fa-solid fa-arrows-rotate"></i></button>
+                        </div>
+                    </div>
+                    <div id="add-patch-type-form" style="display:none; padding: 1.5rem; border-bottom: 1px solid rgba(148,163,184,0.1);">
+                        <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: end;">
+                            <div><label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">Type Key</label><input type="text" id="new-type-key" placeholder="my_type" style="background:rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.1); color:var(--text-primary); padding:6px 10px; border-radius:4px;"></div>
+                            <div><label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">Display Name</label><input type="text" id="new-type-name" placeholder="My Type" style="background:rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.1); color:var(--text-primary); padding:6px 10px; border-radius:4px;"></div>
+                            <div><label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">Persistence</label><select id="new-type-persistence" style="background:rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.1); color:var(--text-primary); padding:6px 10px; border-radius:4px;"><option value="sticky">sticky</option><option value="decaying">decaying</option><option value="completable">completable</option></select></div>
+                            <button class="sm-btn active" onclick="addPatchType()">Create</button>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="data-table"><thead><tr>
+                            <th>Type Key</th><th>Display Name</th><th>Persistence</th><th>TTL (days)</th><th>Completable</th><th>Project Scoped</th><th>Actions</th>
+                        </tr></thead><tbody id="patch-types-body"></tbody></table>
+                    </div>
+                </div>
+
+                <div class="card table-card">
+                    <div class="card-header">
+                        <h2><i class="fa-solid fa-link"></i> Connection Vocabulary</h2>
+                        <div class="table-actions">
+                            <button class="sm-btn active" onclick="toggleAddConnectionForm()"><i class="fa-solid fa-plus"></i> Add Connection</button>
+                            <button class="icon-btn" onclick="fetchConnections()"><i class="fa-solid fa-arrows-rotate"></i></button>
+                        </div>
+                    </div>
+                    <div id="add-connection-form" style="display:none; padding: 1.5rem; border-bottom: 1px solid rgba(148,163,184,0.1);">
+                        <div style="display: flex; gap: 1rem; flex-wrap: wrap; align-items: end;">
+                            <div><label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">Label</label><input type="text" id="new-conn-label" placeholder="belongs_to" style="background:rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.1); color:var(--text-primary); padding:6px 10px; border-radius:4px;"></div>
+                            <div><label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:4px;">Role</label><select id="new-conn-role" style="background:rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.1); color:var(--text-primary); padding:6px 10px; border-radius:4px;"><option value="parent">parent</option><option value="depends_on">depends_on</option><option value="resolves">resolves</option><option value="replaces">replaces</option><option value="informs">informs</option></select></div>
+                            <button class="sm-btn active" onclick="addConnection()">Create</button>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="data-table"><thead><tr>
+                            <th>Label</th><th>Role</th><th>From Types</th><th>To Types</th><th>Description</th>
+                        </tr></thead><tbody id="connections-body"></tbody></table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Extraction Costs -->
+            <div id="roi-view" class="view-container">
+                <div class="page-header"><h1>Extraction Cost Tracking</h1></div>
+                <div class="kpi-grid">
+                    <div class="card kpi-card"><div class="kpi-icon green"><i class="fa-solid fa-dollar-sign"></i></div><div class="kpi-content"><h3>Total Cost</h3><div class="value" id="cost-total">--</div></div></div>
+                    <div class="card kpi-card"><div class="kpi-icon blue"><i class="fa-solid fa-microchip"></i></div><div class="kpi-content"><h3>Total Extractions</h3><div class="value" id="cost-extractions">--</div></div></div>
+                    <div class="card kpi-card"><div class="kpi-icon purple"><i class="fa-solid fa-calculator"></i></div><div class="kpi-content"><h3>Avg Cost / Extraction</h3><div class="value" id="cost-avg">--</div></div></div>
+                    <div class="card kpi-card"><div class="kpi-icon orange"><i class="fa-solid fa-clock"></i></div><div class="kpi-content"><h3>Avg Latency</h3><div class="value" id="cost-latency">--</div></div></div>
+                </div>
+                <div class="charts-grid">
+                    <div class="card chart-card wide"><div class="card-header"><h2>Cost Over Time (30 days)</h2></div><div class="chart-container"><canvas id="costOverTimeChart"></canvas></div></div>
+                    <div class="card chart-card"><div class="card-header"><h2>Cost by Model</h2></div><div class="chart-container"><canvas id="costByModelChart"></canvas></div></div>
+                </div>
+                <div class="card table-card">
+                    <div class="card-header"><h2>Recent Extractions</h2><button class="icon-btn" onclick="fetchRecentExtractions()"><i class="fa-solid fa-arrows-rotate"></i></button></div>
+                    <div class="table-responsive">
+                        <table class="data-table"><thead><tr>
+                            <th>Time</th><th>User</th><th>Model</th><th>Input Tokens</th><th>Output Tokens</th><th>Cost</th><th>Latency</th><th>Patches</th>
+                        </tr></thead><tbody id="recent-extractions-body"></tbody></table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- System Health -->
+            <div id="system-view" class="view-container">
+                <div class="page-header"><h1>System Health</h1><button class="sm-btn" onclick="initSystemView()"><i class="fa-solid fa-arrows-rotate"></i> Refresh</button></div>
+                <div class="kpi-grid">
+                    <div class="card kpi-card" id="health-pg-card"><div class="kpi-icon green"><i class="fa-solid fa-database"></i></div><div class="kpi-content"><h3>PostgreSQL</h3><div class="value" id="health-pg-status">--</div><div class="trend" id="health-pg-detail">--</div></div></div>
+                    <div class="card kpi-card" id="health-redis-card"><div class="kpi-icon blue"><i class="fa-solid fa-bolt"></i></div><div class="kpi-content"><h3>Redis</h3><div class="value" id="health-redis-status">--</div><div class="trend" id="health-redis-detail">--</div></div></div>
+                    <div class="card kpi-card" id="health-worker-card"><div class="kpi-icon purple"><i class="fa-solid fa-gears"></i></div><div class="kpi-content"><h3>Worker Queue</h3><div class="value" id="health-worker-pending">--</div><div class="trend" id="health-worker-detail">pending events</div></div></div>
+                    <div class="card kpi-card" id="health-llm-card"><div class="kpi-icon orange"><i class="fa-solid fa-brain"></i></div><div class="kpi-content"><h3>LLM Provider</h3><div class="value" id="health-llm-model">--</div><div class="trend" id="health-llm-url">--</div></div></div>
+                </div>
+                <div class="card" style="padding: 1.5rem; margin-top: 2rem;">
+                    <h2 style="margin-bottom: 1rem;"><i class="fa-solid fa-sliders"></i> Runtime Configuration</h2>
+                    <pre id="health-config-display" style="background:rgba(15,23,42,0.6); padding:1rem; border-radius:0.5rem; color:var(--text-muted); font-size:0.85rem; overflow-x:auto;">Loading...</pre>
+                </div>
+            </div>
+
+            <!-- Settings -->
+            <div id="settings-view" class="view-container">
+                <div class="page-header"><h1>Configuration</h1></div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-bottom: 2rem;">
+                    <div class="card" style="padding: 1.5rem;">
+                        <h2 style="margin-bottom: 1rem;"><i class="fa-solid fa-sliders"></i> Extraction Settings</h2>
+                        <div id="extraction-settings-display" style="font-family:var(--font-mono); font-size:0.85rem; color:var(--text-muted);">Loading...</div>
+                    </div>
+                    <div class="card" style="padding: 1.5rem;">
+                        <h2 style="margin-bottom: 1rem;"><i class="fa-solid fa-brain"></i> LLM Configuration</h2>
+                        <div id="llm-config-display" style="font-family:var(--font-mono); font-size:0.85rem; color:var(--text-muted);">Loading...</div>
+                    </div>
+                </div>
+                <div class="card" style="padding: 1.5rem;">
+                    <div class="card-header" style="margin-bottom: 1rem;">
+                        <h2><i class="fa-solid fa-file-code"></i> Prompt Editor</h2>
+                        <div style="display: flex; gap: 1rem; align-items: center;">
+                            <select id="prompt-selector" class="filter-select" onchange="loadSelectedPrompt()"><option value="">Select a prompt...</option></select>
+                            <button class="sm-btn active" onclick="savePrompt()"><i class="fa-solid fa-save"></i> Save New Version</button>
+                        </div>
+                    </div>
+                    <div id="prompt-info" style="margin-bottom: 0.5rem; font-size: 0.85rem; color: var(--text-muted);"></div>
+                    <textarea id="prompt-editor" style="width:100%; height:400px; resize:vertical; background:rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.1); color:var(--text-primary); padding:1rem; border-radius:0.5rem; font-family:var(--font-mono); font-size:0.85rem; line-height:1.5;" placeholder="Select a prompt to edit..."></textarea>
+                </div>
+            </div>
+
         </main>
     </div>
     <link rel="stylesheet" href="style.css?v=3">

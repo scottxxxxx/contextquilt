@@ -44,10 +44,16 @@ function initNavigation() {
                 initUserQuilt();
             }
             if (item.dataset.view === 'schema') {
-                initSchemaDiscovery();
+                initSchemaView();
             }
             if (item.dataset.view === 'roi') {
-                initROIView();
+                initCostView();
+            }
+            if (item.dataset.view === 'system') {
+                initSystemView();
+            }
+            if (item.dataset.view === 'settings') {
+                initSettingsView();
             }
         });
     });
@@ -56,103 +62,356 @@ function initNavigation() {
 
 // ... (initClock, user quilt, schema logic) ...
 
-// ROI Logic
-// Schema & Discovery Logic
-async function initSchemaDiscovery() {
-    await fetchSchemaData();
+// ============================================================
+// Patch Type Manager
+// ============================================================
+
+async function initSchemaView() {
+    await fetchPatchTypes();
+    await fetchConnections();
 }
 
-// ROI Logic
-async function initROIView() {
-    await fetchROIMetrics();
-    renderROICharts();
-}
-
-async function fetchROIMetrics() {
+async function fetchPatchTypes() {
     try {
-        const res = await fetch('/api/dashboard/roi');
-        const data = await res.json();
-
-        document.getElementById('roi-efficiency').textContent = data.efficiency_gain_percent + '%';
-        document.getElementById('roi-savings').textContent = data.token_savings_count + '.5M'; // Mocking the decimal for display
-        document.getElementById('roi-cost').textContent = data.cost_saved_usd;
-        document.getElementById('roi-sentiment').textContent = '+' + data.sentiment_lift_percent + '%';
-
-    } catch (error) {
-        console.error('Failed to fetch ROI metrics:', error);
-    }
+        const res = await fetch('/api/dashboard/patch-types');
+        const types = await res.json();
+        renderPatchTypesTable(types);
+    } catch (error) { console.error('Failed to fetch patch types:', error); }
 }
 
-let efficiencyChart, costChart;
+function renderPatchTypesTable(types) {
+    const tbody = document.getElementById('patch-types-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    types.forEach(t => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td style="font-family:var(--font-mono); color:var(--text-primary);">${t.type_key}</td>
+            <td style="color:var(--text-secondary);">${t.display_name}</td>
+            <td><select onchange="updatePatchType('${t.type_key}', {persistence: this.value})" style="background:rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.1); color:var(--text-primary); padding:4px 8px; border-radius:4px;">
+                <option value="sticky" ${t.persistence==='sticky'?'selected':''}>sticky</option>
+                <option value="decaying" ${t.persistence==='decaying'?'selected':''}>decaying</option>
+                <option value="completable" ${t.persistence==='completable'?'selected':''}>completable</option>
+            </select></td>
+            <td><input type="number" value="${t.default_ttl_days||''}" placeholder="—" onchange="updatePatchType('${t.type_key}', {default_ttl_days: parseInt(this.value)||null})" style="width:60px; background:rgba(15,23,42,0.6); border:1px solid rgba(148,163,184,0.1); color:var(--text-primary); padding:4px 8px; border-radius:4px;"></td>
+            <td style="text-align:center;"><input type="checkbox" ${t.is_completable?'checked':''} onchange="updatePatchType('${t.type_key}', {is_completable: this.checked})"></td>
+            <td style="text-align:center;"><input type="checkbox" ${t.project_scoped?'checked':''} onchange="updatePatchType('${t.type_key}', {project_scoped: this.checked})"></td>
+            <td style="color:var(--text-muted); font-size:0.8rem;">${t.app_id || 'built-in'}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
 
-function renderROICharts() {
-    // 1. Efficiency Chart (Bar)
-    const ctx1 = document.getElementById('roiEfficiencyChart');
-    if (ctx1 && !efficiencyChart) {
-        efficiencyChart = new Chart(ctx1, {
-            type: 'bar',
-            data: {
-                labels: ['Week 1', 'Week 2', 'Week 3', 'Week 4'],
-                datasets: [
-                    {
-                        label: 'With ContextQuilt',
-                        data: [4.2, 3.8, 3.5, 3.2], // Turns average
-                        backgroundColor: '#06b6d4'
-                    },
-                    {
-                        label: 'Without ContextQuilt',
-                        data: [5.5, 5.4, 5.6, 5.5],
-                        backgroundColor: '#334155'
-                    }
-                ]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: { labels: { color: '#94a3b8' } }
-                },
-                scales: {
-                    y: {
-                        beginAtZero: true,
-                        title: { display: true, text: 'Avg Turns per Session', color: '#64748b' },
-                        grid: { color: 'rgba(148, 163, 184, 0.05)' }
-                    },
-                    x: { grid: { display: false } }
-                }
-            }
+async function updatePatchType(typeKey, data) {
+    try {
+        await fetch(`/api/dashboard/patch-types/${typeKey}`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data)
         });
-    }
+    } catch (error) { console.error('Failed to update patch type:', error); }
+}
 
-    // 2. Cost Chart (Line)
-    const ctx2 = document.getElementById('roiCostChart');
-    if (ctx2 && !costChart) {
-        costChart = new Chart(ctx2, {
+function toggleAddPatchTypeForm() {
+    const form = document.getElementById('add-patch-type-form');
+    form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+
+async function addPatchType() {
+    const typeKey = document.getElementById('new-type-key').value.trim();
+    const displayName = document.getElementById('new-type-name').value.trim();
+    const persistence = document.getElementById('new-type-persistence').value;
+    if (!typeKey || !displayName) return alert('Type key and display name required');
+    try {
+        await fetch('/api/dashboard/patch-types', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ type_key: typeKey, display_name: displayName, persistence })
+        });
+        document.getElementById('new-type-key').value = '';
+        document.getElementById('new-type-name').value = '';
+        toggleAddPatchTypeForm();
+        fetchPatchTypes();
+    } catch (error) { alert('Failed to create patch type'); }
+}
+
+async function fetchConnections() {
+    try {
+        const res = await fetch('/api/dashboard/connections');
+        const conns = await res.json();
+        renderConnectionsTable(conns);
+    } catch (error) { console.error('Failed to fetch connections:', error); }
+}
+
+function renderConnectionsTable(conns) {
+    const tbody = document.getElementById('connections-body');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    const roleColors = { parent: '#3b82f6', depends_on: '#ef4444', resolves: '#10b981', replaces: '#f59e0b', informs: '#8b5cf6' };
+    conns.forEach(c => {
+        const color = roleColors[c.role] || '#94a3b8';
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+            <td style="font-family:var(--font-mono); color:var(--text-primary);">${c.label}</td>
+            <td><span class="badge" style="background:rgba(${color === '#3b82f6' ? '59,130,246' : color === '#ef4444' ? '239,68,68' : color === '#10b981' ? '16,185,129' : color === '#f59e0b' ? '245,158,11' : '139,92,246'},0.15); color:${color};">${c.role}</span></td>
+            <td style="font-family:var(--font-mono); font-size:0.8rem; color:var(--text-muted);">${(c.from_types||[]).join(', ')}</td>
+            <td style="font-family:var(--font-mono); font-size:0.8rem; color:var(--text-muted);">${(c.to_types||[]).join(', ')}</td>
+            <td style="color:var(--text-muted); font-size:0.85rem;">${c.description||''}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+function toggleAddConnectionForm() {
+    const form = document.getElementById('add-connection-form');
+    form.style.display = form.style.display === 'none' ? 'block' : 'none';
+}
+
+async function addConnection() {
+    const label = document.getElementById('new-conn-label').value.trim();
+    const role = document.getElementById('new-conn-role').value;
+    if (!label) return alert('Label required');
+    try {
+        await fetch('/api/dashboard/connections', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ label, role, from_types: [], to_types: [] })
+        });
+        document.getElementById('new-conn-label').value = '';
+        toggleAddConnectionForm();
+        fetchConnections();
+    } catch (error) { alert('Failed to create connection'); }
+}
+
+// ============================================================
+// Extraction Cost Tracking
+// ============================================================
+
+let costOverTimeChart, costByModelChart;
+
+async function initCostView() {
+    await fetchCostSummary();
+    await fetchCostOverTime();
+    await fetchCostByModel();
+    await fetchRecentExtractions();
+}
+
+async function fetchCostSummary() {
+    try {
+        const res = await fetch('/api/dashboard/metrics/summary?days=30');
+        const data = await res.json();
+        document.getElementById('cost-total').textContent = '$' + data.total_cost.toFixed(4);
+        document.getElementById('cost-extractions').textContent = data.total_extractions;
+        document.getElementById('cost-avg').textContent = '$' + data.avg_cost.toFixed(6);
+        document.getElementById('cost-latency').textContent = Math.round(data.avg_latency) + 'ms';
+    } catch (error) { console.error('Failed to fetch cost summary:', error); }
+}
+
+async function fetchCostOverTime() {
+    try {
+        const res = await fetch('/api/dashboard/metrics/cost?days=30');
+        const data = await res.json();
+        const ctx = document.getElementById('costOverTimeChart');
+        if (!ctx) return;
+        if (costOverTimeChart) costOverTimeChart.destroy();
+        costOverTimeChart = new Chart(ctx, {
             type: 'line',
             data: {
-                labels: ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'],
+                labels: data.map(d => d.date),
                 datasets: [{
-                    label: 'Cumulative Savings ($)',
-                    data: [200, 450, 750, 1100, 1500, 2100],
+                    label: 'Cost ($)',
+                    data: data.map(d => d.cost),
                     borderColor: '#10b981',
                     backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                    fill: true,
-                    tension: 0.4
+                    fill: true, tension: 0.4, pointRadius: 3
                 }]
             },
             options: {
-                responsive: true,
-                maintainAspectRatio: false,
+                responsive: true, maintainAspectRatio: false,
                 plugins: { legend: { display: false } },
                 scales: {
-                    y: {
-                        grid: { color: 'rgba(148, 163, 184, 0.05)' }
-                    },
-                    x: { grid: { display: false } }
+                    y: { grid: { color: 'rgba(148,163,184,0.05)' }, ticks: { color: '#64748b' } },
+                    x: { grid: { display: false }, ticks: { color: '#64748b' } }
                 }
             }
         });
+    } catch (error) { console.error('Failed to fetch cost over time:', error); }
+}
+
+async function fetchCostByModel() {
+    try {
+        const res = await fetch('/api/dashboard/metrics/models?days=30');
+        const data = await res.json();
+        const ctx = document.getElementById('costByModelChart');
+        if (!ctx) return;
+        if (costByModelChart) costByModelChart.destroy();
+        const colors = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#06b6d4'];
+        costByModelChart = new Chart(ctx, {
+            type: 'doughnut',
+            data: {
+                labels: data.map(d => d.model),
+                datasets: [{ data: data.map(d => d.cost), backgroundColor: colors.slice(0, data.length) }]
+            },
+            options: {
+                responsive: true, maintainAspectRatio: false,
+                plugins: { legend: { position: 'bottom', labels: { color: '#94a3b8', padding: 15 } } }
+            }
+        });
+    } catch (error) { console.error('Failed to fetch cost by model:', error); }
+}
+
+async function fetchRecentExtractions() {
+    try {
+        const res = await fetch('/api/dashboard/metrics/recent?limit=50');
+        const data = await res.json();
+        const tbody = document.getElementById('recent-extractions-body');
+        if (!tbody) return;
+        tbody.innerHTML = '';
+        data.forEach(m => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td style="color:var(--text-muted); font-size:0.85rem; white-space:nowrap;">${new Date(m.created_at).toLocaleString()}</td>
+                <td style="color:var(--text-primary);">${m.user_id || '—'}</td>
+                <td style="font-family:var(--font-mono); font-size:0.8rem; color:var(--text-muted);">${m.model || '—'}</td>
+                <td style="text-align:right; color:var(--text-muted);">${m.input_tokens || 0}</td>
+                <td style="text-align:right; color:var(--text-muted);">${m.output_tokens || 0}</td>
+                <td style="text-align:right; color:#10b981; font-family:var(--font-mono);">$${(m.cost_usd||0).toFixed(6)}</td>
+                <td style="text-align:right; color:var(--text-muted);">${Math.round(m.latency_ms||0)}ms</td>
+                <td style="text-align:right; color:var(--text-primary);">${m.patches_extracted || 0}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    } catch (error) { console.error('Failed to fetch recent extractions:', error); }
+}
+
+// ============================================================
+// System Health
+// ============================================================
+
+async function initSystemView() {
+    try {
+        const res = await fetch('/api/dashboard/health-check');
+        const data = await res.json();
+
+        // Postgres
+        const pgStatus = document.getElementById('health-pg-status');
+        const pgDetail = document.getElementById('health-pg-detail');
+        const pgCard = document.getElementById('health-pg-card');
+        if (data.postgres.status === 'connected') {
+            pgStatus.textContent = 'Connected';
+            pgDetail.textContent = `${data.postgres.latency_ms}ms · ${data.postgres.patches} patches · ${data.postgres.users} users`;
+            pgCard.querySelector('.kpi-icon').className = 'kpi-icon green';
+        } else {
+            pgStatus.textContent = 'Disconnected';
+            pgDetail.textContent = data.postgres.error || '';
+            pgCard.querySelector('.kpi-icon').className = 'kpi-icon red';
+        }
+
+        // Redis
+        const redisStatus = document.getElementById('health-redis-status');
+        const redisDetail = document.getElementById('health-redis-detail');
+        const redisCard = document.getElementById('health-redis-card');
+        if (data.redis.status === 'connected') {
+            redisStatus.textContent = 'Connected';
+            redisDetail.textContent = `${data.redis.latency_ms}ms · ${data.redis.queue_keys} queues · ${data.redis.entity_keys} indexes`;
+            redisCard.querySelector('.kpi-icon').className = 'kpi-icon green';
+        } else {
+            redisStatus.textContent = 'Disconnected';
+            redisDetail.textContent = data.redis.error || '';
+            redisCard.querySelector('.kpi-icon').className = 'kpi-icon red';
+        }
+
+        // Worker
+        document.getElementById('health-worker-pending').textContent = data.worker.pending_events >= 0 ? data.worker.pending_events : '?';
+
+        // LLM
+        document.getElementById('health-llm-model').textContent = data.llm.model;
+        document.getElementById('health-llm-url').textContent = data.llm.base_url;
+
+        // Config
+        document.getElementById('health-config-display').textContent = JSON.stringify(data.config, null, 2);
+
+    } catch (error) {
+        console.error('Failed to fetch health:', error);
+        document.getElementById('health-pg-status').textContent = 'Error';
     }
+}
+
+// ============================================================
+// Settings / Configuration
+// ============================================================
+
+let allPrompts = [];
+
+async function initSettingsView() {
+    await fetchSettingsConfig();
+    await fetchPromptList();
+}
+
+async function fetchSettingsConfig() {
+    try {
+        const res = await fetch('/api/dashboard/config');
+        const config = await res.json();
+
+        document.getElementById('extraction-settings-display').innerHTML = `
+            <div style="display:grid; gap:0.75rem;">
+                <div>Max patches per meeting: <strong>${config.extraction.max_patches_per_meeting}</strong></div>
+                <div>Max entities per meeting: <strong>${config.extraction.max_entities_per_meeting}</strong></div>
+                <div>Max relationships per meeting: <strong>${config.extraction.max_relationships_per_meeting}</strong></div>
+            </div>
+            <div style="margin-top:1rem; padding-top:1rem; border-top:1px solid rgba(148,163,184,0.1);">
+                <div>Queue max wait: <strong>${config.queue.max_wait_minutes} min</strong></div>
+                <div>Queue budget threshold: <strong>${(config.queue.budget_threshold * 100).toFixed(0)}%</strong></div>
+            </div>
+        `;
+
+        document.getElementById('llm-config-display').innerHTML = `
+            <div style="display:grid; gap:0.75rem;">
+                <div>Model: <strong>${config.llm.model}</strong></div>
+                <div>Base URL: <strong style="word-break:break-all;">${config.llm.base_url}</strong></div>
+            </div>
+        `;
+    } catch (error) { console.error('Failed to fetch config:', error); }
+}
+
+async function fetchPromptList() {
+    try {
+        const res = await fetch('/api/dashboard/prompts');
+        allPrompts = await res.json();
+        const selector = document.getElementById('prompt-selector');
+        if (!selector) return;
+        selector.innerHTML = '<option value="">Select a prompt...</option>';
+        allPrompts.forEach(p => {
+            selector.innerHTML += `<option value="${p.prompt_key}">${p.prompt_name} (v${p.version_num})</option>`;
+        });
+    } catch (error) { console.error('Failed to fetch prompts:', error); }
+}
+
+function loadSelectedPrompt() {
+    const key = document.getElementById('prompt-selector').value;
+    const prompt = allPrompts.find(p => p.prompt_key === key);
+    if (prompt) {
+        document.getElementById('prompt-editor').value = prompt.prompt_text;
+        document.getElementById('prompt-info').textContent =
+            `${prompt.description || ''} · Version ${prompt.version_num} · Updated ${new Date(prompt.updated_at).toLocaleString()}`;
+    } else {
+        document.getElementById('prompt-editor').value = '';
+        document.getElementById('prompt-info').textContent = '';
+    }
+}
+
+async function savePrompt() {
+    const key = document.getElementById('prompt-selector').value;
+    if (!key) return alert('Select a prompt first');
+    const text = document.getElementById('prompt-editor').value;
+    if (!text.trim()) return alert('Prompt text cannot be empty');
+    try {
+        const res = await fetch(`/api/dashboard/prompts/${key}`, {
+            method: 'PUT', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ prompt_text: text, change_reason: 'Dashboard edit' })
+        });
+        if (res.ok) {
+            const data = await res.json();
+            alert(`Saved as version ${data.new_version}`);
+            fetchPromptList();
+        } else { alert('Failed to save prompt'); }
+    } catch (error) { alert('Failed to save prompt: ' + error.message); }
 }
 
 
@@ -274,90 +533,7 @@ async function fetchIngestionHistory() {
 
 
 
-async function fetchSchemaData() {
-    // Candidates
-    try {
-        const res = await fetch('/api/dashboard/schema/candidates');
-        const candidates = await res.json();
-        renderCandidates(candidates);
-    } catch (error) {
-        console.error('Failed to fetch candidates:', error);
-    }
-
-    // Schema
-    try {
-        const res = await fetch('/api/dashboard/schema');
-        const schema = await res.json();
-        renderSchemaTable(schema);
-    } catch (error) {
-        console.error('Failed to fetch schema:', error);
-    }
-}
-
-function renderCandidates(candidates) {
-    const grid = document.getElementById('candidates-grid');
-    if (!grid) return;
-    grid.innerHTML = '';
-
-    if (candidates.length === 0) {
-        grid.innerHTML = '<div class="empty-message">No new candidates found by Mistral.</div>';
-        return;
-    }
-
-    candidates.forEach(c => {
-        const card = document.createElement('div');
-        card.className = 'candidate-card';
-        card.innerHTML = `
-            <div class="candidate-header">
-                <div class="candidate-name">${c.name}</div>
-                <div class="candidate-stats"><i class="fa-solid fa-chart-simple"></i> ${c.frequency}</div>
-            </div>
-            <div class="candidate-sample">"${c.sample}"</div>
-            <div class="candidate-actions">
-                <button class="btn-approve" onclick="handleCandidate('${c.id}', 'approve')"><i class="fa-solid fa-check"></i> Approve</button>
-                <button class="btn-ignore" onclick="handleCandidate('${c.id}', 'ignore')"><i class="fa-solid fa-xmark"></i> Ignore</button>
-            </div>
-        `;
-        grid.appendChild(card);
-    });
-}
-
-function renderSchemaTable(schema) {
-    const tbody = document.getElementById('schema-table-body');
-    if (!tbody) return;
-    tbody.innerHTML = '';
-
-    schema.forEach(item => {
-        const tr = document.createElement('tr');
-
-        let typeBadge = '';
-        if (item.type === 'identity') typeBadge = '<span class="badge" style="background: rgba(30, 58, 138, 0.3); color: #60a5fa;">Identity</span>';
-        if (item.type === 'preference') typeBadge = '<span class="badge" style="background: rgba(16, 185, 129, 0.3); color: #34d399;">Preference</span>';
-        if (item.type === 'trait') typeBadge = '<span class="badge" style="background: rgba(139, 92, 246, 0.3); color: #a78bfa;">Trait</span>';
-        if (item.type === 'experience') typeBadge = '<span class="badge" style="background: rgba(245, 158, 11, 0.3); color: #fbbf24;">Experience</span>';
-
-        tr.innerHTML = `
-            <td style="font-family: var(--font-mono); color: var(--text-primary);">${item.name}</td>
-            <td>${typeBadge}</td>
-            <td style="color: var(--text-muted);">${item.description}</td>
-            <td><span class="badge" style="background: rgba(16, 185, 129, 0.2); color: #10b981;">Active</span></td>
-            <td><button class="icon-btn"><i class="fa-solid fa-pen"></i></button></td>
-        `;
-        tbody.appendChild(tr);
-    });
-}
-
-async function handleCandidate(id, action) {
-    try {
-        await fetch(`/api/dashboard/schema/candidates/${id}/${action}`, { method: 'POST' });
-        // Refresh
-        fetchSchemaData();
-        // Show basic feedback
-        alert(`Candidate ${action}d!`);
-    } catch (error) {
-        alert('Action failed');
-    }
-}
+// (Old mock schema/candidate functions removed — replaced by Patch Type Manager above)
 
 
 function initClock() {
