@@ -654,7 +654,7 @@ function renderQuiltPatchTable(patches) {
     tbody.innerHTML = '';
 
     if (patches.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="9" class="empty-message">No patches found.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="10" class="empty-message">No patches found.</td></tr>';
         return;
     }
 
@@ -702,9 +702,65 @@ function renderQuiltPatchTable(patches) {
             <td style="color: var(--text-muted); font-size: 0.85rem;">${patch.confidence}</td>
             <td style="color: var(--text-muted); font-size: 0.85rem;">${patch.sensitivity}</td>
             <td style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary); max-width: 400px; overflow-wrap: break-word;">${valDisplay}</td>
+            <td style="white-space: nowrap;">
+                <button onclick="editPatch('${patch.patch_id}', '${patch.user_id}')" class="btn-icon" title="Edit" style="background: rgba(59, 130, 246, 0.1); color: #3b82f6; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; margin-right: 4px;">
+                    <i class="fa-solid fa-pen-to-square"></i>
+                </button>
+                <button onclick="deletePatch('${patch.patch_id}', '${patch.user_id}')" class="btn-icon" title="Delete" style="background: rgba(239, 68, 68, 0.1); color: #ef4444; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer;">
+                    <i class="fa-solid fa-trash"></i>
+                </button>
+            </td>
         `;
         tbody.appendChild(tr);
     });
+}
+
+// Patch Management Functions
+async function editPatch(patchId, userId) {
+    const currentFact = prompt('Edit this patch fact:');
+    if (currentFact === null) return; // User cancelled
+
+    try {
+        const response = await fetch(`/api/dashboard/patches/${patchId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ fact: currentFact })
+        });
+        if (!response.ok) throw new Error(`Failed to update patch: ${response.statusText}`);
+        // Refresh the quilt view
+        if (userId) {
+            const quiltResponse = await fetch(`/api/dashboard/users/${userId}/quilt`);
+            if (quiltResponse.ok) {
+                const data = await quiltResponse.json();
+                currentUserPatches = data.patches;
+                renderQuiltPatchTable(data.patches);
+            }
+        }
+    } catch (err) {
+        alert('Failed to update patch: ' + err.message);
+    }
+}
+
+async function deletePatch(patchId, userId) {
+    if (!confirm('Delete this patch? This cannot be undone.')) return;
+
+    try {
+        const response = await fetch(`/api/dashboard/patches/${patchId}`, {
+            method: 'DELETE'
+        });
+        if (!response.ok) throw new Error(`Failed to delete patch: ${response.statusText}`);
+        // Refresh the quilt view
+        if (userId) {
+            const quiltResponse = await fetch(`/api/dashboard/users/${userId}/quilt`);
+            if (quiltResponse.ok) {
+                const data = await quiltResponse.json();
+                currentUserPatches = data.patches;
+                renderQuiltPatchTable(data.patches);
+            }
+        }
+    } catch (err) {
+        alert('Failed to delete patch: ' + err.message);
+    }
 }
 
 // Global Sort State for Quilt Table
