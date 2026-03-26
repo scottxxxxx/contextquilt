@@ -95,6 +95,9 @@ See `docs/architecture/` for the complete V3 specification:
 - `08-connected-quilt-model.md` — Connected Quilt: extensible patch types, patch connections (role + label), app policy, lifecycle through connections
 - `health-coach-quilt-diagram.md` — Design example: health coaching app with five connection roles (parent, depends_on, resolves, replaces, informs)
 
+## Integration Guides
+- `docs/integration/ios-quilt-management.md` — iOS team guide: patch types, API endpoints, UI recommendations, flow diagrams
+
 ## Other Resources
 - `GETTING_STARTED.md` — Setup instructions
 - `README.md` — Project overview
