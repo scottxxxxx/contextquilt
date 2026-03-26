@@ -726,11 +726,13 @@ async def get_user_quilt(
     # Build query with optional ACL enforcement
     query = f"""
         SELECT cp.patch_id, cp.patch_name, cp.patch_type, cp.value,
-               cp.origin_mode, cp.source_prompt, cp.created_at, cp.project
+               cp.origin_mode, cp.source_prompt, cp.created_at, cp.project,
+               cp.status
         FROM context_patches cp
         JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
         {acl_join}
         WHERE ps.subject_key = $1
+          AND COALESCE(cp.status, 'active') = 'active'
           {acl_where}
     """
 
@@ -784,7 +786,7 @@ async def get_user_quilt(
             participants=value.get("participants", []),
             owner=value.get("owner"),
             deadline=value.get("deadline"),
-            patch_type=value.get("type", row["patch_type"] or ""),
+            patch_type=row["patch_type"] or "",
             source=row["source_prompt"] or "",
             created_at=row["created_at"].isoformat() if row["created_at"] else None,
             project=row["project"],
