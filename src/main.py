@@ -682,10 +682,12 @@ class QuiltPatchResponse(BaseModel):
     participants: List[str] = []
     owner: Optional[str] = None
     deadline: Optional[str] = None
-    patch_type: str = ""  # "action_item" or fact category
+    patch_type: str = ""
     source: str = ""
     created_at: Optional[str] = None
     project: Optional[str] = None
+    project_id: Optional[str] = None
+    meeting_id: Optional[str] = None
     connections: List[PatchConnectionResponse] = []
 
 class QuiltResponse(BaseModel):
@@ -745,7 +747,7 @@ async def get_user_quilt(
     query = f"""
         SELECT cp.patch_id, cp.patch_name, cp.patch_type, cp.value,
                cp.origin_mode, cp.source_prompt, cp.created_at, cp.project,
-               cp.status
+               cp.project_id, cp.meeting_id, cp.status
         FROM context_patches cp
         JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
         {acl_join}
@@ -824,6 +826,8 @@ async def get_user_quilt(
             source=row["source_prompt"] or "",
             created_at=row["created_at"].isoformat() if row["created_at"] else None,
             project=row["project"],
+            project_id=row.get("project_id"),
+            meeting_id=row.get("meeting_id"),
             connections=connections_by_patch.get(pid, []),
         )
 
@@ -1004,6 +1008,111 @@ async def delete_all_patches(
         "patches_deleted": count,
         "entities_deleted": entity_count,
     }
+
+
+# ============================================
+# Projects
+# ============================================
+
+class ProjectCreate(BaseModel):
+    project_id: str
+    name: str
+
+class ProjectUpdate(BaseModel):
+    name: Optional[str] = None
+    status: Optional[str] = None  # "active" or "archived"
+
+class ProjectResponse(BaseModel):
+    project_id: str
+    name: str
+    status: str
+    patch_count: int = 0
+    created_at: Optional[str] = None
+
+@app.get("/v1/projects/{user_id}", tags=["Projects"])
+async def get_user_projects(
+    user_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """Get all projects for a user."""
+    rows = await db_pool.fetch(
+        """
+        SELECT p.project_id, p.name, p.status, p.created_at,
+               COUNT(cp.patch_id) as patch_count
+        FROM projects p
+        LEFT JOIN context_patches cp ON cp.project_id = p.project_id
+            AND COALESCE(cp.status, 'active') = 'active'
+        WHERE p.user_id = $1
+        GROUP BY p.project_id, p.name, p.status, p.created_at
+        ORDER BY p.updated_at DESC
+        """,
+        user_id
+    )
+    return [ProjectResponse(
+        project_id=r["project_id"], name=r["name"], status=r["status"],
+        patch_count=r["patch_count"],
+        created_at=r["created_at"].isoformat() if r["created_at"] else None
+    ) for r in rows]
+
+@app.post("/v1/projects/{user_id}", tags=["Projects"])
+async def create_project(
+    user_id: str,
+    project: ProjectCreate,
+    app_id: str = Depends(verify_application_access),
+):
+    """Register a project. Called by ShoulderSurf when a new project is created."""
+    await db_pool.execute(
+        """
+        INSERT INTO projects (project_id, user_id, name)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (project_id) DO UPDATE SET name = $3, updated_at = NOW()
+        """,
+        project.project_id, user_id, project.name
+    )
+    return {"status": "created", "project_id": project.project_id}
+
+@app.patch("/v1/projects/{user_id}/{project_id}", tags=["Projects"])
+async def update_project(
+    user_id: str,
+    project_id: str,
+    update: ProjectUpdate,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Rename or archive a project.
+    Renaming updates the display name — the project_id never changes.
+    Archiving cascades: all patches with this project_id get archived.
+    """
+    row = await db_pool.fetchrow(
+        "SELECT project_id FROM projects WHERE project_id = $1 AND user_id = $2",
+        project_id, user_id
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if update.name is not None:
+        await db_pool.execute(
+            "UPDATE projects SET name = $1, updated_at = NOW() WHERE project_id = $2",
+            update.name, project_id
+        )
+        # Also update the text project column on patches for backward compat
+        await db_pool.execute(
+            "UPDATE context_patches SET project = $1, updated_at = NOW() WHERE project_id = $2",
+            update.name, project_id
+        )
+
+    if update.status == "archived":
+        await db_pool.execute(
+            "UPDATE projects SET status = 'archived', updated_at = NOW() WHERE project_id = $1",
+            project_id
+        )
+        # Cascade: archive all patches belonging to this project
+        await db_pool.execute(
+            "UPDATE context_patches SET status = 'archived', updated_at = NOW() WHERE project_id = $1 AND COALESCE(status, 'active') = 'active'",
+            project_id
+        )
+
+    return {"status": "updated", "project_id": project_id}
 
 
 class AppUpdate(BaseModel):
