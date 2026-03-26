@@ -156,7 +156,7 @@ Group patches into sections the user can scan quickly:
 ```
 
 **Section logic:**
-- "About You" = patches where `category` is trait, preference, or role (with no project)
+- "About You" = patches where `patch_type` is trait, preference, or role (with no project)
 - Project sections = group by project name from the `participants` or a future `project` field
 - "Action Items" = patches where `category` is commitment or blocker
 
@@ -220,15 +220,17 @@ User managing their quilt:
 
 ### QuiltPatchResponse
 
+> **Note on `category` vs `patch_type`:** Both fields return the same value. `patch_type` is the canonical field — it maps directly to the DB column and the patch type registry. `category` is a legacy alias kept for backward compatibility. **Model only `patch_type` in your Swift types.** The `category` field may be removed in a future version.
+
 | Field | Type | Description |
 |-------|------|-------------|
 | `patch_id` | `string` (UUID) | Unique ID — use for edit/delete |
 | `fact` | `string` | The patch text content |
-| `category` | `string` | Patch type (trait, preference, commitment, etc.) |
+| `patch_type` | `string` | The patch type: trait, preference, role, person, project, decision, commitment, blocker, takeaway |
+| `category` | `string` | **Legacy alias for `patch_type`** — same value. Do not model separately in Swift. |
 | `participants` | `string[]` | People involved |
 | `owner` | `string?` | Who's responsible (commitments, blockers) |
 | `deadline` | `string?` | Due date if applicable |
-| `patch_type` | `string` | Same as category |
 | `source` | `string` | "inferred" (CQ extracted) or "declared" (user edited) |
 | `created_at` | `string` (ISO 8601) | When this patch was created |
 
