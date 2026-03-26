@@ -40,6 +40,21 @@ QUEUE_MAX_WAIT_MINUTES = int(os.getenv("CQ_QUEUE_MAX_WAIT_MINUTES", "60"))
 QUEUE_BUDGET_THRESHOLD = float(os.getenv("CQ_QUEUE_BUDGET_THRESHOLD", "0.8"))
 QUEUE_CHECK_INTERVAL_SECONDS = 30  # How often to check queues for processing
 
+# Extraction caps — belt-and-suspenders with prompt limits
+MAX_FACTS_PER_MEETING = 5
+MAX_ACTION_ITEMS_PER_MEETING = 3
+MAX_PATCHES_PER_MEETING = 12  # Connected quilt model (replaces facts+actions for V2)
+MAX_ENTITIES_PER_MEETING = 10
+MAX_RELATIONSHIPS_PER_MEETING = 10
+
+# Default persistence by patch type (used when registry lookup unavailable)
+DEFAULT_PERSISTENCE = {
+    "trait": "sticky", "preference": "sticky", "identity": "sticky",
+    "role": "sticky", "person": "sticky", "project": "sticky",
+    "decision": "sticky", "experience": "decaying", "takeaway": "decaying",
+    "commitment": "sticky", "blocker": "sticky",
+}
+
 # Known context windows for common models (tokens)
 KNOWN_CONTEXT_WINDOWS = {
     "mistralai/mistral-small-3.1-24b-instruct": 128000,
@@ -71,6 +86,7 @@ async def store_facts(
     source_prompt: str,
     app_id: str | None = None,
     timestamp: str | None = None,
+    project: str | None = None,
 ):
     """
     Store extracted facts and action items to Postgres.
@@ -118,12 +134,13 @@ async def store_facts(
             """
             INSERT INTO context_patches (
                 patch_id, patch_name, patch_type, value,
-                origin_mode, source_prompt, confidence, persistence, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                origin_mode, source_prompt, confidence, persistence, project, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             """,
             patch_id, patch_name, category, value_json,
             "inferred", source_prompt, 0.8,
             "sticky" if category in ("identity", "preference", "trait") else "decaying",
+            project,
             created_at, created_at
         )
 
@@ -160,6 +177,7 @@ async def store_action_items(
     action_items: List[Dict[str, Any]],
     app_id: str | None = None,
     timestamp: str | None = None,
+    project: str | None = None,
 ):
     """Store extracted action items as experience-type patches."""
     if not action_items:
@@ -189,11 +207,11 @@ async def store_action_items(
             """
             INSERT INTO context_patches (
                 patch_id, patch_name, patch_type, value,
-                origin_mode, source_prompt, confidence, persistence, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                origin_mode, source_prompt, confidence, persistence, project, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             """,
             patch_id, patch_name, "experience", value_json,
-            "inferred", "meeting_summary", 0.8, "decaying", created_at, created_at
+            "inferred", "meeting_summary", 0.8, "decaying", project, created_at, created_at
         )
 
         await db.execute(
@@ -220,6 +238,202 @@ async def store_action_items(
 
         stored += 1
 
+    return stored
+
+
+async def store_connected_patches(
+    db,
+    user_id: str,
+    patches: List[Dict[str, Any]],
+    source_prompt: str,
+    app_id: str | None = None,
+    timestamp: str | None = None,
+    project: str | None = None,
+):
+    """
+    Store typed, connected patches (Connected Quilt V2 model).
+    Two-pass: create all patches first, then create connections between them.
+    """
+    if not patches:
+        return 0
+
+    await db.execute(
+        "INSERT INTO profiles (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+        user_id
+    )
+
+    created_at = datetime.fromisoformat(timestamp) if timestamp else datetime.utcnow()
+    subject_key = f"user:{user_id}"
+
+    # Pass 1: Create all patches, build lookup map for connection resolution
+    patch_lookup = {}  # (text_lower, type) → patch_id
+    stored = 0
+
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+
+        patch_type = patch.get("type", "experience")
+        value = patch.get("value", {})
+        if isinstance(value, str):
+            value = {"text": value}
+        text = value.get("text", "")
+        if not text:
+            continue
+
+        patch_id = str(uuid.uuid4())
+        patch_name = f"{source_prompt}_{patch_id[:8]}"
+        value_json = json.dumps(value)
+        persistence = DEFAULT_PERSISTENCE.get(patch_type, "decaying")
+
+        # Project-scoped types get the project tag
+        project_scoped_types = ("decision", "commitment", "blocker", "takeaway", "experience")
+        patch_project = project if patch_type in project_scoped_types else None
+        # Role patches can also be project-scoped if they have a belongs_to connection
+        if patch_type == "role" and project:
+            connects_to = patch.get("connects_to", [])
+            if any(c.get("role") == "parent" for c in connects_to):
+                patch_project = project
+
+        await db.execute(
+            """
+            INSERT INTO context_patches (
+                patch_id, patch_name, patch_type, value,
+                origin_mode, source_prompt, confidence, persistence,
+                project, status, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            """,
+            patch_id, patch_name, patch_type, value_json,
+            "inferred", source_prompt, 0.8, persistence,
+            patch_project, "active", created_at, created_at
+        )
+
+        await db.execute(
+            "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
+            patch_id, subject_key
+        )
+
+        await db.execute(
+            """
+            INSERT INTO patch_usage_metrics (patch_id, access_count, last_accessed_at, current_decay_score)
+            VALUES ($1, 1, $2, 1.0)
+            """,
+            patch_id, created_at
+        )
+
+        if app_id:
+            try:
+                await db.execute(
+                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read) VALUES ($1, $2::uuid, TRUE)",
+                    patch_id, app_id
+                )
+            except Exception:
+                pass
+
+        patch_lookup[(text.lower().strip(), patch_type)] = patch_id
+        stored += 1
+
+    # Pass 2: Create connections between patches
+    connections_created = 0
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+        connects_to = patch.get("connects_to", [])
+        if not connects_to:
+            continue
+
+        value = patch.get("value", {})
+        if isinstance(value, str):
+            value = {"text": value}
+        from_text = value.get("text", "").lower().strip()
+        from_type = patch.get("type", "experience")
+        from_id = patch_lookup.get((from_text, from_type))
+        if not from_id:
+            continue
+
+        for conn in connects_to:
+            target_text = conn.get("target_text", "").lower().strip()
+            target_type = conn.get("target_type", "")
+            role = conn.get("role", "informs")
+            label = conn.get("label", "")
+
+            if not target_text or not role:
+                continue
+
+            # Resolve target: check current batch first
+            to_id = patch_lookup.get((target_text, target_type))
+
+            # If not in batch, check existing patches for this user
+            if not to_id:
+                row = await db.fetchrow(
+                    """
+                    SELECT cp.patch_id FROM context_patches cp
+                    JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+                    WHERE ps.subject_key = $1 AND cp.patch_type = $2
+                      AND LOWER(cp.value->>'text') = $3 AND cp.status = 'active'
+                    LIMIT 1
+                    """,
+                    subject_key, target_type, target_text
+                )
+                if row:
+                    to_id = str(row["patch_id"])
+
+            # If still unresolved, create a stub patch for the target
+            if not to_id:
+                to_id = str(uuid.uuid4())
+                stub_name = f"{source_prompt}_{to_id[:8]}"
+                stub_value = json.dumps({"text": conn.get("target_text", "")})
+                stub_persistence = DEFAULT_PERSISTENCE.get(target_type, "sticky")
+                stub_project = project if target_type in project_scoped_types else None
+
+                await db.execute(
+                    """
+                    INSERT INTO context_patches (
+                        patch_id, patch_name, patch_type, value,
+                        origin_mode, source_prompt, confidence, persistence,
+                        project, status, created_at, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    """,
+                    to_id, stub_name, target_type, stub_value,
+                    "inferred", source_prompt, 0.6, stub_persistence,
+                    stub_project, "active", created_at, created_at
+                )
+                await db.execute(
+                    "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
+                    to_id, subject_key
+                )
+                await db.execute(
+                    """
+                    INSERT INTO patch_usage_metrics (patch_id, access_count, last_accessed_at, current_decay_score)
+                    VALUES ($1, 1, $2, 1.0)
+                    """,
+                    to_id, created_at
+                )
+                patch_lookup[(target_text, target_type)] = to_id
+                stored += 1
+
+            # Create the connection
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO patch_connections (from_patch_id, to_patch_id, connection_role, connection_label, context)
+                    VALUES ($1::uuid, $2::uuid, $3, $4, $5)
+                    ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO NOTHING
+                    """,
+                    from_id, to_id, role, label, conn.get("context")
+                )
+                connections_created += 1
+
+                # Lifecycle trigger: REPLACES → archive the target
+                if role == "replaces":
+                    await db.execute(
+                        "UPDATE context_patches SET status = 'archived', completed_at = NOW() WHERE patch_id = $1::uuid",
+                        to_id
+                    )
+            except Exception as e:
+                logger.warning("connection_failed", error=str(e), from_id=from_id, to_id=to_id)
+
+    logger.info("connected_patches_stored", patches=stored, connections=connections_created, user_id=user_id)
     return stored
 
 
@@ -581,6 +795,13 @@ class ColdPathWorker:
             await self.handle_active_learning(payload)
             return
 
+        # End-of-meeting full transcript — process immediately, never buffer
+        # (this IS the complete meeting, sent by ShoulderSurf at session end)
+        if task_type == "meeting_transcript":
+            payload["summary"] = payload.get("content", "")
+            await self.handle_meeting_summary(payload)
+            return
+
         # If event has a meeting_id, buffer it for consolidated processing
         if meeting_id and task_type in ("meeting_summary", "query", "summary", "sentiment"):
             await self._buffer_event(payload, meeting_id)
@@ -752,27 +973,65 @@ class ColdPathWorker:
 
         logger.info("analyzing_meeting_summary", user_id=user_id, length=len(summary))
 
+        # Identify the submitting user so the LLM can attribute traits correctly
+        # (transcripts often use speaker labels like [Speaker 16] instead of names)
+        metadata = payload.get("metadata", {})
+        display_name = metadata.get("display_name") if metadata else None
+        user_context = f"The submitting user is: {display_name}\n\n" if display_name else ""
+
         try:
             response = await self.llm.extract(
                 system_prompt=MEETING_SUMMARY_SYSTEM,
-                user_content=summary,
+                user_content=user_context + summary,
             )
-
-            facts = response.content.get("facts", [])
-            action_items = response.content.get("action_items", [])
-            entities = response.content.get("entities", [])
-            relationships = response.content.get("relationships", [])
 
             app_id = payload.get("app_id")
             timestamp = payload.get("timestamp")
-            metadata = payload.get("metadata", {})
+            project = metadata.get("project") if metadata else None
 
-            facts_stored = await store_facts(
-                self.db, user_id, facts, "meeting_summary", app_id, timestamp
-            )
-            actions_stored = await store_action_items(
-                self.db, user_id, action_items, app_id, timestamp
-            )
+            # Connected Quilt V2: patches with connections
+            patches = response.content.get("patches", [])
+            entities = response.content.get("entities", [])
+            relationships = response.content.get("relationships", [])
+
+            if patches:
+                # V2 model — typed, connected patches
+                if len(patches) > MAX_PATCHES_PER_MEETING:
+                    logger.warning("extraction_capped", type="patches", original=len(patches), capped=MAX_PATCHES_PER_MEETING)
+                    patches = patches[:MAX_PATCHES_PER_MEETING]
+
+                patches_stored = await store_connected_patches(
+                    self.db, user_id, patches, "meeting_summary", app_id, timestamp, project
+                )
+                facts_stored = patches_stored
+                actions_stored = 0
+            else:
+                # V1 fallback — flat facts + action_items
+                facts = response.content.get("facts", [])
+                action_items = response.content.get("action_items", [])
+
+                if len(facts) > MAX_FACTS_PER_MEETING:
+                    logger.warning("extraction_capped", type="facts", original=len(facts), capped=MAX_FACTS_PER_MEETING)
+                    facts = facts[:MAX_FACTS_PER_MEETING]
+                if len(action_items) > MAX_ACTION_ITEMS_PER_MEETING:
+                    logger.warning("extraction_capped", type="action_items", original=len(action_items), capped=MAX_ACTION_ITEMS_PER_MEETING)
+                    action_items = action_items[:MAX_ACTION_ITEMS_PER_MEETING]
+
+                facts_stored = await store_facts(
+                    self.db, user_id, facts, "meeting_summary", app_id, timestamp, project
+                )
+                actions_stored = await store_action_items(
+                    self.db, user_id, action_items, app_id, timestamp, project
+                )
+
+            # Entities and relationships always stored (feeds entity name index)
+            if len(entities) > MAX_ENTITIES_PER_MEETING:
+                logger.warning("extraction_capped", type="entities", original=len(entities), capped=MAX_ENTITIES_PER_MEETING)
+                entities = entities[:MAX_ENTITIES_PER_MEETING]
+            if len(relationships) > MAX_RELATIONSHIPS_PER_MEETING:
+                logger.warning("extraction_capped", type="relationships", original=len(relationships), capped=MAX_RELATIONSHIPS_PER_MEETING)
+                relationships = relationships[:MAX_RELATIONSHIPS_PER_MEETING]
+
             entities_stored = await store_entities(
                 self.db, self.redis, user_id, entities, metadata
             )
