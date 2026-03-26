@@ -854,6 +854,56 @@ async def delete_patch(
     return {"status": "deleted", "patch_id": patch_id}
 
 
+@app.delete("/v1/quilt/{user_id}", tags=["Quilt"])
+async def delete_all_patches(
+    user_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Delete ALL patches, entities, and relationships for a user.
+    Use for testing or when a user requests full data deletion.
+    """
+    subject_key = f"user:{user_id}"
+
+    # Delete all patches and related records for this user
+    patch_ids = await db_pool.fetch(
+        "SELECT patch_id FROM patch_subjects WHERE subject_key = $1", subject_key
+    )
+    count = len(patch_ids)
+
+    for row in patch_ids:
+        pid = row["patch_id"]
+        await db_pool.execute("DELETE FROM patch_connections WHERE from_patch_id = $1 OR to_patch_id = $1", pid)
+        await db_pool.execute("DELETE FROM patch_usage_metrics WHERE patch_id = $1", pid)
+        await db_pool.execute("DELETE FROM context_patch_acl WHERE patch_id = $1", pid)
+
+    await db_pool.execute("DELETE FROM patch_subjects WHERE subject_key = $1", subject_key)
+    await db_pool.execute(
+        """DELETE FROM context_patches WHERE patch_id IN (
+            SELECT patch_id FROM patch_subjects WHERE subject_key = $1
+        ) OR patch_id NOT IN (SELECT patch_id FROM patch_subjects)""",
+        subject_key
+    )
+
+    # Also clear entities and relationships
+    entity_count = await db_pool.fetchval(
+        "SELECT COUNT(*) FROM entities WHERE user_id = $1", user_id
+    )
+    await db_pool.execute("DELETE FROM relationships WHERE user_id = $1", user_id)
+    await db_pool.execute("DELETE FROM entities WHERE user_id = $1", user_id)
+
+    # Clear Redis caches
+    await redis_client.delete(f"entity_index:{user_id}")
+    await redis_client.delete(f"active_context:{user_id}")
+
+    return {
+        "status": "deleted",
+        "user_id": user_id,
+        "patches_deleted": count,
+        "entities_deleted": entity_count,
+    }
+
+
 class AppUpdate(BaseModel):
     enforce_auth: bool
 
