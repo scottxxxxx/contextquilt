@@ -692,6 +692,8 @@ class QuiltResponse(BaseModel):
     user_id: str
     facts: List[QuiltPatchResponse]
     action_items: List[QuiltPatchResponse]
+    deleted: List[str] = []        # patch_ids removed since `since` timestamp
+    server_time: Optional[str] = None  # use as `since` on next request
 
 class PatchUpdate(BaseModel):
     fact: Optional[str] = None
@@ -700,14 +702,20 @@ class PatchUpdate(BaseModel):
 @app.get("/v1/quilt/{user_id}", response_model=QuiltResponse, tags=["Quilt"])
 async def get_user_quilt(
     user_id: str,
-    category: Optional[str] = Query(None, description="Filter by category: identity, preference, trait, experience"),
+    category: Optional[str] = Query(None, description="Filter by patch_type"),
+    since: Optional[str] = Query(None, description="ISO 8601 timestamp — return only patches created/updated after this time, plus IDs of patches deleted since then"),
     app_id: str = Depends(verify_application_access),
 ):
     """
-    Get all facts and action items CQ knows about a user.
-    Scoped to patches the calling app has read access to.
+    Get patches CQ knows about a user.
+
+    Without `since`: returns all active patches (full sync).
+    With `since`: returns only patches created or updated after that timestamp,
+    plus a `deleted` array of patch_ids that were removed or archived since then.
+    Pass the returned `server_time` as `since` on the next request.
     """
     subject_key = f"user:{user_id}"
+    server_time = datetime.utcnow()
 
     # Check if app_id is a valid UUID for ACL join; legacy X-App-ID
     # values (e.g. "cloudzap") are not UUIDs, so skip ACL filtering
@@ -724,6 +732,16 @@ async def get_user_quilt(
         params = [subject_key]
 
     # Build query with optional ACL enforcement
+    since_filter = ""
+    since_dt = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            since_filter = f" AND cp.updated_at > ${len(params) + 1}"
+            params.append(since_dt)
+        except ValueError:
+            pass
+
     query = f"""
         SELECT cp.patch_id, cp.patch_name, cp.patch_type, cp.value,
                cp.origin_mode, cp.source_prompt, cp.created_at, cp.project,
@@ -734,6 +752,7 @@ async def get_user_quilt(
         WHERE ps.subject_key = $1
           AND COALESCE(cp.status, 'active') = 'active'
           {acl_where}
+          {since_filter}
     """
 
     if category:
@@ -743,6 +762,21 @@ async def get_user_quilt(
     query += " ORDER BY cp.created_at DESC"
 
     rows = await db_pool.fetch(query, *params)
+
+    # Find patches deleted or archived since the timestamp
+    deleted_ids = []
+    if since_dt:
+        deleted_rows = await db_pool.fetch(
+            """
+            SELECT cp.patch_id FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $1
+              AND cp.status IN ('archived', 'completed')
+              AND cp.updated_at > $2
+            """,
+            subject_key, since_dt
+        )
+        deleted_ids = [str(r["patch_id"]) for r in deleted_rows]
 
     # Collect all patch IDs to fetch connections in one query
     patch_ids = [row["patch_id"] for row in rows]
@@ -798,7 +832,13 @@ async def get_user_quilt(
         else:
             facts.append(patch)
 
-    return QuiltResponse(user_id=user_id, facts=facts, action_items=action_items)
+    return QuiltResponse(
+        user_id=user_id,
+        facts=facts,
+        action_items=action_items,
+        deleted=deleted_ids,
+        server_time=server_time.isoformat() + "Z",
+    )
 
 
 @app.patch("/v1/quilt/{user_id}/patches/{patch_id}", tags=["Quilt"])
