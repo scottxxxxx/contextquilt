@@ -281,6 +281,33 @@ async def store_connected_patches(
         if not text:
             continue
 
+        # Deduplication: check if an active patch with same type and text already exists
+        existing = await db.fetchrow(
+            """
+            SELECT cp.patch_id FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $1 AND cp.patch_type = $2
+              AND LOWER(cp.value->>'text') = LOWER($3)
+              AND COALESCE(cp.status, 'active') = 'active'
+            LIMIT 1
+            """,
+            subject_key, patch_type, text
+        )
+        if existing:
+            # Reuse existing patch — update last_seen timestamp
+            patch_id = str(existing["patch_id"])
+            await db.execute(
+                "UPDATE context_patches SET updated_at = $1 WHERE patch_id = $2::uuid",
+                created_at, patch_id
+            )
+            await db.execute(
+                "UPDATE patch_usage_metrics SET access_count = access_count + 1, last_accessed_at = $1 WHERE patch_id = $2::uuid",
+                created_at, patch_id
+            )
+            patch_lookup[(text.lower().strip(), patch_type)] = patch_id
+            logger.debug("patch_deduplicated", type=patch_type, text=text[:50], patch_id=patch_id)
+            continue
+
         patch_id = str(uuid.uuid4())
         patch_name = f"{source_prompt}_{patch_id[:8]}"
         value_json = json.dumps(value)
