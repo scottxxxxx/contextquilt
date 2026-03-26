@@ -92,6 +92,8 @@ See `docs/architecture/` for the complete V3 specification:
 - `05-integration.md` — CloudZap/ShoulderSurf flow, capture points, metadata
 - `06-configuration.md` — All settings, env vars, admin dashboard
 - `07-api-reference.md` — Complete API endpoint documentation
+- `08-connected-quilt-model.md` — Connected Quilt: extensible patch types, patch connections (role + label), app policy, lifecycle through connections
+- `health-coach-quilt-diagram.md` — Design example: health coaching app with five connection roles (parent, depends_on, resolves, replaces, informs)
 
 ## Other Resources
 - `GETTING_STARTED.md` — Setup instructions
@@ -99,39 +101,57 @@ See `docs/architecture/` for the complete V3 specification:
 - `docs/sales/` — Sales and marketing materials
 - `docs/archive/` — Previous architecture versions (V1, V2, 3.7-3.10)
 
-## Current Status (March 24, 2026)
+## Current Status (March 25, 2026)
 
 **Live deployment:** `https://cq.shouldersurf.com`
 **Admin dashboard:** `https://cq.shouldersurf.com/dashboard/` (protected by CQ_ADMIN_KEY)
 **GCP VM:** `35.239.227.192` (shared with CloudZap via Project Bifrost)
-**Version:** 3.10.0
+**Version:** 3.11.0 (Connected Quilt)
 
 ### What's built and deployed:
 - PostgreSQL + Redis on GCP VM
-- Cold path worker using Mistral Small 3.1 via OpenRouter ($0.00009/extraction)
-- Graph memory layer — entities and relationships extracted and stored
-- `POST /v1/recall` — entity matching + graph traversal, returns context block
+- Cold path worker — recommended model: Gemini 2.5 Flash via OpenRouter ($0.0017/extraction)
+- **Connected Quilt model** — typed patches (trait, preference, role, person, project, decision, commitment, blocker, takeaway) with connections (role + label)
+- Patch type registry and connection vocabulary tables for extensible, app-defined types
+- Five structural connection roles: parent, depends_on, resolves, replaces, informs
+- App-defined semantic labels: belongs_to, blocked_by, motivated_by, works_on, owns, supersedes
+- Lifecycle through connections: project archival cascades to children, replaces auto-archives old patches
+- `POST /v1/recall` — entity matching + graph traversal + patch connection traversal, returns structured context (grouped by: about you, decisions, commitments, blockers, roles, key facts)
 - `GET/PATCH/DELETE /v1/quilt/{user_id}` — user quilt CRUD with ACL
-- Meeting queue with 60-min batching and context budget triggers
-- Generic metadata system (meeting_id, project, any key-value pairs)
-- Admin dashboard with login gate (CQ_ADMIN_KEY)
-- Provider-agnostic LLM client (OpenRouter, OpenAI, Gemini, Ollama, etc.)
-- User profile identity (display_name, email) via metadata passthrough
-- Smart persistence: identity/preference/trait facts are `sticky`, experience/action items are `decaying`
-- Relevance-filtered extraction prompts to reduce noise
+- Admin dashboard with edit/delete patch management
+- Project-scoped patches — prevents cross-project context bleed
+- Submitting user identity injected into extraction ("The submitting user is: Scott") for correct trait attribution from diarized transcripts
+- Hard extraction caps: 12 patches, 10 entities, 10 relationships per meeting
+- Extraction exclusion list: ticket numbers, scheduling, troubleshooting, procedural logistics
+- Trait priority: self-disclosed traits always extracted first
+- Per-app policy column on applications table (extraction caps, budgets, decay rules)
+- `POST /v1/capture-transcript` on CloudZap for end-of-meeting full transcript capture
+- ShoulderSurf sends `fullSessionTranscript` at `stopSession()` for trait/fact extraction from raw dialogue
+- Backward compatible: V1 flat facts still work alongside V2 connected patches
 
 ### CloudZap integration:
 - CloudZap calls `/v1/recall` before LLM queries when `context_quilt: true`
 - CloudZap POSTs query+response to `/v1/memory` after LLM responds (async)
+- CloudZap `POST /v1/capture-transcript` receives full transcript at meeting end from ShoulderSurf
 - Response headers `X-CQ-Matched` and `X-CQ-Entities` for iOS UI indicator
-- Can pass `display_name` and `email` in metadata to populate user profiles
+- Passes `display_name`, `email`, `project` in metadata
+
+### Model benchmarks (Florida Blue transcript):
+| Model | Cost/extraction | Patches | Connections | Quality |
+|-------|----------------|---------|-------------|---------|
+| Mistral Small 3.1 | $0.00016 | 6 | 5 | Missed people, preferences |
+| Qwen3 32B | $0.00094 | 7 | 6 | Accurate but conservative |
+| GPT-4o-mini | $0.00093 | 7 | 6 | Accurate, missed decision/blocker |
+| DeepSeek V3 | $0.00109 | 11 | 10 | Strong, missed decision→preference link |
+| **Gemini 2.5 Flash** | **$0.00167** | **12** | **9** | **Best: all types, correct connections** |
 
 ### Next priorities:
-1. Update CloudZap to pass display_name/email in metadata from Apple Sign-In
-2. End-to-end test: ShoulderSurf → CloudZap → CQ → graph → recall
-3. Build CQ indicator UI in ShoulderSurf response bubbles
-4. Settings page in admin dashboard for runtime config changes
-5. Implement active decay scoring in recall path (weight by recency + access count)
+1. Deploy migration `04_connected_quilt.sql` to GCP
+2. Switch `CQ_LLM_MODEL` to `google/gemini-2.5-flash`
+3. End-to-end test: ShoulderSurf → CloudZap → CQ → connected quilt → recall
+4. Build user-facing patch management in ShoulderSurf (cards UI)
+5. Implement decay worker (scheduled job to archive stale patches per app policy)
+6. Build domain description interface (YAML or natural language → schema generation)
 
 ## Related Projects
 

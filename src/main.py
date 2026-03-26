@@ -370,20 +370,75 @@ async def recall_context(
         user_id, entity_ids, max_hops
     )
 
-    # Step 4: Get related facts (patches) for matched entities
-    fact_rows = await db_pool.fetch(
-        """
-        SELECT cp.value, cp.patch_type, cp.source_prompt
-        FROM context_patches cp
-        JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
-        WHERE ps.subject_key = $1
-        ORDER BY cp.created_at DESC
-        LIMIT 20
-        """,
-        f"user:{user_id}"
-    )
+    # Step 4: Get patches for this user
+    recall_project = request.metadata.get("project") if request.metadata else None
+    subject_key = f"user:{user_id}"
 
-    # Step 5: Build context block
+    # Step 4a: Flat patch query (works for both V1 and V2 patches)
+    if recall_project:
+        fact_rows = await db_pool.fetch(
+            """
+            SELECT cp.value, cp.patch_type, cp.source_prompt
+            FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $1
+              AND (cp.project = $2 OR cp.project IS NULL OR cp.patch_type IN ('trait', 'preference'))
+              AND COALESCE(cp.status, 'active') = 'active'
+            ORDER BY cp.created_at DESC
+            LIMIT 20
+            """,
+            subject_key, recall_project
+        )
+    else:
+        fact_rows = await db_pool.fetch(
+            """
+            SELECT cp.value, cp.patch_type, cp.source_prompt
+            FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $1
+              AND COALESCE(cp.status, 'active') = 'active'
+            ORDER BY cp.created_at DESC
+            LIMIT 20
+            """,
+            subject_key
+        )
+
+    # Step 4b: Traverse patch connections from project patches (Connected Quilt V2)
+    connected_rows = []
+    if recall_project:
+        project_patch = await db_pool.fetchrow(
+            """
+            SELECT cp.patch_id FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $1 AND cp.patch_type = 'project'
+              AND LOWER(cp.value->>'text') LIKE '%' || LOWER($2) || '%'
+              AND COALESCE(cp.status, 'active') = 'active'
+            LIMIT 1
+            """,
+            subject_key, recall_project
+        )
+        if project_patch:
+            connected_rows = await db_pool.fetch(
+                """
+                SELECT cp.value, cp.patch_type, cp.source_prompt
+                FROM patch_connections pc
+                JOIN context_patches cp ON pc.from_patch_id = cp.patch_id
+                WHERE pc.to_patch_id = $1 AND pc.connection_role = 'parent'
+                  AND COALESCE(cp.status, 'active') = 'active'
+                """,
+                project_patch["patch_id"]
+            )
+
+    # Merge flat rows + connected rows, deduplicate by value text
+    all_patches = list(fact_rows)
+    seen_texts = {(row["value"] if isinstance(row["value"], str) else json.dumps(row["value"])) for row in fact_rows}
+    for row in connected_rows:
+        key = row["value"] if isinstance(row["value"], str) else json.dumps(row["value"])
+        if key not in seen_texts:
+            all_patches.append(row)
+            seen_texts.add(key)
+
+    # Step 5: Build context block — grouped by patch type
     sections = []
 
     # Entities summary
@@ -408,26 +463,56 @@ async def recall_context(
                            + (f" ({r['context']})" if r['context'] else ""))
         sections.append("Connections:\n" + "\n".join(f"- {l}" for l in rel_lines))
 
-    # Action items from facts
-    actions = []
-    facts_text = []
-    for row in fact_rows:
-        value = row["value"]
-        if isinstance(value, str):
-            value = json.loads(value)
-        if value.get("type") == "action_item":
-            owner = value.get("owner", "")
-            deadline = value.get("deadline", "")
+    # Parse all patches by type
+    def parse_value(row):
+        v = row["value"]
+        return json.loads(v) if isinstance(v, str) else v
+
+    # About you (traits, preferences)
+    universals = [parse_value(r) for r in all_patches if r["patch_type"] in ("trait", "preference")]
+    if universals:
+        sections.append("About you:\n" + "\n".join(f"- {v.get('text', '')}" for v in universals))
+
+    # Decisions
+    decisions = [parse_value(r) for r in all_patches if r["patch_type"] == "decision"]
+    if decisions:
+        sections.append("Decisions:\n" + "\n".join(f"- {v.get('text', '')}" for v in decisions))
+
+    # Open commitments
+    commitments = [parse_value(r) for r in all_patches if r["patch_type"] == "commitment"]
+    if commitments:
+        lines = []
+        for v in commitments:
+            owner = v.get("owner", "")
+            deadline = v.get("deadline", "")
             dl = f" (by {deadline})" if deadline else ""
-            actions.append(f"{owner}: {value.get('text', '')}{dl}")
-        else:
-            facts_text.append(value.get("text", ""))
+            prefix = f"{owner}: " if owner else ""
+            lines.append(f"- {prefix}{v.get('text', '')}{dl}")
+        sections.append("Open commitments:\n" + "\n".join(lines))
 
-    if actions:
-        sections.append("Open actions:\n" + "\n".join(f"- {a}" for a in actions))
+    # Blockers
+    blockers = [parse_value(r) for r in all_patches if r["patch_type"] == "blocker"]
+    if blockers:
+        sections.append("Blockers:\n" + "\n".join(f"- {v.get('text', '')}" for v in blockers))
 
-    if facts_text:
-        sections.append("Key facts:\n" + "\n".join(f"- {f}" for f in facts_text[:10]))
+    # Roles
+    roles = [parse_value(r) for r in all_patches if r["patch_type"] == "role"]
+    if roles:
+        sections.append("Roles:\n" + "\n".join(f"- {v.get('text', '')}" for v in roles))
+
+    # Takeaways and remaining facts (experience, identity, person, etc.)
+    other_types = ("experience", "identity", "takeaway", "person")
+    others = [parse_value(r) for r in all_patches if r["patch_type"] in other_types]
+    # Also include V1 action_items
+    for r in all_patches:
+        v = parse_value(r)
+        if v.get("type") == "action_item":
+            owner = v.get("owner", "")
+            deadline = v.get("deadline", "")
+            dl = f" (by {deadline})" if deadline else ""
+            others.append({"text": f"{owner}: {v.get('text', '')}{dl}"})
+    if others:
+        sections.append("Key facts:\n" + "\n".join(f"- {v.get('text', '')}" for v in others[:10]))
 
     context = "\n\n".join(sections)
 

@@ -531,6 +531,67 @@ async def get_user_quilt(user_id: str):
     finally:
         await conn.close()
 
+class PatchUpdateRequest(BaseModel):
+    fact: Optional[str] = None
+    category: Optional[str] = None
+
+@router.patch("/patches/{patch_id}", dependencies=[Depends(verify_admin_key)])
+async def update_patch(patch_id: str, request: PatchUpdateRequest):
+    """Update a patch's fact text and/or category from the admin dashboard."""
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        # Verify patch exists
+        row = await conn.fetchrow(
+            "SELECT patch_id, value, patch_type FROM context_patches WHERE patch_id = $1",
+            uuid.UUID(patch_id)
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Patch not found")
+
+        async with conn.transaction():
+            if request.fact is not None:
+                current_value = row['value']
+                if isinstance(current_value, dict):
+                    current_value['text'] = request.fact
+                else:
+                    current_value = {'text': request.fact}
+                await conn.execute(
+                    "UPDATE context_patches SET value = $1, updated_at = NOW(), origin_mode = 'declared' WHERE patch_id = $2",
+                    json.dumps(current_value), uuid.UUID(patch_id)
+                )
+            if request.category is not None:
+                await conn.execute(
+                    "UPDATE context_patches SET patch_type = $1, updated_at = NOW() WHERE patch_id = $2",
+                    request.category, uuid.UUID(patch_id)
+                )
+
+        return {"status": "updated", "patch_id": patch_id}
+    finally:
+        await conn.close()
+
+@router.delete("/patches/{patch_id}", dependencies=[Depends(verify_admin_key)])
+async def delete_patch(patch_id: str):
+    """Delete a patch from the admin dashboard."""
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        pid = uuid.UUID(patch_id)
+        # Verify patch exists
+        row = await conn.fetchrow(
+            "SELECT patch_id FROM context_patches WHERE patch_id = $1", pid
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Patch not found")
+
+        async with conn.transaction():
+            await conn.execute("DELETE FROM patch_usage_metrics WHERE patch_id = $1", pid)
+            await conn.execute("DELETE FROM context_patch_acl WHERE patch_id = $1", pid)
+            await conn.execute("DELETE FROM patch_subjects WHERE patch_id = $1", pid)
+            await conn.execute("DELETE FROM context_patches WHERE patch_id = $1", pid)
+
+        return {"status": "deleted", "patch_id": patch_id}
+    finally:
+        await conn.close()
+
 class SchemaItem(BaseModel):
     name: str
     type: str

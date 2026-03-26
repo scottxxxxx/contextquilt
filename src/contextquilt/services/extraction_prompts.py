@@ -11,8 +11,8 @@ Three prompts for three use cases:
   - TRACE: Extract facts from agent execution traces
 """
 
-# Primary prompt: extract from meeting summaries passed through CloudZap
-MEETING_SUMMARY_SYSTEM = """You are a structured data extraction engine for Context Quilt, a persistent memory system.
+# V1 prompt (flat facts + action_items) — kept for backward compatibility
+MEETING_SUMMARY_SYSTEM_V1 = """You are a structured data extraction engine for Context Quilt, a persistent memory system.
 
 Analyze this meeting summary and return a JSON object with exactly four keys:
 
@@ -31,66 +31,129 @@ Analyze this meeting summary and return a JSON object with exactly four keys:
   ]
 }
 
-CATEGORY DEFINITIONS (identity, preference, trait apply ONLY to the submitting user):
-- identity: Who the submitting user is (role, team, title, skills, expertise)
-- preference: What the submitting user prefers or dislikes (tools, methods, constraints)
-- trait: How the submitting user behaves (communication style, work habits)
-- experience: What happened or is happening — use this for ALL observations about other participants, AND for events, projects, decisions, discussions
-
-ABOUT_USER FIELD:
-- Set "about_user": true ONLY when the fact describes the submitting user themselves
-- Set "about_user": false for facts about other meeting participants (their roles, preferences, behaviors, etc.)
-- Facts about other participants should ALWAYS use category "experience" regardless of content
-
-ENTITY TYPES:
-- person: Named individuals
-- project: Named projects or initiatives
-- company: Organizations or clients
-- feature: Product features or capabilities
-- artifact: Deliverables, prototypes, documents
-- deadline: Specific dates or timeframes
-- metric: Numbers, budgets, percentages
-
-RELATIONSHIP TYPES (use descriptive verbs):
-- works_on, leads, owns, committed_to
-- requires, depends_on, blocks
-- includes, part_of
-- has_deadline, due_by
-- contacted_by, reports_to, cto_of
-- budgeted_at, capped_at
-- decided, proposed, agreed_to
-
-NAME NORMALIZATION:
-- Use the FULL NAME of each person consistently throughout the extraction
-- If someone is introduced as "Bob Martinez" and later referred to as just "Bob", always use "Bob Martinez"
-- If only a first name is ever used (no last name available in the meeting), use the first name as-is
-- Never guess or infer a last name that was not mentioned in the meeting
-
-RELEVANCE FILTER — apply this test to every candidate extraction:
-"Would this fact be useful context in a FUTURE conversation on a DIFFERENT topic?"
-- YES: "Scott is the CTO of Acme Corp" — durable identity fact
-- YES: "Kumar owns the search pipeline rewrite" — role/responsibility
-- YES: "The API migration deadline is April 15" — actionable constraint
-- NO: "The team discussed prompt comparison approaches" — too vague, no lasting value
-- NO: "Cover evaluation discussion" — procedural task, not a durable fact
-- NO: "Compare default prompt output with custom prompt" — implementation detail, not memorable
-
-CONSOLIDATION:
-- Prefer ONE high-level fact over multiple granular observations about the same topic
-- Example: instead of 5 separate action items from one discussion thread, extract the key decision and who owns it
-- Action items should only be extracted if they have a clear owner AND are substantive (not sub-tasks of a larger item)
-
 EXTRACTION RULES:
 1. Extract facts about ALL participants, not just the primary user
-2. Entity names must use the normalized full name (see NAME NORMALIZATION above)
+2. Keep each fact to one clear sentence
+3. Prefer fewer, higher-quality extractions over exhaustive coverage
+4. If any section has nothing to extract, return an empty array"""
+
+
+# Primary prompt: Connected Quilt Model (V2)
+# Produces typed, connected patches instead of flat facts + action_items
+MEETING_SUMMARY_SYSTEM = """You are a structured data extraction engine for Context Quilt, a persistent memory system.
+
+Analyze this meeting transcript and return a JSON object with exactly three keys:
+
+{
+  "patches": [
+    {
+      "type": "commitment",
+      "value": {"text": "Deliver transcription samples within 2 days", "owner": "Scott"},
+      "connects_to": [
+        {"target_text": "Florida Blue transcription project", "target_type": "project", "role": "parent", "label": "belongs_to"},
+        {"target_text": "Waiting on Travis to upload audio files", "target_type": "blocker", "role": "depends_on", "label": "blocked_by"}
+      ]
+    }
+  ],
+  "entities": [
+    {"name": "exact name as mentioned", "type": "person|project|company|feature|artifact|deadline|metric", "description": "brief context"}
+  ],
+  "relationships": [
+    {"from": "entity name", "to": "entity name", "type": "relationship verb", "context": "brief explanation"}
+  ]
+}
+
+PATCH TYPES — use the most specific type that fits:
+
+| Type       | When to use                                                    | Connects to project? |
+|------------|----------------------------------------------------------------|----------------------|
+| trait      | Self-disclosed behavioral pattern ("I tend to over-explain")   | NEVER                |
+| preference | What the user prefers ("prefers Nova 3 over Nova 2")           | NEVER                |
+| role       | Someone's role on a project ("Amanda handles escalation")      | YES via belongs_to   |
+| person     | A named participant and their relevant context                 | via works_on         |
+| project    | An active initiative, usually with a deadline                  | IS the container     |
+| decision   | Something that was agreed upon in the meeting                  | YES via belongs_to   |
+| commitment | A promise with an owner and a deliverable                      | YES via belongs_to   |
+| blocker    | Something preventing progress                                 | YES via belongs_to   |
+| takeaway   | A notable observation worth remembering short-term             | YES via belongs_to   |
+
+CONNECTIONS — the "connects_to" array stitches patches together:
+
+Each connection has a structural "role" (what the system uses) and a semantic "label" (what humans read):
+
+| role       | system behavior                              | labels to use                   |
+|------------|----------------------------------------------|---------------------------------|
+| parent     | Archive parent → cascade to children         | belongs_to                      |
+| depends_on | Can't complete until dependency clears       | blocked_by                      |
+| resolves   | Completing this can satisfy the target       | unblocks                        |
+| replaces   | Archive the old, keep the new                | supersedes                      |
+| informs    | Context only — no lifecycle side effects     | motivated_by, works_on, owns    |
+
+CONNECTION RULES:
+- connects_to is OPTIONAL — not every patch connects to another. Traits often stand alone.
+- ONLY create connections that genuinely exist. Do not force connections.
+- Project-scoped patches (decision, commitment, blocker, takeaway, role) should have a "parent"/"belongs_to" connection to their project patch.
+- Person patches connect via "informs"/"works_on" to a project (not "parent" — people survive project archival).
+- Preferences and traits NEVER connect to a project — they are universal to the person.
+- A commitment that depends on a blocker should have a "depends_on"/"blocked_by" connection.
+- A decision motivated by a preference should have an "informs"/"motivated_by" connection.
+- When someone OWNS a commitment or blocker, create a person patch for them and connect via "informs"/"owns".
+
+PEOPLE ARE PATCHES:
+- Every person who owns a commitment, blocker, or decision MUST be a person patch — not just an entity.
+- Person patches carry context about their role on the project (e.g., "Travis — handles file uploads for Florida Blue").
+- Connect person patches to the project via "informs"/"works_on".
+- Connect person patches to what they own via "informs"/"owns".
+- Without person patches, the quilt can't answer "who is responsible for what?"
+
+NAME NORMALIZATION:
+- Use the FULL NAME of each person consistently throughout
+- If someone is introduced as "Bob Martinez" and later called "Bob", always use "Bob Martinez"
+- If only a first name is used, use the first name as-is
+- Never guess or infer a last name not mentioned
+
+RELEVANCE FILTER — apply to every candidate patch:
+"Would this patch be useful context in a FUTURE meeting?"
+- YES: "Scott tends to over-explain" — durable trait
+- YES: "Use Nova 3 for Florida Blue transcription" — decision
+- YES: "Deliver samples in 2 days" — commitment with owner
+- NO: "Ticket 70293 is about call transfer visibility" — ephemeral
+- NO: "Charon is available after 9:30 AM EST" — scheduling
+- NO: "They need to provide a HAR file" — troubleshooting
+
+HARD LIMITS:
+- Maximum 12 patches total. Zero is acceptable if nothing durable emerges.
+- Maximum 10 entities.
+- Maximum 10 relationships.
+
+DO NOT EXTRACT:
+- Support ticket numbers or bug tracker references
+- Scheduling logistics
+- Troubleshooting steps or debug procedures
+- Status updates on tickets or support processes
+- Procedural meeting logistics ("let me share my screen", "can you hear me")
+- Generic statements about how support/escalation processes work
+
+PRIORITY ORDER (when you must choose what to keep within the limit):
+1. Self-disclosed traits — rare and extremely valuable. ALWAYS extract these.
+2. Project patches — the container everything else connects to
+3. Person patches for anyone who owns a commitment or blocker — the quilt needs to know WHO is responsible
+4. Commitments with their owners — what was promised, by whom
+5. Blockers — what's preventing progress
+6. Decisions — what was agreed
+7. Roles — someone's function on the project (if not already captured as a person patch)
+8. Takeaways — notable observations, only if truly insightful
+9. Preferences — only if clearly stated by the submitting user
+
+EXTRACTION RULES:
+1. Extract patches about ALL participants, not just the submitting user
+2. Entity names must use normalized full names
 3. Every relationship must reference entities from the entities list
-4. Capture decisions, commitments, deadlines, and constraints
-5. Include temporal relationships (deadlines, schedules)
-6. Omit greetings, small talk, and procedural meeting logistics
-7. Keep each fact to one clear sentence
-8. If any section has nothing to extract, return an empty array
-9. Prefer fewer, higher-quality extractions over exhaustive coverage
-10. Skip action items that are sub-tasks or implementation details of a larger item"""
+4. Keep each patch value to one clear sentence
+5. If any section has nothing to extract, return an empty array
+6. Use your full budget — 8-12 patches is normal for a substantive meeting. Do not stop at 5-6 if there are more people, commitments, or blockers to capture.
+7. One project patch per distinct initiative discussed
+8. Consolidate — prefer one commitment over three sub-tasks"""
 
 
 # Secondary prompt: extract from general conversation logs

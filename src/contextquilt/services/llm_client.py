@@ -27,14 +27,19 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4.1-nano": (0.10, 0.40),
     "gpt-5.4-nano": (0.20, 1.25),
     "gpt-4o-mini": (0.15, 0.60),
-    # Gemini (via OpenAI-compatible endpoint)
+    # Gemini (via OpenAI-compatible endpoint or OpenRouter)
+    "google/gemini-2.5-flash": (0.30, 2.50),
     "gemini-2.5-flash-lite": (0.10, 0.40),
+    "google/gemini-2.0-flash-001": (0.10, 0.40),
     "gemini-2.0-flash-lite": (0.075, 0.30),
     # Qwen (via OpenRouter)
     "qwen/qwen3-4b:free": (0.0, 0.0),
     "qwen/qwen-turbo": (0.033, 0.13),
     "qwen/qwen3.5-flash-02-23": (0.065, 0.26),
     "qwen/qwen3-14b": (0.06, 0.24),
+    "qwen/qwen3-32b": (0.08, 0.24),
+    # DeepSeek (via OpenRouter)
+    "deepseek/deepseek-chat-v3-0324": (0.20, 0.77),
     # Mistral (via OpenRouter)
     "mistralai/mistral-small-3.1-24b-instruct:free": (0.0, 0.0),
     "mistralai/mistral-small-3.1-24b-instruct": (0.03, 0.11),

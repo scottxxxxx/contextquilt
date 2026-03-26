@@ -1,0 +1,71 @@
+Florida Blue Meeting - Mar 24, 2026
+
+[Scott] Okay, so depending on the quality of the audio file you give me, then I can do the ASR and the transcription on that.
+[Scott] Um, And then I can, there's, there's, it's sort of an open problem.
+[Scott] You're asking me for something but I'm trying to figure out if there's constraints that you have on this.
+[Scott] The ideal way to do this would be to run it through a transcription engine and then possibly do direzation and then use something like a transformer to provide that as context along with system instructions and then get a summary.
+[Scott] And I believe what you're asking for is a summary that would be passed to a live agent.
+[Scott] Is that correct? Uh, correct.
+[Scott] As of now, we are wanting that to do analysis for the sales calls.
+[Sridev] This was done by core for us, right?
+[Sridev] We had engaged with Anand and Vishnu back then.
+[Sridev] So if you can check with them to see what they had done for us back then.
+[Sridev] Yeah, I can talk to Anand about that.
+[Scott] But you need to provide some direction in terms of what your expectations are.
+[Scott] Ideally, you would give me an ideal output of what the summary would include. It's too open-ended.
+[Scott] Like you need to provide some guidelines.
+[Sridev] What we don't know what the summary needs to be, okay?
+[Sridev] So basically what we are saying is this capability is going to be given to the sales agents for the first time, okay?
+[Sridev] So, what we are asking is generate an optimal summary based on how core has done this in your other clients.
+[Sridev] Because you have done this multiple times as an organization for different clients, and you will have best practices out of that.
+[Sridev] So based on those best practices, give us a summary that is like, um, it's about thousand characters long.
+[Scott] You're saying that you don't want this summary to meet more than a 1000 characters? Is that your only constraint?
+[Sridev] That's the only constraint at this point.
+[Scott] In your business is like every other business that we've provided summaries to sales teams for, there's nothing unique that you want to give us to make it more conforming to what your sales team expects or needs.
+[Sridev] See, that's where we are getting started, right? We are starting with a blank slate, okay?
+[Scott] You want us to just give you something generic, try to figure out what's going to suit you, and then when we do that, you'll be able to come back and say change this and change that. We can do it that way.
+[Scott] I'm not sure it's the most efficient way. It's typically, you know, I want to, as an SME, be able to talk to somebody, figure out what it is that they're looking for, what benefits them, what do they use a summary for? What information would help them get their job done quicker? What are things that are typically missing that that summary could include?
+[Scott] But if, you know, we can't do that, if we can't get the kind of requirements from the business side, then I'll give you useful information and then we can just iterate that way.
+[Sridev] Because going to the business, trust me, I can link you up directly to the business, but it will just go in loops.
+[Scott] I don't like engineering or solving for problems without fully understanding the problem. And I'm getting given limited information, saying just do what core always does, but there's no one solution for every customer.
+[Scott] But, um, you know, if you let me just do whatever I want, I'll pick the best model. We do the best transcription. I'll include direzation. We'll then have more information. I'll use the best model if you're saying that I can use LLMs for this.
+[Scott] If you're saying do whatever you want, Scott, just give us the best product, that's easy.
+[Scott] I'll work with Don and figure out, or if you're just gonna give me the audio files, I'll do the transcription. I'll figure out what it is and then I'll show you the outputs of those.
+[Sridev] They basically put it in an excel sheet. They name the record using the file name of the audio, and they created a column for transcription. They created another column for summary.
+[Scott] And the only restriction is this summary needs to be 1000 characters or less. That's the only restriction I have.
+[Sridev] I will confirm if it is 1000 or if it is 5000.
+[Scott] Well, if it's 5000, just tell me what the reasonable size is and I'll not go over that.
+[Scott] And also maybe consider if it's based on time. For example, if you had a 5 minute call, you wouldn't want 5000, but if you had a 20 or 30 minute call, maybe you would want 5000 characters. So if there's some sort of guidelines around, not just the maximum, but the expected summary per minute or some kind of guideline.
+[Sridev] I'll give you the exact business challenge here. This business is going to be used for the very first time, okay? So they are coming and asking us, if there are long calls, our summary is going to be appropriate, meaning is it going to give a proper summary of what happened in the call, and how is it going to vary for a very short call?
+[Scott] This isn't the first time that I've done this type of activity. So I'll give you something good. It won't be what you'll end up with because we'll have to talk about how to make it better, but you'll get something good. Give me a couple days. As soon as you give me the audio files, just give me 2 days.
+[Scott] How many audio files are you going to give me?
+[Sridev] About 1500.
+[Scott] It just takes longer. I don't know if I'm gonna read 1500 summaries, but I'll spot check them. Just give me a couple days to get this done.
+[Sridev] Now, with this capability, a couple of other things. Language line support. So we have, when a user calls in, the IVR, the Genesis IVR, picks up the language that the user wants to communicate with.
+[Sridev] The second item is our existing capability. What happens is an inducer calls, an agent picks up the call, and as the call is going in, there's transcription that's happening, and then the summary is generated at the end of the call.
+[Sridev] For this new business area, they're saying there could be a scenario where a user calls in, during the call, the agent figures out that this particular call needs a translation to be done. So during the call, they can conference in a translator who will be translating between the agent and the customer.
+[Sridev] So there are going to be 3 speakers speaking 2 different languages.
+[Scott] I don't think it's a big problem. You could use a transcription engine that would understand both languages, Spanish and English, transcribe the languages correctly. And then when you ask for summarization, you would simply provide in the system instructions that you would either focus only on English or be cognizant of when a translation had occurred.
+[Sridev] The summary should be used by the agent, right? At the end of the call, the agent just wants a real summary of the conversation in English.
+[Scott] We wouldn't necessarily, it wouldn't make sense to say this is the language, right? We would expect that the transcription model is able to infer the language from the wavefile.
+[Sridev] Can you put that in an email and include me and Anand and Amanda in it so I can just have a way to track that?
+[Scott] Nova 3 does support Spanish and English. I just confirmed that while we were talking.
+[Scott] I'm so keen on Nova 3 because I've had specific use cases where Nova 2 didn't deal with background noise well. And I did testing with it over a year ago. It's a generational improvement. The word error rate is like 18% better.
+[Sridev] We've been asking Core to add Nova 3 for us. We know it's come up.
+[Scott] Anand just added it for someone else. He went in and flipped a switch and Nova 3 is now being used. I don't know why it's different for you, maybe because you're on your own VPC.
+[Scott] When I do your transcription, I'll use Nova 3. I don't like building for the past. If that's what we're gonna go with, let's build for what we think we're gonna have.
+[Sridev] The production date is June 28. We need to get these things implemented within the next 4 weeks.
+[Scott] Would you mind if when I do your transcription, I use Nova 3 if that's the direction we think we're gonna go?
+[Sridev] Yeah, we want to push towards that.
+[Chris] We had a recent problem where the transcription didn't pull most of the call because they flipped the language in the middle of the call.
+[Sridev] The audio hook is another one where it stops working randomly. We need some support over there.
+[Chris] One of the tickets is for the conversation visibility setting not working, for hiding the conversation from one agent to another. And then we have the audio hooks.
+[Chris] The transfer scenario - what happens is it uses the same conversation ID. So when you ask core for the call transcript, it gives you the entire agent one plus agent 2 conversation, thus not hiding it from the second agent.
+[Scott] I just put a public comment on that ticket. Let me look at 70413. That one has a corresponding Jira now, which means an engineer on the product team is now engaged.
+[Sridev] For the subsequent sessions, don't wait on me. Sync up with Scott's help to make progress.
+[Scott] The typical escalation process is through Amanda, because Amanda works in customer success and has the ability to prioritize and add weight behind these tickets.
+[Scott] Sometimes I tend to be repetitive if you haven't noticed. I over-explain. So that's my, you know, that's how I work.
+[Sridev] The number one thing is when you get me the FTP link to get the wave files, I'll start running the transcription on them, and then I'll start working on the prompts to get those summarized.
+[Sridev] Travis is gonna upload them and he'll send an email.
+[Sridev] The other critical one is the language line support. That includes agent assist and the transcription engines.
+[Scott] Can you put that in an email and include me and Anand and Amanda?
