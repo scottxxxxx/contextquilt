@@ -701,20 +701,33 @@ async def get_user_quilt(
     """
     subject_key = f"user:{user_id}"
 
-    # Build query with ACL enforcement
-    query = """
+    # Check if app_id is a valid UUID for ACL join; legacy X-App-ID
+    # values (e.g. "cloudzap") are not UUIDs, so skip ACL filtering
+    # and return all patches (no ACL row = open access).
+    import uuid as _uuid
+    try:
+        app_uuid = _uuid.UUID(app_id)
+        acl_join = "LEFT JOIN context_patch_acl acl ON cp.patch_id = acl.patch_id AND acl.app_id = $2"
+        acl_where = "AND (acl.can_read = TRUE OR acl.patch_id IS NULL)"
+        params: list = [subject_key, app_uuid]
+    except (ValueError, AttributeError):
+        acl_join = ""
+        acl_where = ""
+        params = [subject_key]
+
+    # Build query with optional ACL enforcement
+    query = f"""
         SELECT cp.patch_id, cp.patch_name, cp.patch_type, cp.value,
                cp.origin_mode, cp.source_prompt, cp.created_at
         FROM context_patches cp
         JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
-        LEFT JOIN context_patch_acl acl ON cp.patch_id = acl.patch_id AND acl.app_id = $2
+        {acl_join}
         WHERE ps.subject_key = $1
-          AND (acl.can_read = TRUE OR acl.patch_id IS NULL)
+          {acl_where}
     """
-    params: list = [subject_key, app_id]
 
     if category:
-        query += " AND cp.patch_type = $3"
+        query += f" AND cp.patch_type = ${len(params) + 1}"
         params.append(category)
 
     query += " ORDER BY cp.created_at DESC"
@@ -774,13 +787,18 @@ async def update_patch(
     if not row:
         raise HTTPException(status_code=404, detail="Patch not found for this user")
 
-    # Check write ACL
-    acl = await db_pool.fetchrow(
-        "SELECT can_write FROM context_patch_acl WHERE patch_id = $1 AND app_id = $2",
-        patch_id, app_id
-    )
-    if acl and not acl["can_write"]:
-        raise HTTPException(status_code=403, detail="Write access denied for this patch")
+    # Check write ACL (skip for legacy non-UUID app IDs — no ACL = open access)
+    import uuid as _uuid
+    try:
+        app_uuid = _uuid.UUID(app_id)
+        acl = await db_pool.fetchrow(
+            "SELECT can_write FROM context_patch_acl WHERE patch_id = $1 AND app_id = $2",
+            patch_id, app_uuid
+        )
+        if acl and not acl["can_write"]:
+            raise HTTPException(status_code=403, detail="Write access denied for this patch")
+    except (ValueError, AttributeError):
+        pass  # Legacy app_id, no ACL enforcement
 
     # Build update
     value = row["value"]
@@ -832,13 +850,18 @@ async def delete_patch(
     if not row:
         raise HTTPException(status_code=404, detail="Patch not found for this user")
 
-    # Check delete ACL
-    acl = await db_pool.fetchrow(
-        "SELECT can_delete FROM context_patch_acl WHERE patch_id = $1 AND app_id = $2",
-        patch_id, app_id
-    )
-    if acl and not acl["can_delete"]:
-        raise HTTPException(status_code=403, detail="Delete access denied for this patch")
+    # Check delete ACL (skip for legacy non-UUID app IDs — no ACL = open access)
+    import uuid as _uuid
+    try:
+        app_uuid = _uuid.UUID(app_id)
+        acl = await db_pool.fetchrow(
+            "SELECT can_delete FROM context_patch_acl WHERE patch_id = $1 AND app_id = $2",
+            patch_id, app_uuid
+        )
+        if acl and not acl["can_delete"]:
+            raise HTTPException(status_code=403, detail="Delete access denied for this patch")
+    except (ValueError, AttributeError):
+        pass  # Legacy app_id, no ACL enforcement
 
     # Delete patch and related records
     await db_pool.execute("DELETE FROM patch_usage_metrics WHERE patch_id = $1", patch_id)
