@@ -669,6 +669,12 @@ async def list_applications():
 # This is provider-agnostic — CQ doesn't care if the user logged in
 # via Apple, Google, email, or anything else. That's the app's job.
 
+class PatchConnectionResponse(BaseModel):
+    to_patch_id: str
+    role: str              # parent, depends_on, resolves, replaces, informs
+    label: Optional[str] = None  # belongs_to, blocked_by, works_on, owns, etc.
+    context: Optional[str] = None
+
 class QuiltPatchResponse(BaseModel):
     patch_id: str
     fact: str
@@ -679,6 +685,8 @@ class QuiltPatchResponse(BaseModel):
     patch_type: str = ""  # "action_item" or fact category
     source: str = ""
     created_at: Optional[str] = None
+    project: Optional[str] = None
+    connections: List[PatchConnectionResponse] = []
 
 class QuiltResponse(BaseModel):
     user_id: str
@@ -718,7 +726,7 @@ async def get_user_quilt(
     # Build query with optional ACL enforcement
     query = f"""
         SELECT cp.patch_id, cp.patch_name, cp.patch_type, cp.value,
-               cp.origin_mode, cp.source_prompt, cp.created_at
+               cp.origin_mode, cp.source_prompt, cp.created_at, cp.project
         FROM context_patches cp
         JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
         {acl_join}
@@ -734,6 +742,32 @@ async def get_user_quilt(
 
     rows = await db_pool.fetch(query, *params)
 
+    # Collect all patch IDs to fetch connections in one query
+    patch_ids = [row["patch_id"] for row in rows]
+
+    # Fetch all outgoing connections for these patches
+    connections_by_patch: dict[str, list] = {}
+    if patch_ids:
+        conn_rows = await db_pool.fetch(
+            """SELECT pc.from_patch_id, pc.to_patch_id,
+                      pc.connection_role, pc.connection_label, pc.context
+               FROM patch_connections pc
+               WHERE pc.from_patch_id = ANY($1::uuid[])""",
+            patch_ids,
+        )
+        for cr in conn_rows:
+            from_id = str(cr["from_patch_id"])
+            if from_id not in connections_by_patch:
+                connections_by_patch[from_id] = []
+            connections_by_patch[from_id].append(
+                PatchConnectionResponse(
+                    to_patch_id=str(cr["to_patch_id"]),
+                    role=cr["connection_role"] or "",
+                    label=cr["connection_label"],
+                    context=cr["context"],
+                )
+            )
+
     facts = []
     action_items = []
 
@@ -742,8 +776,9 @@ async def get_user_quilt(
         if isinstance(value, str):
             value = json.loads(value)
 
+        pid = str(row["patch_id"])
         patch = QuiltPatchResponse(
-            patch_id=str(row["patch_id"]),
+            patch_id=pid,
             fact=value.get("text", ""),
             category=row["patch_type"] or "",
             participants=value.get("participants", []),
@@ -752,6 +787,8 @@ async def get_user_quilt(
             patch_type=value.get("type", row["patch_type"] or ""),
             source=row["source_prompt"] or "",
             created_at=row["created_at"].isoformat() if row["created_at"] else None,
+            project=row["project"],
+            connections=connections_by_patch.get(pid, []),
         )
 
         if value.get("type") == "action_item":
