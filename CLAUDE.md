@@ -113,7 +113,7 @@ See `docs/architecture/` for the complete V3 specification:
 
 ### What's built and deployed:
 - PostgreSQL + Redis on GCP VM
-- Cold path worker — recommended model: Gemini 2.5 Flash via OpenRouter ($0.0017/extraction)
+- Cold path worker using Gemini 2.5 Flash via OpenRouter ($0.0017/extraction)
 - **Connected Quilt model** — typed patches (trait, preference, role, person, project, decision, commitment, blocker, takeaway) with connections (role + label)
 - Patch type registry and connection vocabulary tables for extensible, app-defined types
 - Five structural connection roles: parent, depends_on, resolves, replaces, informs
@@ -156,8 +156,58 @@ See `docs/architecture/` for the complete V3 specification:
 5. Implement decay worker (scheduled job to archive stale patches per app policy)
 6. Build domain description interface (YAML or natural language → schema generation)
 
+## CI/CD and Deployment
+
+### Deployment workflow
+Push to `main` triggers GitHub Actions (`.github/workflows/deploy.yml`):
+1. Builds Docker image → pushes to `ghcr.io`
+2. SSH into GCP VM (`35.239.227.192`)
+3. Pulls latest image, restarts CQ containers via `docker-compose.prod.yml --env-file .env.prod`
+4. Only restarts CQ containers — does NOT touch CloudZap/Bifrost
+
+### Production environment
+- **On the GCP VM at `/opt/contextquilt/`**
+- `.env.prod` contains all production secrets (CQ_ADMIN_KEY, JWT_SECRET_KEY, CQ_LLM_API_KEY, POSTGRES_PASSWORD, REDIS_PASSWORD)
+- `docker-compose.prod.yml` defines: `context-quilt` (API on port 8000), `context-quilt-worker` (cold path), `cq-postgres`, `cq-redis`
+- LLM calls go through OpenRouter (`CQ_LLM_BASE_URL`), default model configured via `CQ_LLM_MODEL`
+- Nginx Proxy Manager (Project Bifrost) handles TLS termination and routes `cq.shouldersurf.com` → port 8000
+
+### GitHub Secrets required
+`GCP_HOST`, `GCP_USERNAME`, `GCP_SSH_KEY`, `GCP_SSH_PASSPHRASE`, `GITHUB_TOKEN` (auto)
+
+## Testing and Data Seeding
+
+### How data gets into CQ (production flow)
+1. User uses ShoulderSurf on iPhone → ShoulderSurf sends audio/transcript to GhostPour (CloudZap)
+2. GhostPour POSTs to `POST /v1/memory` with `user_id` (Apple Sign-In UUID), `interaction_type: "meeting_summary"`, transcript in `summary` field, and metadata (`meeting_id`, `project`, `display_name`)
+3. CQ queues to Redis stream → cold-path worker picks it up → LLM extracts patches → stored to Postgres
+4. On next query, GhostPour calls `POST /v1/recall` with `user_id` → CQ returns matching context
+
+### User identity
+- CQ does NOT authenticate end users — it authenticates **apps** (via JWT or X-App-ID header)
+- Apps are responsible for user auth (Apple Sign-In, etc.) and pass `user_id` to CQ
+- `user_id` is the Apple Sign-In subject identifier (UUID format, e.g., `FA4D903C-24C0-45D5-9FDB-B5496E32501B`)
+- CQ's internal `subject_key` format is `user:{user_id}`
+
+### Verifying patches for a user
+- **Admin dashboard:** `https://cq.shouldersurf.com/dashboard/` → Users tab → click user → see all patches
+- **API:** `GET /api/dashboard/users/{user_id}/quilt` (requires `X-Admin-Key` header)
+- **Quilt API:** `GET /v1/quilt/{user_id}` (requires app JWT or X-App-ID)
+
+### Dry-run extraction (no database writes)
+```bash
+OPENROUTER_API_KEY=sk-... python tests/benchmark/test_extraction_dryrun.py [transcript_file] [--user "Display Name"]
+```
+Runs the transcript through the extraction prompt and shows what patches would be created. Uses the Florida Blue transcript by default. See also `tests/benchmark/run_pipeline_benchmark.py` for multi-model comparison.
+
+### Test scripts
+- `scripts/generate_seed_patches.py` → generates synthetic patches to `data/seed_patches.json`
+- `scripts/load_seed_data.py` → loads seed patches into DB for demo users
+- `scripts/dump_patches.py` → dump all patches for inspection
+- `tests/benchmark/test_summaries.py` → ground truth test cases for benchmarking extraction quality
+
 ## Related Projects
 
-- **CloudZap** (`/Users/scottguida/cloudzap/`) — LLM gateway, CQ integration point
+- **GhostPour** (formerly CloudZap) (`/Users/scottguida/cloudzap/`) — LLM gateway, CQ integration point
 - **ShoulderSurf** (`/Users/scottguida/ShoulderSurf/`) — iOS meeting copilot, first CQ consumer
 - **Project Bifrost** (`/Users/scottguida/bifrost/`) — Nginx Proxy Manager on shared GCP VM

@@ -14,7 +14,7 @@ services:
       - REDIS_PASSWORD=${REDIS_PASSWORD}
       - CQ_LLM_API_KEY=${CQ_LLM_API_KEY}
       - CQ_LLM_BASE_URL=${CQ_LLM_BASE_URL:-https://openrouter.ai/api/v1}
-      - CQ_LLM_MODEL=${CQ_LLM_MODEL:-mistralai/mistral-small-3.1-24b-instruct}
+      - CQ_LLM_MODEL=${CQ_LLM_MODEL:-google/gemini-2.5-flash}
       - CQ_ADMIN_KEY=${CQ_ADMIN_KEY}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY}
     depends_on:
@@ -39,7 +39,7 @@ services:
       - REDIS_URL=redis://:${REDIS_PASSWORD}@cq-redis:6379/0
       - CQ_LLM_API_KEY=${CQ_LLM_API_KEY}
       - CQ_LLM_BASE_URL=${CQ_LLM_BASE_URL:-https://openrouter.ai/api/v1}
-      - CQ_LLM_MODEL=${CQ_LLM_MODEL:-mistralai/mistral-small-3.1-24b-instruct}
+      - CQ_LLM_MODEL=${CQ_LLM_MODEL:-google/gemini-2.5-flash}
     depends_on:
       cq-postgres:
         condition: service_healthy
