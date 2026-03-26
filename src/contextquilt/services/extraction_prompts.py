@@ -89,21 +89,30 @@ Each connection has a structural "role" (what the system uses) and a semantic "l
 | replaces   | Archive the old, keep the new                | supersedes                      |
 | informs    | Context only — no lifecycle side effects     | motivated_by, works_on, owns    |
 
+CONNECTION DIRECTION — connections go FROM → TO. The direction matters:
+- commitment/blocker/decision → project: "belongs_to" (the item is inside the project)
+- person → project: "works_on" (the person is involved in the project)
+- person → commitment/blocker/decision: "owns" (the person is RESPONSIBLE for the item)
+- commitment → blocker: "blocked_by" (the commitment depends on the blocker)
+- decision → preference: "motivated_by" (the decision was driven by the preference)
+
+WRONG: decision → person with label "owns" (reads as "decision owns person")
+RIGHT: person → decision with label "owns" (reads as "person owns decision")
+
 CONNECTION RULES:
 - connects_to is OPTIONAL — not every patch connects to another. Traits often stand alone.
 - ONLY create connections that genuinely exist. Do not force connections.
 - Project-scoped patches (decision, commitment, blocker, takeaway, role) should have a "parent"/"belongs_to" connection to their project patch.
 - Person patches connect via "informs"/"works_on" to a project (not "parent" — people survive project archival).
+- Person patches connect via "informs"/"owns" to commitments/blockers/decisions they are responsible for. Direction: FROM person TO the item they own.
 - Preferences and traits NEVER connect to a project — they are universal to the person.
 - A commitment that depends on a blocker should have a "depends_on"/"blocked_by" connection.
 - A decision motivated by a preference should have an "informs"/"motivated_by" connection.
-- When someone OWNS a commitment or blocker, create a person patch for them and connect via "informs"/"owns".
 
 PEOPLE ARE PATCHES:
 - Every person who owns a commitment, blocker, or decision MUST be a person patch — not just an entity.
 - Person patches carry context about their role on the project (e.g., "Travis — handles file uploads for Florida Blue").
-- Connect person patches to the project via "informs"/"works_on".
-- Connect person patches to what they own via "informs"/"owns".
+- The person patch has connects_to entries pointing TO the things they own/work on — NOT the other way around.
 - Without person patches, the quilt can't answer "who is responsible for what?"
 
 NAME NORMALIZATION:
