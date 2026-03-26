@@ -70,35 +70,96 @@ GET /v1/quilt/{user_id}
 Optional query param: `?category=trait` to filter by type.
 
 **Response:**
+
+Returns all active patches for the user. The `facts` array contains every patch type (trait, preference, decision, commitment, blocker, person, project, etc.). The `action_items` array is a V1 holdover — it will be empty for new patches. Use `patch_type` to distinguish.
+
+Each patch includes its `connections` — outgoing edges to other patches. Use `project` to group patches by project client-side.
+
 ```json
 {
   "user_id": "user_abc123",
   "facts": [
     {
-      "patch_id": "550e8400-e29b-41d4-a716-446655440000",
-      "fact": "Tends to over-explain",
-      "category": "trait",
-      "participants": [],
-      "owner": null,
-      "deadline": null,
-      "patch_type": "trait",
+      "patch_id": "aaa-111",
+      "fact": "Florida Blue transcription project",
+      "category": "project",
+      "patch_type": "project",
+      "project": null,
       "source": "inferred",
-      "created_at": "2026-03-25T14:32:10Z"
+      "created_at": "2026-03-25T14:32:10Z",
+      "connections": []
     },
     {
-      "patch_id": "660f9500-f39c-52e5-b827-557766551111",
+      "patch_id": "aaa-222",
+      "fact": "Tends to over-explain",
+      "category": "trait",
+      "patch_type": "trait",
+      "project": null,
+      "source": "inferred",
+      "created_at": "2026-03-25T14:32:10Z",
+      "connections": []
+    },
+    {
+      "patch_id": "aaa-333",
+      "fact": "Use Nova 3 for Florida Blue transcription",
+      "category": "decision",
+      "patch_type": "decision",
+      "project": "Florida Blue",
+      "source": "inferred",
+      "created_at": "2026-03-25T14:32:10Z",
+      "connections": [
+        {"to_patch_id": "aaa-111", "role": "parent", "label": "belongs_to"},
+        {"to_patch_id": "aaa-444", "role": "informs", "label": "motivated_by"}
+      ]
+    },
+    {
+      "patch_id": "aaa-444",
+      "fact": "Prefers Nova 3 over Nova 2 for better noise handling",
+      "category": "preference",
+      "patch_type": "preference",
+      "project": null,
+      "source": "inferred",
+      "created_at": "2026-03-25T14:32:10Z",
+      "connections": []
+    },
+    {
+      "patch_id": "aaa-555",
       "fact": "Deliver transcription samples within 2 days",
       "category": "commitment",
-      "participants": ["Travis"],
-      "owner": "Ina",
-      "deadline": "2026-03-27",
       "patch_type": "commitment",
+      "owner": "Scott",
+      "deadline": "2026-03-27",
+      "project": "Florida Blue",
       "source": "inferred",
-      "created_at": "2026-03-25T14:32:10Z"
+      "created_at": "2026-03-25T14:32:10Z",
+      "connections": [
+        {"to_patch_id": "aaa-111", "role": "parent", "label": "belongs_to"},
+        {"to_patch_id": "aaa-666", "role": "depends_on", "label": "blocked_by"}
+      ]
+    },
+    {
+      "patch_id": "aaa-666",
+      "fact": "Waiting on Travis to upload audio files",
+      "category": "blocker",
+      "patch_type": "blocker",
+      "project": "Florida Blue",
+      "source": "inferred",
+      "created_at": "2026-03-25T14:32:10Z",
+      "connections": [
+        {"to_patch_id": "aaa-111", "role": "parent", "label": "belongs_to"}
+      ]
     }
   ],
   "action_items": []
 }
+```
+
+**Grouping logic for iOS:**
+```swift
+// Group by project
+let universals = facts.filter { $0.project == nil }  // traits, preferences
+let byProject = Dictionary(grouping: facts.filter { $0.project != nil }, by: \.project)
+```
 ```
 
 ### Edit a Patch
