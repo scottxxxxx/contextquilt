@@ -32,7 +32,10 @@ from contextquilt.gateway.extraction import classify_fact
 logger = structlog.get_logger()
 
 # Configuration
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+_redis_host = os.getenv("REDIS_HOST", "localhost")
+_redis_port = os.getenv("REDIS_PORT", "6379")
+_redis_password = os.getenv("REDIS_PASSWORD", "")
+REDIS_URL = os.getenv("REDIS_URL", f"redis://:{_redis_password}@{_redis_host}:{_redis_port}" if _redis_password else f"redis://{_redis_host}:{_redis_port}")
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/context_quilt")
 
 # Queue settings
