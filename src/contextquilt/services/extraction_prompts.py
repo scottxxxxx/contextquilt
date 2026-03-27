@@ -155,6 +155,13 @@ PRIORITY ORDER (when you must choose what to keep within the limit):
 8. Takeaways — notable observations, only if truly insightful
 9. Preferences — only if clearly stated by the submitting user
 
+UNNAMED SPEAKERS:
+- Do NOT create entity or person patches for unnamed speakers (e.g., "Speaker 1", "Speaker 4").
+- These labels are temporary diarization artifacts — "Speaker 4" in one meeting is a different person than "Speaker 4" in another meeting.
+- If a speaker is only known by label, use the label in the patch fact text (e.g., "Speaker 4 committed to...") but do NOT create an entity for them.
+- Only create entities and person patches for people identified by real name (e.g., "Travis", "Kumar", "Amanda").
+- The app will rename "Speaker 4" to the real name later, at which point the entity gets created.
+
 EXTRACTION RULES:
 1. Extract patches about ALL participants, not just the submitting user
 2. Entity names must use normalized full names
