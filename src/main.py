@@ -1011,6 +1011,55 @@ async def delete_all_patches(
 
 
 # ============================================
+# Speaker / Entity Rename
+# ============================================
+
+class SpeakerRename(BaseModel):
+    old_name: str
+    new_name: str
+
+@app.post("/v1/quilt/{user_id}/rename-speaker", tags=["Quilt"])
+async def rename_speaker(
+    user_id: str,
+    rename: SpeakerRename,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Rename a speaker across entities, relationships, and the Redis entity index.
+    Called by ShoulderSurf when a user renames "Speaker 4" to "SriDev".
+
+    The app is responsible for updating patch text separately via PATCH /v1/quilt.
+    This endpoint handles the graph layer (entities + relationships).
+    """
+    old = rename.old_name
+    new = rename.new_name
+
+    # Update entity name
+    result = await db_pool.execute(
+        "UPDATE entities SET name = $1, last_seen_at = NOW() WHERE user_id = $2 AND name = $3",
+        new, user_id, old
+    )
+
+    # Update relationship context that mentions the old name
+    await db_pool.execute(
+        "UPDATE relationships SET context = REPLACE(context, $1, $2) WHERE user_id = $3 AND context LIKE '%' || $1 || '%'",
+        old, new, user_id
+    )
+
+    # Rebuild Redis entity index so recall matches the new name
+    entity_index_key = f"entity_index:{user_id}"
+    all_names = await db_pool.fetch(
+        "SELECT name FROM entities WHERE user_id = $1", user_id
+    )
+    if all_names:
+        await redis_client.delete(entity_index_key)
+        await redis_client.sadd(entity_index_key, *[r["name"] for r in all_names])
+        await redis_client.expire(entity_index_key, 7200)
+
+    return {"status": "renamed", "old_name": old, "new_name": new}
+
+
+# ============================================
 # Projects
 # ============================================
 
