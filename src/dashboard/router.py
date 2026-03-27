@@ -853,7 +853,10 @@ async def get_metrics_recent(limit: int = 50):
 import time
 import redis.asyncio as aioredis
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+_redis_host = os.getenv("REDIS_HOST", "localhost")
+_redis_port = os.getenv("REDIS_PORT", "6379")
+_redis_password = os.getenv("REDIS_PASSWORD", "")
+REDIS_URL = os.getenv("REDIS_URL", f"redis://:{_redis_password}@{_redis_host}:{_redis_port}" if _redis_password else f"redis://{_redis_host}:{_redis_port}")
 
 @router.get("/health-check", dependencies=[Depends(verify_admin_key)])
 async def health_check():
