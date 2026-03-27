@@ -1034,11 +1034,23 @@ async def rename_speaker(
     old = rename.old_name
     new = rename.new_name
 
-    # Update entity name
-    result = await db_pool.execute(
-        "UPDATE entities SET name = $1, last_seen_at = NOW() WHERE user_id = $2 AND name = $3",
-        new, user_id, old
+    # Update entity name if it exists, or create it if the old name was an unnamed speaker
+    existing = await db_pool.fetchrow(
+        "SELECT entity_id FROM entities WHERE user_id = $1 AND name = $2", user_id, old
     )
+    if existing:
+        await db_pool.execute(
+            "UPDATE entities SET name = $1, last_seen_at = NOW() WHERE user_id = $2 AND name = $3",
+            new, user_id, old
+        )
+    else:
+        # Old name was never an entity (unnamed speaker) — create the entity with the real name
+        await db_pool.execute(
+            """INSERT INTO entities (user_id, name, entity_type, description)
+            VALUES ($1, $2, 'person', $3)
+            ON CONFLICT (user_id, name, entity_type) DO UPDATE SET last_seen_at = NOW()""",
+            user_id, new, f"Identified from speaker rename (was {old})"
+        )
 
     # Update relationship context that mentions the old name
     await db_pool.execute(
