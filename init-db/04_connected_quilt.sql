@@ -67,9 +67,12 @@ CREATE TABLE IF NOT EXISTS connection_vocabulary (
     role TEXT NOT NULL,                       -- Which structural role this maps to
     from_types TEXT[],                        -- Which patch types can be "from"
     to_types TEXT[],                          -- Which patch types can be "to"
-    description TEXT,                         -- What this connection means
-    PRIMARY KEY (label, app_id)
+    description TEXT                          -- What this connection means
 );
+
+-- Unique constraint that handles NULL app_id (universals)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_connection_vocab_unique
+    ON connection_vocabulary (label, COALESCE(app_id, '00000000-0000-0000-0000-000000000000'::uuid));
 
 -- Seed universal vocabulary (app_id = NULL)
 INSERT INTO connection_vocabulary (label, app_id, role, from_types, to_types, description) VALUES
