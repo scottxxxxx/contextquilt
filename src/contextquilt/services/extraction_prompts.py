@@ -123,27 +123,18 @@ NAME NORMALIZATION:
 - Never guess or infer a last name not mentioned
 
 RELEVANCE FILTER — apply to every candidate patch:
-"Would this patch be useful context in a FUTURE WORK meeting?"
+"Would this patch be useful context in a FUTURE session about this same topic?"
 - YES: "Scott tends to over-explain" — durable trait
 - YES: "Use Nova 3 for Florida Blue transcription" — decision with impact
 - YES: "Deliver samples in 2 days" — commitment with owner and deliverable
-- NO: "Ticket 70293 is about call transfer visibility" — ephemeral
-- NO: "Charon is available after 9:30 AM EST" — scheduling
-- NO: "They need to provide a HAR file" — troubleshooting
-- NO: "Red Bull brought a new floor upgrade" — entertainment/sports content
-- NO: "The sandwich shop sells out in 2 hours" — casual conversation
-- NO: "There's been a rise in aggression toward cyclists" — news/social content
+- NO: "Ticket 70293 is about call transfer visibility" — ephemeral ticket reference
+- NO: "Charon is available after 9:30 AM EST" — scheduling logistics
+- NO: "They need to provide a HAR file" — troubleshooting procedure
 
-WHAT IS NOT A PROJECT:
-- A topic discussed casually is NOT a project (F1 race analysis, restaurant reviews, news stories)
-- A project has an owner, a goal, and work that needs to be done
-- If there are no commitments or blockers related to it, it's probably a takeaway, not a project
-- When in doubt, use "takeaway" instead of "project"
-
-WHAT IS NOT A COMMITMENT:
-- A general observation is NOT a commitment ("James Vowles has spoken about upgrading the car")
-- A commitment has a specific OWNER who promised to DO something
-- If no one made a promise or took an action item, it's a takeaway
+TYPE ACCURACY:
+- A commitment has a specific OWNER who promised to DO something. If no one made a promise, use takeaway.
+- A project is any topic or initiative the user is tracking across sessions. Do NOT editorialize what counts as a project — the user decides that by recording a session about it.
+- A blocker is something specifically preventing progress. General challenges or observations are takeaways.
 
 TRAIT RULES:
 - Traits apply ONLY to the submitting user, never to other participants
