@@ -286,14 +286,17 @@ async def store_connected_patches(
         if not text:
             continue
 
-        # Deduplication: check if an active patch with same type and text already exists
+        # Deduplication: check if an active patch with same type and similar text already exists
+        # Uses trigram similarity (pg_trgm) to catch near-duplicates like
+        # "Deliver samples in 2 days" vs "Deliver transcription samples within 2 days"
         existing = await db.fetchrow(
             """
             SELECT cp.patch_id FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1 AND cp.patch_type = $2
-              AND LOWER(cp.value->>'text') = LOWER($3)
+              AND SIMILARITY(LOWER(cp.value->>'text'), LOWER($3)) > 0.6
               AND COALESCE(cp.status, 'active') = 'active'
+            ORDER BY SIMILARITY(LOWER(cp.value->>'text'), LOWER($3)) DESC
             LIMIT 1
             """,
             subject_key, patch_type, text
@@ -449,6 +452,13 @@ async def store_connected_patches(
                 patch_lookup[(target_text, target_type)] = to_id
                 stored += 1
 
+            # Normalize direction: "owns" should always go FROM person TO the thing owned
+            # The LLM often puts "owns" on a commitment pointing to a person (reversed)
+            actual_from = from_id
+            actual_to = to_id
+            if label == "owns" and from_type != "person" and target_type == "person":
+                actual_from, actual_to = to_id, from_id
+
             # Create the connection
             try:
                 await db.execute(
@@ -457,7 +467,7 @@ async def store_connected_patches(
                     VALUES ($1::uuid, $2::uuid, $3, $4, $5)
                     ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO NOTHING
                     """,
-                    from_id, to_id, role, label, conn.get("context")
+                    actual_from, actual_to, role, label, conn.get("context")
                 )
                 connections_created += 1
 

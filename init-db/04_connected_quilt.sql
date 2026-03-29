@@ -1,3 +1,6 @@
+-- Enable trigram similarity for fuzzy deduplication
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+
 -- Connected Quilt Model
 -- Transforms CQ from flat patches to a connected graph where:
 -- - Patches have extensible types (app-defined via registry)
