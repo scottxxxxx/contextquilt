@@ -648,10 +648,11 @@ class ColdPathWorker:
                      base_url=self.llm.base_url,
                      context_budget=self.context_budget)
 
-        # Run stream consumer and queue checker concurrently
+        # Run stream consumer, queue checker, and decay worker concurrently
         await asyncio.gather(
             self.consume_stream(),
             self.check_queues_loop(),
+            self.decay_loop(),
         )
 
     async def stop(self):
@@ -707,6 +708,65 @@ class ColdPathWorker:
                 await self._process_ready_queues()
             except Exception as e:
                 logger.error("queue_check_error", error=str(e))
+
+    async def decay_loop(self):
+        """Periodically archive stale patches based on type-specific TTLs."""
+        # Default TTLs by patch type (days). NULL = never decays.
+        DEFAULT_TTLS = {
+            "takeaway": 14,
+            "blocker": 30,
+            "commitment": 30,
+            "experience": 30,
+        }
+        # Run every 6 hours
+        DECAY_INTERVAL_SECONDS = 6 * 60 * 60
+        # Wait 60 seconds after startup before first run
+        await asyncio.sleep(60)
+
+        while self.running:
+            try:
+                total_archived = 0
+                for patch_type, ttl_days in DEFAULT_TTLS.items():
+                    # Look up TTL from registry if available, fall back to default
+                    try:
+                        row = await self.db.fetchrow(
+                            "SELECT default_ttl_days FROM patch_type_registry WHERE type_key = $1",
+                            patch_type
+                        )
+                        if row and row["default_ttl_days"] is not None:
+                            ttl_days = row["default_ttl_days"]
+                    except Exception:
+                        pass  # Registry table may not exist yet
+
+                    # Archive patches older than TTL that haven't been accessed recently
+                    result = await self.db.execute(
+                        """
+                        UPDATE context_patches SET status = 'archived', updated_at = NOW()
+                        WHERE patch_type = $1
+                          AND COALESCE(status, 'active') = 'active'
+                          AND updated_at < NOW() - INTERVAL '1 day' * $2
+                          AND patch_id NOT IN (
+                              SELECT patch_id FROM patch_usage_metrics
+                              WHERE last_accessed_at > NOW() - INTERVAL '1 day' * $2
+                          )
+                        """,
+                        patch_type, ttl_days
+                    )
+                    # Parse "UPDATE N" to get count
+                    count = int(result.split()[-1]) if result else 0
+                    if count > 0:
+                        total_archived += count
+                        logger.info("decay_archived", patch_type=patch_type, count=count, ttl_days=ttl_days)
+
+                if total_archived > 0:
+                    logger.info("decay_cycle_complete", total_archived=total_archived)
+                else:
+                    logger.debug("decay_cycle_complete", total_archived=0)
+
+            except Exception as e:
+                logger.error("decay_error", error=str(e))
+
+            await asyncio.sleep(DECAY_INTERVAL_SECONDS)
 
     async def _process_ready_queues(self):
         """Find queues that have exceeded the time window and process them."""
