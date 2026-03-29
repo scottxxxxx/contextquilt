@@ -1,268 +1,194 @@
 # Connected Quilt Data Model
 
-## The Problem
+## Overview
 
-Today, patches are flat and isolated. Four hardcoded types (identity, preference, trait, experience), no connections between them. The quilt metaphor implies patches stitched together — but right now it's a pile of fabric.
-
-This matters because:
-- We can't represent "this commitment is blocked by that action item"
-- We can't auto-archive a project and everything connected to it
-- We can't tell ShoulderSurf "show me the Florida Blue quilt" as a connected graph
-- A different app (CRM, helpdesk) can't define its own patch types
+The quilt is a connected graph of typed patches rooted on a person. Each patch has a type that defines its shape and lifecycle, and patches are connected via typed edges that carry both structural meaning (for CQ's automation) and semantic meaning (for the app's domain).
 
 ## Design Principles
 
-1. **Patches are typed** — each type has a shape (required fields, lifecycle rules)
-2. **Patches are connected** — typed edges between patches form the quilt
-3. **Types are extensible** — apps register custom types; CQ provides built-in universals
-4. **The graph is the quilt** — recall traverses connections, not just flat lists
-5. **Connections drive lifecycle** — when a project archives, its children archive; when all blockers clear, a commitment completes
+1. **The quilt is a person** — everything hangs off the user as the root
+2. **Patches are typed** — each type has persistence rules, TTL, and whether it's completable
+3. **Patches are connected** — directed edges with a structural role (CQ uses) and semantic label (app defines)
+4. **Types are extensible** — apps can register custom types; CQ provides 11 built-in types
+5. **Connections drive lifecycle** — project archival cascades to children, replaces auto-archives
+6. **CQ doesn't editorialize** — any topic the user records is a valid project
 
-## Data Model
+## Patch Types (Built-In)
 
-### Layer 1: Patch Type Registry
+All 11 types are registered in `patch_type_registry` with `app_id = NULL` (universal).
 
-Apps register the types of patches they'll create. CQ ships with built-in types that all apps share.
+| type_key | persistence | TTL (days) | completable | project_scoped | description |
+|----------|------------|------------|-------------|----------------|-------------|
+| `trait` | sticky | never | no | no | Self-disclosed behavioral pattern (submitting user ONLY) |
+| `preference` | sticky | never | no | no | What the user prefers |
+| `identity` | sticky | never | no | no | Who the user is (role, org) |
+| `role` | sticky | never | no | optional | Someone's function on a project |
+| `person` | sticky | never | no | no | A named participant |
+| `project` | sticky | never | no | no | An initiative the user tracks across sessions |
+| `decision` | sticky | never | no | yes | Something agreed upon |
+| `commitment` | completable | 30 | yes | yes | A promise with a named owner |
+| `blocker` | completable | 30 | yes | yes | Something preventing progress |
+| `takeaway` | decaying | 14 | no | yes | A notable observation, short-lived |
+| `experience` | decaying | 30 | no | yes | Legacy type — general observations |
 
-```sql
-CREATE TABLE IF NOT EXISTS patch_type_registry (
-    type_key TEXT PRIMARY KEY,            -- "trait", "commitment", "decision"
-    app_id UUID REFERENCES applications(app_id) ON DELETE CASCADE,
-                                          -- NULL = built-in (available to all apps)
-    display_name TEXT NOT NULL,           -- "Commitment", "Decision"
-    description TEXT,                     -- "A promise to deliver something by a deadline"
+### Type Rules
 
-    -- Shape: what fields this type expects in value JSONB
-    schema JSONB NOT NULL DEFAULT '{}',   -- JSON Schema for value validation
-                                          -- e.g., {"owner": "string", "deadline": "string?", "status": "string"}
+- **Traits** apply ONLY to the submitting user. "Speaker 3 is meticulous" is NOT a trait.
+- **Commitments** require a specific NAMED owner. "Someone should finalize the deck" (no owner) = takeaway.
+- **Projects** are any topic the user tracks — CQ doesn't decide what's "real work" vs "casual."
+- **Unnamed speakers** (Speaker 1, Speaker 4) must NOT become entities or person patches.
 
-    -- Lifecycle rules
-    persistence TEXT DEFAULT 'sticky',    -- "sticky", "decaying", "completable"
-    default_ttl_days INTEGER,             -- NULL = no expiry. 30 = archive after 30 days idle
-    is_completable BOOLEAN DEFAULT FALSE, -- Can this patch be marked "done"?
-    project_scoped BOOLEAN DEFAULT TRUE,  -- Does this type belong to a project context?
+## Connections (Role + Label)
 
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
+Connections are directed edges stored in `patch_connections`. Each has:
+- **role** — structural, CQ uses for lifecycle automation (5 roles)
+- **label** — semantic, app-defined vocabulary (unlimited)
+
+### The Five Roles
+
+| Role | CQ Behavior | Example Labels |
+|------|------------|----------------|
+| `parent` | Archive parent → cascade to children | belongs_to |
+| `depends_on` | Can't complete until dependency clears | blocked_by |
+| `resolves` | Completing this can satisfy target | unblocks, fulfills |
+| `replaces` | Archive the old, keep the new | supersedes, updates |
+| `informs` | Traversal only — no lifecycle side effects | motivated_by, works_on, owns |
+
+### Connection Direction
+
+Connections go FROM → TO. Direction matters:
+- `person → project`: "works_on"
+- `person → commitment/blocker/decision`: "owns" (person is responsible)
+- `commitment/blocker/decision → project`: "belongs_to" (item is inside project)
+- `commitment → blocker`: "blocked_by"
+- `decision → preference`: "motivated_by"
+
+**Never**: `commitment → person` with "owns" (backwards — the worker normalizes this automatically).
+
+### Connection Vocabulary
+
+Registered in `connection_vocabulary` table. Built-in labels:
+
+| label | role | from_types | to_types |
+|-------|------|-----------|----------|
+| belongs_to | parent | decision, commitment, blocker, takeaway, role | project |
+| works_on | informs | person | project |
+| owns | informs | person | commitment, blocker, decision |
+| blocked_by | depends_on | commitment | blocker |
+| unblocks | resolves | blocker | commitment |
+| motivated_by | informs | decision | preference, takeaway |
+| supersedes | replaces | decision | decision |
+
+## Projects & Meetings
+
+Projects are first-class entities with stable IDs. Names can be renamed without breaking patch associations.
+
+### Projects Table
+```
+projects: project_id (stable UUID from app), user_id, name (renameable), status, created_at
 ```
 
-**Built-in types** (app_id = NULL, available to all apps):
-
-| type_key | persistence | completable | project_scoped | schema |
-|----------|------------|-------------|----------------|--------|
-| `trait` | sticky | no | no | `{text}` |
-| `preference` | sticky | no | no | `{text}` |
-| `identity` | sticky | no | no | `{text, role?, org?}` |
-| `experience` | decaying | no | yes | `{text, participants?}` |
-
-**ShoulderSurf custom types** (registered by the app):
-
-| type_key | persistence | completable | project_scoped | schema |
-|----------|------------|-------------|----------------|--------|
-| `commitment` | completable | yes | yes | `{text, owner, deadline?, status}` |
-| `decision` | sticky | no | yes | `{text, rationale?, participants?}` |
-| `action_item` | completable | yes | yes | `{text, owner, deadline?, status}` |
-| `requirement` | completable | yes | yes | `{text, priority?, status}` |
-| `project` | sticky | no | no | `{text, status}` |
-
-A CRM app might register completely different types: `deal`, `objection`, `contact_note`.
-
-### Layer 2: Patches (Existing Table, Extended)
-
-The `context_patches` table stays mostly the same. The `patch_type` column now references the registry instead of being a free-form string.
-
-```sql
--- Existing columns remain unchanged
--- New columns:
-
-ALTER TABLE context_patches ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active';
-    -- "active", "completed", "archived"
-    -- Only meaningful for completable types, but tracked universally
-
-ALTER TABLE context_patches ADD COLUMN IF NOT EXISTS completed_at TIMESTAMP WITH TIME ZONE;
-    -- When this patch was marked complete (action items, commitments)
+### On Patches
+```
+context_patches: ... project (display name), project_id (stable UUID), meeting_id (UUID)
 ```
 
-The `value` JSONB column already stores structured data. With the type registry, we can validate that a `commitment` patch has `{text, owner, deadline, status}` while a `trait` patch just has `{text}`.
+### APIs
+- `GET /v1/projects/{user_id}` — list projects with patch counts
+- `POST /v1/projects/{user_id}` — register a project
+- `PATCH /v1/projects/{user_id}/{project_id}` — rename (cascades to all patches) or archive (cascades: archives all patches inside)
 
-### Layer 3: Patch Connections (New — The Stitching)
-
-This is the new primitive. Typed, directed edges between patches.
-
-```sql
-CREATE TABLE IF NOT EXISTS patch_connections (
-    connection_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    from_patch_id UUID NOT NULL REFERENCES context_patches(patch_id) ON DELETE CASCADE,
-    to_patch_id UUID NOT NULL REFERENCES context_patches(patch_id) ON DELETE CASCADE,
-    connection_type TEXT NOT NULL,         -- "belongs_to", "blocked_by", "motivated_by", etc.
-    context TEXT,                          -- Optional explanation
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    UNIQUE(from_patch_id, to_patch_id, connection_type)
-);
-
-CREATE INDEX IF NOT EXISTS idx_connections_from ON patch_connections(from_patch_id);
-CREATE INDEX IF NOT EXISTS idx_connections_to ON patch_connections(to_patch_id);
-CREATE INDEX IF NOT EXISTS idx_connections_type ON patch_connections(connection_type);
+### Grouping Hierarchy
+```
+Person (root)
+ ├── Universal patches (trait, preference — no project)
+ ├── Project A
+ │    ├── Meeting 1 (meeting_id)
+ │    │    ├── decision, commitment, blocker, takeaway
+ │    │    └── person patches (works_on → project)
+ │    └── Meeting 2
+ │         └── ...
+ └── Project B
+      └── ...
 ```
 
-**Connection types:**
+## Lifecycle
 
-| connection_type | meaning | example |
-|----------------|---------|---------|
-| `belongs_to` | child → parent grouping | action_item → project |
-| `blocked_by` | this can't complete until that completes | commitment → action_item |
-| `fulfills` | completing this satisfies that | action_item → commitment |
-| `motivated_by` | this decision was driven by that preference/trait | decision → preference |
-| `supersedes` | this replaces that (auto-archives the old one) | decision → decision |
-| `related_to` | general association | experience → experience |
+### Decay Worker
+Runs every 6 hours. Archives patches that exceed their type's TTL and haven't been accessed recently:
+- Takeaways: 14 days
+- Experience: 30 days
+- Commitments: 30 days
+- Blockers: 30 days
+- Sticky types (trait, preference, decision, project, person, role): never
 
-### Layer 4: App Policy (Per-App Configuration)
+TTLs are configurable via `patch_type_registry.default_ttl_days`. Access-based exemption: if `patch_usage_metrics.last_accessed_at` is recent, the patch survives even past TTL.
 
-```sql
-ALTER TABLE applications ADD COLUMN IF NOT EXISTS policy JSONB DEFAULT '{}'::jsonb;
-```
+### Lifecycle Through Connections
+- **Project archival**: `PATCH /v1/projects/{user_id}/{project_id}` with `status: "archived"` → cascades to all patches with that `project_id`
+- **Decision supersedes**: when a `replaces` connection is created, the target patch is auto-archived
+- **Direction normalization**: worker automatically flips `commitment → owns → person` to `person → owns → commitment`
 
-```json
-{
-  "extraction": {
-    "max_facts_per_event": 5,
-    "max_action_items_per_event": 3,
-    "max_entities_per_event": 10
-  },
-  "budget": {
-    "max_active_patches": 30,
-    "overflow_strategy": "archive_oldest_decaying"
-  },
-  "decay": {
-    "check_interval_hours": 24,
-    "rules": {
-      "experience": { "idle_days": 30 },
-      "action_item": { "idle_days": 14 },
-      "commitment": { "idle_days": 60 }
-    }
-  }
-}
-```
+### Patch Status
+- `active` — visible in quilt, included in recall
+- `completed` — marked done by user (commitments, blockers)
+- `archived` — hidden from quilt and recall (decayed, cascaded, or manually removed)
 
-No policy = no limits (platform default behavior for apps that don't need constraints).
+## Deduplication
 
-## How It All Connects — The Florida Blue Example
+Before creating a new patch, the worker checks for existing patches with the same type and similar text using `pg_trgm` trigram similarity:
+- Threshold: SIMILARITY() > 0.6
+- If found: reuses existing patch_id, bumps `access_count` and `updated_at`
+- Catches: "Deliver samples in 2 days" vs "Deliver transcription samples within 2 days"
 
-After a meeting, the extraction produces these patches and connections:
+## Delta Sync (iOS)
 
-```
-PATCHES:
-  [project]     "Florida Blue transcription project"     status: active
-  [decision]    "Use Nova 3 for transcription"           status: active
-  [commitment]  "Deliver samples in 2 days"              owner: Scott, status: active
-  [action_item] "Travis uploads audio files via FTP"     owner: Travis, status: active
-  [requirement] "Summary capped at 1000-5000 chars"      status: active
+`GET /v1/quilt/{user_id}?since=ISO8601` returns:
+- `facts[]` — only patches created/updated after the timestamp
+- `deleted[]` — patch_ids archived/completed since then
+- `server_time` — use as `since` on next request
 
-CONNECTIONS:
-  decision:Nova3        --belongs_to-->    project:FloridaBlue
-  decision:Nova3        --motivated_by-->  preference:latest_tech
-  commitment:samples    --belongs_to-->    project:FloridaBlue
-  commitment:samples    --blocked_by-->    action_item:Travis_uploads
-  requirement:summary   --belongs_to-->    project:FloridaBlue
-```
+First call without `since` = full sync. Subsequent calls = delta only.
 
-Plus the user's universal patches (no project, no connections needed):
+## Speaker Rename
 
-```
-  [trait]       "Tends to over-explain"                  sticky, never expires
-  [preference]  "Prefers to understand problem fully"    sticky, never expires
-  [preference]  "Prefers latest technology"              sticky, never expires
-```
+When ShoulderSurf renames "Speaker 4" → "SriDev":
+1. App updates patch text via `PATCH /v1/quilt/{user_id}/patches/{patch_id}`
+2. App calls `POST /v1/quilt/{user_id}/rename-speaker` with `{old_name, new_name}`
+3. CQ creates entity (unnamed speakers are never stored as entities) and rebuilds Redis index
 
-**Total: 8 patches, 5 connections.** That's the entire Florida Blue quilt.
+## Extraction
 
-## How Recall Changes
+### Prompt (V2 — Connected Quilt)
+Produces `patches[]` with `connects_to[]` instead of flat `facts[]` + `action_items[]`. Entities and relationships arrays unchanged (feed the entity name index for hot-path recall).
 
-Today: flat query, return 20 most recent patches.
+### Hard Limits
+- 12 patches per meeting
+- 10 entities
+- 10 relationships
 
-With connections: **graph traversal starting from the project patch.**
+### Priority Order
+1. Self-disclosed traits
+2. Project patches
+3. Person patches for owners
+4. Commitments with owners
+5. Blockers
+6. Decisions
+7. Roles
+8. Takeaways
+9. Preferences
 
-```
-User asks: "catch me up on Florida Blue"
+### Extraction Cost
+Model: Gemini 2.5 Flash via OpenRouter (~$0.0017/extraction). Metrics tracked in `extraction_metrics` table and visible in admin dashboard.
 
-1. Match "Florida Blue" → project patch
-2. Traverse belongs_to connections → find decision, commitment, requirement
-3. Traverse blocked_by on commitment → find Travis action item
-4. Check statuses → filter out completed/archived
-5. Also include universal patches (traits, preferences) — no traversal needed
+## Recall (Hot Path)
 
-Result: structured context, not a flat list
-```
+1. Match entity names from Redis index (text search)
+2. Get entity rows from Postgres
+3. Recursive CTE on relationships table (entity graph)
+4. Flat patch query (filtered by project, status = active)
+5. Traverse `patch_connections` from project patches (parent role)
+6. Merge and deduplicate
+7. Format structured context block: About you, Decisions, Open commitments, Blockers, Roles, Key facts
 
-## How Lifecycle Works Through Connections
-
-**Completing an action item:**
-1. Travis uploads files → `action_item:Travis_uploads` marked `completed`
-2. System checks: anything `blocked_by` this patch? → Yes: `commitment:samples`
-3. Are ALL blockers for that commitment now complete? → Yes
-4. `commitment:samples` becomes unblocked (still active — Scott hasn't delivered yet)
-
-**Archiving a project:**
-1. Florida Blue ships → `project:FloridaBlue` marked `archived`
-2. System traverses: find all patches with `belongs_to → project:FloridaBlue`
-3. Archive all of them (decisions, commitments, requirements, action items)
-4. Traits and preferences are NOT archived — they have no project connection
-
-**A decision supersedes another:**
-1. "Switch from Nova 3 to Whisper" → new decision patch
-2. Connected: `decision:Whisper --supersedes--> decision:Nova3`
-3. Old decision auto-archived
-
-## How This Stays Flexible for Other Apps
-
-A CRM app registers its own types:
-
-```
-deal:       { value, stage, close_date, owner }     completable, project_scoped
-objection:  { text, response_strategy }             decaying
-contact:    { text, sentiment }                     decaying
-```
-
-And its own connections:
-
-```
-objection --raised_in--> deal
-contact   --belongs_to--> deal
-deal      --owned_by-->  (links to identity patch)
-```
-
-CQ doesn't interpret these. It stores them, traverses them on recall, and applies the lifecycle rules the app defined in its type registry. The platform is generic; the meaning comes from the app.
-
-## Migration Path
-
-This doesn't break anything that exists today:
-
-1. **patch_type_registry** — new table, seed with the four built-in types
-2. **patch_connections** — new table, empty until extraction starts producing connections
-3. **status column** — added to context_patches, defaults to "active" for all existing patches
-4. **app policy** — added to applications table, defaults to empty (no constraints)
-
-Existing patches keep working. The flat extraction prompt keeps working. We evolve the prompt to produce connections over time, and the recall path learns to traverse them.
-
-## What the Extraction Prompt Becomes
-
-Instead of four flat arrays, the LLM returns patches with their connections:
-
-```json
-{
-  "patches": [
-    {
-      "type": "commitment",
-      "value": { "text": "Deliver samples in 2 days", "owner": "Scott" },
-      "connects_to": [
-        { "target_text": "Florida Blue transcription project", "connection": "belongs_to" },
-        { "target_text": "Travis uploads audio files", "connection": "blocked_by" }
-      ]
-    }
-  ],
-  "entities": [...],
-  "relationships": [...]
-}
-```
-
-The worker resolves `target_text` references to actual patch IDs when storing (similar to how entity names get resolved to entity IDs today).
+Target: <10ms, no LLM call.
