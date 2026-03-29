@@ -1,0 +1,13 @@
+Team standup - March 28, 2026
+
+[Speaker 1] So the big update is that the Benefits App MVP is basically done. Kumar finished the multi-plan integration yesterday.
+[Speaker 2] Nice. James Vowles mentioned in an interview that Williams is planning a major upgrade for Miami. I thought that was interesting.
+[Speaker 1] Yeah I saw that. Speaking of upgrades, Joe said he's not a fan of constant platform migrations. He wants stability.
+[Speaker 2] That's fair. Oh, the summary generation failure rate is still at 3-4%. Nobody's picked that up yet.
+[Speaker 1] Speaker 3 is really meticulous about documentation. They always catch things we miss.
+[Speaker 1] We should probably look into the Deepgram Flux model at some point. I heard it handles accents better.
+[Speaker 2] The presentation deck still needs work. Someone should finalize it before Tuesday.
+[Speaker 1] I tend to ramble in these meetings. Sorry about that.
+[Speaker 2] Ravikanth said he'd create the stories from our discussion but I haven't seen them yet.
+[Speaker 1] The new restaurant down the street has amazing tacos. We should go for lunch.
+[Speaker 2] Also, Anna mentioned she's been doing yoga every morning. Says it helps her focus.

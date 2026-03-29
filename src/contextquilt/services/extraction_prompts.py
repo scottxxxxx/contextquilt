@@ -132,7 +132,7 @@ RELEVANCE FILTER — apply to every candidate patch:
 - NO: "They need to provide a HAR file" — troubleshooting procedure
 
 TYPE ACCURACY:
-- A commitment has a specific OWNER who promised to DO something. If no one made a promise, use takeaway.
+- A commitment has a specific NAMED OWNER who promised to DO something. "Someone should finalize the deck" has no owner — that's a takeaway. "Ravikanth said he'd create the stories" has an owner (Ravikanth) — that's a commitment.
 - A project is any topic or initiative the user is tracking across sessions. Do NOT editorialize what counts as a project — the user decides that by recording a session about it.
 - A blocker is something specifically preventing progress. General challenges or observations are takeaways.
 
