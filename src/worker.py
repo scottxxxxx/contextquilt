@@ -954,7 +954,7 @@ class ColdPathWorker:
     # ============================================
 
     async def hydrate_cache(self, user_id: str):
-        """Hydration Workflow: Postgres -> Redis"""
+        """Hydration Workflow: Postgres -> Redis. Warms profile + entity index."""
         try:
             row = await self.db.fetchrow(
                 "SELECT variables, last_updated, display_name, email FROM profiles WHERE user_id = $1", user_id
@@ -980,6 +980,9 @@ class ColdPathWorker:
 
         cache_key = f"active_context:{user_id}"
         await self.redis.set(cache_key, json.dumps(profile_data), ex=3600)
+
+        # Also warm the entity name index — recall's first step uses this for fast matching
+        await _rebuild_entity_index(self.db, self.redis, user_id)
 
         logger.info("hydration_complete", user_id=user_id)
 
