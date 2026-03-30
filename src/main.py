@@ -1118,6 +1118,16 @@ async def get_user_quilt_graph(
                         style="invis")
 
     img_bytes = dot.pipe()
+
+    # For SVG: strip fixed width/height so browsers scale to fit viewport
+    if fmt == "svg":
+        import re as _re
+        svg_str = img_bytes.decode("utf-8")
+        svg_str = _re.sub(r'<svg\s', '<svg style="width:100%;height:100%" ', svg_str, count=1)
+        svg_str = _re.sub(r'\swidth="[^"]*pt"', '', svg_str, count=1)
+        svg_str = _re.sub(r'\sheight="[^"]*pt"', '', svg_str, count=1)
+        img_bytes = svg_str.encode("utf-8")
+
     media = "image/svg+xml" if fmt == "svg" else "image/png"
     return Response(content=img_bytes, media_type=media)
 
