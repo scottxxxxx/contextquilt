@@ -607,20 +607,44 @@ async def prewarm_cache(
     app_id: str = Depends(verify_application_access)
 ):
     """
-    Trigger Cache Hydration.
-    Moves data from Cold Storage (Postgres) to Hot Cache (Redis).
+    Synchronous Cache Hydration.
+    Warms profile + entity index from Postgres into Redis.
+    Call at session start so the first recall hits a warm cache.
+    Typically completes in <50ms.
     """
-    # Push 'hydrate' command to worker stream
-    stream_key = "memory_updates"
-    payload = {
-        "type": "hydrate",
-        "user_id": user_id,
-        "app_id": app_id,
-        "timestamp": datetime.utcnow().isoformat()
+    # Warm profile
+    row = await db_pool.fetchrow(
+        "SELECT variables, last_updated, display_name, email FROM profiles WHERE user_id = $1",
+        user_id
+    )
+    if row:
+        variables = row["variables"]
+        if isinstance(variables, str):
+            variables = json.loads(variables)
+        profile_data = {
+            "variables": variables,
+            "last_updated": row["last_updated"].isoformat() if row["last_updated"] else "now",
+            "display_name": row["display_name"],
+            "email": row["email"],
+        }
+        await redis_client.set(f"active_context:{user_id}", json.dumps(profile_data), ex=3600)
+
+    # Warm entity index
+    entity_rows = await db_pool.fetch(
+        "SELECT name FROM entities WHERE user_id = $1", user_id
+    )
+    entity_key = f"entity_index:{user_id}"
+    if entity_rows:
+        names = [r["name"] for r in entity_rows]
+        await redis_client.delete(entity_key)
+        await redis_client.sadd(entity_key, *names)
+        await redis_client.expire(entity_key, 7200)
+
+    return {
+        "status": "warm",
+        "profile": row is not None,
+        "entities": len(entity_rows) if entity_rows else 0,
     }
-    await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
-    
-    return {"status": "queued", "message": "Hydration requested"}
 
 @app.get("/health", tags=["Ops"])
 async def health():
