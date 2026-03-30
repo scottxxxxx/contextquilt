@@ -1080,11 +1080,18 @@ class ColdPathWorker:
 
         logger.info("analyzing_meeting_summary", user_id=user_id, length=len(summary))
 
-        # Identify the submitting user so the LLM can attribute traits correctly
-        # (transcripts often use speaker labels like [Speaker 16] instead of names)
+        # Identify the submitting user so the LLM can attribute traits correctly.
+        # New convention: transcript labels the app user with "(you)" e.g. "[Scott (you)]".
+        # Fallback for older clients: prepend "The submitting user is: {name}" if no (you) marker.
         metadata = payload.get("metadata", {})
         display_name = metadata.get("display_name") if metadata else None
-        user_context = f"The submitting user is: {display_name}\n\n" if display_name else ""
+        has_you_marker = "(you)" in summary.lower() if summary else False
+        if has_you_marker:
+            user_context = ""  # (you) label in transcript is sufficient
+        elif display_name:
+            user_context = f"The submitting user is: {display_name}\n\n"
+        else:
+            user_context = ""
 
         try:
             response = await self.llm.extract(
