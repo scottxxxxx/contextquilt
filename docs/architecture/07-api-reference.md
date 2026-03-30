@@ -169,6 +169,28 @@ Remove a fact or action item.
 
 **Response:** `{"status": "deleted", "patch_id": "uuid"}`
 
+### GET /v1/quilt/{user_id}/graph
+
+Render a visual graph of a user's entire quilt — all patches and connections displayed as a colorful, quilt-like diagram. Returns an image directly.
+
+**Query params:** `?format=svg|png` (default: `svg`)
+
+**Response:** `image/svg+xml` or `image/png`
+
+The graph uses a force-directed layout with:
+- **Project clustering** — patches grouped into labeled sub-boxes by project
+- **User centering** — the submitting user's person patch is pinned at the center
+- **Color-coded types** — each patch type has a distinct color (project=blue, commitment=amber, blocker=red, decision=purple, person=green, trait=pink, preference=cyan, takeaway=lime)
+- **Connection edges** — colored by structural role (parent=blue, depends_on=red, resolves=green, replaces=orange, informs=purple)
+
+The user's person patch automatically connects to all project patches via `works_on` edges, even if the extraction didn't create them explicitly.
+
+**Example:**
+```
+GET /v1/quilt/fa4d903c-24c0-45d5-9fdb-b5496e32501b/graph?format=svg
+→ image/svg+xml (full quilt visualization)
+```
+
 ---
 
 ## Operations

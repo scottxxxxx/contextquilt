@@ -136,6 +136,7 @@ See `docs/architecture/` for the complete V3 specification:
 **Quilt API (iOS CRUD):**
 - `GET /v1/quilt/{user_id}` — all active patches with connections, project_id, meeting_id
 - `GET /v1/quilt/{user_id}?since=ISO8601` — delta sync: only patches created/updated since timestamp, plus `deleted[]` array of removed patch_ids. Returns `server_time` to use as `since` on next call.
+- `GET /v1/quilt/{user_id}/graph?format=svg` — visual graph of entire quilt as SVG or PNG image. Force-directed layout, project clustering, user centered, color-coded by type.
 - `PATCH /v1/quilt/{user_id}/patches/{patch_id}` — edit patch text/type
 - `DELETE /v1/quilt/{user_id}/patches/{patch_id}` — delete single patch
 - `DELETE /v1/quilt/{user_id}` — delete all patches for a user (testing/GDPR)
@@ -168,6 +169,11 @@ See `docs/architecture/` for the complete V3 specification:
 - GhostPour `POST /v1/capture-transcript` receives full transcript at meeting end
 - Response headers `X-CQ-Matched` and `X-CQ-Entities` for iOS UI indicator
 - Passes `display_name`, `email`, `project`, `project_id`, `meeting_id` in metadata
+
+**Worker improvements (v3.13):**
+- Stub patches now include `project_id` and `meeting_id` (previously missing, caused orphan connections)
+- Auto-connects submitting user's person patch to all project patches via `works_on` after each extraction
+- Graphviz added to Docker image for server-side graph rendering
 
 ### Next priorities:
 1. End-to-end test: ShoulderSurf → GhostPour → CQ → connected quilt → recall

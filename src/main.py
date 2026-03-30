@@ -876,6 +876,252 @@ async def get_user_quilt(
     )
 
 
+@app.get("/v1/quilt/{user_id}/graph", tags=["Quilt"])
+async def get_user_quilt_graph(
+    user_id: str,
+    format: str = Query("svg", description="Output format: svg or png"),
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Render a visual graph of a user's entire quilt — all patches and connections
+    displayed as a colorful, quilt-like diagram. Uses force-directed layout
+    with project clustering and the user's person patch pinned at center.
+    """
+    import graphviz
+    from fastapi.responses import Response
+
+    subject_key = f"user:{user_id}"
+
+    rows = await db_pool.fetch(
+        """
+        SELECT cp.patch_id, cp.patch_name, cp.patch_type, cp.value,
+               cp.project, cp.project_id
+        FROM context_patches cp
+        JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+        WHERE ps.subject_key = $1
+          AND COALESCE(cp.status, 'active') = 'active'
+        ORDER BY cp.created_at DESC
+        """,
+        subject_key,
+    )
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No patches found for this user")
+
+    patch_ids = [row["patch_id"] for row in rows]
+    patch_id_set = {str(pid) for pid in patch_ids}
+
+    # Fetch connections (both directions)
+    conn_rows = await db_pool.fetch(
+        """SELECT pc.from_patch_id, pc.to_patch_id,
+                  pc.connection_role, pc.connection_label
+           FROM patch_connections pc
+           WHERE pc.from_patch_id = ANY($1::uuid[])
+              OR pc.to_patch_id = ANY($1::uuid[])""",
+        patch_ids,
+    )
+
+    # -- Build graphviz --
+    TYPE_COLORS = {
+        "project":    {"fill": "#2563EB", "font": "white",  "border": "#1D4ED8"},
+        "commitment": {"fill": "#F59E0B", "font": "#1a1a1a", "border": "#D97706"},
+        "blocker":    {"fill": "#EF4444", "font": "white",  "border": "#DC2626"},
+        "decision":   {"fill": "#8B5CF6", "font": "white",  "border": "#7C3AED"},
+        "person":     {"fill": "#10B981", "font": "white",  "border": "#059669"},
+        "trait":      {"fill": "#EC4899", "font": "white",  "border": "#DB2777"},
+        "preference": {"fill": "#06B6D4", "font": "white",  "border": "#0891B2"},
+        "takeaway":   {"fill": "#84CC16", "font": "#1a1a1a", "border": "#65A30D"},
+        "role":       {"fill": "#F97316", "font": "white",  "border": "#EA580C"},
+        "identity":   {"fill": "#6366F1", "font": "white",  "border": "#4F46E5"},
+        "experience": {"fill": "#D946EF", "font": "white",  "border": "#C026D3"},
+    }
+    DEFAULT_COLOR = {"fill": "#64748B", "font": "white", "border": "#475569"}
+
+    ROLE_COLORS = {
+        "parent":     "#3B82F6",
+        "depends_on": "#EF4444",
+        "resolves":   "#10B981",
+        "replaces":   "#F59E0B",
+        "informs":    "#8B5CF6",
+    }
+
+    def wrap_text(text, max_width=28):
+        words = text.split()
+        lines, line = [], ""
+        for w in words:
+            if len(line) + len(w) + 1 > max_width:
+                lines.append(line)
+                line = w
+            else:
+                line = f"{line} {w}".strip()
+        if line:
+            lines.append(line)
+        result = "\n".join(lines[:2])
+        if len(lines) > 2:
+            result += "..."
+        return result
+
+    fmt = "svg" if format not in ("svg", "png") else format
+    dot = graphviz.Digraph(format=fmt, engine="sfdp")
+
+    # Find the user's display name from their person patch
+    display_name = user_id
+    user_person_pid = None
+    for row in rows:
+        if row["patch_type"] == "person":
+            value = row["value"]
+            if isinstance(value, str):
+                value = json.loads(value)
+            text = value.get("text", "").strip().lower()
+            if text.endswith("(you)") or len(text.split()) == 1:
+                display_name = value.get("text", "").replace(" (you)", "").strip()
+                user_person_pid = str(row["patch_id"])
+                break
+
+    dot.attr(
+        bgcolor="#0F172A",
+        fontcolor="#F1F5F9",
+        fontname="Helvetica Neue",
+        fontsize="20",
+        label=f"{display_name}'s Quilt\n ",
+        labelloc="t",
+        labeljust="c",
+        pad="1.0",
+        nodesep="0.9",
+        ranksep="1.2",
+        splines="curved",
+        dpi="150",
+        overlap="prism",
+        overlap_scaling="4",
+        K="2.5",
+        repulsiveforce="2",
+    )
+
+    dot.attr("node",
+        shape="box", style="filled,rounded",
+        fontname="Helvetica Neue", fontsize="9",
+        width="1.8", height="0.5",
+        penwidth="2", margin="0.15,0.08",
+    )
+
+    dot.attr("edge",
+        penwidth="1.2", arrowsize="0.5",
+    )
+
+    # Group patches by project for clustering
+    projects = {}
+    no_project = []
+    active_types = set()
+
+    for row in rows:
+        proj = row.get("project_id") or row.get("project") or None
+        if proj:
+            projects.setdefault(proj, []).append(row)
+        else:
+            no_project.append(row)
+
+    def add_node(dot_ctx, row):
+        pid = str(row["patch_id"])
+        ptype = row["patch_type"] or "unknown"
+        value = row["value"]
+        if isinstance(value, str):
+            value = json.loads(value)
+
+        text = value.get("text", row["patch_name"] or "")
+        display = wrap_text(text)
+        label = f"\u00ab{ptype.upper()}\u00bb\n{display}"
+        owner = value.get("owner")
+        if owner:
+            label += f"\n\U0001F464 {owner}"
+
+        colors = TYPE_COLORS.get(ptype, DEFAULT_COLOR)
+        active_types.add(ptype)
+
+        extra = {}
+        if pid == user_person_pid:
+            extra = {
+                "pos": "0,0!",
+                "width": "2.5",
+                "height": "0.8",
+                "fontsize": "14",
+                "penwidth": "4",
+            }
+
+        dot_ctx.node(pid, label=label,
+                     fillcolor=colors["fill"], fontcolor=colors["font"],
+                     color=colors["border"], **extra)
+
+    # Create project clusters
+    cluster_i = 0
+    for proj_key, proj_patches in sorted(projects.items(), key=lambda x: -len(x[1])):
+        proj_name = proj_patches[0].get("project") or proj_key
+        with dot.subgraph(name=f"cluster_{cluster_i}") as sub:
+            sub.attr(
+                label=f"  {proj_name}  ",
+                style="rounded,filled",
+                fillcolor="#1E293B",
+                color="#334155",
+                fontcolor="#94A3B8",
+                fontname="Helvetica Neue",
+                fontsize="11",
+                margin="20",
+            )
+            for row in proj_patches:
+                add_node(sub, row)
+        cluster_i += 1
+
+    # Unclustered patches (persons, traits, preferences)
+    for row in no_project:
+        add_node(dot, row)
+
+    # Edges (only where both endpoints exist)
+    rendered_edges = set()
+    for cr in conn_rows:
+        from_id = str(cr["from_patch_id"])
+        to_id = str(cr["to_patch_id"])
+        if from_id not in patch_id_set or to_id not in patch_id_set:
+            continue
+        role = cr["connection_role"] or ""
+        color = ROLE_COLORS.get(role, "#64748B")
+        dot.edge(from_id, to_id, color=color)
+        rendered_edges.add((from_id, to_id))
+
+    # Synthetic edges: user's person patch → all project patches (works_on)
+    if user_person_pid:
+        project_pids = {str(row["patch_id"]) for row in rows if row["patch_type"] == "project"}
+        for proj_pid in project_pids:
+            if (user_person_pid, proj_pid) not in rendered_edges:
+                dot.edge(user_person_pid, proj_pid, color=ROLE_COLORS["informs"])
+
+    # Legend
+    with dot.subgraph(name="cluster_legend") as legend:
+        legend.attr(
+            label="  Patch Types  ",
+            style="rounded,filled",
+            fillcolor="#1E293B",
+            color="#334155",
+            fontcolor="white",
+            fontname="Helvetica Neue",
+            fontsize="13",
+            margin="16",
+        )
+        legend.attr("node", width="1.4", height="0.4", fontsize="10")
+        sorted_types = [t for t in TYPE_COLORS if t in active_types]
+        for t in sorted_types:
+            c = TYPE_COLORS[t]
+            legend.node(f"legend_{t}", label=f"  {t.upper()}  ",
+                        fillcolor=c["fill"], fontcolor=c["font"],
+                        color=c["border"])
+        for i in range(len(sorted_types) - 1):
+            legend.edge(f"legend_{sorted_types[i]}",
+                        f"legend_{sorted_types[i+1]}",
+                        style="invis")
+
+    img_bytes = dot.pipe()
+    media = "image/svg+xml" if fmt == "svg" else "image/png"
+    return Response(content=img_bytes, media_type=media)
+
+
 @app.patch("/v1/quilt/{user_id}/patches/{patch_id}", tags=["Quilt"])
 async def update_patch(
     user_id: str,
