@@ -1018,7 +1018,7 @@ async def get_user_quilt_graph(
         label=f"{display_name}'s Quilt\n ",
         labelloc="t",
         labeljust="c",
-        pad="2.0",
+        pad="1.0",
         nodesep="0.9",
         ranksep="1.2",
         splines="curved",
@@ -1125,29 +1125,8 @@ async def get_user_quilt_graph(
             if (user_person_pid, proj_pid) not in rendered_edges:
                 dot.edge(user_person_pid, proj_pid, color=ROLE_COLORS["informs"])
 
-    # Legend
-    with dot.subgraph(name="cluster_legend") as legend:
-        legend.attr(
-            label="  Patch Types  ",
-            style="rounded,filled",
-            fillcolor="#1E293B",
-            color="#334155",
-            fontcolor="white",
-            fontname="Helvetica Neue",
-            fontsize="13",
-            margin="16",
-        )
-        legend.attr("node", width="1.4", height="0.4", fontsize="10")
-        sorted_types = [t for t in TYPE_COLORS if t in active_types]
-        for t in sorted_types:
-            c = TYPE_COLORS[t]
-            legend.node(f"legend_{t}", label=f"  {t.upper()}  ",
-                        fillcolor=c["fill"], fontcolor=c["font"],
-                        color=c["border"])
-        for i in range(len(sorted_types) - 1):
-            legend.edge(f"legend_{sorted_types[i]}",
-                        f"legend_{sorted_types[i+1]}",
-                        style="invis")
+    # Legend removed — each node already displays its type (e.g. «COMMITMENT»)
+    # and the legend cluster caused graphviz viewBox overflow on the right side
 
     img_bytes = dot.pipe()
 
@@ -1157,16 +1136,6 @@ async def get_user_quilt_graph(
         # Strip fixed pt-unit dimensions
         svg_str = _re.sub(r'\swidth="[^"]*pt"', ' width="100%"', svg_str, count=1)
         svg_str = _re.sub(r'\sheight="[^"]*pt"', ' height="100%"', svg_str, count=1)
-        # Pad the viewBox — graphviz pad attribute adds space but the
-        # reported viewBox still clips labels/legend at edges
-        def _pad_viewbox(m):
-            x, y, w, h = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
-            pad = w * 0.08  # 8% padding on each side
-            return f'viewBox="{x - pad:.2f} {y - pad:.2f} {w + pad * 2:.2f} {h + pad * 2:.2f}"'
-        svg_str = _re.sub(
-            r'viewBox="([\d.-]+)\s+([\d.-]+)\s+([\d.]+)\s+([\d.]+)"',
-            _pad_viewbox, svg_str, count=1
-        )
         img_bytes = svg_str.encode("utf-8")
 
     # format=html wraps the SVG in a self-contained HTML page with
