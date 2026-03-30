@@ -1152,6 +1152,15 @@ async def get_user_quilt_graph(
         # Strip fixed pt-unit dimensions
         svg_str = _re.sub(r'\swidth="[^"]*pt"', ' width="100%"', svg_str, count=1)
         svg_str = _re.sub(r'\sheight="[^"]*pt"', ' height="100%"', svg_str, count=1)
+        # Pad the viewBox so content doesn't clip at edges
+        def _pad_viewbox(m):
+            x, y, w, h = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
+            pad = w * 0.02  # 2% padding
+            return f'viewBox="{x - pad:.2f} {y - pad:.2f} {w + pad * 2:.2f} {h + pad * 2:.2f}"'
+        svg_str = _re.sub(
+            r'viewBox="([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)"',
+            _pad_viewbox, svg_str, count=1
+        )
         img_bytes = svg_str.encode("utf-8")
 
     # format=html wraps the SVG in a self-contained HTML page with
