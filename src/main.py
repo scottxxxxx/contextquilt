@@ -371,11 +371,28 @@ async def recall_context(
     )
 
     # Step 4: Get patches for this user
+    # Prefer project_id (stable UUID) over project name (can be renamed)
+    recall_project_id = request.metadata.get("project_id") if request.metadata else None
     recall_project = request.metadata.get("project") if request.metadata else None
     subject_key = f"user:{user_id}"
 
     # Step 4a: Flat patch query (works for both V1 and V2 patches)
-    if recall_project:
+    if recall_project_id:
+        fact_rows = await db_pool.fetch(
+            """
+            SELECT cp.value, cp.patch_type, cp.source_prompt
+            FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $1
+              AND (cp.project_id = $2 OR cp.project_id IS NULL OR cp.patch_type IN ('trait', 'preference'))
+              AND COALESCE(cp.status, 'active') = 'active'
+            ORDER BY cp.created_at DESC
+            LIMIT 20
+            """,
+            subject_key, recall_project_id
+        )
+    elif recall_project:
+        # Fallback: filter by project display name (backward compat)
         fact_rows = await db_pool.fetch(
             """
             SELECT cp.value, cp.patch_type, cp.source_prompt
@@ -405,18 +422,32 @@ async def recall_context(
 
     # Step 4b: Traverse patch connections from project patches (Connected Quilt V2)
     connected_rows = []
-    if recall_project:
-        project_patch = await db_pool.fetchrow(
-            """
-            SELECT cp.patch_id FROM context_patches cp
-            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
-            WHERE ps.subject_key = $1 AND cp.patch_type = 'project'
-              AND LOWER(cp.value->>'text') LIKE '%' || LOWER($2) || '%'
-              AND COALESCE(cp.status, 'active') = 'active'
-            LIMIT 1
-            """,
-            subject_key, recall_project
-        )
+    if recall_project_id or recall_project:
+        if recall_project_id:
+            project_patch = await db_pool.fetchrow(
+                """
+                SELECT cp.patch_id FROM context_patches cp
+                JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+                WHERE ps.subject_key = $1 AND cp.patch_type = 'project'
+                  AND cp.project_id = $2
+                  AND COALESCE(cp.status, 'active') = 'active'
+                LIMIT 1
+                """,
+                subject_key, recall_project_id
+            )
+        else:
+            # Fallback: fuzzy match on project name
+            project_patch = await db_pool.fetchrow(
+                """
+                SELECT cp.patch_id FROM context_patches cp
+                JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+                WHERE ps.subject_key = $1 AND cp.patch_type = 'project'
+                  AND LOWER(cp.value->>'text') LIKE '%' || LOWER($2) || '%'
+                  AND COALESCE(cp.status, 'active') = 'active'
+                LIMIT 1
+                """,
+                subject_key, recall_project
+            )
         if project_patch:
             connected_rows = await db_pool.fetch(
                 """
