@@ -1022,7 +1022,7 @@ async def get_user_quilt_graph(
         nodesep="0.9",
         ranksep="1.2",
         splines="curved",
-        dpi="150",
+        dpi="96",
         overlap="prism",
         overlap_scaling="4",
         K="2.5",
