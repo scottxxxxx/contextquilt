@@ -471,6 +471,7 @@ class UserQuilt(BaseModel):
     email: Optional[str] = None
     patches: List[QuiltPatch]
     timeline: List[TimelineEvent]
+    communication_profile: Optional[Dict[str, Any]] = None
 
 @router.get("/users/{user_id}/quilt", response_model=UserQuilt, dependencies=[Depends(verify_admin_key)])
 async def get_user_quilt(user_id: str):
@@ -479,9 +480,9 @@ async def get_user_quilt(user_id: str):
         # Construct subject_key (assuming user:ID format)
         subject_key = f"user:{user_id}"
 
-        # Fetch profile identity
+        # Fetch profile identity + communication profile
         profile_row = await conn.fetchrow(
-            "SELECT display_name, email FROM profiles WHERE user_id = $1", user_id
+            "SELECT display_name, email, variables->'communication_profile' as comm_profile FROM profiles WHERE user_id = $1", user_id
         )
 
         # Get Patches from context_patches (via patch_subjects)
@@ -520,12 +521,19 @@ async def get_user_quilt(user_id: str):
                 sentiment="neutral"
             ))
 
+        # Parse communication profile
+        comm_profile = None
+        if profile_row and profile_row['comm_profile']:
+            cp = profile_row['comm_profile']
+            comm_profile = json.loads(cp) if isinstance(cp, str) else cp
+
         return UserQuilt(
             user_id=user_id,
             display_name=profile_row['display_name'] if profile_row else None,
             email=profile_row['email'] if profile_row else None,
             patches=patches,
-            timeline=timeline[:20]
+            timeline=timeline[:20],
+            communication_profile=comm_profile,
         )
 
     finally:

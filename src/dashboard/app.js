@@ -804,6 +804,46 @@ function renderQuiltView(data) {
     // Mock Last Active
     document.getElementById('quilt-last-active').textContent = 'Just now';
 
+    // Communication Profile
+    const profileSection = document.getElementById('comm-profile-section');
+    const profileBars = document.getElementById('comm-profile-bars');
+    const profileSamples = document.getElementById('comm-profile-samples');
+    if (data.communication_profile && profileBars) {
+        const cp = data.communication_profile;
+        const sampleCount = cp._sample_count || 1;
+        profileSamples.textContent = `(${sampleCount} meeting${sampleCount !== 1 ? 's' : ''})`;
+
+        const dimensions = [
+            { key: 'verbosity', label: 'Verbosity', icon: 'fa-comment', low: 'Terse', high: 'Detailed' },
+            { key: 'directness', label: 'Directness', icon: 'fa-bullseye', low: 'Hedging', high: 'Decisive' },
+            { key: 'formality', label: 'Formality', icon: 'fa-user-tie', low: 'Casual', high: 'Formal' },
+            { key: 'technical_level', label: 'Technical', icon: 'fa-microchip', low: 'Layperson', high: 'Expert' },
+            { key: 'warmth', label: 'Warmth', icon: 'fa-heart', low: 'Transactional', high: 'Friendly' },
+            { key: 'detail_orientation', label: 'Detail', icon: 'fa-magnifying-glass', low: 'Vague', high: 'Precise' },
+        ];
+
+        profileBars.innerHTML = dimensions.map(d => {
+            const score = cp[d.key];
+            if (score == null) return '';
+            const pct = Math.round(score * 100);
+            const hue = 200 + (score * 60); // blue to purple gradient
+            return `
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <i class="fa-solid ${d.icon}" style="color: var(--text-muted); width: 16px; text-align: center; font-size: 0.75rem;"></i>
+                    <span style="width: 70px; font-size: 0.8rem; color: var(--text-secondary);">${d.label}</span>
+                    <div style="flex: 1; background: rgba(15,23,42,0.6); border-radius: 4px; height: 8px; position: relative;">
+                        <div style="width: ${pct}%; height: 100%; background: hsl(${hue}, 60%, 55%); border-radius: 4px; transition: width 0.3s;"></div>
+                    </div>
+                    <span style="width: 32px; text-align: right; font-size: 0.75rem; font-family: var(--font-mono); color: var(--text-muted);">${score.toFixed(1)}</span>
+                </div>
+            `;
+        }).join('');
+
+        profileSection.style.display = 'block';
+    } else if (profileSection) {
+        profileSection.style.display = 'none';
+    }
+
     // Render Patches Table
     renderQuiltPatchTable(data.patches);
 
