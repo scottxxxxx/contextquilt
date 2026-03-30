@@ -991,17 +991,22 @@ async def get_user_quilt_graph(
         fmt = "svg"
     dot = graphviz.Digraph(format=fmt, engine="sfdp")
 
-    # Find the user's display name from their person patch
-    display_name = user_id
+    # Get the user's display name from their profile (authoritative source)
+    profile_row = await db_pool.fetchrow(
+        "SELECT display_name FROM profiles WHERE user_id = $1", user_id
+    )
+    display_name = (profile_row["display_name"] if profile_row and profile_row["display_name"] else user_id)
+
+    # Find the user's person patch — match by display name
     user_person_pid = None
+    display_lower = display_name.lower().strip()
     for row in rows:
         if row["patch_type"] == "person":
             value = row["value"]
             if isinstance(value, str):
                 value = json.loads(value)
             text = value.get("text", "").strip().lower()
-            if text.endswith("(you)") or len(text.split()) == 1:
-                display_name = value.get("text", "").replace(" (you)", "").strip()
+            if text == display_lower or text == display_lower + " (you)":
                 user_person_pid = str(row["patch_id"])
                 break
 
