@@ -903,7 +903,7 @@ async def get_user_quilt(
 @app.get("/v1/quilt/{user_id}/graph", tags=["Quilt"])
 async def get_user_quilt_graph(
     user_id: str,
-    format: str = Query("svg", description="Output format: svg or png"),
+    format: str = Query("svg", description="Output format: svg, png, or html (html wraps SVG in a page with viewport scaling for WKWebView)"),
     app_id: str = Depends(verify_application_access),
 ):
     """
@@ -985,7 +985,10 @@ async def get_user_quilt_graph(
             result += "..."
         return result
 
-    fmt = "svg" if format not in ("svg", "png") else format
+    fmt = "svg" if format not in ("svg", "png", "html") else format
+    # html format renders SVG internally, so graphviz always produces SVG
+    if fmt == "html":
+        fmt = "svg"
     dot = graphviz.Digraph(format=fmt, engine="sfdp")
 
     # Find the user's display name from their person patch
@@ -1143,15 +1146,33 @@ async def get_user_quilt_graph(
 
     img_bytes = dot.pipe()
 
-    # For SVG: replace fixed pt-unit dimensions with percentage-based sizing.
-    # viewBox preserves the coordinate system; width/height="100%" tells
-    # WKWebView and browsers to scale the SVG to fill its container.
     if fmt == "svg":
         import re as _re
         svg_str = img_bytes.decode("utf-8")
+        # Strip fixed pt-unit dimensions
         svg_str = _re.sub(r'\swidth="[^"]*pt"', ' width="100%"', svg_str, count=1)
         svg_str = _re.sub(r'\sheight="[^"]*pt"', ' height="100%"', svg_str, count=1)
         img_bytes = svg_str.encode("utf-8")
+
+    # format=html wraps the SVG in a self-contained HTML page with
+    # viewport scaling and pinch-to-zoom — ideal for WKWebView on iOS.
+    if format == "html":
+        svg_content = img_bytes.decode("utf-8") if fmt == "svg" else ""
+        if not svg_content:
+            # Need SVG for HTML wrapper; re-render if PNG was requested
+            svg_content = dot.pipe(format="svg").decode("utf-8")
+        html = f"""<!DOCTYPE html>
+<html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1,minimum-scale=0.1,maximum-scale=10,user-scalable=yes">
+<style>
+*{{margin:0;padding:0}}
+body{{background:#0F172A;overflow:auto;-webkit-overflow-scrolling:touch}}
+svg{{display:block;width:100%;height:auto}}
+</style>
+</head><body>
+{svg_content}
+</body></html>"""
+        return Response(content=html.encode("utf-8"), media_type="text/html")
 
     media = "image/svg+xml" if fmt == "svg" else "image/png"
     return Response(content=img_bytes, media_type=media)
