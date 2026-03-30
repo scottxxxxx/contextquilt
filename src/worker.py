@@ -425,18 +425,21 @@ async def store_connected_patches(
                 stub_value = json.dumps({"text": conn.get("target_text", "")})
                 stub_persistence = DEFAULT_PERSISTENCE.get(target_type, "sticky")
                 stub_project = project if target_type in project_scoped_types else None
+                stub_project_id = project_id if target_type in project_scoped_types else None
+                stub_meeting_id = meeting_id if target_type in project_scoped_types else None
 
                 await db.execute(
                     """
                     INSERT INTO context_patches (
                         patch_id, patch_name, patch_type, value,
                         origin_mode, source_prompt, confidence, persistence,
-                        project, status, created_at, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                        project, project_id, meeting_id, status, created_at, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                     """,
                     to_id, stub_name, target_type, stub_value,
                     "inferred", source_prompt, 0.6, stub_persistence,
-                    stub_project, "active", created_at, created_at
+                    stub_project, stub_project_id, stub_meeting_id,
+                    "active", created_at, created_at
                 )
                 await db.execute(
                     "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
@@ -1000,6 +1003,66 @@ class ColdPathWorker:
         except Exception as e:
             logger.error("profile_identity_update_failed", error=str(e), user_id=user_id)
 
+    async def _ensure_user_project_connections(self, user_id: str, display_name: str | None):
+        """
+        Ensure the submitting user's person patch has works_on connections
+        to all their project patches. The user works on every project in
+        their quilt — the LLM doesn't always create these edges.
+        """
+        if not display_name:
+            return
+
+        subject_key = f"user:{user_id}"
+        try:
+            # Find the user's person patch (short name or "(you)" marker)
+            name_lower = display_name.strip().lower()
+            person_row = await self.db.fetchrow(
+                """
+                SELECT cp.patch_id FROM context_patches cp
+                JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+                WHERE ps.subject_key = $1 AND cp.patch_type = 'person'
+                  AND COALESCE(cp.status, 'active') = 'active'
+                  AND (LOWER(TRIM(cp.value->>'text')) = $2
+                       OR LOWER(TRIM(cp.value->>'text')) = $3)
+                LIMIT 1
+                """,
+                subject_key, name_lower, name_lower + " (you)"
+            )
+            if not person_row:
+                return
+
+            person_patch_id = str(person_row["patch_id"])
+
+            # Find all project patches for this user
+            project_rows = await self.db.fetch(
+                """
+                SELECT cp.patch_id FROM context_patches cp
+                JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+                WHERE ps.subject_key = $1 AND cp.patch_type = 'project'
+                  AND COALESCE(cp.status, 'active') = 'active'
+                """,
+                subject_key
+            )
+
+            connected = 0
+            for proj in project_rows:
+                proj_id = str(proj["patch_id"])
+                await self.db.execute(
+                    """
+                    INSERT INTO patch_connections (from_patch_id, to_patch_id, connection_role, connection_label)
+                    VALUES ($1::uuid, $2::uuid, 'informs', 'works_on')
+                    ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO NOTHING
+                    """,
+                    person_patch_id, proj_id
+                )
+                connected += 1
+
+            if connected:
+                logger.info("user_project_connections_ensured",
+                            user_id=user_id, person_patch=person_patch_id, projects=connected)
+        except Exception as e:
+            logger.warning("user_project_connections_failed", error=str(e), user_id=user_id)
+
     async def handle_active_learning(self, payload: Dict[str, Any]):
         """Active Learning: Agent explicitly saved a fact. Direct write, no LLM needed."""
         fact = payload.get("fact")
@@ -1134,6 +1197,10 @@ class ColdPathWorker:
                 )
                 facts_stored = patches_stored
                 actions_stored = 0
+
+                # Auto-connect the (you) person patch to all project patches.
+                # The submitting user works on every project in their quilt.
+                await self._ensure_user_project_connections(user_id, display_name)
             else:
                 # V1 fallback — flat facts + action_items
                 facts = response.content.get("facts", [])

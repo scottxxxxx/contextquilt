@@ -253,6 +253,27 @@ The quilt is **transparent**. Users should understand:
 - Project-specific patches stay scoped to that project
 - Old projects and completed tasks naturally fade away
 
+### Quilt Graph Visualization
+
+Render the user's entire quilt as an SVG image — patches color-coded by type, grouped by project, with connections drawn between them.
+
+```
+GET /v1/quilt/{user_id}/graph
+GET /v1/quilt/{user_id}/graph?format=png
+```
+
+Returns `image/svg+xml` (default) or `image/png`. The graph includes all active patches across all projects, with the user's person patch at the center.
+
+**iOS usage:** Load the SVG in a `WKWebView` for native pan/zoom, or render as a static image. GhostPour can proxy this endpoint or ShoulderSurf can call CQ directly.
+
+```swift
+// Load quilt graph in a WKWebView
+let url = URL(string: "\(cqBaseURL)/v1/quilt/\(userId)/graph?format=svg")!
+var request = URLRequest(url: url)
+request.addValue("cloudzap", forHTTPHeaderField: "X-App-ID")
+webView.load(request)
+```
+
 ## How It All Flows
 
 ```
