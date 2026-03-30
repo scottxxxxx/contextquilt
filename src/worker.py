@@ -905,9 +905,17 @@ class ColdPathWorker:
             await self.handle_active_learning(payload)
             return
 
-        # End-of-meeting full transcript — process immediately, never buffer
+        # End-of-meeting full transcript — process immediately, never buffer.
         # (this IS the complete meeting, sent by ShoulderSurf at session end)
+        # Flush any orphaned buffered events for this meeting — the transcript supersedes them.
         if task_type == "meeting_transcript":
+            if meeting_id and user_id:
+                queue_key = f"meeting_queue:{user_id}:{meeting_id}"
+                flushed = await self.redis.llen(queue_key)
+                if flushed:
+                    await self.redis.delete(queue_key)
+                    await self.redis.delete(f"{queue_key}:last_event")
+                    logger.info("queue_flushed_by_transcript", meeting_id=meeting_id, flushed_events=flushed)
             payload["summary"] = payload.get("content", "")
             await self.handle_meeting_summary(payload)
             return
