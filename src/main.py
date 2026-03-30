@@ -1155,7 +1155,7 @@ async def get_user_quilt_graph(
         # Pad the viewBox so content doesn't clip at edges
         def _pad_viewbox(m):
             x, y, w, h = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
-            pad = w * 0.02  # 2% padding
+            pad = w * 0.05  # 5% padding — graphviz labels overflow the viewBox
             return f'viewBox="{x - pad:.2f} {y - pad:.2f} {w + pad * 2:.2f} {h + pad * 2:.2f}"'
         svg_str = _re.sub(
             r'viewBox="([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)"',
