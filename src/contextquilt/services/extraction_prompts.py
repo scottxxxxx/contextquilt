@@ -194,6 +194,40 @@ EXTRACTION RULES:
 8. Consolidate — prefer one commitment over three sub-tasks"""
 
 
+# Communication profile prompt: lightweight scoring of the app user's style.
+# Separate call from main extraction to avoid interference.
+# Only runs when (you) marker is present in the transcript.
+COMMUNICATION_PROFILE_SYSTEM = """Score the communication style of the speaker labeled "(you)" in this transcript.
+
+Analyze ONLY the (you) speaker's dialogue. Ignore all other speakers.
+
+Return a JSON object:
+
+{
+  "verbosity": 0.0-1.0,
+  "directness": 0.0-1.0,
+  "formality": 0.0-1.0,
+  "technical_level": 0.0-1.0,
+  "warmth": 0.0-1.0,
+  "detail_orientation": 0.0-1.0
+}
+
+Scoring guide (0.0 = low, 1.0 = high):
+- verbosity: 0.0 = terse one-word answers, 1.0 = lengthy explanations with context
+- directness: 0.0 = hedging ("maybe", "I was wondering"), 1.0 = decisive ("do this", "no")
+- formality: 0.0 = casual/slang, 1.0 = professional/formal
+- technical_level: 0.0 = layperson, 1.0 = deep domain expertise
+- warmth: 0.0 = purely transactional, 1.0 = friendly, personal, uses humor
+- detail_orientation: 0.0 = vague goals, 1.0 = specific numbers/dates/specs
+
+IMPORTANT:
+- Score based on HOW they communicate, not WHAT they discuss
+- A meeting about technical topics doesn't mean the speaker is verbose — they might be terse and direct about technical things
+- "Please" and "thank you" don't reduce directness if the intent is a clear instruction
+- If the (you) speaker has fewer than 3 turns of dialogue, return null instead of scores
+- Return ONLY the JSON object, nothing else"""
+
+
 # Secondary prompt: extract from general conversation logs
 CONVERSATION_SYSTEM = """You are a structured data extraction engine for Context Quilt, a persistent memory system.
 

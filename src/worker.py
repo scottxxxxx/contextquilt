@@ -25,6 +25,7 @@ from contextquilt.services.extraction_prompts import (
     MEETING_SUMMARY_SYSTEM,
     CONVERSATION_SYSTEM,
     TRACE_SYSTEM,
+    COMMUNICATION_PROFILE_SYSTEM,
 )
 from contextquilt.gateway.extraction import classify_fact
 
@@ -1272,10 +1273,89 @@ class ColdPathWorker:
             except Exception as e:
                 logger.warning("metrics_insert_failed", error=str(e))
 
+            # Communication profile: separate lightweight call, only when (you) marker present
+            if has_you_marker:
+                await self._extract_communication_profile(user_id, summary)
+
             await self.hydrate_cache(user_id)
 
         except Exception as e:
             logger.error("meeting_summary_failed", error=str(e), user_id=user_id)
+
+    async def _extract_communication_profile(self, user_id: str, transcript: str):
+        """Extract communication style scores from the (you) speaker's dialogue.
+        Runs as a separate lightweight LLM call. Blends with existing profile via rolling average."""
+        try:
+            response = await self.llm.extract(
+                system_prompt=COMMUNICATION_PROFILE_SYSTEM,
+                user_content=transcript,
+            )
+
+            scores = response.content
+            if not scores or not isinstance(scores, dict):
+                logger.info("comm_profile_null", user_id=user_id, reason="null or invalid response")
+                return
+
+            # Validate: all expected dimensions present with numeric values
+            dimensions = ("verbosity", "directness", "formality", "technical_level", "warmth", "detail_orientation")
+            valid_scores = {}
+            for dim in dimensions:
+                val = scores.get(dim)
+                if isinstance(val, (int, float)) and 0.0 <= val <= 1.0:
+                    valid_scores[dim] = round(float(val), 2)
+
+            if not valid_scores:
+                logger.info("comm_profile_null", user_id=user_id, reason="no valid scores")
+                return
+
+            # Load existing profile for rolling average
+            existing = await self.db.fetchval(
+                "SELECT variables->'communication_profile' FROM profiles WHERE user_id = $1",
+                user_id
+            )
+
+            if existing:
+                existing = json.loads(existing) if isinstance(existing, str) else existing
+                sample_count = existing.get("_sample_count", 1)
+                new_count = sample_count + 1
+
+                # Weighted rolling average: blend new scores with existing
+                blended = {}
+                for dim in dimensions:
+                    old_val = existing.get(dim)
+                    new_val = valid_scores.get(dim)
+                    if old_val is not None and new_val is not None:
+                        blended[dim] = round((old_val * sample_count + new_val) / new_count, 2)
+                    elif new_val is not None:
+                        blended[dim] = new_val
+                    elif old_val is not None:
+                        blended[dim] = old_val
+
+                blended["_sample_count"] = new_count
+                profile_data = blended
+            else:
+                valid_scores["_sample_count"] = 1
+                profile_data = valid_scores
+
+            # Store in profiles.variables
+            await self.db.execute(
+                """UPDATE profiles
+                SET variables = jsonb_set(COALESCE(variables, '{}'::jsonb), '{communication_profile}', $1::jsonb),
+                    last_updated = NOW()
+                WHERE user_id = $2""",
+                json.dumps(profile_data), user_id
+            )
+
+            logger.info(
+                "comm_profile_updated",
+                user_id=user_id,
+                scores={k: v for k, v in profile_data.items() if k != "_sample_count"},
+                sample_count=profile_data.get("_sample_count", 1),
+                cost_usd=response.cost_usd,
+            )
+
+        except Exception as e:
+            logger.warning("comm_profile_failed", user_id=user_id, error=str(e))
 
     async def handle_passive_learning(self, payload: Dict[str, Any]):
         """Passive Learning: Analyze agent execution trace."""
