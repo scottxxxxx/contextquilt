@@ -1018,7 +1018,7 @@ async def get_user_quilt_graph(
         label=f"{display_name}'s Quilt\n ",
         labelloc="t",
         labeljust="c",
-        pad="1.0",
+        pad="2.0",
         nodesep="0.9",
         ranksep="1.2",
         splines="curved",
@@ -1157,13 +1157,14 @@ async def get_user_quilt_graph(
         # Strip fixed pt-unit dimensions
         svg_str = _re.sub(r'\swidth="[^"]*pt"', ' width="100%"', svg_str, count=1)
         svg_str = _re.sub(r'\sheight="[^"]*pt"', ' height="100%"', svg_str, count=1)
-        # Pad the viewBox so content doesn't clip at edges
+        # Pad the viewBox — graphviz pad attribute adds space but the
+        # reported viewBox still clips labels/legend at edges
         def _pad_viewbox(m):
             x, y, w, h = float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4))
-            pad = w * 0.05  # 5% padding — graphviz labels overflow the viewBox
+            pad = w * 0.08  # 8% padding on each side
             return f'viewBox="{x - pad:.2f} {y - pad:.2f} {w + pad * 2:.2f} {h + pad * 2:.2f}"'
         svg_str = _re.sub(
-            r'viewBox="([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)"',
+            r'viewBox="([\d.-]+)\s+([\d.-]+)\s+([\d.]+)\s+([\d.]+)"',
             _pad_viewbox, svg_str, count=1
         )
         img_bytes = svg_str.encode("utf-8")
