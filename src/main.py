@@ -1143,13 +1143,14 @@ async def get_user_quilt_graph(
 
     img_bytes = dot.pipe()
 
-    # For SVG: strip fixed width/height in pt units so the viewBox controls
-    # sizing. Clients (iOS WKWebView, browsers) can set their own dimensions.
+    # For SVG: replace fixed pt-unit dimensions with percentage-based sizing.
+    # viewBox preserves the coordinate system; width/height="100%" tells
+    # WKWebView and browsers to scale the SVG to fill its container.
     if fmt == "svg":
         import re as _re
         svg_str = img_bytes.decode("utf-8")
-        svg_str = _re.sub(r'\swidth="[^"]*pt"', '', svg_str, count=1)
-        svg_str = _re.sub(r'\sheight="[^"]*pt"', '', svg_str, count=1)
+        svg_str = _re.sub(r'\swidth="[^"]*pt"', ' width="100%"', svg_str, count=1)
+        svg_str = _re.sub(r'\sheight="[^"]*pt"', ' height="100%"', svg_str, count=1)
         img_bytes = svg_str.encode("utf-8")
 
     media = "image/svg+xml" if fmt == "svg" else "image/png"
