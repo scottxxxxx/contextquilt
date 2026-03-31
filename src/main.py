@@ -407,12 +407,16 @@ async def recall_context(
             subject_key, recall_project
         )
     else:
+        # No project context — only return universal patches (traits, preferences).
+        # Project-scoped patches (commitments, blockers, decisions) from other projects
+        # would be irrelevant noise in an unrelated session.
         fact_rows = await db_pool.fetch(
             """
             SELECT cp.value, cp.patch_type, cp.source_prompt
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
+              AND cp.patch_type IN ('trait', 'preference')
               AND COALESCE(cp.status, 'active') = 'active'
             ORDER BY cp.created_at DESC
             LIMIT 20
