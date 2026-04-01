@@ -59,7 +59,7 @@ The quilt is organized around the user as the root. Here's what a typical quilt 
 
 ## API Endpoints
 
-All calls go to your ContextQuilt instance (e.g., `https://your-cq-host.example.com`). Auth via your gateway's JWT token passed as `Authorization: Bearer <token>`, or `X-App-ID` header.
+All calls go to your ContextQuilt instance (e.g., `https://your-cq-host.example.com`). Auth via your app's JWT token passed as `Authorization: Bearer <token>` (see [Security & Authentication](../architecture/10-security-and-authentication.md)).
 
 ### Get the User's Quilt
 
@@ -270,7 +270,7 @@ Returns `image/svg+xml` (default) or `image/png`. The graph includes all active 
 // Load quilt graph in a WKWebView
 let url = URL(string: "\(cqBaseURL)/v1/quilt/\(userId)/graph?format=svg")!
 var request = URLRequest(url: url)
-request.addValue("cloudzap", forHTTPHeaderField: "X-App-ID")
+request.addValue("Bearer \(jwtToken)", forHTTPHeaderField: "Authorization")
 webView.load(request)
 ```
 
