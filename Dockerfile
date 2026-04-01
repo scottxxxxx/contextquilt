@@ -36,10 +36,18 @@ RUN useradd -m -u 1000 contextquilt && \
 WORKDIR /app
 
 # Install runtime dependencies
+# Graphviz from Debian apt is 2.42.4 which has a known SVG viewBox bug
+# (regression from 2.38.0, fixed in 13.0.0). Install from the official
+# graphviz apt repo to get a current version with correct SVG output.
 RUN apt-get update && apt-get install -y \
     libpq5 \
     curl \
-    graphviz \
+    gnupg \
+    && curl -fsSL https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-release-key/1/graphviz-release-key.asc \
+       | gpg --dearmor -o /usr/share/keyrings/graphviz-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/graphviz-archive-keyring.gpg] https://gitlab.com/api/v4/projects/4207231/packages/generic/deb/any bookworm main" \
+       > /etc/apt/sources.list.d/graphviz.list \
+    && apt-get update && apt-get install -y graphviz \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder
