@@ -63,7 +63,7 @@ Your App ←→ Your LLM Gateway ←→ LLM Provider
               Context Quilt
 ```
 
-Apps authenticate via JWT or X-App-ID. CQ authenticates apps, not end users — apps are responsible for their own user auth and pass `user_id` to CQ.
+Apps authenticate via JWT (required). CQ authenticates apps, not end users — apps are responsible for their own user auth and pass `user_id` to CQ. See [Security & Authentication](docs/architecture/10-security-and-authentication.md) for the full threat model.
 
 ## Documentation
 
@@ -77,6 +77,8 @@ Apps authenticate via JWT or X-App-ID. CQ authenticates apps, not end users — 
 - `06-configuration.md` — All settings and env vars
 - `07-api-reference.md` — API endpoint documentation
 - `08-connected-quilt-model.md` — Patch types, connections, lifecycle
+- `09-domain-mapping.md` — How to map CQ concepts to your domain (health, CRM, etc.)
+- `10-security-and-authentication.md` — Auth model, threat model, GDPR, defense in depth
 
 ### API Reference
 - `docs/openapi.yaml` — OpenAPI 3.0 specification
