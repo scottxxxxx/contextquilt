@@ -50,7 +50,7 @@ jobs:
             # Login to GHCR
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-            # Pull latest and restart (only CQ containers, does NOT touch CloudZap)
+            # Pull latest and restart CQ containers
             sudo docker compose -f docker-compose.prod.yml --env-file .env.prod pull
             sudo docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
             sudo docker image prune -af --filter "until=24h"

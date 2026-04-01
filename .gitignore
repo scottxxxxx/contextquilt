@@ -51,6 +51,7 @@ dmypy.json
 # Environment variables
 .env
 .env.local
+.env.prod
 
 # Logs
 *.log
@@ -58,3 +59,16 @@ logs/
 
 # Distribution / packaging
 *.whl
+
+# Test artifacts and personal data
+quilt_*.json
+quilt_*.svg
+quilt_*.png
+quilt_viewer.html
+quilt_api_test.html
+test_token.txt
+
+# Benchmark result files (contain real extraction outputs)
+tests/benchmark/*_result.json
+tests/benchmark/results.json
+tests/benchmark/pipeline_results.json

@@ -1,0 +1,838 @@
+openapi: "3.0.3"
+info:
+  title: ContextQuilt API
+  version: "3.13.0"
+  description: >
+    Persistent cognitive memory layer for AI applications. ContextQuilt gives
+    your AI app memory that persists across sessions, platforms, and conversations.
+  contact:
+    email: scott@contextquilt.com
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: http://localhost:8000
+    description: Local development
+
+tags:
+  - name: Hot Path
+    description: Low-latency context recall and cache operations
+  - name: Memory
+    description: Asynchronous memory ingestion
+  - name: Quilt
+    description: Patch CRUD and graph visualization
+  - name: Projects
+    description: Project management for grouping patches
+  - name: Authentication
+    description: Application registration and token issuance
+  - name: Ops
+    description: Operational health and readiness
+
+security:
+  - AppIdHeader: []
+  - BearerJWT: []
+
+components:
+  securitySchemes:
+    AppIdHeader:
+      type: apiKey
+      in: header
+      name: X-App-ID
+      description: Application identifier issued during registration.
+    BearerJWT:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >
+        JSON Web Token obtained from POST /v1/auth/token.
+
+  schemas:
+    RecallRequest:
+      type: object
+      required: [user_id, text]
+      properties:
+        user_id:
+          type: string
+          description: Unique user identifier (e.g. Apple Sign-In UUID).
+        text:
+          type: string
+          description: The query or prompt to recall context for.
+        metadata:
+          type: object
+          properties:
+            project:
+              type: string
+            project_id:
+              type: string
+        max_hops:
+          type: integer
+          default: 2
+          description: Maximum graph traversal hops for entity matching.
+
+    RecallResponse:
+      type: object
+      properties:
+        context:
+          type: string
+          description: Formatted context block ready for injection into an LLM prompt.
+        matched_entities:
+          type: array
+          items:
+            type: string
+        patch_count:
+          type: integer
+
+    MemoryRequest:
+      type: object
+      required: [user_id, interaction_type]
+      properties:
+        user_id:
+          type: string
+        interaction_type:
+          type: string
+          enum: [tool_call, trace, chat_log, meeting_summary, meeting_transcript, query]
+        summary:
+          type: string
+        content:
+          type: string
+        response:
+          type: string
+        metadata:
+          type: object
+        timestamp:
+          type: string
+          format: date-time
+
+    MemoryResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: queued
+        message:
+          type: string
+
+    EnrichRequest:
+      type: object
+      required: [user_id, template]
+      properties:
+        user_id:
+          type: string
+        template:
+          type: string
+          description: Prompt template with {{variable}} placeholders.
+        context:
+          type: object
+        format:
+          type: string
+          enum: [text, json]
+
+    EnrichResponse:
+      type: object
+      properties:
+        enriched_prompt:
+          type: string
+        variables:
+          type: object
+        used_variables:
+          type: array
+          items:
+            type: string
+        missing_variables:
+          type: array
+          items:
+            type: string
+
+    ProfileResponse:
+      type: object
+      properties:
+        user_id:
+          type: string
+        variables:
+          type: object
+
+    PatchConnection:
+      type: object
+      properties:
+        to_patch_id:
+          type: string
+        role:
+          type: string
+        label:
+          type: string
+        context:
+          type: string
+
+    QuiltPatch:
+      type: object
+      properties:
+        patch_id:
+          type: string
+        fact:
+          type: string
+        category:
+          type: string
+        patch_type:
+          type: string
+        source:
+          type: string
+        owner:
+          type: string
+          nullable: true
+        deadline:
+          type: string
+          nullable: true
+        project:
+          type: string
+          nullable: true
+        project_id:
+          type: string
+          nullable: true
+        meeting_id:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+        connections:
+          type: array
+          items:
+            $ref: "#/components/schemas/PatchConnection"
+
+    QuiltResponse:
+      type: object
+      properties:
+        user_id:
+          type: string
+        facts:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuiltPatch"
+        action_items:
+          type: array
+          items:
+            $ref: "#/components/schemas/QuiltPatch"
+        deleted:
+          type: array
+          items:
+            type: string
+          description: Patch IDs deleted since the `since` timestamp (only present for delta sync).
+        server_time:
+          type: string
+          format: date-time
+          description: Use as the `since` value on the next delta-sync call.
+
+    PatchUpdateRequest:
+      type: object
+      properties:
+        fact:
+          type: string
+        category:
+          type: string
+
+    PatchUpdateResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: updated
+        patch_id:
+          type: string
+
+    PatchDeleteResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: deleted
+        patch_id:
+          type: string
+
+    UserDeleteResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: deleted
+        user_id:
+          type: string
+        patches_deleted:
+          type: integer
+        entities_deleted:
+          type: integer
+
+    RenameSpeakerRequest:
+      type: object
+      required: [old_name, new_name]
+      properties:
+        old_name:
+          type: string
+        new_name:
+          type: string
+
+    RenameSpeakerResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: renamed
+        old_name:
+          type: string
+        new_name:
+          type: string
+
+    Project:
+      type: object
+      properties:
+        project_id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+        patch_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    CreateProjectRequest:
+      type: object
+      required: [project_id, name]
+      properties:
+        project_id:
+          type: string
+        name:
+          type: string
+
+    CreateProjectResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: created
+        project_id:
+          type: string
+
+    UpdateProjectRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [active, archived]
+
+    UpdateProjectResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: updated
+        project_id:
+          type: string
+
+    PrewarmResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: warm
+        profile:
+          type: boolean
+        entities:
+          type: integer
+
+    RegisterRequest:
+      type: object
+      required: [app_name]
+      properties:
+        app_name:
+          type: string
+
+    RegisterResponse:
+      type: object
+      properties:
+        app_id:
+          type: string
+        app_name:
+          type: string
+        client_secret:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          example: bearer
+        expires_in:
+          type: integer
+          example: 3600
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: healthy
+        version:
+          type: string
+
+paths:
+  /v1/recall:
+    post:
+      operationId: recall
+      summary: Intelligent Context Recall
+      description: >
+        Query the user's quilt for relevant context. Returns a formatted context
+        block, matched entity names, and patch count. Designed for the hot path
+        — call this before sending a prompt to your LLM.
+      tags: [Hot Path]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RecallRequest"
+      responses:
+        "200":
+          description: Context recalled successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RecallResponse"
+
+  /v1/memory:
+    post:
+      operationId: queueMemory
+      summary: Queue Memory Update
+      description: >
+        Submit an interaction for asynchronous extraction. The request is queued
+        immediately and processed by the cold-path worker. Patches are extracted
+        and stored without blocking the caller.
+      tags: [Memory]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MemoryRequest"
+      responses:
+        "200":
+          description: Interaction queued for processing.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MemoryResponse"
+
+  /v1/enrich:
+    post:
+      operationId: enrichTemplate
+      summary: Template Enrichment
+      description: >
+        Fill a prompt template with user-specific context variables from the
+        quilt. Returns the enriched prompt along with which variables were
+        resolved and which were missing.
+      tags: [Hot Path]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrichRequest"
+      responses:
+        "200":
+          description: Template enriched successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnrichResponse"
+
+  /v1/profile/{user_id}:
+    get:
+      operationId: getProfile
+      summary: Get User Profile
+      description: Retrieve resolved profile variables for a user.
+      tags: [Hot Path]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: keys
+          in: query
+          required: false
+          description: Filter to specific variable keys.
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: Profile retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProfileResponse"
+
+  /v1/quilt/{user_id}:
+    get:
+      operationId: getQuilt
+      summary: Get User's Quilt
+      description: >
+        Return all active patches (and their connections) for a user. Supports
+        delta sync via the `since` query parameter — when provided, only patches
+        created or updated after that timestamp are returned, along with a
+        `deleted` array of removed patch IDs.
+      tags: [Quilt]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: category
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: since
+          in: query
+          required: false
+          description: ISO 8601 timestamp for delta sync. Use `server_time` from a previous response.
+          schema:
+            type: string
+            format: date-time
+      responses:
+        "200":
+          description: Quilt patches returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuiltResponse"
+
+    delete:
+      operationId: deleteAllUserData
+      summary: Delete All User Data (GDPR)
+      description: >
+        Permanently delete all patches, entities, and relationships for a user.
+        Intended for GDPR right-to-erasure compliance.
+      tags: [Quilt]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: All user data deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserDeleteResponse"
+
+  /v1/quilt/{user_id}/graph:
+    get:
+      operationId: getQuiltGraph
+      summary: Visual Quilt Graph
+      description: >
+        Render the user's quilt as a visual graph. Supports SVG, PNG, and
+        interactive HTML formats.
+      tags: [Quilt]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: format
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [svg, png, html]
+            default: svg
+      responses:
+        "200":
+          description: Graph rendered.
+          content:
+            image/svg+xml:
+              schema:
+                type: string
+            image/png:
+              schema:
+                type: string
+                format: binary
+            text/html:
+              schema:
+                type: string
+
+  /v1/quilt/{user_id}/patches/{patch_id}:
+    patch:
+      operationId: updatePatch
+      summary: Update Patch
+      description: Edit a patch's text or category.
+      tags: [Quilt]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: patch_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchUpdateRequest"
+      responses:
+        "200":
+          description: Patch updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PatchUpdateResponse"
+
+    delete:
+      operationId: deletePatch
+      summary: Delete Patch
+      description: Permanently delete a single patch.
+      tags: [Quilt]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: patch_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Patch deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PatchDeleteResponse"
+
+  /v1/quilt/{user_id}/rename-speaker:
+    post:
+      operationId: renameSpeaker
+      summary: Rename Speaker / Entity
+      description: >
+        Rename all occurrences of a speaker or entity across the user's patches.
+      tags: [Quilt]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RenameSpeakerRequest"
+      responses:
+        "200":
+          description: Speaker renamed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RenameSpeakerResponse"
+
+  /v1/projects/{user_id}:
+    get:
+      operationId: listProjects
+      summary: List Projects
+      description: Return all projects for a user with patch counts.
+      tags: [Projects]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Projects listed.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Project"
+
+    post:
+      operationId: createProject
+      summary: Create Project
+      description: Register a new project for a user.
+      tags: [Projects]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectRequest"
+      responses:
+        "201":
+          description: Project created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateProjectResponse"
+
+  /v1/projects/{user_id}/{project_id}:
+    patch:
+      operationId: updateProject
+      summary: Update Project
+      description: >
+        Rename or archive a project. Archiving cascades to all patches in the
+        project.
+      tags: [Projects]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProjectRequest"
+      responses:
+        "200":
+          description: Project updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateProjectResponse"
+
+  /v1/prewarm:
+    post:
+      operationId: prewarm
+      summary: Cache Prewarm
+      description: >
+        Warm the Redis working-memory cache for a user before they start a
+        session. Reduces first-recall latency.
+      tags: [Hot Path]
+      parameters:
+        - name: user_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Cache warmed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PrewarmResponse"
+
+  /v1/auth/register:
+    post:
+      operationId: registerApp
+      summary: Register Application
+      description: >
+        Register a new application to obtain an app_id and client_secret for
+        authenticating API calls.
+      tags: [Authentication]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterRequest"
+      responses:
+        "201":
+          description: Application registered.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegisterResponse"
+
+  /v1/auth/token:
+    post:
+      operationId: getToken
+      summary: Get Access Token
+      description: >
+        Exchange app credentials for a short-lived JWT. Uses OAuth2 password
+        grant flow where username is the app_id and password is the
+        client_secret.
+      tags: [Authentication]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                  description: The app_id from registration.
+                password:
+                  type: string
+                  description: The client_secret from registration.
+                grant_type:
+                  type: string
+                  default: password
+      responses:
+        "200":
+          description: Token issued.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Health Check
+      description: Returns service health status and version.
+      tags: [Ops]
+      security: []
+      responses:
+        "200":
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
