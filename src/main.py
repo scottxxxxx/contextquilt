@@ -150,6 +150,7 @@ class RecallResponse(BaseModel):
     context: str
     matched_entities: List[str]
     patch_count: int
+    communication_style: Optional[str] = None
 
 # ============================================
 # Helpers
@@ -551,10 +552,38 @@ async def recall_context(
 
     context = "\n\n".join(sections)
 
+    # Look up communication profile and format as a natural language hint.
+    # The calling gateway decides whether to inject this (e.g., only for chat modes).
+    comm_style = None
+    profile = await get_working_memory(user_id)
+    if profile:
+        cp = profile.get("variables", {}).get("communication_profile")
+        if cp and isinstance(cp, dict):
+            # Build a natural language style hint from the scores
+            style_parts = []
+            v = cp.get("verbosity")
+            if v is not None:
+                style_parts.append("concise" if v < 0.4 else "detailed" if v > 0.6 else "moderate-length")
+            d = cp.get("directness")
+            if d is not None:
+                style_parts.append("direct" if d > 0.6 else "diplomatic" if d < 0.4 else "balanced")
+            f = cp.get("formality")
+            if f is not None:
+                style_parts.append("formal" if f > 0.6 else "casual" if f < 0.4 else "semi-formal")
+            t = cp.get("technical_level")
+            if t is not None:
+                style_parts.append("highly technical" if t > 0.7 else "non-technical" if t < 0.3 else "moderately technical")
+            w = cp.get("warmth")
+            if w is not None:
+                style_parts.append("warm and friendly" if w > 0.6 else "businesslike" if w < 0.4 else "professional")
+            if style_parts:
+                comm_style = f"This user communicates in a {', '.join(style_parts)} style."
+
     return RecallResponse(
         context=context,
         matched_entities=matched_names,
         patch_count=len(fact_rows) + len(rel_rows),
+        communication_style=comm_style,
     )
 
 
