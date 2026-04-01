@@ -180,6 +180,10 @@ Unlike flat fact stores, ContextQuilt preserves **relationships** between facts.
 
 Apps can register custom patch types and connection labels via the patch type registry. A health coaching app might add `condition`, `goal`, `metric`, `intervention`. A CRM might add `deal`, `contact`, `interaction`.
 
+### Not Just for Meetings
+
+The API uses terms like "project" and "meeting" but these are generic grouping concepts. A "project" is any named container (a treatment plan, a deal, a repository). A "meeting_id" is any session that produces patches (an office visit, a sales call, a code review). See [Domain Mapping Guide](docs/architecture/09-domain-mapping.md) for how to map CQ to your domain.
+
 ## Configuration
 
 See [docs/architecture/06-configuration.md](docs/architecture/06-configuration.md) for all settings.
