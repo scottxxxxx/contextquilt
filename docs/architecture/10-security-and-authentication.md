@@ -87,6 +87,7 @@ For production deployments:
 5. **SSL certificate pinning** — if your client app is native (iOS/Android), pin the certificate to prevent MITM proxy inspection
 6. **Rotate `client_secret`** periodically — re-register the app and update your gateway config
 7. **Monitor access patterns** — unusual spikes in recall or memory writes may indicate abuse
+8. **Never hardcode your production CQ URL in public repositories** — use environment variables (e.g., `CQ_BASE_URL`)
 
 ## Environment Variables (Security-Related)
 
