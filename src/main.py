@@ -183,34 +183,45 @@ async def verify_application_access(
 
     # 2. Fallback to Legacy Mode (X-App-ID)
     app_id_to_check = x_app_id
-    
+
     if not app_id_to_check:
-        # If no token and no header, allow for now (legacy) but return None
-        # Or should we require at least one?
-        # Existing verify_app_id required X-App-ID.
-        # Let's require it if no token.
         raise HTTPException(status_code=400, detail="X-App-ID header or Bearer Token required")
 
-    # Check enforcement in DB
+    # Verify the app_id exists in the applications table.
+    # Legacy string IDs (e.g., "cloudzap") that aren't registered are rejected.
     try:
-        # Ensure db_pool is initialized
         if not db_pool:
             return app_id_to_check
-            
+
         row = await db_pool.fetchrow(
-            "SELECT enforce_auth FROM applications WHERE app_id = $1",
+            "SELECT app_id, enforce_auth FROM applications WHERE app_id = $1",
             app_id_to_check
         )
-        if row and row['enforce_auth']:
+
+        if not row:
+            # App ID not registered — reject
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required for this application",
+                detail="Unknown application. Register via POST /v1/auth/register.",
+            )
+
+        if row['enforce_auth']:
+            # App requires JWT — X-App-ID alone is not enough
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required for this application. Use Bearer token.",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+
         return app_id_to_check
-    except Exception:
-        # Fail open for legacy compatibility
-        return app_id_to_check
+    except HTTPException:
+        raise  # Re-raise our own HTTP exceptions
+    except Exception as e:
+        # DB error — fail closed for security
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to verify application access",
+        )
 
 async def get_working_memory(user_id: str) -> Dict[str, Any]:
     """Fetch hydrated profile from Redis"""
