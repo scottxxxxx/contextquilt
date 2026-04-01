@@ -37,17 +37,16 @@ WORKDIR /app
 
 # Install runtime dependencies
 # Graphviz from Debian apt is 2.42.4 which has a known SVG viewBox bug
-# (regression from 2.38.0, fixed in 13.0.0). Install from the official
-# graphviz apt repo to get a current version with correct SVG output.
-RUN apt-get update && apt-get install -y \
+# (regression from 2.38.0, fixed in 13.0.0). Install the official
+# graphviz release deb to get correct SVG output.
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
-    gnupg \
-    && curl -fsSL https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-release-key/1/graphviz-release-key.asc \
-       | gpg --dearmor -o /usr/share/keyrings/graphviz-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/graphviz-archive-keyring.gpg] https://gitlab.com/api/v4/projects/4207231/packages/generic/deb/any bookworm main" \
-       > /etc/apt/sources.list.d/graphviz.list \
-    && apt-get update && apt-get install -y graphviz \
+    && curl -fsSL \
+       "https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/14.1.4/ubuntu_22.04_graphviz-14.1.4-cmake.deb" \
+       -o /tmp/graphviz.deb \
+    && apt-get install -y /tmp/graphviz.deb \
+    && rm /tmp/graphviz.deb \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder
