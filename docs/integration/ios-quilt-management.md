@@ -59,7 +59,7 @@ The quilt is organized around the user as the root. Here's what a typical quilt 
 
 ## API Endpoints
 
-All calls go to `https://cq.shouldersurf.com`. Auth via GhostPour's JWT token passed as `Authorization: Bearer <token>`, or `X-App-ID` header.
+All calls go to your ContextQuilt instance (e.g., `https://your-cq-host.example.com`). Auth via your gateway's JWT token passed as `Authorization: Bearer <token>`, or `X-App-ID` header.
 
 ### Get the User's Quilt
 
