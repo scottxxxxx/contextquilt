@@ -60,6 +60,9 @@ logs/
 # Distribution / packaging
 *.whl
 
+# Internal docs (not for public repo)
+docs/sales/
+
 # Test artifacts and personal data
 quilt_*.json
 quilt_*.svg
