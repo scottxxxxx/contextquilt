@@ -1528,6 +1528,71 @@ async def update_project(
     return {"status": "updated", "project_id": project_id}
 
 
+class MeetingProjectAssignment(BaseModel):
+    project_id: str
+    project_name: str
+
+@app.post("/v1/meetings/{user_id}/{meeting_id}/assign-project", tags=["Projects"])
+async def assign_meeting_to_project(
+    user_id: str,
+    meeting_id: str,
+    assignment: MeetingProjectAssignment,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Retroactively assign a meeting's patches to a project.
+    Use when a user records a meeting without selecting a project, then
+    assigns it to a project later. Bulk-updates all patches with the
+    given meeting_id to the specified project_id.
+    """
+    project_id = assignment.project_id
+    project_name = assignment.project_name
+
+    # Ensure project exists (upsert)
+    await db_pool.execute(
+        """
+        INSERT INTO projects (project_id, user_id, name)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (project_id) DO UPDATE SET updated_at = NOW()
+        """,
+        project_id, user_id, project_name
+    )
+
+    # Find all patches for this meeting that are currently unscoped
+    subject_key = f"user:{user_id}"
+    updated = await db_pool.execute(
+        """
+        UPDATE context_patches SET
+            project_id = $1,
+            project = $2,
+            updated_at = NOW()
+        WHERE patch_id IN (
+            SELECT cp.patch_id FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $3
+              AND cp.meeting_id = $4
+              AND cp.patch_type NOT IN ('trait', 'preference')
+        )
+        """,
+        project_id, project_name, subject_key, meeting_id
+    )
+
+    # Extract count from "UPDATE N"
+    patches_updated = int(updated.split()[-1]) if updated else 0
+
+    # Trigger cache refresh
+    stream_key = "memory_updates"
+    payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
+    await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
+
+    return {
+        "status": "assigned",
+        "meeting_id": meeting_id,
+        "project_id": project_id,
+        "patches_updated": patches_updated,
+    }
+
+
 class AppUpdate(BaseModel):
     enforce_auth: bool
 
