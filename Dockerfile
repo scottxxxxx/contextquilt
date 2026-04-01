@@ -44,6 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libltdl7 \
     libgts-0.7-5 \
+    libexpat1 \
     && curl -fsSL \
        "https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/14.1.4/ubuntu_22.04_graphviz-14.1.4-cmake.deb" \
        -o /tmp/graphviz.deb \
