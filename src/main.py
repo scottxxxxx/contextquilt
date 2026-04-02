@@ -13,7 +13,7 @@ import os
 import redis.asyncio as redis
 import json
 import re
-import re
+import time
 from datetime import datetime
 import sys
 import os
@@ -151,6 +151,7 @@ class RecallResponse(BaseModel):
     matched_entities: List[str]
     patch_count: int
     communication_style: Optional[str] = None
+    timing_ms: Optional[Dict[str, float]] = None
 
 # ============================================
 # Helpers
@@ -312,10 +313,13 @@ async def recall_context(
     """
     user_id = request.user_id
     text_lower = request.text.lower()
+    t0 = time.monotonic()
+    timings = {}
 
     # Step 1: Find matching entities from Redis index (fast)
     entity_index_key = f"entity_index:{user_id}"
     known_entities = await redis_client.smembers(entity_index_key)
+    timings["redis_entity_lookup"] = round((time.monotonic() - t0) * 1000, 2)
 
     matched_names = []
     if known_entities:
@@ -332,9 +336,10 @@ async def recall_context(
                     matched_names.append(val)
 
     if not matched_names:
-        return RecallResponse(context="", matched_entities=[], patch_count=0)
+        return RecallResponse(context="", matched_entities=[], patch_count=0, timing_ms=timings)
 
     # Step 2: Traverse graph from matched entities (Postgres)
+    t1 = time.monotonic()
     # Find entity IDs for matched names
     entity_rows = await db_pool.fetch(
         """
@@ -381,8 +386,10 @@ async def recall_context(
         """,
         user_id, entity_ids, max_hops
     )
+    timings["postgres_entities_and_graph"] = round((time.monotonic() - t1) * 1000, 2)
 
     # Step 4: Get patches for this user
+    t2 = time.monotonic()
     # Prefer project_id (stable UUID) over project name (can be renamed)
     recall_project_id = request.metadata.get("project_id") if request.metadata else None
     recall_project = request.metadata.get("project") if request.metadata else None
@@ -484,6 +491,8 @@ async def recall_context(
         if key not in seen_texts:
             all_patches.append(row)
             seen_texts.add(key)
+
+    timings["postgres_patches"] = round((time.monotonic() - t2) * 1000, 2)
 
     # Step 5: Build context block — grouped by patch type
     sections = []
@@ -590,11 +599,14 @@ async def recall_context(
             if style_parts:
                 comm_style = f"This user communicates in a {', '.join(style_parts)} style."
 
+    timings["total"] = round((time.monotonic() - t0) * 1000, 2)
+
     return RecallResponse(
         context=context,
         matched_entities=matched_names,
         patch_count=len(fact_rows) + len(rel_rows),
         communication_style=comm_style,
+        timing_ms=timings,
     )
 
 
