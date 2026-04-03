@@ -11,6 +11,7 @@ services:
       - DATABASE_URL=postgresql://postgres:${MCP_POSTGRES_PASSWORD}@cq-mcp-postgres:5432/context_quilt_mcp
       - REDIS_URL=redis://:${MCP_REDIS_PASSWORD}@cq-mcp-redis:6379/0
       - MCP_PORT=8001
+      - MCP_API_KEY=${MCP_API_KEY}
     depends_on:
       cq-mcp-postgres:
         condition: service_healthy

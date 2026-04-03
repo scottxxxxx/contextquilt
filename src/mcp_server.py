@@ -29,6 +29,7 @@ from mcp.server.fastmcp import FastMCP
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/context_quilt")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 MCP_PORT = int(os.getenv("MCP_PORT", "8001"))
+MCP_API_KEY = os.getenv("MCP_API_KEY", "")  # Required for remote transport. Set to a strong random string.
 
 # ============================================
 # MCP Server Definition
@@ -425,11 +426,44 @@ async def get_user_profile(user_id: str) -> str:
 
 
 # ============================================
+# Auth Middleware (for remote transports)
+# ============================================
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
+
+
+class BearerAuthMiddleware(BaseHTTPMiddleware):
+    """Validates Authorization: Bearer <token> against MCP_API_KEY."""
+
+    async def dispatch(self, request, call_next):
+        # Skip auth for health check
+        if request.url.path == "/health":
+            return await call_next(request)
+
+        if not MCP_API_KEY:
+            # No key configured — allow (local dev)
+            return await call_next(request)
+
+        auth = request.headers.get("authorization", "")
+        if not auth.startswith("Bearer "):
+            return JSONResponse({"error": "Authorization: Bearer <token> required"}, status_code=401)
+
+        token = auth[7:]
+        if token != MCP_API_KEY:
+            return JSONResponse({"error": "Invalid API key"}, status_code=403)
+
+        return await call_next(request)
+
+
+# ============================================
 # Entry point
 # ============================================
 
 if __name__ == "__main__":
     import argparse
+    import uvicorn
+
     parser = argparse.ArgumentParser(description="ContextQuilt MCP Server")
     parser.add_argument("--transport", choices=["stdio", "sse", "http"], default="sse",
                        help="Transport mode (default: sse)")
@@ -437,11 +471,24 @@ if __name__ == "__main__":
                        help=f"Port for SSE/HTTP transport (default: {MCP_PORT})")
     args = parser.parse_args()
 
-    os.environ.setdefault("MCP_PORT", str(args.port))
+    if args.transport == "stdio":
+        mcp.run(transport="stdio")
+    else:
+        # Get the Starlette app and add auth middleware
+        if args.transport == "sse":
+            app = mcp.sse_app()
+        else:
+            app = mcp.streamable_http_app()
 
-    transport_map = {
-        "stdio": "stdio",
-        "sse": "sse",
-        "http": "streamable-http",
-    }
-    mcp.run(transport=transport_map[args.transport])
+        app.add_middleware(BearerAuthMiddleware)
+
+        # Add a simple health check
+        from starlette.routing import Route
+        from starlette.responses import PlainTextResponse
+
+        async def health(request):
+            return PlainTextResponse("ok")
+
+        app.routes.append(Route("/health", health))
+
+        uvicorn.run(app, host="0.0.0.0", port=args.port)
