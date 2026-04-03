@@ -1,0 +1,73 @@
+services:
+  # MCP Server — ContextQuilt exposed as an MCP endpoint
+  # Completely isolated from the production SS instance
+  cq-mcp:
+    image: ${GHCR_IMAGE:-ghcr.io/scottxxxxx/contextquilt:latest}
+    container_name: cq-mcp
+    command: python src/mcp_server.py --transport sse --port 8001
+    expose:
+      - "8001"
+    environment:
+      - DATABASE_URL=postgresql://postgres:${MCP_POSTGRES_PASSWORD}@cq-mcp-postgres:5432/context_quilt_mcp
+      - REDIS_URL=redis://:${MCP_REDIS_PASSWORD}@cq-mcp-redis:6379/0
+      - MCP_PORT=8001
+      - MCP_API_KEY=${MCP_API_KEY}
+    depends_on:
+      cq-mcp-postgres:
+        condition: service_healthy
+      cq-mcp-redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # MCP Worker — same cold path worker, separate DB
+  cq-mcp-worker:
+    image: ${GHCR_IMAGE:-ghcr.io/scottxxxxx/contextquilt:latest}
+    container_name: cq-mcp-worker
+    command: python src/worker.py
+    environment:
+      - DATABASE_URL=postgresql://postgres:${MCP_POSTGRES_PASSWORD}@cq-mcp-postgres:5432/context_quilt_mcp
+      - REDIS_URL=redis://:${MCP_REDIS_PASSWORD}@cq-mcp-redis:6379/0
+      - REDIS_HOST=cq-mcp-redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${MCP_REDIS_PASSWORD}
+      - CQ_LLM_API_KEY=${CQ_LLM_API_KEY}
+      - CQ_LLM_BASE_URL=${CQ_LLM_BASE_URL:-https://openrouter.ai/api/v1}
+      - CQ_LLM_MODEL=${CQ_LLM_MODEL:-mistralai/mistral-small-3.1-24b-instruct}
+    depends_on:
+      cq-mcp-postgres:
+        condition: service_healthy
+      cq-mcp-redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Separate Postgres for MCP
+  cq-mcp-postgres:
+    image: pgvector/pgvector:pg16
+    container_name: cq-mcp-postgres
+    environment:
+      - POSTGRES_DB=context_quilt_mcp
+      - POSTGRES_PASSWORD=${MCP_POSTGRES_PASSWORD}
+    volumes:
+      - cq-mcp-pgdata:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Separate Redis for MCP
+  cq-mcp-redis:
+    image: redis:7-alpine
+    container_name: cq-mcp-redis
+    command: redis-server --requirepass ${MCP_REDIS_PASSWORD} --maxmemory 128mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${MCP_REDIS_PASSWORD}", "--raw", "incr", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  cq-mcp-pgdata:
