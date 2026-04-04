@@ -1,197 +1,115 @@
-version: '3.8'
+# ContextQuilt — Self-Hosted Deployment
+#
+# Runs the full CQ stack: REST API + MCP server + cold path worker + Postgres + Redis.
+#
+# Quick start:
+#   cp .env.example .env   # Edit with your API keys
+#   docker compose up -d
+#
+# Endpoints:
+#   REST API:    http://localhost:8000      (for app integration)
+#   MCP Server:  http://localhost:8001/sse  (for MCP clients)
+#   Dashboard:   http://localhost:8000/dashboard/
+#   API Docs:    http://localhost:8000/docs
+#   Health:      http://localhost:8000/health
 
 services:
-  # Context Quilt API Gateway
+  # REST API — the primary interface for app integrations
   context-quilt:
     build: .
-    container_name: context-quilt-api
+    container_name: contextquilt
     ports:
       - "8000:8000"
     environment:
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_DB=context_quilt
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/context_quilt
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - CONTEXT_QUILT_LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - ENABLE_CACHING=${ENABLE_CACHING:-true}
-      - ENABLE_AB_TESTING=${ENABLE_AB_TESTING:-true}
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/context_quilt
-      - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434/api/generate}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis}
+      - CQ_LLM_API_KEY=${CQ_LLM_API_KEY}
+      - CQ_LLM_BASE_URL=${CQ_LLM_BASE_URL:-https://openrouter.ai/api/v1}
+      - CQ_LLM_MODEL=${CQ_LLM_MODEL:-mistralai/mistral-small-3.1-24b-instruct}
+      - CQ_ADMIN_KEY=${CQ_ADMIN_KEY:-admin}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
-    networks:
-      - context-quilt-network
-    volumes:
-      - ./logs:/app/logs
-      - ./src:/app/src
-    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000
 
-  # Context Quilt Worker (Cold Path)
+  # MCP Server — Model Context Protocol endpoint for AI agent clients
+  context-quilt-mcp:
+    build: .
+    container_name: contextquilt-mcp
+    ports:
+      - "8001:8001"
+    environment:
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/context_quilt
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis}@redis:6379/0
+      - MCP_PORT=8001
+      - MCP_API_KEY=${MCP_API_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    command: python src/mcp_server.py --transport sse --port 8001
+
+  # Cold Path Worker — async extraction pipeline
   context-quilt-worker:
     build: .
-    container_name: context-quilt-worker
-    command: python src/worker.py
+    container_name: contextquilt-worker
     environment:
-      - POSTGRES_HOST=postgres
-      - POSTGRES_PORT=5432
-      - POSTGRES_DB=context_quilt
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/context_quilt
+      - DATABASE_URL=postgresql://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/context_quilt
       - REDIS_HOST=redis
       - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379/0
-      - OLLAMA_URL=${OLLAMA_URL:-http://ollama:11434/api/generate}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-redis}
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-redis}@redis:6379/0
+      - CQ_LLM_API_KEY=${CQ_LLM_API_KEY}
+      - CQ_LLM_BASE_URL=${CQ_LLM_BASE_URL:-https://openrouter.ai/api/v1}
+      - CQ_LLM_MODEL=${CQ_LLM_MODEL:-mistralai/mistral-small-3.1-24b-instruct}
     depends_on:
-      ollama:
-        condition: service_healthy
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
-    networks:
-      - context-quilt-network
-    volumes:
-      - ./logs:/app/logs
-      - ./src:/app/src
+    command: python src/worker.py
 
-
-
-  # Ollama Service (LLM Host)
-  ollama:
-    image: ollama/ollama:latest
-
-    container_name: ollama
-    ports:
-      - "11434:11434"
-    volumes:
-      - ollama-data:/root/.ollama
-    restart: unless-stopped
-    networks:
-      - context-quilt-network
-    healthcheck:
-      test: ["CMD", "ollama", "list"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  # Ollama Model Initializer (Ephemeral)
-  ollama-init:
-    image: ollama/ollama:latest
-    container_name: ollama-init
-    restart: "no"
-    networks:
-      - context-quilt-network
-    environment:
-      - OLLAMA_HOST=ollama:11434
-    command: pull qwen2.5-coder:7b-instruct
-    depends_on:
-      ollama:
-        condition: service_healthy
-
-  # PostgreSQL Database
+  # PostgreSQL with pgvector
   postgres:
-    image: postgres:15-alpine
-    container_name: context-quilt-db
+    image: pgvector/pgvector:pg16
+    container_name: contextquilt-db
     environment:
       - POSTGRES_DB=context_quilt
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - PGDATA=/var/lib/postgresql/data/pgdata
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
     ports:
       - "5432:5432"
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
       - ./init-db:/docker-entrypoint-initdb.d
-    restart: unless-stopped
-    networks:
-      - context-quilt-network
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
+      interval: 5s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
 
-  # Redis Cache
+  # Redis
   redis:
     image: redis:7-alpine
-    container_name: context-quilt-cache
-    command: redis-server --requirepass ${REDIS_PASSWORD} --maxmemory 256mb --maxmemory-policy allkeys-lru
+    container_name: contextquilt-cache
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis} --maxmemory 256mb --maxmemory-policy allkeys-lru
     ports:
       - "6379:6379"
-    volumes:
-      - redis-data:/data
-    restart: unless-stopped
-    networks:
-      - context-quilt-network
     healthcheck:
-      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
-      interval: 10s
-      timeout: 3s
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redis}", "--raw", "incr", "ping"]
+      interval: 5s
+      timeout: 5s
       retries: 5
-
-  # Optional: Redis Commander (Redis GUI)
-  redis-commander:
-    image: rediscommander/redis-commander:latest
-    container_name: context-quilt-redis-gui
-    environment:
-      - REDIS_HOSTS=local:redis:6379:0:${REDIS_PASSWORD}
-    ports:
-      - "8081:8081"
-    depends_on:
-      - redis
-    networks:
-      - context-quilt-network
-    profiles:
-      - debug
-
-  # Optional: pgAdmin (PostgreSQL GUI)
-  pgadmin:
-    image: dpage/pgadmin4:latest
-    container_name: context-quilt-pgadmin
-    environment:
-      - PGADMIN_DEFAULT_EMAIL=${PGADMIN_EMAIL:-admin@contextquilt.local}
-      - PGADMIN_DEFAULT_PASSWORD=${PGADMIN_PASSWORD:-admin}
-      - PGADMIN_CONFIG_SERVER_MODE=False
-    ports:
-      - "5050:80"
-    depends_on:
-      - postgres
-    networks:
-      - context-quilt-network
-    volumes:
-      - pgadmin-data:/var/lib/pgadmin
-    profiles:
-      - debug
-
-networks:
-  context-quilt-network:
-    driver: bridge
+    restart: unless-stopped
 
 volumes:
-  ollama-data:
-    driver: local
-  postgres-data:
-    driver: local
-  redis-data:
-    driver: local
-  pgadmin-data:
-    driver: local
+  pgdata:
