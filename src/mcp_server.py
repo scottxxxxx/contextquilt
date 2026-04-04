@@ -35,11 +35,24 @@ MCP_API_KEY = os.getenv("MCP_API_KEY", "")  # Required for remote transport. Set
 # MCP Server Definition
 # ============================================
 
+from mcp.server.transport_security import TransportSecuritySettings
+
 mcp = FastMCP(
     "ContextQuilt",
     instructions="""ContextQuilt is a persistent cognitive memory layer for AI applications.
 It remembers user preferences, decisions, commitments, and relationships across sessions.
 Use these tools to store and recall context for your users.""",
+    host="0.0.0.0",
+    port=MCP_PORT,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "mcp.contextquilt.com",
+            "mcp.contextquilt.com:443",
+            "localhost:*",
+            "127.0.0.1:*",
+        ],
+    ),
 )
 
 # ============================================
