@@ -635,7 +635,8 @@ class ColdPathWorker:
 
         self.redis = redis.from_url(REDIS_URL, decode_responses=True)
         self.db = await asyncpg.connect(DATABASE_URL)
-        self.llm = LLMClient()  # Configured via CQ_LLM_* env vars
+        self.llm = LLMClient()  # Default LLM client (server's own key)
+        self._app_llm_cache: Dict[str, LLMClient] = {}  # Per-app BYOK clients
 
         # Get context window for budget calculation
         model_name = self.llm.model
@@ -954,6 +955,39 @@ class ColdPathWorker:
     # Handlers
     # ============================================
 
+    async def _get_llm_for_app(self, app_id: str | None) -> LLMClient:
+        """Get the LLM client for an app. Uses app's BYOK key if available, else server default."""
+        if not app_id:
+            return self.llm
+
+        # Check cache first
+        if app_id in self._app_llm_cache:
+            return self._app_llm_cache[app_id]
+
+        # Look up app's LLM config from DB
+        try:
+            row = await self.db.fetchrow(
+                "SELECT llm_api_key_encrypted, llm_base_url, llm_model FROM applications WHERE app_id = $1",
+                app_id
+            )
+            if row and row["llm_api_key_encrypted"]:
+                from contextquilt.services.key_encryption import decrypt_key
+                api_key = decrypt_key(row["llm_api_key_encrypted"])
+                if api_key:
+                    client = LLMClient(
+                        api_key=api_key,
+                        base_url=row["llm_base_url"] or self.llm.base_url,
+                        model=row["llm_model"] or self.llm.model,
+                    )
+                    self._app_llm_cache[app_id] = client
+                    logger.info("byok_client_created", app_id=app_id[:8])
+                    return client
+        except Exception as e:
+            logger.warning("byok_lookup_failed", app_id=app_id[:8], error=str(e))
+
+        # Fall back to server default
+        return self.llm
+
     async def hydrate_cache(self, user_id: str):
         """Hydration Workflow: Postgres -> Redis. Warms profile + entity index."""
         try:
@@ -1169,12 +1203,14 @@ class ColdPathWorker:
             user_context = ""
 
         try:
-            response = await self.llm.extract(
+            app_id = payload.get("app_id")
+            llm = await self._get_llm_for_app(app_id)
+
+            response = await llm.extract(
                 system_prompt=MEETING_SUMMARY_SYSTEM,
                 user_content=user_context + summary,
             )
 
-            app_id = payload.get("app_id")
             timestamp = payload.get("timestamp")
             project = metadata.get("project") if metadata else None
             project_id = metadata.get("project_id") if metadata else None
@@ -1275,18 +1311,19 @@ class ColdPathWorker:
 
             # Communication profile: separate lightweight call, only when (you) marker present
             if has_you_marker:
-                await self._extract_communication_profile(user_id, summary)
+                await self._extract_communication_profile(user_id, summary, app_id)
 
             await self.hydrate_cache(user_id)
 
         except Exception as e:
             logger.error("meeting_summary_failed", error=str(e), user_id=user_id)
 
-    async def _extract_communication_profile(self, user_id: str, transcript: str):
+    async def _extract_communication_profile(self, user_id: str, transcript: str, app_id: str = None):
         """Extract communication style scores from the (you) speaker's dialogue.
         Runs as a separate lightweight LLM call. Blends with existing profile via rolling average."""
         try:
-            response = await self.llm.extract(
+            llm = await self._get_llm_for_app(app_id)
+            response = await llm.extract(
                 system_prompt=COMMUNICATION_PROFILE_SYSTEM,
                 user_content=transcript,
             )

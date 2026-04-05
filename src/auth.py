@@ -23,12 +23,16 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="v1/auth/token", auto_error=False)
 # Models
 class ApplicationCreate(BaseModel):
     app_name: str
+    llm_api_key: Optional[str] = None  # BYOK: user's own LLM API key (encrypted at rest)
+    llm_base_url: Optional[str] = None  # e.g., https://openrouter.ai/api/v1
+    llm_model: Optional[str] = None  # e.g., mistralai/mistral-small-3.1-24b-instruct
 
 class ApplicationResponse(BaseModel):
     app_id: str
     app_name: str
     client_secret: str  # Only returned once on creation
     created_at: datetime
+    llm_key_provided: bool = False  # Whether user provided their own LLM key
 
 class Token(BaseModel):
     access_token: str
