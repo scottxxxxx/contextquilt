@@ -1,5 +1,9 @@
 # ContextQuilt
 
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![MCP Compatible](https://img.shields.io/badge/MCP-Compatible-purple.svg)](https://modelcontextprotocol.io)
+[![Live MCP Server](https://img.shields.io/badge/MCP_Server-Live-green.svg)](https://mcp.contextquilt.com/health)
+
 **Persistent cognitive memory for AI applications.**
 
 ContextQuilt gives your AI app memory that persists across sessions, platforms, and conversations. It sits between your application and LLM provider, automatically extracting and recalling user context with zero added latency on the read path.
@@ -163,6 +167,44 @@ curl -H "X-App-ID: {app_id}" ...
 ```
 
 Full API documentation: [docs/openapi.yaml](docs/openapi.yaml) | Interactive docs at `/docs` when running.
+
+## MCP Server
+
+ContextQuilt is available as an [MCP](https://modelcontextprotocol.io) server. Any MCP-compatible client (Claude Desktop, Claude Code, Cursor, etc.) can use CQ for persistent memory.
+
+**Connect from Claude Code:**
+
+```bash
+claude mcp add contextquilt --transport sse \
+  --url https://mcp.contextquilt.com/sse \
+  --header "Authorization: Bearer YOUR_API_KEY"
+```
+
+**Or add to your project's `.mcp.json`:**
+
+```json
+{
+  "mcpServers": {
+    "contextquilt": {
+      "type": "sse",
+      "url": "https://mcp.contextquilt.com/sse",
+      "headers": {
+        "Authorization": "Bearer YOUR_API_KEY"
+      }
+    }
+  }
+}
+```
+
+**Available MCP tools:**
+- `recall_context` — retrieve relevant memory for a query (<50ms)
+- `store_memory` — save a transcript or conversation for extraction
+- `get_quilt` — view all patches for a user
+- `delete_patch` — remove a specific patch
+
+**Self-hosted:** The MCP server is included in `docker-compose.yml` on port 8001. Set `MCP_API_KEY` in your `.env` to protect it.
+
+To get an API key for the hosted server, email [scott@contextquilt.com](mailto:scott@contextquilt.com).
 
 ## Architecture
 
