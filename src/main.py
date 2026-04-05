@@ -202,6 +202,17 @@ _RECALL_LABELS = {
         "roles": "Funções",
         "key_facts": "Fatos importantes",
     },
+    "ja": {
+        "project": "プロジェクト",
+        "people": "メンバー",
+        "connections": "関係",
+        "about_you": "あなたについて",
+        "decisions": "決定事項",
+        "commitments": "未完了のコミットメント",
+        "blockers": "ブロッカー",
+        "roles": "役割",
+        "key_facts": "重要な事実",
+    },
 }
 
 def _recall_labels(locale: str) -> dict:
