@@ -779,23 +779,30 @@ async def health():
 
 @app.post("/v1/auth/register", response_model=auth.ApplicationResponse, tags=["Authentication"])
 async def register_application(app_data: auth.ApplicationCreate):
+    from src.contextquilt.services.key_encryption import encrypt_key
+
     client_secret = secrets.token_urlsafe(32)
     secret_hash = auth.get_password_hash(client_secret)
-    
+
+    # Encrypt the user's LLM key if provided
+    encrypted_llm_key = encrypt_key(app_data.llm_api_key) if app_data.llm_api_key else None
+
     try:
         row = await db_pool.fetchrow(
             """
-            INSERT INTO applications (app_name, client_secret_hash)
-            VALUES ($1, $2)
+            INSERT INTO applications (app_name, client_secret_hash, llm_api_key_encrypted, llm_base_url, llm_model)
+            VALUES ($1, $2, $3, $4, $5)
             RETURNING app_id, created_at
             """,
-            app_data.app_name, secret_hash
+            app_data.app_name, secret_hash, encrypted_llm_key,
+            app_data.llm_base_url, app_data.llm_model
         )
         return {
             "app_id": str(row['app_id']),
             "app_name": app_data.app_name,
             "client_secret": client_secret,
-            "created_at": row['created_at']
+            "created_at": row['created_at'],
+            "llm_key_provided": app_data.llm_api_key is not None,
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1717,15 +1724,37 @@ async def assign_meeting_to_project(
 
 
 class AppUpdate(BaseModel):
-    enforce_auth: bool
+    enforce_auth: Optional[bool] = None
+    llm_api_key: Optional[str] = None  # Update/rotate LLM API key
+    llm_base_url: Optional[str] = None
+    llm_model: Optional[str] = None
 
 @app.patch("/v1/auth/apps/{app_id}", tags=["Authentication"])
 async def update_application(app_id: str, update: AppUpdate):
+    from src.contextquilt.services.key_encryption import encrypt_key, mask_key
+
     try:
-        await db_pool.execute(
-            "UPDATE applications SET enforce_auth = $1 WHERE app_id = $2",
-            update.enforce_auth, app_id
-        )
-        return {"status": "updated"}
+        if update.enforce_auth is not None:
+            await db_pool.execute(
+                "UPDATE applications SET enforce_auth = $1 WHERE app_id = $2",
+                update.enforce_auth, app_id
+            )
+        if update.llm_api_key is not None:
+            encrypted = encrypt_key(update.llm_api_key)
+            await db_pool.execute(
+                "UPDATE applications SET llm_api_key_encrypted = $1 WHERE app_id = $2",
+                encrypted, app_id
+            )
+        if update.llm_base_url is not None:
+            await db_pool.execute(
+                "UPDATE applications SET llm_base_url = $1 WHERE app_id = $2",
+                update.llm_base_url, app_id
+            )
+        if update.llm_model is not None:
+            await db_pool.execute(
+                "UPDATE applications SET llm_model = $1 WHERE app_id = $2",
+                update.llm_model, app_id
+            )
+        return {"status": "updated", "llm_key_masked": mask_key(update.llm_api_key) if update.llm_api_key else None}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
