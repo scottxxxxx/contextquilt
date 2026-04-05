@@ -889,6 +889,8 @@ class QuiltResponse(BaseModel):
 class PatchUpdate(BaseModel):
     fact: Optional[str] = None
     category: Optional[str] = None
+    owner: Optional[str] = None
+    project_id: Optional[str] = None
 
 @app.get("/v1/quilt/{user_id}", response_model=QuiltResponse, tags=["Quilt"])
 async def get_user_quilt(
@@ -1372,6 +1374,8 @@ async def update_patch(
 
     if update.fact is not None:
         value["text"] = update.fact
+    if update.owner is not None:
+        value["owner"] = update.owner if update.owner else None
 
     new_type = update.category if update.category else row["patch_type"]
 
@@ -1383,6 +1387,17 @@ async def update_patch(
         """,
         json.dumps(value), new_type, datetime.utcnow(), patch_id
     )
+
+    # Update project_id if requested (move patch to a different project)
+    if update.project_id is not None:
+        project_row = await db_pool.fetchrow(
+            "SELECT name FROM projects WHERE project_id = $1", update.project_id
+        )
+        project_name = project_row["name"] if project_row else None
+        await db_pool.execute(
+            "UPDATE context_patches SET project_id = $1, project = $2, updated_at = $3 WHERE patch_id = $4",
+            update.project_id, project_name, datetime.utcnow(), patch_id
+        )
 
     # Trigger cache refresh
     stream_key = "memory_updates"
@@ -1490,6 +1505,77 @@ async def delete_all_patches(
         "patches_deleted": count,
         "entities_deleted": entity_count,
     }
+
+
+# ============================================
+# Patch Connections CRUD
+# ============================================
+
+class ConnectionCreate(BaseModel):
+    from_patch_id: str
+    to_patch_id: str
+    role: str  # parent, depends_on, resolves, replaces, informs
+    label: Optional[str] = None  # belongs_to, blocked_by, owns, works_on, etc.
+    context: Optional[str] = None
+
+@app.post("/v1/quilt/{user_id}/connections", tags=["Quilt"])
+async def create_connection(
+    user_id: str,
+    conn: ConnectionCreate,
+    app_id: str = Depends(verify_application_access),
+):
+    """Create a connection between two patches."""
+    subject_key = f"user:{user_id}"
+
+    # Verify both patches belong to this user
+    for pid in (conn.from_patch_id, conn.to_patch_id):
+        row = await db_pool.fetchrow(
+            "SELECT cp.patch_id FROM context_patches cp JOIN patch_subjects ps ON cp.patch_id = ps.patch_id WHERE cp.patch_id = $1 AND ps.subject_key = $2",
+            pid, subject_key
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail=f"Patch {pid} not found for this user")
+
+    await db_pool.execute(
+        """
+        INSERT INTO patch_connections (from_patch_id, to_patch_id, connection_role, connection_label, context)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO UPDATE SET
+            connection_label = EXCLUDED.connection_label,
+            context = EXCLUDED.context
+        """,
+        conn.from_patch_id, conn.to_patch_id, conn.role, conn.label, conn.context
+    )
+
+    # Lifecycle: "replaces" role archives the target
+    if conn.role == "replaces":
+        await db_pool.execute(
+            "UPDATE context_patches SET status = 'archived', updated_at = NOW() WHERE patch_id = $1",
+            conn.to_patch_id
+        )
+
+    return {"status": "created", "from": conn.from_patch_id, "to": conn.to_patch_id, "role": conn.role}
+
+
+@app.delete("/v1/quilt/{user_id}/connections", tags=["Quilt"])
+async def delete_connection(
+    user_id: str,
+    from_patch_id: str = Query(...),
+    to_patch_id: str = Query(...),
+    role: str = Query(...),
+    app_id: str = Depends(verify_application_access),
+):
+    """Delete a connection between two patches."""
+    result = await db_pool.execute(
+        "DELETE FROM patch_connections WHERE from_patch_id = $1 AND to_patch_id = $2 AND connection_role = $3",
+        from_patch_id, to_patch_id, role
+    )
+    deleted = int(result.split()[-1]) if result else 0
+
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    return {"status": "deleted", "from": from_patch_id, "to": to_patch_id, "role": role}
 
 
 # ============================================
