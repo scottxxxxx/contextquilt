@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "contextquilt": {
+      "type": "sse",
+      "url": "https://mcp.contextquilt.com/sse",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_API_KEY"
+      }
+    }
+  }
+}
