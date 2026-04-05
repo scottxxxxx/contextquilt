@@ -154,6 +154,62 @@ class RecallResponse(BaseModel):
     timing_ms: Optional[Dict[str, float]] = None
 
 # ============================================
+# i18n — Recall section labels by locale
+# ============================================
+
+_RECALL_LABELS = {
+    "en": {
+        "project": "Project",
+        "people": "People",
+        "connections": "Connections",
+        "about_you": "About you",
+        "decisions": "Decisions",
+        "commitments": "Open commitments",
+        "blockers": "Blockers",
+        "roles": "Roles",
+        "key_facts": "Key facts",
+    },
+    "es": {
+        "project": "Proyecto",
+        "people": "Personas",
+        "connections": "Conexiones",
+        "about_you": "Sobre ti",
+        "decisions": "Decisiones",
+        "commitments": "Compromisos abiertos",
+        "blockers": "Bloqueadores",
+        "roles": "Roles",
+        "key_facts": "Datos clave",
+    },
+    "fr": {
+        "project": "Projet",
+        "people": "Personnes",
+        "connections": "Connexions",
+        "about_you": "À propos de vous",
+        "decisions": "Décisions",
+        "commitments": "Engagements en cours",
+        "blockers": "Blocages",
+        "roles": "Rôles",
+        "key_facts": "Faits clés",
+    },
+    "pt": {
+        "project": "Projeto",
+        "people": "Pessoas",
+        "connections": "Conexões",
+        "about_you": "Sobre você",
+        "decisions": "Decisões",
+        "commitments": "Compromissos abertos",
+        "blockers": "Bloqueios",
+        "roles": "Funções",
+        "key_facts": "Fatos importantes",
+    },
+}
+
+def _recall_labels(locale: str) -> dict:
+    """Get recall section labels for a locale. Falls back to English."""
+    return _RECALL_LABELS.get(locale[:2].lower(), _RECALL_LABELS["en"])
+
+
+# ============================================
 # Helpers
 # ============================================
 
@@ -495,6 +551,10 @@ async def recall_context(
     timings["postgres_patches"] = round((time.monotonic() - t2) * 1000, 2)
 
     # Step 5: Build context block — grouped by patch type
+    # Locale-aware section headers (default: English)
+    locale = request.metadata.get("locale", "en") if request.metadata else "en"
+    labels = _recall_labels(locale)
+
     sections = []
 
     # Entities summary
@@ -504,9 +564,9 @@ async def recall_context(
 
     if projects:
         for p in projects:
-            sections.append(f"Project: {p['name']} — {p['description'] or ''}")
+            sections.append(f"{labels['project']}: {p['name']} — {p['description'] or ''}")
     if people:
-        sections.append("People: " + ", ".join(
+        sections.append(labels["people"] + ": " + ", ".join(
             f"{p['name']} ({p['description']})" if p['description'] else p['name']
             for p in people
         ))
@@ -517,7 +577,7 @@ async def recall_context(
         for r in rel_rows:
             rel_lines.append(f"{r['from_name']} {r['relationship_type']} {r['to_name']}"
                            + (f" ({r['context']})" if r['context'] else ""))
-        sections.append("Connections:\n" + "\n".join(f"- {l}" for l in rel_lines))
+        sections.append(f"{labels['connections']}:\n" + "\n".join(f"- {l}" for l in rel_lines))
 
     # Parse all patches by type
     def parse_value(row):
@@ -527,12 +587,12 @@ async def recall_context(
     # About you (traits, preferences)
     universals = [parse_value(r) for r in all_patches if r["patch_type"] in ("trait", "preference")]
     if universals:
-        sections.append("About you:\n" + "\n".join(f"- {v.get('text', '')}" for v in universals))
+        sections.append(f"{labels['about_you']}:\n" + "\n".join(f"- {v.get('text', '')}" for v in universals))
 
     # Decisions
     decisions = [parse_value(r) for r in all_patches if r["patch_type"] == "decision"]
     if decisions:
-        sections.append("Decisions:\n" + "\n".join(f"- {v.get('text', '')}" for v in decisions))
+        sections.append(f"{labels['decisions']}:\n" + "\n".join(f"- {v.get('text', '')}" for v in decisions))
 
     # Open commitments
     commitments = [parse_value(r) for r in all_patches if r["patch_type"] == "commitment"]
@@ -544,17 +604,17 @@ async def recall_context(
             dl = f" (by {deadline})" if deadline else ""
             prefix = f"{owner}: " if owner else ""
             lines.append(f"- {prefix}{v.get('text', '')}{dl}")
-        sections.append("Open commitments:\n" + "\n".join(lines))
+        sections.append(f"{labels['commitments']}:\n" + "\n".join(lines))
 
     # Blockers
     blockers = [parse_value(r) for r in all_patches if r["patch_type"] == "blocker"]
     if blockers:
-        sections.append("Blockers:\n" + "\n".join(f"- {v.get('text', '')}" for v in blockers))
+        sections.append(f"{labels['blockers']}:\n" + "\n".join(f"- {v.get('text', '')}" for v in blockers))
 
     # Roles
     roles = [parse_value(r) for r in all_patches if r["patch_type"] == "role"]
     if roles:
-        sections.append("Roles:\n" + "\n".join(f"- {v.get('text', '')}" for v in roles))
+        sections.append(f"{labels['roles']}:\n" + "\n".join(f"- {v.get('text', '')}" for v in roles))
 
     # Takeaways and remaining facts (experience, identity, person, etc.)
     other_types = ("experience", "identity", "takeaway", "person")
@@ -568,7 +628,7 @@ async def recall_context(
             dl = f" (by {deadline})" if deadline else ""
             others.append({"text": f"{owner}: {v.get('text', '')}{dl}"})
     if others:
-        sections.append("Key facts:\n" + "\n".join(f"- {v.get('text', '')}" for v in others[:10]))
+        sections.append(f"{labels['key_facts']}:\n" + "\n".join(f"- {v.get('text', '')}" for v in others[:10]))
 
     context = "\n\n".join(sections)
 
