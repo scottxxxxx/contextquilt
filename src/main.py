@@ -671,14 +671,45 @@ async def recall_context(
             if style_parts:
                 comm_style = f"This user communicates in a {', '.join(style_parts)} style."
 
-    # Collect matched patch IDs from all_patches (flat + connected, deduplicated)
-    matched_patch_ids = []
+    # Collect matched patch IDs from all_patches, ranked by relevance.
+    # Scoring:
+    #   + 100 if patch text contains any matched entity name
+    #   + type priority: commitment=50, blocker=45, decision=40, role=30,
+    #     person=25, project=20, trait=15, preference=10, takeaway=5
+    #   + recency boost: newer patches score slightly higher (tiebreaker)
+    TYPE_PRIORITY = {
+        "commitment": 50, "blocker": 45, "decision": 40, "role": 30,
+        "person": 25, "project": 20, "trait": 15, "preference": 10,
+        "takeaway": 5, "experience": 5, "identity": 5,
+    }
+    matched_lower = [n.lower() for n in matched_names]
+
+    scored = []
     seen_ids = set()
-    for row in all_patches:
+    for idx, row in enumerate(all_patches):
         pid = str(row["patch_id"]) if row.get("patch_id") else None
-        if pid and pid not in seen_ids:
-            matched_patch_ids.append(pid)
-            seen_ids.add(pid)
+        if not pid or pid in seen_ids:
+            continue
+        seen_ids.add(pid)
+
+        # Parse text from value
+        v = row["value"]
+        if isinstance(v, str):
+            try:
+                v = json.loads(v)
+            except Exception:
+                v = {}
+        text = (v.get("text", "") if isinstance(v, dict) else "").lower()
+
+        score = TYPE_PRIORITY.get(row["patch_type"], 0)
+        # Entity-match boost: +100 if any matched entity appears in the patch text
+        if any(name in text for name in matched_lower):
+            score += 100
+        # Tiebreaker: preserve original order (newer first from created_at DESC)
+        scored.append((score, -idx, pid))
+
+    scored.sort(key=lambda t: (-t[0], -t[1]))
+    matched_patch_ids = [pid for _, _, pid in scored]
 
     timings["total"] = round((time.monotonic() - t0) * 1000, 2)
 
