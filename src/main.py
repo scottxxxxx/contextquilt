@@ -149,6 +149,7 @@ class RecallResponse(BaseModel):
     """Context recalled from the graph"""
     context: str
     matched_entities: List[str]
+    matched_patch_ids: List[str] = []
     patch_count: int
     communication_style: Optional[str] = None
     timing_ms: Optional[Dict[str, float]] = None
@@ -466,7 +467,7 @@ async def recall_context(
     if recall_project_id:
         fact_rows = await db_pool.fetch(
             """
-            SELECT cp.value, cp.patch_type, cp.source_prompt
+            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
@@ -481,7 +482,7 @@ async def recall_context(
         # Fallback: filter by project display name (backward compat)
         fact_rows = await db_pool.fetch(
             """
-            SELECT cp.value, cp.patch_type, cp.source_prompt
+            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
@@ -498,7 +499,7 @@ async def recall_context(
         # would be irrelevant noise in an unrelated session.
         fact_rows = await db_pool.fetch(
             """
-            SELECT cp.value, cp.patch_type, cp.source_prompt
+            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
@@ -541,7 +542,7 @@ async def recall_context(
         if project_patch:
             connected_rows = await db_pool.fetch(
                 """
-                SELECT cp.value, cp.patch_type, cp.source_prompt
+                SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt
                 FROM patch_connections pc
                 JOIN context_patches cp ON pc.from_patch_id = cp.patch_id
                 WHERE pc.to_patch_id = $1 AND pc.connection_role = 'parent'
@@ -670,11 +671,21 @@ async def recall_context(
             if style_parts:
                 comm_style = f"This user communicates in a {', '.join(style_parts)} style."
 
+    # Collect matched patch IDs from all_patches (flat + connected, deduplicated)
+    matched_patch_ids = []
+    seen_ids = set()
+    for row in all_patches:
+        pid = str(row["patch_id"]) if row.get("patch_id") else None
+        if pid and pid not in seen_ids:
+            matched_patch_ids.append(pid)
+            seen_ids.add(pid)
+
     timings["total"] = round((time.monotonic() - t0) * 1000, 2)
 
     return RecallResponse(
         context=context,
         matched_entities=matched_names,
+        matched_patch_ids=matched_patch_ids,
         patch_count=len(fact_rows) + len(rel_rows),
         communication_style=comm_style,
         timing_ms=timings,
