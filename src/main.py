@@ -671,12 +671,25 @@ async def recall_context(
             if style_parts:
                 comm_style = f"This user communicates in a {', '.join(style_parts)} style."
 
-    # Collect matched patch IDs from all_patches, ranked by relevance.
-    # Scoring:
-    #   + 100 if patch text contains any matched entity name
-    #   + type priority: commitment=50, blocker=45, decision=40, role=30,
-    #     person=25, project=20, trait=15, preference=10, takeaway=5
-    #   + recency boost: newer patches score slightly higher (tiebreaker)
+    # Collect matched patch IDs from all_patches, ranked by "relevance-ish" order.
+    #
+    # NOTE: This is deliberately NOT a real scoring algorithm (no BM25, no
+    # embedding similarity, no query-patch relevance model). It's a heuristic
+    # ordering designed to put the most "nudge-worthy" patches first for UI
+    # preview chips (e.g., SS "Almost Had It" teaser). If we ever add true
+    # semantic scoring (pgvector cosine, reranker model), replace this block.
+    #
+    # Heuristic:
+    #   + 100 if patch text contains any matched entity name (strongest signal)
+    #   + type priority (below): actionable types first, passive types last
+    #   + tiebreaker: preserve original DB order (newest first via created_at DESC)
+    #
+    # Type priority rationale:
+    #   Actionable work items (commitment, blocker, decision) — "what needs to happen"
+    #   Roles & people — "who is involved"
+    #   Container (project) — "what it belongs to"
+    #   User traits/preferences — "background context about the user"
+    #   Short-term observations (takeaway, experience, identity) — "passing context"
     TYPE_PRIORITY = {
         "commitment": 50, "blocker": 45, "decision": 40, "role": 30,
         "person": 25, "project": 20, "trait": 15, "preference": 10,
