@@ -15,6 +15,12 @@ services:
       - REDIS_URL=redis://:${MCP_REDIS_PASSWORD}@cq-mcp-redis:6379/0
       - MCP_PORT=8001
       - MCP_API_KEY=${MCP_API_KEY}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
     depends_on:
       cq-mcp-postgres:
         condition: service_healthy
@@ -36,6 +42,12 @@ services:
       - CQ_LLM_API_KEY=${CQ_LLM_API_KEY}
       - CQ_LLM_BASE_URL=${CQ_LLM_BASE_URL:-https://openrouter.ai/api/v1}
       - CQ_LLM_MODEL=${CQ_LLM_MODEL:-mistralai/mistral-small-3.1-24b-instruct}
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'python src/worker.py' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     depends_on:
       cq-mcp-postgres:
         condition: service_healthy
