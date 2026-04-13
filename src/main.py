@@ -1564,6 +1564,159 @@ async def delete_all_patches(
 
 
 # ============================================
+# Patch Create
+# ============================================
+
+VALID_PATCH_TYPES = {
+    "trait", "preference", "identity", "role", "person", "project",
+    "decision", "commitment", "blocker", "takeaway",
+}
+
+PATCH_PERSISTENCE = {
+    "trait": "sticky", "preference": "sticky", "identity": "sticky",
+    "role": "sticky", "person": "sticky", "project": "sticky",
+    "decision": "sticky", "commitment": "sticky", "blocker": "sticky",
+    "experience": "decaying", "takeaway": "decaying",
+}
+
+PROJECT_SCOPED_TYPES = {"decision", "commitment", "blocker", "takeaway", "role"}
+
+
+class PatchConnectionInput(BaseModel):
+    target_patch_id: str
+    role: str  # parent, depends_on, resolves, replaces, informs
+    label: Optional[str] = None  # belongs_to, blocked_by, owns, works_on, etc.
+    context: Optional[str] = None
+
+
+class PatchCreate(BaseModel):
+    type: str = Field(..., description="Patch type: trait, preference, identity, role, person, project, decision, commitment, blocker, takeaway")
+    text: str = Field(..., description="The patch content")
+    owner: Optional[str] = Field(default=None, description="Owner name (for commitment, blocker, decision)")
+    project_id: Optional[str] = Field(default=None, description="Project UUID to scope this patch to")
+    connections: Optional[List[PatchConnectionInput]] = Field(default=None, description="Optional connections to existing patches")
+
+
+@app.post("/v1/quilt/{user_id}/patches", tags=["Quilt"])
+async def create_patch(
+    user_id: str,
+    patch: PatchCreate,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Create a patch manually. Origin is 'declared' (user-created, not extracted).
+    Returns the new patch_id so the caller can immediately wire up connections.
+    """
+    if patch.type not in VALID_PATCH_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid patch type '{patch.type}'. Must be one of: {', '.join(sorted(VALID_PATCH_TYPES))}"
+        )
+
+    patch_id = str(uuid.uuid4())
+    subject_key = f"user:{user_id}"
+    now = datetime.utcnow()
+    persistence = PATCH_PERSISTENCE.get(patch.type, "decaying")
+
+    # Build value JSON
+    value = {"text": patch.text}
+    if patch.owner:
+        value["owner"] = patch.owner
+
+    # Resolve project scope
+    project_name = None
+    project_id = patch.project_id
+    if project_id:
+        project_row = await db_pool.fetchrow(
+            "SELECT name FROM projects WHERE project_id = $1", project_id
+        )
+        project_name = project_row["name"] if project_row else None
+    elif patch.type not in PROJECT_SCOPED_TYPES:
+        project_id = None
+
+    patch_project = project_name if patch.type in PROJECT_SCOPED_TYPES else None
+    patch_project_id = project_id if patch.type in PROJECT_SCOPED_TYPES else None
+
+    await db_pool.execute(
+        """
+        INSERT INTO context_patches (
+            patch_id, patch_name, patch_type, value,
+            origin_mode, source_prompt, confidence, persistence,
+            project, project_id, status, created_at, updated_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        """,
+        patch_id, f"declared_{patch_id[:8]}", patch.type, json.dumps(value),
+        "declared", "manual", 1.0, persistence,
+        patch_project, patch_project_id, "active", now, now
+    )
+
+    await db_pool.execute(
+        "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
+        patch_id, subject_key
+    )
+
+    # ACL — declared patches get full access for the creating app
+    import uuid as _uuid
+    try:
+        app_uuid = _uuid.UUID(app_id)
+        await db_pool.execute(
+            """
+            INSERT INTO context_patch_acl (patch_id, app_id, can_read, can_write, can_delete)
+            VALUES ($1, $2, TRUE, TRUE, TRUE)
+            """,
+            patch_id, app_uuid
+        )
+    except (ValueError, AttributeError):
+        pass  # Legacy app_id, no ACL
+
+    # Create connections if provided
+    created_connections = []
+    if patch.connections:
+        for conn in patch.connections:
+            # Verify target patch belongs to this user
+            target_row = await db_pool.fetchrow(
+                "SELECT cp.patch_id FROM context_patches cp JOIN patch_subjects ps ON cp.patch_id = ps.patch_id WHERE cp.patch_id = $1 AND ps.subject_key = $2",
+                conn.target_patch_id, subject_key
+            )
+            if not target_row:
+                continue  # Skip invalid connections silently
+
+            await db_pool.execute(
+                """
+                INSERT INTO patch_connections (from_patch_id, to_patch_id, connection_role, connection_label, context)
+                VALUES ($1, $2, $3, $4, $5)
+                ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO UPDATE SET
+                    connection_label = EXCLUDED.connection_label,
+                    context = EXCLUDED.context
+                """,
+                patch_id, conn.target_patch_id, conn.role, conn.label, conn.context
+            )
+
+            # Lifecycle: "replaces" role archives the target
+            if conn.role == "replaces":
+                await db_pool.execute(
+                    "UPDATE context_patches SET status = 'archived', updated_at = NOW() WHERE patch_id = $1",
+                    conn.target_patch_id
+                )
+
+            created_connections.append({
+                "to": conn.target_patch_id, "role": conn.role, "label": conn.label
+            })
+
+    # Trigger cache refresh
+    stream_key = "memory_updates"
+    payload = {"type": "hydrate", "user_id": user_id, "timestamp": now.isoformat()}
+    await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
+
+    return {
+        "status": "created",
+        "patch_id": patch_id,
+        "type": patch.type,
+        "connections": created_connections,
+    }
+
+
+# ============================================
 # Patch Connections CRUD
 # ============================================
 
