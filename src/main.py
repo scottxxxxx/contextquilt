@@ -14,7 +14,7 @@ import redis.asyncio as redis
 import json
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import sys
 import os
 
@@ -881,7 +881,8 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             )
         
         access_token = auth.create_access_token(
-            data={"sub": str(row['app_id'])}
+            data={"sub": str(row['app_id'])},
+            expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES),
         )
         return {"access_token": access_token, "token_type": "bearer", "expires_in": auth.ACCESS_TOKEN_EXPIRE_MINUTES * 60}
     except Exception as e:
