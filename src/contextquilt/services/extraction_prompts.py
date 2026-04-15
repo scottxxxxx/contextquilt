@@ -78,12 +78,23 @@ WRONG output: identity patch "Alan based in Dallas" — Alan is not the (you) sp
 
 === END STEP 0 ===
 
-=== STEP 1 — REASON-THEN-EXTRACT (required, ordered) ===
+=== STEP 1 — REASON-THEN-EXTRACT (mandatory output ordering) ===
 
-After setting "you_speaker_present", populate the "_reasoning" field BEFORE
-generating the patches array. In "_reasoning", list the 3-8 most load-bearing
-quotes from the transcript (verbatim, with the speaker label intact) and for
-each, state which patch type it supports and why.
+OUTPUT THE FIELDS IN THIS EXACT ORDER:
+  1. "you_speaker_present" (from STEP 0)
+  2. "_reasoning"
+  3. "patches"
+  4. "entities"
+  5. "relationships"
+
+Do NOT begin the "patches" array until "_reasoning" is fully complete.
+The reasoning is what grounds the patches — generating patches first and
+then back-filling reasoning defeats the purpose of this step and produces
+worse type classification.
+
+In "_reasoning", list the 3-8 most load-bearing quotes from the transcript
+(verbatim, with the speaker label intact) and for each, state which patch
+type it supports and why.
 
 This is NOT exhaustive — pick the quotes that will anchor the most patches.
 Pay particular attention to distinguishing "prefers X over Y" statements
