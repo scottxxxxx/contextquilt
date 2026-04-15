@@ -178,7 +178,7 @@ def strip_ephemeral_fields(content: dict) -> dict:
     Remove fields that exist only to shape model output and are not meant
     to be persisted or returned to callers. Currently `_reasoning`.
 
-    Call after enforce_you_marker_gate, before handing content to the
+    Call after enforce_owner_gate, before handing content to the
     downstream worker pipeline.
     """
     content.pop("_reasoning", None)
@@ -207,7 +207,7 @@ def enforce_connection_requirements(content: dict) -> dict:
       - parent_target_not_in_output: parent target_text doesn't match any
                                      emitted project patch
 
-    Call after enforce_you_marker_gate, before strip_ephemeral_fields.
+    Call after enforce_owner_gate, before strip_ephemeral_fields.
     Mutates content in place; returns it for convenience.
     """
     patches = content.get("patches") or []
@@ -261,18 +261,55 @@ def enforce_connection_requirements(content: dict) -> dict:
     return content
 
 
-def enforce_you_marker_gate(content: dict, transcript: str) -> dict:
+def normalize_owner_in_transcript(
+    transcript: str, owner_speaker_label: str | None
+) -> str:
     """
-    Authoritatively enforce the (you)-marker gating rule by filtering the
+    Ensure the transcript contains an inline `(you)` marker whenever the
+    app has supplied an owner label. This is the platform-neutral bridge:
+    apps that inject `(you)` themselves (e.g. SS's enrollment-time
+    injection) pass through untouched; apps that only send a structured
+    `owner_speaker_label` get the marker injected here so the downstream
+    extraction pipeline has a single, consistent signal regardless of
+    wire-format preference.
+
+    Rules:
+      - If `owner_speaker_label` is empty/None → no change.
+      - If transcript already contains "(you)" → no change (app-injected).
+      - Otherwise, replace every `[<label>]` with `[<label> (you)]`.
+
+    Caveat: replacement is global. If two speakers share the owner's name
+    (name-collision case), all occurrences get the marker. The correct
+    long-term fix is per-turn ownership metadata; tracked as a deferred
+    design item.
+    """
+    if not owner_speaker_label:
+        return transcript
+    if "(you)" in transcript:
+        return transcript
+    return transcript.replace(
+        f"[{owner_speaker_label}]", f"[{owner_speaker_label} (you)]"
+    )
+
+
+def enforce_owner_gate(content: dict, transcript: str) -> dict:
+    """
+    Authoritatively enforce the owner-identity gating rule by filtering the
     model's response, independent of its self-reported flag.
 
-    The extraction schema includes a `you_speaker_present` boolean the model
-    is asked to set. Observed behavior: Claude Haiku honors it, Mistral and
-    GPT-4o-mini do not. The transcript scan below is the ground-truth check.
+    This is the platform-level gate: trait / preference / identity patches
+    require a known owner. The only concrete signal the LLM sees is an
+    inline `(you)` marker on a speaker label in the transcript it processes.
+    Any app that wants self-typed extraction either injects that marker
+    itself or sends `metadata.owner_speaker_label` for CQ to inject during
+    normalization BEFORE the LLM call.
 
-    If no "(you)" substring is present in the transcript, any patch of type
-    trait, preference, or identity is dropped. The content dict is mutated
-    in place and returned for convenience.
+    By the time this function runs, the transcript either has the marker
+    or doesn't. If it does → self-typed patches are allowed. If not →
+    they're dropped regardless of what the model's `you_speaker_present`
+    field claimed (observed: Mistral and GPT-4o-mini set this incorrectly).
+
+    Mutates `content` in place and returns it.
     """
     if "(you)" in transcript:
         return content
@@ -281,8 +318,13 @@ def enforce_you_marker_gate(content: dict, transcript: str) -> dict:
     content["patches"] = [
         p for p in patches if p.get("type") not in SELF_TYPED_PATCH_TYPES
     ]
-    content["_you_gate_enforced"] = {
+    content["_owner_gate_enforced"] = {
         "marker_present": False,
         "filtered": before - len(content["patches"]),
     }
     return content
+
+
+# Backwards-compat alias. Kept so existing imports don't break mid-stack;
+# removable once downstream code standardizes on the new name.
+enforce_you_marker_gate = enforce_owner_gate
