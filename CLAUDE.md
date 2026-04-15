@@ -119,7 +119,7 @@ Required:
 - `REDIS_URL` or `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`
 - `CQ_LLM_API_KEY` — API key for LLM extraction (any OpenAI-compatible provider)
 - `CQ_LLM_BASE_URL` — LLM endpoint (default: OpenRouter)
-- `CQ_LLM_MODEL` — Model for extraction (default: mistral-small-3.1)
+- `CQ_LLM_MODEL` — Model for extraction (default: anthropic/claude-haiku-4.5)
 - `CQ_ADMIN_KEY` — Admin dashboard access key
 - `JWT_SECRET_KEY` — JWT signing secret
 
