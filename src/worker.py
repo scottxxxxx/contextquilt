@@ -30,6 +30,7 @@ from contextquilt.services.extraction_prompts import (
 from contextquilt.services.extraction_schema import (
     EXTRACTION_SCHEMA,
     enforce_you_marker_gate,
+    enforce_connection_requirements,
     strip_ephemeral_fields,
 )
 from contextquilt.gateway.extraction import classify_fact
@@ -1225,6 +1226,15 @@ class ColdPathWorker:
                         filtered=g["filtered"],
                         model=response.model,
                     )
+            enforce_connection_requirements(response.content)
+            if (c := response.content.get("_connection_enforced")):
+                logger.warning(
+                    "connection_enforced_dropped_patches",
+                    user_id=user_id,
+                    count=c["count"],
+                    dropped=c["dropped"],
+                    model=response.model,
+                )
             # Observability: track how much scratchpad the model is generating
             # before we strip it — informs token-cost monitoring.
             if (r := response.content.get("_reasoning")):

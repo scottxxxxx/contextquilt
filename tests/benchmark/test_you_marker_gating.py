@@ -32,7 +32,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "c
 
 from llm_client import LLMClient
 from extraction_prompts import MEETING_SUMMARY_SYSTEM
-from extraction_schema import EXTRACTION_SCHEMA, enforce_you_marker_gate
+from extraction_schema import (
+    EXTRACTION_SCHEMA,
+    enforce_you_marker_gate,
+    enforce_connection_requirements,
+)
 
 # Types that should be suppressed when `(you)` marker is absent
 SELF_TYPED = {"trait", "preference", "identity"}
@@ -96,6 +100,7 @@ def summarize_patches(run: dict, label: str) -> dict:
         "patches": patches,
         "you_flag": run.get("you_flag"),
         "reasoning_chars": run.get("reasoning_chars", 0),
+        "connection_dropped": run.get("connection_dropped", 0),
         "cost_usd": run.get("cost_usd", 0.0),
         "latency_ms": run.get("latency_ms", 0.0),
     }
@@ -107,6 +112,7 @@ def print_patch_set(summary: dict):
     print(f"{'=' * 70}")
     print(f"  you_speaker_present: {summary.get('you_flag')}")
     print(f"  _reasoning length:  {summary.get('reasoning_chars', 0)} chars")
+    print(f"  dropped by connection gate: {summary.get('connection_dropped', 0)}")
     print(f"  cost: ${summary.get('cost_usd', 0):.5f}  latency: {summary.get('latency_ms', 0):.0f}ms")
     print(f"  Total patches: {summary['total']}")
     print(f"  Type breakdown: {summary['types']}")
@@ -131,11 +137,14 @@ async def extract(client: LLMClient, transcript: str):
         json_schema=EXTRACTION_SCHEMA,
     )
     enforce_you_marker_gate(result.content, transcript)
+    enforce_connection_requirements(result.content)
     reasoning = result.content.get("_reasoning", "") or ""
+    conn_enforced = result.content.get("_connection_enforced") or {}
     return {
         "patches": result.content.get("patches", []),
         "you_flag": result.content.get("you_speaker_present", "<missing>"),
         "reasoning_chars": len(reasoning),
+        "connection_dropped": conn_enforced.get("count", 0),
         "cost_usd": result.cost_usd,
         "latency_ms": result.latency_ms,
     }
