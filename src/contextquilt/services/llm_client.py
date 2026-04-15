@@ -6,8 +6,8 @@ via configurable base_url. Uses JSON mode for structured extraction output.
 
 Configuration via environment variables:
     CQ_LLM_API_KEY    - API key for the provider
-    CQ_LLM_BASE_URL   - OpenAI-compatible endpoint (default: OpenAI)
-    CQ_LLM_MODEL      - Model name (default: gpt-4.1-nano)
+    CQ_LLM_BASE_URL   - OpenAI-compatible endpoint (default: OpenRouter)
+    CQ_LLM_MODEL      - Model name (default: anthropic/claude-haiku-4.5)
 """
 
 import json
@@ -41,6 +41,8 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "qwen/qwen3-32b": (0.08, 0.24),
     # DeepSeek (via OpenRouter)
     "deepseek/deepseek-chat-v3-0324": (0.20, 0.77),
+    # Anthropic (via OpenRouter)
+    "anthropic/claude-haiku-4.5": (1.00, 5.00),
     # Mistral (via OpenRouter)
     "mistralai/mistral-small-3.1-24b-instruct:free": (0.0, 0.0),
     "mistralai/mistral-small-3.1-24b-instruct": (0.03, 0.11),
@@ -90,9 +92,9 @@ class LLMClient:
     ):
         self.api_key = api_key or os.getenv("CQ_LLM_API_KEY", "")
         self.base_url = (
-            base_url or os.getenv("CQ_LLM_BASE_URL", "https://api.openai.com/v1")
+            base_url or os.getenv("CQ_LLM_BASE_URL", "https://openrouter.ai/api/v1")
         ).rstrip("/")
-        self.model = model or os.getenv("CQ_LLM_MODEL", "gpt-4.1-nano")
+        self.model = model or os.getenv("CQ_LLM_MODEL", "anthropic/claude-haiku-4.5")
         self.timeout = timeout
 
         self._client = httpx.AsyncClient(
