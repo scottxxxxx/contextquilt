@@ -185,6 +185,82 @@ def strip_ephemeral_fields(content: dict) -> dict:
     return content
 
 
+# Types that only make sense attached to a project the (you) speaker owns.
+# The quilt is user-centric — patches must anchor to something the user
+# cares about. A decision/commitment/blocker/takeaway/role with no project
+# parent is noise from the user's POV and gets dropped at ingest.
+# Person patches are intentionally excluded: context about humans the user
+# knows has standalone value even without project linkage.
+PROJECT_SCOPED_TYPES = frozenset(
+    {"decision", "commitment", "blocker", "takeaway", "role"}
+)
+
+
+def enforce_connection_requirements(content: dict) -> dict:
+    """
+    Drop project-scoped patches (decision/commitment/blocker/takeaway/role)
+    that lack a valid parent connection to a project in the same extraction.
+
+    Three drop reasons, logged in content["_connection_enforced"]:
+      - no_parent_connection:      patch has no role="parent" entry
+      - parent_target_not_project: parent connection points at wrong type
+      - parent_target_not_in_output: parent target_text doesn't match any
+                                     emitted project patch
+
+    Call after enforce_you_marker_gate, before strip_ephemeral_fields.
+    Mutates content in place; returns it for convenience.
+    """
+    patches = content.get("patches") or []
+    project_texts = {
+        (p.get("value") or {}).get("text", "")
+        for p in patches
+        if p.get("type") == "project"
+    }
+    project_texts.discard("")
+
+    kept: list = []
+    dropped: list = []
+    for p in patches:
+        ptype = p.get("type")
+        if ptype not in PROJECT_SCOPED_TYPES:
+            kept.append(p)
+            continue
+
+        parent_conns = [
+            c for c in (p.get("connects_to") or []) if c.get("role") == "parent"
+        ]
+
+        if not parent_conns:
+            reason = "no_parent_connection"
+        elif all(c.get("target_type") != "project" for c in parent_conns):
+            reason = "parent_target_not_project"
+        elif not any(
+            c.get("target_text") in project_texts
+            for c in parent_conns
+            if c.get("target_type") == "project"
+        ):
+            reason = "parent_target_not_in_output"
+        else:
+            kept.append(p)
+            continue
+
+        dropped.append(
+            {
+                "type": ptype,
+                "text": (p.get("value") or {}).get("text", ""),
+                "reason": reason,
+            }
+        )
+
+    content["patches"] = kept
+    if dropped:
+        content["_connection_enforced"] = {
+            "dropped": dropped,
+            "count": len(dropped),
+        }
+    return content
+
+
 def enforce_you_marker_gate(content: dict, transcript: str) -> dict:
     """
     Authoritatively enforce the (you)-marker gating rule by filtering the
