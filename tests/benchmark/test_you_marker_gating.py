@@ -34,7 +34,7 @@ from llm_client import LLMClient
 from extraction_prompts import MEETING_SUMMARY_SYSTEM
 from extraction_schema import (
     EXTRACTION_SCHEMA,
-    enforce_you_marker_gate,
+    enforce_owner_gate,
     enforce_connection_requirements,
 )
 
@@ -136,7 +136,7 @@ async def extract(client: LLMClient, transcript: str):
         user_content=transcript,
         json_schema=EXTRACTION_SCHEMA,
     )
-    enforce_you_marker_gate(result.content, transcript)
+    enforce_owner_gate(result.content, transcript)
     enforce_connection_requirements(result.content)
     reasoning = result.content.get("_reasoning", "") or ""
     conn_enforced = result.content.get("_connection_enforced") or {}
