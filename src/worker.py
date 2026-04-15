@@ -27,6 +27,7 @@ from contextquilt.services.extraction_prompts import (
     TRACE_SYSTEM,
     COMMUNICATION_PROFILE_SYSTEM,
 )
+from contextquilt.services.extraction_schema import EXTRACTION_SCHEMA
 from contextquilt.gateway.extraction import classify_fact
 
 # Configure Logging
@@ -1209,6 +1210,7 @@ class ColdPathWorker:
             response = await llm.extract(
                 system_prompt=MEETING_SUMMARY_SYSTEM,
                 user_content=user_context + summary,
+                json_schema=EXTRACTION_SCHEMA,
             )
 
             timestamp = payload.get("timestamp")
