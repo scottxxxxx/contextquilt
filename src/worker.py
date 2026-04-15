@@ -27,7 +27,7 @@ from contextquilt.services.extraction_prompts import (
     TRACE_SYSTEM,
     COMMUNICATION_PROFILE_SYSTEM,
 )
-from contextquilt.services.extraction_schema import EXTRACTION_SCHEMA
+from contextquilt.services.extraction_schema import EXTRACTION_SCHEMA, enforce_you_marker_gate
 from contextquilt.gateway.extraction import classify_fact
 
 # Configure Logging
@@ -1212,6 +1212,15 @@ class ColdPathWorker:
                 user_content=user_context + summary,
                 json_schema=EXTRACTION_SCHEMA,
             )
+            enforce_you_marker_gate(response.content, summary)
+            if (g := response.content.get("_you_gate_enforced")):
+                if g.get("filtered"):
+                    logger.warning(
+                        "you_gate_filtered_patches",
+                        user_id=user_id,
+                        filtered=g["filtered"],
+                        model=response.model,
+                    )
 
             timestamp = payload.get("timestamp")
             project = metadata.get("project") if metadata else None

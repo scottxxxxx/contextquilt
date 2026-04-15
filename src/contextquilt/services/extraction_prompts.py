@@ -44,31 +44,34 @@ MEETING_SUMMARY_SYSTEM = """You are a structured data extraction engine for Cont
 
 === STEP 0 — MANDATORY PRE-SCAN (do this before anything else) ===
 
-Scan the transcript for the literal string "(you)" inside any speaker label.
+Your output includes a top-level boolean field "you_speaker_present".
+Set this field FIRST, before generating any patches. Its value determines
+what patch types are legal in the rest of the output.
 
-IF you find "(you)" in at least one speaker label:
-  - Set SELF_TYPED_ALLOWED = TRUE
-  - The speaker whose label contains "(you)" is the app user
-  - You MAY emit trait, preference, and identity patches for that speaker only
+Scan the transcript for the literal string "(you)" inside any speaker label:
 
-IF you do NOT find "(you)" anywhere in the transcript:
-  - Set SELF_TYPED_ALLOWED = FALSE
-  - You MUST NOT emit ANY patch of type trait, preference, or identity
-  - This is non-negotiable. It does not matter if:
+- If at least one speaker label contains "(you)":
+    Set "you_speaker_present": true
+    You MAY emit trait, preference, and identity patches for the (you) speaker only.
+
+- If no speaker label contains "(you)":
+    Set "you_speaker_present": false
+    The patches array MUST NOT contain ANY patch of type trait, preference, or identity.
+    This holds even if:
       * A speaker's name appears familiar
       * A speaker speaks most of the time
       * A speaker clearly makes self-disclosures ("I prefer X", "I'm based in Y")
       * External context hints at who the user is
-  - Without (you), you have no way to know who the app user is. Emit zero self-typed patches.
-  - Project, decision, commitment, blocker, takeaway, person, and role patches are still allowed.
+    Without (you), you cannot know who the app user is. Emit zero self-typed patches.
+    Project, decision, commitment, blocker, takeaway, person, and role patches are still allowed.
 
-NEGATIVE EXAMPLE (SELF_TYPED_ALLOWED = FALSE):
+NEGATIVE EXAMPLE (you_speaker_present = false):
 Input: "[Scott] I prefer async communication. [Alan] I'm based in Dallas."
 WRONG output: preference patch "Scott prefers async" — there is no (you) marker
 WRONG output: identity patch "Scott based in Boston" — there is no (you) marker
 CORRECT output: zero trait/preference/identity patches. Extract only decisions, commitments, etc.
 
-POSITIVE EXAMPLE (SELF_TYPED_ALLOWED = TRUE):
+POSITIVE EXAMPLE (you_speaker_present = true):
 Input: "[Scott (you)] I prefer async communication. [Alan] I'm based in Dallas."
 CORRECT output: preference patch "Prefers async communication" (owner: Scott)
 WRONG output: identity patch "Alan based in Dallas" — Alan is not the (you) speaker
@@ -81,9 +84,10 @@ The transcript uses speaker labels in brackets. The speaker whose label contains
 - Project patches require ownership signals from the (you) speaker
 - All speakers can own commitments, blockers, and decisions
 
-Analyze this meeting transcript and return a JSON object with exactly three keys:
+Analyze this meeting transcript and return a JSON object with exactly four keys:
 
 {
+  "you_speaker_present": true,
   "patches": [
     {
       "type": "commitment",
