@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "src", "c
 
 from llm_client import LLMClient
 from extraction_prompts import MEETING_SUMMARY_SYSTEM
+from extraction_schema import EXTRACTION_SCHEMA
 
 # Types that should be suppressed when `(you)` marker is absent
 SELF_TYPED = {"trait", "preference", "identity"}
@@ -117,6 +118,7 @@ async def extract(client: LLMClient, transcript: str) -> list:
     result = await client.extract(
         system_prompt=MEETING_SUMMARY_SYSTEM,
         user_content=transcript,
+        json_schema=EXTRACTION_SCHEMA,
     )
     return result.content.get("patches", [])
 
