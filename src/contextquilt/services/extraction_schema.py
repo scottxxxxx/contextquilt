@@ -51,10 +51,12 @@ EXTRACTION_SCHEMA: dict = {
     "type": "object",
     "additionalProperties": False,
     # Property order matters under OpenAI strict mode — the model generates
-    # fields in the order they appear in `properties`. Placing the gate first
-    # forces the model to commit to a TRUE/FALSE decision before generating
-    # any patches, which it must then honor.
-    "required": ["you_speaker_present", "patches", "entities", "relationships"],
+    # fields in the order they appear in `properties`. We exploit this to
+    # force:
+    #   1. The (you)-marker decision FIRST  (gating commitment)
+    #   2. Reason-then-extract SECOND       (grounds patches in quotes)
+    #   3. The patches array LAST           (committed to by the prior two)
+    "required": ["you_speaker_present", "_reasoning", "patches", "entities", "relationships"],
     "properties": {
         "you_speaker_present": {
             "type": "boolean",
@@ -63,6 +65,19 @@ EXTRACTION_SCHEMA: dict = {
                 "substring \"(you)\". FALSE otherwise. Set this first, before "
                 "generating any patches. If FALSE, the patches array MUST NOT "
                 "contain any patch of type trait, preference, or identity."
+            ),
+        },
+        "_reasoning": {
+            "type": "string",
+            "description": (
+                "Scratchpad for grounding patches in the transcript. Before "
+                "emitting the patches array, list the 3-8 most load-bearing "
+                "quotes from the transcript (verbatim, with their speaker "
+                "label) and for each, state which patch type it supports and "
+                "why. Keep under 400 words. This field is not persisted — it "
+                "exists solely to force reason-then-extract ordering and to "
+                "improve type classification (e.g., distinguishing 'prefers X "
+                "over Y' as a preference, not a trait)."
             ),
         },
         "patches": {
@@ -156,6 +171,18 @@ def response_format() -> dict:
 
 
 SELF_TYPED_PATCH_TYPES = frozenset({"trait", "preference", "identity"})
+
+
+def strip_ephemeral_fields(content: dict) -> dict:
+    """
+    Remove fields that exist only to shape model output and are not meant
+    to be persisted or returned to callers. Currently `_reasoning`.
+
+    Call after enforce_you_marker_gate, before handing content to the
+    downstream worker pipeline.
+    """
+    content.pop("_reasoning", None)
+    return content
 
 
 def enforce_you_marker_gate(content: dict, transcript: str) -> dict:

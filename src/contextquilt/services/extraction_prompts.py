@@ -78,6 +78,22 @@ WRONG output: identity patch "Alan based in Dallas" — Alan is not the (you) sp
 
 === END STEP 0 ===
 
+=== STEP 1 — REASON-THEN-EXTRACT (required, ordered) ===
+
+After setting "you_speaker_present", populate the "_reasoning" field BEFORE
+generating the patches array. In "_reasoning", list the 3-8 most load-bearing
+quotes from the transcript (verbatim, with the speaker label intact) and for
+each, state which patch type it supports and why.
+
+This is NOT exhaustive — pick the quotes that will anchor the most patches.
+Pay particular attention to distinguishing "prefers X over Y" statements
+(preference) from behavioral patterns (trait) and factual attributes
+(identity).
+
+Keep "_reasoning" under 400 words.
+
+=== END STEP 1 ===
+
 APP USER IDENTIFICATION:
 The transcript uses speaker labels in brackets. The speaker whose label contains "(you)" is the app user — the person this memory is being built for. Example: "[Scott (you)]" means Scott is the app user.
 - Traits, preferences, and identity apply ONLY to the (you) speaker, and ONLY when a (you) marker is present in the transcript
