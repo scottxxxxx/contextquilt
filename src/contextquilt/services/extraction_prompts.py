@@ -104,23 +104,27 @@ Analyze this meeting transcript and return a JSON object with exactly four keys:
 
 {
   "you_speaker_present": true,
+  "_reasoning": "<3-8 verbatim quotes from this transcript, each tagged with the patch type it supports>",
   "patches": [
     {
-      "type": "commitment",
-      "value": {"text": "Deliver transcription samples within 2 days", "owner": "Scott"},
+      "type": "<one of the patch types below>",
+      "value": {"text": "<concise statement grounded in this transcript>", "owner": "<speaker name, or null>", "deadline": "<date or null>"},
       "connects_to": [
-        {"target_text": "Florida Blue transcription project", "target_type": "project", "role": "parent", "label": "belongs_to"},
-        {"target_text": "Waiting on Travis to upload audio files", "target_type": "blocker", "role": "depends_on", "label": "blocked_by"}
+        {"target_text": "<text of another patch in this output>", "target_type": "<one of the patch types>", "role": "<parent|depends_on|resolves|replaces|informs>", "label": "<belongs_to|blocked_by|unblocks|supersedes|motivated_by|works_on|owns>"}
       ]
     }
   ],
   "entities": [
-    {"name": "exact name as mentioned", "type": "person|project|company|feature|artifact|deadline|metric", "description": "brief context"}
+    {"name": "<exact name as mentioned in this transcript>", "type": "<person|project|company|feature|artifact|deadline|metric>", "description": "<brief context from this transcript>"}
   ],
   "relationships": [
-    {"from": "entity name", "to": "entity name", "type": "relationship verb", "context": "brief explanation"}
+    {"from": "<entity name from above>", "to": "<entity name from above>", "type": "<relationship verb>", "context": "<brief explanation>"}
   ]
 }
+
+The angle-bracket placeholders above describe the SHAPE of each field. Do
+NOT copy the placeholder text into your output — every value must be
+grounded in THIS transcript, not in any example.
 
 PATCH TYPES — use the most specific type that fits:
 
