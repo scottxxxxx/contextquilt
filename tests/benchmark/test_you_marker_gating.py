@@ -83,7 +83,7 @@ def inject_you_marker(transcript: str, owner: str) -> str:
     return transcript.replace(f"[{owner}]", f"[{owner} (you)]")
 
 
-def summarize_patches(patches: list, label: str, you_flag=None) -> dict:
+def summarize_patches(patches: list, label: str, you_flag=None, reasoning_chars=0) -> dict:
     """Return type counts and a flat list for printing."""
     types = Counter(p.get("type", "?") for p in patches)
     self_typed_count = sum(types[t] for t in SELF_TYPED)
@@ -94,6 +94,7 @@ def summarize_patches(patches: list, label: str, you_flag=None) -> dict:
         "self_typed_count": self_typed_count,
         "patches": patches,
         "you_flag": you_flag,
+        "reasoning_chars": reasoning_chars,
     }
 
 
@@ -102,6 +103,7 @@ def print_patch_set(summary: dict):
     print(f"  {summary['label']}")
     print(f"{'=' * 70}")
     print(f"  you_speaker_present: {summary.get('you_flag')}")
+    print(f"  _reasoning length:  {summary.get('reasoning_chars', 0)} chars")
     print(f"  Total patches: {summary['total']}")
     print(f"  Type breakdown: {summary['types']}")
     print(f"  Self-typed (trait/preference/identity): {summary['self_typed_count']}")
@@ -116,18 +118,21 @@ def print_patch_set(summary: dict):
         print(f"    [{ptype}]{flag} {text}{owner_str}")
 
 
-async def extract(client: LLMClient, transcript: str) -> tuple[list, object]:
-    """Return (patches, you_speaker_present_flag). Applies the same post-
-    processing gate the worker uses in production."""
+async def extract(client: LLMClient, transcript: str) -> tuple[list, object, int]:
+    """Return (patches, you_speaker_present_flag, reasoning_chars). Applies
+    the same post-processing gate the worker uses in production. Surfaces
+    reasoning length so we can see whether the model is using the scratchpad."""
     result = await client.extract(
         system_prompt=MEETING_SUMMARY_SYSTEM,
         user_content=transcript,
         json_schema=EXTRACTION_SCHEMA,
     )
     enforce_you_marker_gate(result.content, transcript)
+    reasoning = result.content.get("_reasoning", "") or ""
     return (
         result.content.get("patches", []),
         result.content.get("you_speaker_present", "<missing>"),
+        len(reasoning),
     )
 
 
@@ -141,13 +146,13 @@ MODELS = [
 async def run_model(model: str, base_url: str, api_key: str, without_marker: str, with_marker: str):
     client = LLMClient(api_key=api_key, base_url=base_url, model=model)
     try:
-        patches_off, flag_off = await extract(client, without_marker)
-        patches_on, flag_on = await extract(client, with_marker)
+        patches_off, flag_off, reason_off = await extract(client, without_marker)
+        patches_on, flag_on, reason_on = await extract(client, with_marker)
     finally:
         await client.close()
     return (
-        summarize_patches(patches_off, f"{model} — WITHOUT (you)", flag_off),
-        summarize_patches(patches_on, f"{model} — WITH (you)", flag_on),
+        summarize_patches(patches_off, f"{model} — WITHOUT (you)", flag_off, reason_off),
+        summarize_patches(patches_on, f"{model} — WITH (you)", flag_on, reason_on),
     )
 
 
