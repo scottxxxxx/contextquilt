@@ -79,6 +79,7 @@ Apps authenticate via JWT (required). CQ authenticates apps, not end users — a
 - `08-connected-quilt-model.md` — Patch types, connections, lifecycle
 - `09-domain-mapping.md` — How to map CQ concepts to your domain (health, CRM, etc.)
 - `10-security-and-authentication.md` — Auth model, threat model, GDPR, defense in depth
+- `11-model-selection.md` — Why Claude Haiku 4.5, benchmark results, alternatives
 
 ### API Reference
 - `docs/openapi.yaml` — OpenAPI 3.0 specification
