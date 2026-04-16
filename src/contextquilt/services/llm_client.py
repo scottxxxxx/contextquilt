@@ -29,6 +29,7 @@ MODEL_PRICING: dict[str, tuple[float, float]] = {
     "gpt-4o-mini": (0.15, 0.60),
     # Gemini (via OpenAI-compatible endpoint or OpenRouter)
     "google/gemini-2.5-flash": (0.30, 2.50),
+    "google/gemini-2.5-flash-lite": (0.10, 0.40),
     "gemini-2.5-flash-lite": (0.10, 0.40),
     "google/gemini-2.0-flash-001": (0.10, 0.40),
     "gemini-2.0-flash-lite": (0.075, 0.30),
