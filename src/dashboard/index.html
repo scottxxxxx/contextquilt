@@ -341,6 +341,38 @@
                         </div>
                     </div>
 
+                    <!-- Ingestion Audit Log -->
+                    <div class="card table-card" id="card-ingestion-log">
+                        <div class="card-header">
+                            <h2>Ingestion Log</h2>
+                            <div class="table-actions">
+                                <button class="icon-btn" onclick="fetchIngestionLog()"><i class="fa-solid fa-arrows-rotate"></i></button>
+                            </div>
+                        </div>
+                        <div class="table-responsive" style="max-height: 400px; overflow-y: auto;">
+                            <table class="data-table" id="ingestion-log-table">
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>User</th>
+                                        <th>Model</th>
+                                        <th>Owner</th>
+                                        <th>(you)?</th>
+                                        <th>Before</th>
+                                        <th>Gated</th>
+                                        <th>Conn</th>
+                                        <th>After</th>
+                                        <th>Cost</th>
+                                        <th>Latency</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="ingestion-log-body">
+                                    <tr><td colspan="11" style="text-align:center; color:var(--text-secondary);">Loading...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
                     <!-- 2. Activity History Card -->
                     <div class="card timeline-card" id="card-history" style="display: none; flex: 0 0 auto;">
                         <div class="card-header"
