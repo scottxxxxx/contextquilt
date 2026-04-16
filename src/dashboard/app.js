@@ -937,10 +937,20 @@ function renderQuiltPatchTable(patches) {
         let typeColor = '#94a3b8';
         let typeBg = 'rgba(148, 163, 184, 0.1)';
 
-        if (patch.patch_type === 'identity') { typeColor = '#3b82f6'; typeBg = 'rgba(59, 130, 246, 0.1)'; }
-        if (patch.patch_type === 'preference') { typeColor = '#10b981'; typeBg = 'rgba(16, 185, 129, 0.1)'; }
-        if (patch.patch_type === 'trait') { typeColor = '#8b5cf6'; typeBg = 'rgba(139, 92, 246, 0.1)'; }
-        if (patch.patch_type === 'experience') { typeColor = '#f59e0b'; typeBg = 'rgba(245, 158, 11, 0.1)'; }
+        const typeColors = {
+            'identity': ['#3b82f6', 'rgba(59, 130, 246, 0.1)'],
+            'preference': ['#10b981', 'rgba(16, 185, 129, 0.1)'],
+            'trait': ['#8b5cf6', 'rgba(139, 92, 246, 0.1)'],
+            'experience': ['#f59e0b', 'rgba(245, 158, 11, 0.1)'],
+            'role': ['#14b8a6', 'rgba(20, 184, 166, 0.1)'],
+            'person': ['#ec4899', 'rgba(236, 72, 153, 0.1)'],
+            'project': ['#6366f1', 'rgba(99, 102, 241, 0.1)'],
+            'decision': ['#f59e0b', 'rgba(245, 158, 11, 0.1)'],
+            'commitment': ['#f97316', 'rgba(249, 115, 22, 0.1)'],
+            'blocker': ['#ef4444', 'rgba(239, 68, 68, 0.1)'],
+            'takeaway': ['#64748b', 'rgba(100, 116, 139, 0.1)'],
+        };
+        if (typeColors[patch.patch_type]) { [typeColor, typeBg] = typeColors[patch.patch_type]; }
 
         // Origin badge style
         let originBadge = `<span class="badge" style="background: rgba(255,255,255,0.05); color: var(--text-muted);">${patch.origin_mode}</span>`;
@@ -949,11 +959,13 @@ function renderQuiltPatchTable(patches) {
         }
 
         // Icon mapping
-        let icon = 'fa-circle';
-        if (patch.patch_type === 'identity') icon = 'fa-id-card';
-        if (patch.patch_type === 'preference') icon = 'fa-heart';
-        if (patch.patch_type === 'trait') icon = 'fa-wand-magic-sparkles';
-        if (patch.patch_type === 'experience') icon = 'fa-clock-rotate-left';
+        const typeIcons = {
+            'identity': 'fa-id-card', 'preference': 'fa-heart', 'trait': 'fa-wand-magic-sparkles',
+            'experience': 'fa-clock-rotate-left', 'role': 'fa-user-tag', 'person': 'fa-user',
+            'project': 'fa-diagram-project', 'decision': 'fa-gavel', 'commitment': 'fa-handshake',
+            'blocker': 'fa-circle-exclamation', 'takeaway': 'fa-lightbulb',
+        };
+        let icon = typeIcons[patch.patch_type] || 'fa-circle';
 
         tr.innerHTML = `
             <td style="color: var(--text-muted); font-size: 0.85rem; white-space: nowrap;">${timeStr}</td>
@@ -1223,6 +1235,48 @@ function initCharts() {
                     data: [],
                     backgroundColor: '#f59e0b', // Orange
                     borderRadius: 2
+                },
+                {
+                    label: 'Role',
+                    data: [],
+                    backgroundColor: '#14b8a6', // Teal
+                    borderRadius: 2
+                },
+                {
+                    label: 'Person',
+                    data: [],
+                    backgroundColor: '#ec4899', // Pink
+                    borderRadius: 2
+                },
+                {
+                    label: 'Project',
+                    data: [],
+                    backgroundColor: '#6366f1', // Indigo
+                    borderRadius: 2
+                },
+                {
+                    label: 'Decision',
+                    data: [],
+                    backgroundColor: '#f59e0b', // Amber
+                    borderRadius: 2
+                },
+                {
+                    label: 'Commitment',
+                    data: [],
+                    backgroundColor: '#f97316', // Orange
+                    borderRadius: 2
+                },
+                {
+                    label: 'Blocker',
+                    data: [],
+                    backgroundColor: '#ef4444', // Red
+                    borderRadius: 2
+                },
+                {
+                    label: 'Takeaway',
+                    data: [],
+                    backgroundColor: '#64748b', // Slate
+                    borderRadius: 2
                 }
             ]
         },
@@ -1321,7 +1375,7 @@ function initCharts() {
 
 async function initTypeFilter() {
     // Static list of patch types
-    const types = ['identity', 'preference', 'trait', 'experience'];
+    const types = ['identity', 'preference', 'trait', 'role', 'person', 'project', 'decision', 'commitment', 'blocker', 'takeaway', 'experience'];
     const select = document.getElementById('patch-filter');
     if (!select) return;
 
@@ -1398,22 +1452,23 @@ function updateRecentFactsTable(patches) {
 
         const type = (patch.patch_type || '').toLowerCase();
 
-        if (type === 'identity') {
-            typeColor = 'rgba(30, 58, 138, 0.3)'; // Deep Blue
-            typeIcon = 'fa-id-card';
-            typeLabel = 'Identity';
-        } else if (type === 'preference') {
-            typeColor = 'rgba(16, 185, 129, 0.3)'; // Green
-            typeIcon = 'fa-heart';
-            typeLabel = 'Preference';
-        } else if (type === 'trait') {
-            typeColor = 'rgba(139, 92, 246, 0.3)'; // Purple
-            typeIcon = 'fa-wand-magic-sparkles';
-            typeLabel = 'Trait';
-        } else if (type === 'experience') {
-            typeColor = 'rgba(245, 158, 11, 0.3)'; // Amber
-            typeIcon = 'fa-clock-rotate-left';
-            typeLabel = 'Experience';
+        const recentTypeMap = {
+            'identity':   { color: 'rgba(30, 58, 138, 0.3)',  icon: 'fa-id-card',            label: 'Identity' },
+            'preference': { color: 'rgba(16, 185, 129, 0.3)', icon: 'fa-heart',              label: 'Preference' },
+            'trait':      { color: 'rgba(139, 92, 246, 0.3)', icon: 'fa-wand-magic-sparkles', label: 'Trait' },
+            'experience': { color: 'rgba(245, 158, 11, 0.3)', icon: 'fa-clock-rotate-left',  label: 'Experience' },
+            'role':       { color: 'rgba(20, 184, 166, 0.3)', icon: 'fa-user-tag',           label: 'Role' },
+            'person':     { color: 'rgba(236, 72, 153, 0.3)', icon: 'fa-user',               label: 'Person' },
+            'project':    { color: 'rgba(99, 102, 241, 0.3)', icon: 'fa-diagram-project',    label: 'Project' },
+            'decision':   { color: 'rgba(245, 158, 11, 0.3)', icon: 'fa-gavel',              label: 'Decision' },
+            'commitment': { color: 'rgba(249, 115, 22, 0.3)', icon: 'fa-handshake',          label: 'Commitment' },
+            'blocker':    { color: 'rgba(239, 68, 68, 0.3)',  icon: 'fa-circle-exclamation',  label: 'Blocker' },
+            'takeaway':   { color: 'rgba(100, 116, 139, 0.3)', icon: 'fa-lightbulb',         label: 'Takeaway' },
+        };
+        if (recentTypeMap[type]) {
+            typeColor = recentTypeMap[type].color;
+            typeIcon = recentTypeMap[type].icon;
+            typeLabel = recentTypeMap[type].label;
         }
 
         let valueStr = typeof patch.value === 'object' ? JSON.stringify(patch.value) : String(patch.value);
@@ -1450,12 +1505,26 @@ function updateIngestionChart(history) {
     const preferenceData = history.map(h => h.counts ? (h.counts.preference || 0) : 0);
     const traitData = history.map(h => h.counts ? (h.counts.trait || 0) : 0);
     const experienceData = history.map(h => h.counts ? (h.counts.experience || 0) : 0);
+    const roleData = history.map(h => h.counts ? (h.counts.role || 0) : 0);
+    const personData = history.map(h => h.counts ? (h.counts.person || 0) : 0);
+    const projectData = history.map(h => h.counts ? (h.counts.project || 0) : 0);
+    const decisionData = history.map(h => h.counts ? (h.counts.decision || 0) : 0);
+    const commitmentData = history.map(h => h.counts ? (h.counts.commitment || 0) : 0);
+    const blockerData = history.map(h => h.counts ? (h.counts.blocker || 0) : 0);
+    const takeawayData = history.map(h => h.counts ? (h.counts.takeaway || 0) : 0);
 
     ingestionChart.data.labels = labels;
     ingestionChart.data.datasets[0].data = identityData;
     ingestionChart.data.datasets[1].data = preferenceData;
     ingestionChart.data.datasets[2].data = traitData;
     ingestionChart.data.datasets[3].data = experienceData;
+    ingestionChart.data.datasets[4].data = roleData;
+    ingestionChart.data.datasets[5].data = personData;
+    ingestionChart.data.datasets[6].data = projectData;
+    ingestionChart.data.datasets[7].data = decisionData;
+    ingestionChart.data.datasets[8].data = commitmentData;
+    ingestionChart.data.datasets[9].data = blockerData;
+    ingestionChart.data.datasets[10].data = takeawayData;
 
     ingestionChart.update();
 }
@@ -1463,7 +1532,7 @@ function updateIngestionChart(history) {
 function updateCategoryChart(distribution) {
     if (!categoryChart) return;
     // Expected patch type order
-    const typeOrder = ['identity', 'preference', 'trait', 'experience'];
+    const typeOrder = ['identity', 'preference', 'trait', 'role', 'person', 'project', 'decision', 'commitment', 'blocker', 'takeaway', 'experience'];
 
     // Sort distribution if keys match the expected types
     distribution.sort((a, b) => {
@@ -1499,6 +1568,13 @@ function updateCategoryChart(distribution) {
         'preference': '#10b981',     // Green
         'trait': '#8b5cf6',          // Purple
         'experience': '#f59e0b',     // Amber/Orange
+        'role': '#14b8a6',           // Teal
+        'person': '#ec4899',         // Pink
+        'project': '#6366f1',        // Indigo
+        'decision': '#f59e0b',       // Amber
+        'commitment': '#f97316',     // Orange
+        'blocker': '#ef4444',        // Red
+        'takeaway': '#64748b',       // Slate
         // Semantic/Origin mappings
         'inferred': '#8b5cf6',
         'declared': '#10b981',
@@ -1612,7 +1688,7 @@ function renderUserTimeline(patches, days = 30) {
         d.setDate(d.getDate() - i);
         const label = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
         dates.push(label);
-        stats[label] = { identity: 0, preference: 0, trait: 0, experience: 0 };
+        stats[label] = { identity: 0, preference: 0, trait: 0, experience: 0, role: 0, person: 0, project: 0, decision: 0, commitment: 0, blocker: 0, takeaway: 0 };
     }
 
     // Fill Buckets
@@ -1635,6 +1711,13 @@ function renderUserTimeline(patches, days = 30) {
     const prefData = dates.map(d => stats[d].preference);
     const traitData = dates.map(d => stats[d].trait);
     const expData = dates.map(d => stats[d].experience);
+    const roleData2 = dates.map(d => stats[d].role);
+    const personData2 = dates.map(d => stats[d].person);
+    const projectData2 = dates.map(d => stats[d].project);
+    const decisionData2 = dates.map(d => stats[d].decision);
+    const commitmentData2 = dates.map(d => stats[d].commitment);
+    const blockerData2 = dates.map(d => stats[d].blocker);
+    const takeawayData2 = dates.map(d => stats[d].takeaway);
 
     const ctx = canvas.getContext('2d');
     timelineChart = new Chart(ctx, {
@@ -1645,7 +1728,14 @@ function renderUserTimeline(patches, days = 30) {
                 { label: 'Identity', data: identityData, backgroundColor: '#3b82f6', borderRadius: 2, stack: 'Stack 0' },
                 { label: 'Preference', data: prefData, backgroundColor: '#10b981', borderRadius: 2, stack: 'Stack 0' },
                 { label: 'Trait', data: traitData, backgroundColor: '#8b5cf6', borderRadius: 2, stack: 'Stack 0' },
-                { label: 'Experience', data: expData, backgroundColor: '#f59e0b', borderRadius: 2, stack: 'Stack 0' }
+                { label: 'Experience', data: expData, backgroundColor: '#f59e0b', borderRadius: 2, stack: 'Stack 0' },
+                { label: 'Role', data: roleData2, backgroundColor: '#14b8a6', borderRadius: 2, stack: 'Stack 0' },
+                { label: 'Person', data: personData2, backgroundColor: '#ec4899', borderRadius: 2, stack: 'Stack 0' },
+                { label: 'Project', data: projectData2, backgroundColor: '#6366f1', borderRadius: 2, stack: 'Stack 0' },
+                { label: 'Decision', data: decisionData2, backgroundColor: '#f59e0b', borderRadius: 2, stack: 'Stack 0' },
+                { label: 'Commitment', data: commitmentData2, backgroundColor: '#f97316', borderRadius: 2, stack: 'Stack 0' },
+                { label: 'Blocker', data: blockerData2, backgroundColor: '#ef4444', borderRadius: 2, stack: 'Stack 0' },
+                { label: 'Takeaway', data: takeawayData2, backgroundColor: '#64748b', borderRadius: 2, stack: 'Stack 0' }
             ]
         },
         options: {
@@ -1843,10 +1933,20 @@ async function runPipelineTest() {
 
                     let typeColor = '#94a3b8';
                     let typeBg = 'rgba(148, 163, 184, 0.1)';
-                    if (patch.patch_type === 'identity') { typeColor = '#3b82f6'; typeBg = 'rgba(59, 130, 246, 0.1)'; }
-                    if (patch.patch_type === 'preference') { typeColor = '#10b981'; typeBg = 'rgba(16, 185, 129, 0.1)'; }
-                    if (patch.patch_type === 'trait') { typeColor = '#8b5cf6'; typeBg = 'rgba(139, 92, 246, 0.1)'; }
-                    if (patch.patch_type === 'experience') { typeColor = '#f59e0b'; typeBg = 'rgba(245, 158, 11, 0.1)'; }
+                    const typeColors2 = {
+                        'identity': ['#3b82f6', 'rgba(59, 130, 246, 0.1)'],
+                        'preference': ['#10b981', 'rgba(16, 185, 129, 0.1)'],
+                        'trait': ['#8b5cf6', 'rgba(139, 92, 246, 0.1)'],
+                        'experience': ['#f59e0b', 'rgba(245, 158, 11, 0.1)'],
+                        'role': ['#14b8a6', 'rgba(20, 184, 166, 0.1)'],
+                        'person': ['#ec4899', 'rgba(236, 72, 153, 0.1)'],
+                        'project': ['#6366f1', 'rgba(99, 102, 241, 0.1)'],
+                        'decision': ['#f59e0b', 'rgba(245, 158, 11, 0.1)'],
+                        'commitment': ['#f97316', 'rgba(249, 115, 22, 0.1)'],
+                        'blocker': ['#ef4444', 'rgba(239, 68, 68, 0.1)'],
+                        'takeaway': ['#64748b', 'rgba(100, 116, 139, 0.1)'],
+                    };
+                    if (typeColors2[patch.patch_type]) { [typeColor, typeBg] = typeColors2[patch.patch_type]; }
 
                     const promptName = patch.source_prompt || 'detective';
 
