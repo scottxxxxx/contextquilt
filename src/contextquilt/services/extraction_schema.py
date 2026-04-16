@@ -185,6 +185,38 @@ def strip_ephemeral_fields(content: dict) -> dict:
     return content
 
 
+def sanitize_you_marker_from_patches(content: dict) -> dict:
+    """
+    Strip the literal '(you)' suffix from all patch text values.
+
+    The '[Name (you)]' speaker label is a transcript-level identification
+    marker that should never leak into stored patch text. Models sometimes
+    copy it verbatim ('Scott (you) prefers async') despite prompt
+    instructions not to. This function catches anything the prompt missed.
+
+    Also strips from owner fields in case the model wrote 'Scott (you)'
+    as the owner name.
+
+    Call after enforce_owner_gate and enforce_connection_requirements,
+    before storage.
+    """
+    for patch in content.get("patches") or []:
+        value = patch.get("value")
+        if not isinstance(value, dict):
+            continue
+        text = value.get("text", "")
+        if "(you)" in text:
+            value["text"] = (
+                text.replace(" (you)", "").replace("(you) ", "").replace("(you)", "")
+            )
+        owner = value.get("owner", "")
+        if owner and "(you)" in owner:
+            value["owner"] = (
+                owner.replace(" (you)", "").replace("(you) ", "").replace("(you)", "")
+            )
+    return content
+
+
 # Types that only make sense attached to a project the (you) speaker owns.
 # The quilt is user-centric — patches must anchor to something the user
 # cares about. A decision/commitment/blocker/takeaway/role with no project
