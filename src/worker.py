@@ -1239,31 +1239,41 @@ class ColdPathWorker:
                 user_content=user_context + effective_summary,
                 json_schema=EXTRACTION_SCHEMA,
             )
+
+            # --- Audit: capture pre-filter state ---
+            patches_before_filters = len(response.content.get("patches") or [])
+            reasoning_chars = len(response.content.get("_reasoning") or "")
+
             enforce_owner_gate(response.content, effective_summary)
+            owner_gate_filtered = 0
             if (g := response.content.get("_owner_gate_enforced")):
-                if g.get("filtered"):
+                owner_gate_filtered = g.get("filtered", 0)
+                if owner_gate_filtered:
                     logger.warning(
                         "owner_gate_filtered_patches",
                         user_id=user_id,
-                        filtered=g["filtered"],
+                        filtered=owner_gate_filtered,
                         model=response.model,
                     )
             enforce_connection_requirements(response.content)
+            connection_dropped = 0
             if (c := response.content.get("_connection_enforced")):
+                connection_dropped = c.get("count", 0)
                 logger.warning(
                     "connection_enforced_dropped_patches",
                     user_id=user_id,
-                    count=c["count"],
+                    count=connection_dropped,
                     dropped=c["dropped"],
                     model=response.model,
                 )
-            # Observability: track how much scratchpad the model is generating
-            # before we strip it — informs token-cost monitoring.
-            if (r := response.content.get("_reasoning")):
+
+            patches_after_filters = len(response.content.get("patches") or [])
+
+            if reasoning_chars:
                 logger.debug(
                     "extraction_reasoning",
                     user_id=user_id,
-                    reasoning_chars=len(r),
+                    reasoning_chars=reasoning_chars,
                     model=response.model,
                 )
             strip_ephemeral_fields(response.content)
@@ -1351,17 +1361,28 @@ class ColdPathWorker:
                 model=response.model,
             )
 
-            # Persist extraction metrics for cost tracking dashboard
+            # Persist ingestion audit log for dashboard observability
             try:
                 await self.db.execute(
                     """
-                    INSERT INTO extraction_metrics (user_id, model, input_tokens, output_tokens,
-                        cost_usd, latency_ms, patches_extracted, entities_extracted, source_prompt)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                    INSERT INTO extraction_metrics (
+                        user_id, model, input_tokens, output_tokens,
+                        cost_usd, latency_ms, patches_extracted, entities_extracted,
+                        source_prompt, app_id, meeting_id, interaction_type,
+                        owner_speaker_label, owner_marker_present,
+                        owner_gate_filtered, connection_dropped,
+                        patches_before_filters, patches_after_filters,
+                        reasoning_chars, transcript_chars
+                    )
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
                     """,
                     user_id, response.model, response.input_tokens, response.output_tokens,
                     response.cost_usd, response.latency_ms, facts_stored, entities_stored,
-                    "meeting_summary"
+                    "meeting_summary", app_id, meeting_id, "meeting_summary",
+                    owner_speaker_label, has_you_marker,
+                    owner_gate_filtered, connection_dropped,
+                    patches_before_filters, patches_after_filters,
+                    reasoning_chars, len(summary),
                 )
             except Exception as e:
                 logger.warning("metrics_insert_failed", error=str(e))
