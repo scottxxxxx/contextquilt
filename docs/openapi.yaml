@@ -1,7 +1,7 @@
 openapi: "3.0.3"
 info:
   title: ContextQuilt API
-  version: "3.13.0"
+  version: "3.14.0"
   description: >
     Persistent cognitive memory layer for AI applications. ContextQuilt gives
     your AI app memory that persists across sessions, platforms, and conversations.
@@ -223,6 +223,63 @@ components:
           type: string
           format: date-time
           description: Use as the `since` value on the next delta-sync call.
+
+    PatchCreateRequest:
+      type: object
+      required: [type, text]
+      properties:
+        type:
+          type: string
+          enum: [trait, preference, identity, role, person, project, decision, commitment, blocker, takeaway]
+          description: Patch type.
+        text:
+          type: string
+          description: The patch content.
+        owner:
+          type: string
+          nullable: true
+          description: Owner name (for commitment, blocker, decision).
+        project_id:
+          type: string
+          nullable: true
+          description: Project UUID to scope this patch to.
+        connections:
+          type: array
+          items:
+            type: object
+            required: [target_patch_id, role]
+            properties:
+              target_patch_id:
+                type: string
+              role:
+                type: string
+                enum: [parent, depends_on, resolves, replaces, informs]
+              label:
+                type: string
+              context:
+                type: string
+
+    PatchCreateResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: created
+        patch_id:
+          type: string
+        type:
+          type: string
+        connections:
+          type: array
+          items:
+            type: object
+            properties:
+              to:
+                type: string
+              role:
+                type: string
+              label:
+                type: string
 
     PatchUpdateRequest:
       type: object
@@ -579,6 +636,37 @@ paths:
             text/html:
               schema:
                 type: string
+
+  /v1/quilt/{user_id}/patches:
+    post:
+      operationId: createPatch
+      summary: Create Patch
+      description: >
+        Manually create a new patch with origin 'declared'. Returns the new
+        patch_id so the caller can immediately wire up connections. Optionally
+        accepts connections to create in the same call.
+      tags: [Quilt]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchCreateRequest"
+      responses:
+        "200":
+          description: Patch created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PatchCreateResponse"
+        "422":
+          description: Invalid patch type.
 
   /v1/quilt/{user_id}/patches/{patch_id}:
     patch:
