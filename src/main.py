@@ -1852,6 +1852,47 @@ async def rename_speaker(
 # Projects
 # ============================================
 
+class PatchTypeDescriptor(BaseModel):
+    type_key: str
+    display_name: str
+    schema: dict
+    persistence: str
+    is_completable: bool
+    project_scoped: bool
+
+class PatchTypesResponse(BaseModel):
+    patch_types: List[PatchTypeDescriptor]
+
+
+@app.get("/v1/patch-types", response_model=PatchTypesResponse, tags=["Schema"])
+async def get_patch_types(app_id: str = Depends(verify_application_access)):
+    """
+    Return the authoritative list of patch types CQ may emit on `/v1/quilt/{user_id}`.
+
+    Clients should call this on launch (or when they encounter an unknown type)
+    and adapt their enum/renderer accordingly. Only universal types are returned
+    (`app_id IS NULL` in the registry); per-app extensions are not exposed here.
+    """
+    rows = await db_pool.fetch(
+        """
+        SELECT type_key, display_name, schema, persistence, is_completable, project_scoped
+        FROM patch_type_registry
+        WHERE app_id IS NULL
+        ORDER BY type_key
+        """
+    )
+    return PatchTypesResponse(patch_types=[
+        PatchTypeDescriptor(
+            type_key=r["type_key"],
+            display_name=r["display_name"],
+            schema=json.loads(r["schema"]) if isinstance(r["schema"], str) else r["schema"],
+            persistence=r["persistence"] or "sticky",
+            is_completable=bool(r["is_completable"]),
+            project_scoped=bool(r["project_scoped"]),
+        ) for r in rows
+    ])
+
+
 class ProjectCreate(BaseModel):
     project_id: str
     name: str
