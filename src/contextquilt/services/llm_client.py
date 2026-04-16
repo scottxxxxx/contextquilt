@@ -109,40 +109,94 @@ class LLMClient:
         system_prompt: str,
         user_content: str,
         model: str | None = None,
+        json_schema: dict | None = None,
     ) -> LLMResponse:
         """
         Run a structured extraction call. Returns parsed JSON.
 
-        Uses response_format=json_object for providers that support it.
-        Falls back to parsing JSON from text if the provider rejects it.
+        Response-format fallback chain (strictest → loosest):
+          1. json_schema  (constrained decoding, if json_schema passed)
+          2. json_object  (loose JSON mode)
+          3. no response_format (pure prompt-described output)
+
+        Each tier is tried on HTTP 400 responses that mention "response_format",
+        so a provider that doesn't support json_schema will automatically
+        degrade to json_object without aborting the call.
         """
         use_model = model or self.model
         start = time.monotonic()
 
-        body: dict[str, Any] = {
+        base_body: dict[str, Any] = {
             "model": use_model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
             "temperature": 0.1,
-            "response_format": {"type": "json_object"},
         }
 
-        try:
-            resp = await self._client.post("/chat/completions", json=body)
-            resp.raise_for_status()
-            data = resp.json()
-        except httpx.HTTPStatusError as e:
-            # If json_object mode not supported, retry without it
-            if e.response.status_code == 400 and "response_format" in e.response.text:
-                logger.warning("json_mode_unsupported", model=use_model)
-                del body["response_format"]
+        # Build fallback chain based on whether a schema was provided.
+        if json_schema is not None:
+            attempts = [
+                ("json_schema", {
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "cq_extraction",
+                        "schema": json_schema,
+                        "strict": True,
+                    },
+                }),
+                ("json_object", {"type": "json_object"}),
+                ("none", None),
+            ]
+        else:
+            attempts = [
+                ("json_object", {"type": "json_object"}),
+                ("none", None),
+            ]
+
+        data = None
+        last_error: Exception | None = None
+        for mode, response_format in attempts:
+            body = dict(base_body)
+            if response_format is not None:
+                body["response_format"] = response_format
+            try:
                 resp = await self._client.post("/chat/completions", json=body)
                 resp.raise_for_status()
-                data = resp.json()
-            else:
+                candidate = resp.json()
+                # Some providers (e.g. Mistral via OpenRouter) return 200 with
+                # null content when they can't satisfy a strict json_schema.
+                # Treat null content as a fallback signal, not a success.
+                message_content = (
+                    candidate.get("choices", [{}])[0].get("message", {}).get("content")
+                )
+                if message_content is None and mode != attempts[-1][0]:
+                    logger.warning("response_format_null_content", model=use_model, mode=mode)
+                    continue
+                data = candidate
+                if mode != attempts[0][0]:
+                    logger.warning("response_format_downgraded", model=use_model, mode=mode)
+                break
+            except httpx.HTTPStatusError as e:
+                last_error = e
+                # Any 400 on a non-terminal attempt triggers fallback. Providers
+                # vary in whether they mention "response_format" in error text,
+                # and Anthropic via OpenRouter returns generic 400s.
+                if e.response.status_code == 400 and mode != attempts[-1][0]:
+                    logger.warning(
+                        "response_format_unsupported",
+                        model=use_model,
+                        mode=mode,
+                        status=e.response.status_code,
+                    )
+                    continue
                 raise
+        if data is None:
+            # All attempts failed or returned null content.
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError(f"LLM returned null content for all response_format modes (model={use_model})")
 
         latency_ms = (time.monotonic() - start) * 1000
 
