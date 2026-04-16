@@ -161,7 +161,14 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'identity') as identity,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'preference') as preference,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'trait') as trait,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'experience') as experience
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'experience') as experience,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'role') as role,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'person') as person,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'project') as project,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'decision') as "decision",
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'commitment') as commitment,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'blocker') as blocker,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'takeaway') as takeaway
                 FROM date_series ds
                 LEFT JOIN context_patches p ON date_trunc('hour', p.created_at) = ds.hour
                 GROUP BY ds.hour
@@ -174,10 +181,17 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
                     "identity": row['identity'] or 0,
                     "preference": row['preference'] or 0,
                     "trait": row['trait'] or 0,
-                    "experience": row['experience'] or 0
+                    "experience": row['experience'] or 0,
+                    "role": row['role'] or 0,
+                    "person": row['person'] or 0,
+                    "project": row['project'] or 0,
+                    "decision": row['decision'] or 0,
+                    "commitment": row['commitment'] or 0,
+                    "blocker": row['blocker'] or 0,
+                    "takeaway": row['takeaway'] or 0,
                 }
             } for row in rows]
-        
+
         elif start_date and end_date:
             # Custom Date Range (Daily granularity)
             start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -196,7 +210,14 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'identity') as identity,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'preference') as preference,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'trait') as trait,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'experience') as experience
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'experience') as experience,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'role') as role,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'person') as person,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'project') as project,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'decision') as "decision",
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'commitment') as commitment,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'blocker') as blocker,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'takeaway') as takeaway
                 FROM date_series ds
                 LEFT JOIN context_patches p ON date_trunc('day', p.created_at)::date = ds.day
                 GROUP BY ds.day
@@ -209,10 +230,17 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
                     "identity": row['identity'] or 0,
                     "preference": row['preference'] or 0,
                     "trait": row['trait'] or 0,
-                    "experience": row['experience'] or 0
+                    "experience": row['experience'] or 0,
+                    "role": row['role'] or 0,
+                    "person": row['person'] or 0,
+                    "project": row['project'] or 0,
+                    "decision": row['decision'] or 0,
+                    "commitment": row['commitment'] or 0,
+                    "blocker": row['blocker'] or 0,
+                    "takeaway": row['takeaway'] or 0,
                 }
             } for row in rows]
-            
+
         else:
 
             query = """
@@ -228,7 +256,14 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'identity') as identity,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'preference') as preference,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'trait') as trait,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'experience') as experience
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'experience') as experience,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'role') as role,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'person') as person,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'project') as project,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'decision') as "decision",
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'commitment') as commitment,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'blocker') as blocker,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'takeaway') as takeaway
                 FROM date_series ds
                 LEFT JOIN context_patches p ON date_trunc('day', p.created_at)::date = ds.day
                 GROUP BY ds.day
@@ -241,7 +276,14 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
                     "identity": row['identity'] or 0,
                     "preference": row['preference'] or 0,
                     "trait": row['trait'] or 0,
-                    "experience": row['experience'] or 0
+                    "experience": row['experience'] or 0,
+                    "role": row['role'] or 0,
+                    "person": row['person'] or 0,
+                    "project": row['project'] or 0,
+                    "decision": row['decision'] or 0,
+                    "commitment": row['commitment'] or 0,
+                    "blocker": row['blocker'] or 0,
+                    "takeaway": row['takeaway'] or 0,
                 }
             } for row in rows]
     finally:
