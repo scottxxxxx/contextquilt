@@ -486,6 +486,19 @@
                                         </div>
                                     </div>
                                 </div>
+
+                                <!-- Quilt Graph Visualization -->
+                                <div id="quilt-graph-section" style="margin-top: 1rem; display: none;">
+                                    <div class="card" style="padding: 1rem;">
+                                        <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                                            <h3><i class="fa-solid fa-diagram-project"></i> Quilt Graph</h3>
+                                            <button class="icon-btn" onclick="loadQuiltGraph()" title="Refresh graph"><i class="fa-solid fa-arrows-rotate"></i></button>
+                                        </div>
+                                        <div id="quilt-graph-container" style="width: 100%; overflow: auto; background: rgba(15,23,42,0.3); border-radius: 8px; min-height: 200px; display: flex; justify-content: center; align-items: center;">
+                                            <span style="color: var(--text-muted);">Click refresh to load graph</span>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>

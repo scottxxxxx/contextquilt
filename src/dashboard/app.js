@@ -832,13 +832,39 @@ function updateUserTimelineRange(days) {
     if (btn) btn.classList.add('active');
 }
 
+let currentQuiltUserId = null;
+
+async function loadQuiltGraph() {
+    if (!currentQuiltUserId) return;
+    const container = document.getElementById('quilt-graph-container');
+    container.innerHTML = '<span style="color: var(--text-muted);">Loading graph...</span>';
+    try {
+        const res = await fetch(`/v1/quilt/${currentQuiltUserId}/graph?format=svg`);
+        if (!res.ok) throw new Error(res.statusText);
+        const svg = await res.text();
+        container.innerHTML = svg;
+        // Make SVG responsive
+        const svgEl = container.querySelector('svg');
+        if (svgEl) {
+            svgEl.style.maxWidth = '100%';
+            svgEl.style.height = 'auto';
+        }
+    } catch (e) {
+        container.innerHTML = `<span style="color: var(--accent-error, #ef4444);">Failed to load graph: ${e.message}</span>`;
+    }
+}
+
 function renderQuiltView(data) {
+    currentQuiltUserId = data.user_id;
+
     // Switch views
     document.getElementById('quilt-empty-state').style.display = 'none';
 
-    // Ensure cards are visible (they should be already handled by loadUserQuilt)
+    // Ensure cards are visible
     document.getElementById('card-history').style.display = 'block';
     document.getElementById('card-details').style.display = 'flex';
+    const graphSection = document.getElementById('quilt-graph-section');
+    if (graphSection) graphSection.style.display = 'block';
 
     // Render Timeline
     renderUserTimeline(data.patches);
@@ -921,62 +947,91 @@ function renderQuiltPatchTable(patches) {
         return;
     }
 
+    const typeColors = {
+        'identity': ['#3b82f6', 'rgba(59, 130, 246, 0.1)'],
+        'preference': ['#10b981', 'rgba(16, 185, 129, 0.1)'],
+        'trait': ['#8b5cf6', 'rgba(139, 92, 246, 0.1)'],
+        'experience': ['#f59e0b', 'rgba(245, 158, 11, 0.1)'],
+        'role': ['#14b8a6', 'rgba(20, 184, 166, 0.1)'],
+        'person': ['#ec4899', 'rgba(236, 72, 153, 0.1)'],
+        'project': ['#6366f1', 'rgba(99, 102, 241, 0.1)'],
+        'decision': ['#f59e0b', 'rgba(245, 158, 11, 0.1)'],
+        'commitment': ['#f97316', 'rgba(249, 115, 22, 0.1)'],
+        'blocker': ['#ef4444', 'rgba(239, 68, 68, 0.1)'],
+        'takeaway': ['#64748b', 'rgba(100, 116, 139, 0.1)'],
+    };
+    const typeIcons = {
+        'identity': 'fa-id-card', 'preference': 'fa-heart', 'trait': 'fa-wand-magic-sparkles',
+        'experience': 'fa-clock-rotate-left', 'role': 'fa-user-tag', 'person': 'fa-user',
+        'project': 'fa-diagram-project', 'decision': 'fa-gavel', 'commitment': 'fa-handshake',
+        'blocker': 'fa-circle-exclamation', 'takeaway': 'fa-lightbulb',
+    };
+    const roleIcons = {
+        'parent': 'fa-arrow-up', 'depends_on': 'fa-link', 'resolves': 'fa-check-circle',
+        'replaces': 'fa-rotate', 'informs': 'fa-arrow-right',
+    };
+
     patches.forEach(patch => {
         const tr = document.createElement('tr');
-
-        // Format Time
         const timeStr = new Date(patch.created_at).toLocaleString();
 
-        // Format Value
         let valDisplay = patch.value;
         if (typeof patch.value === 'object' && patch.value !== null) {
             valDisplay = JSON.stringify(patch.value);
         }
 
-        // Type badge style
-        let typeColor = '#94a3b8';
-        let typeBg = 'rgba(148, 163, 184, 0.1)';
-
-        const typeColors = {
-            'identity': ['#3b82f6', 'rgba(59, 130, 246, 0.1)'],
-            'preference': ['#10b981', 'rgba(16, 185, 129, 0.1)'],
-            'trait': ['#8b5cf6', 'rgba(139, 92, 246, 0.1)'],
-            'experience': ['#f59e0b', 'rgba(245, 158, 11, 0.1)'],
-            'role': ['#14b8a6', 'rgba(20, 184, 166, 0.1)'],
-            'person': ['#ec4899', 'rgba(236, 72, 153, 0.1)'],
-            'project': ['#6366f1', 'rgba(99, 102, 241, 0.1)'],
-            'decision': ['#f59e0b', 'rgba(245, 158, 11, 0.1)'],
-            'commitment': ['#f97316', 'rgba(249, 115, 22, 0.1)'],
-            'blocker': ['#ef4444', 'rgba(239, 68, 68, 0.1)'],
-            'takeaway': ['#64748b', 'rgba(100, 116, 139, 0.1)'],
-        };
+        let typeColor = '#94a3b8', typeBg = 'rgba(148, 163, 184, 0.1)';
         if (typeColors[patch.patch_type]) { [typeColor, typeBg] = typeColors[patch.patch_type]; }
+        let icon = typeIcons[patch.patch_type] || 'fa-circle';
 
-        // Origin badge style
         let originBadge = `<span class="badge" style="background: rgba(255,255,255,0.05); color: var(--text-muted);">${patch.origin_mode}</span>`;
         if (patch.origin_mode === 'inferred') {
             originBadge = `<span class="badge" style="background: rgba(139, 92, 246, 0.1); color: #a78bfa;">inferred</span>`;
         }
+        if (patch.origin_mode === 'declared') {
+            originBadge = `<span class="badge" style="background: rgba(16, 185, 129, 0.1); color: #10b981;">declared</span>`;
+        }
 
-        // Icon mapping
-        const typeIcons = {
-            'identity': 'fa-id-card', 'preference': 'fa-heart', 'trait': 'fa-wand-magic-sparkles',
-            'experience': 'fa-clock-rotate-left', 'role': 'fa-user-tag', 'person': 'fa-user',
-            'project': 'fa-diagram-project', 'decision': 'fa-gavel', 'commitment': 'fa-handshake',
-            'blocker': 'fa-circle-exclamation', 'takeaway': 'fa-lightbulb',
-        };
-        let icon = typeIcons[patch.patch_type] || 'fa-circle';
+        // Status badge
+        const status = patch.status || 'active';
+        let statusBadge = '';
+        if (status === 'completed') statusBadge = ' <span class="badge" style="background:rgba(16,185,129,0.1);color:#10b981;font-size:0.7rem;">done</span>';
+        if (status === 'archived') statusBadge = ' <span class="badge" style="background:rgba(148,163,184,0.1);color:#94a3b8;font-size:0.7rem;">archived</span>';
+
+        // Connections display
+        let connectionsHtml = '';
+        if (patch.connections && patch.connections.length > 0) {
+            const connItems = patch.connections.map(c => {
+                const rIcon = roleIcons[c.role] || 'fa-link';
+                const targetLabel = c.to_text ? c.to_text.substring(0, 50) : c.to_patch_id.substring(0, 8);
+                const tType = c.to_patch_type || '?';
+                let tColor = '#94a3b8';
+                if (typeColors[tType]) tColor = typeColors[tType][0];
+                return `<div style="font-size:0.75rem;color:var(--text-muted);padding:1px 0;">
+                    <i class="fa-solid ${rIcon}" style="width:12px;color:${tColor};"></i>
+                    <span style="color:#a78bfa;">${c.label || c.role}</span>
+                    → <span style="color:${tColor};">[${tType}]</span> ${targetLabel}
+                </div>`;
+            }).join('');
+            connectionsHtml = `<div style="margin-top:4px;border-top:1px solid rgba(148,163,184,0.1);padding-top:4px;">${connItems}</div>`;
+        }
+
+        // Project badge
+        let projectBadge = '';
+        if (patch.project_name) {
+            projectBadge = `<div style="font-size:0.7rem;color:#6366f1;margin-top:2px;"><i class="fa-solid fa-diagram-project"></i> ${patch.project_name}</div>`;
+        }
 
         tr.innerHTML = `
             <td style="color: var(--text-muted); font-size: 0.85rem; white-space: nowrap;">${timeStr}</td>
             <td style="color: var(--text-primary); font-weight: 500;">${patch.user_id}</td>
             <td>${originBadge}</td>
-            <td><span class="badge" style="background: ${typeBg}; color: ${typeColor};"><i class="fa-solid ${icon}"></i> ${patch.patch_type}</span></td>
+            <td><span class="badge" style="background: ${typeBg}; color: ${typeColor};"><i class="fa-solid ${icon}"></i> ${patch.patch_type}</span>${statusBadge}</td>
             <td style="font-family: var(--font-mono); color: var(--text-primary);">${patch.patch_name}</td>
             <td style="font-family: var(--font-mono); color: var(--text-muted); font-size: 0.85rem;">${patch.source_prompt}</td>
             <td style="color: var(--text-muted); font-size: 0.85rem;">${patch.confidence}</td>
             <td style="color: var(--text-muted); font-size: 0.85rem;">${patch.sensitivity}</td>
-            <td style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary); max-width: 400px; overflow-wrap: break-word;">${valDisplay}</td>
+            <td style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-secondary); max-width: 400px; overflow-wrap: break-word;">${valDisplay}${projectBadge}${connectionsHtml}</td>
             <td style="white-space: nowrap;">
                 <button onclick="editPatch('${patch.patch_id}', '${patch.user_id}')" class="btn-icon" title="Edit" style="background: rgba(59, 130, 246, 0.1); color: #3b82f6; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; margin-right: 4px;">
                     <i class="fa-solid fa-pen-to-square"></i>

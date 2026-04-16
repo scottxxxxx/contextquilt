@@ -576,6 +576,15 @@ async def get_users():
     finally:
         await conn.close()
 
+class PatchConnection(BaseModel):
+    to_patch_id: str
+    to_patch_type: Optional[str] = None
+    to_text: Optional[str] = None
+    role: str
+    label: Optional[str] = None
+    context: Optional[str] = None
+
+
 class QuiltPatch(BaseModel):
     patch_id: str
     patch_name: str
@@ -587,6 +596,11 @@ class QuiltPatch(BaseModel):
     sensitivity: str
     created_at: datetime
     user_id: str
+    meeting_id: Optional[str] = None
+    project_id: Optional[str] = None
+    project_name: Optional[str] = None
+    status: Optional[str] = None
+    connections: List[PatchConnection] = []
 
 class TimelineEvent(BaseModel):
     date: str
@@ -602,46 +616,92 @@ class UserQuilt(BaseModel):
     communication_profile: Optional[Dict[str, Any]] = None
 
 @router.get("/users/{user_id}/quilt", response_model=UserQuilt, dependencies=[Depends(verify_admin_key)])
-async def get_user_quilt(user_id: str):
+async def get_user_quilt(user_id: str, meeting_id: Optional[str] = None):
     conn = await asyncpg.connect(DATABASE_URL)
     try:
-        # Construct subject_key (assuming user:ID format)
         subject_key = f"user:{user_id}"
 
-        # Fetch profile identity + communication profile
         profile_row = await conn.fetchrow(
             "SELECT display_name, email, variables->'communication_profile' as comm_profile FROM profiles WHERE user_id = $1", user_id
         )
 
-        # Get Patches from context_patches (via patch_subjects)
-        patch_rows = await conn.fetch("""
+        # Base query with optional meeting filter
+        meeting_filter = ""
+        params = [subject_key]
+        if meeting_id:
+            meeting_filter = "AND cp.meeting_id = $2"
+            params.append(meeting_id)
+
+        patch_rows = await conn.fetch(f"""
             SELECT cp.patch_id, cp.patch_name, cp.value, cp.patch_type, cp.origin_mode, cp.created_at,
-                   cp.source_prompt, cp.confidence, cp.sensitivity
+                   cp.source_prompt, cp.confidence, cp.sensitivity, cp.meeting_id, cp.project_id,
+                   cp.status, pr.name as project_name
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
-            WHERE ps.subject_key = $1
+            LEFT JOIN projects pr ON cp.project_id = pr.project_id
+            WHERE ps.subject_key = $1 {meeting_filter}
             ORDER BY cp.created_at DESC
+        """, *params)
+
+        # Fetch all connections for this user's patches in one query
+        conn_rows = await conn.fetch("""
+            SELECT pc.from_patch_id, pc.to_patch_id, pc.connection_role, pc.connection_label, pc.context,
+                   cp2.patch_type as to_patch_type, cp2.value as to_value
+            FROM patch_connections pc
+            JOIN patch_subjects ps ON pc.from_patch_id = ps.patch_id
+            LEFT JOIN context_patches cp2 ON pc.to_patch_id = cp2.patch_id
+            WHERE ps.subject_key = $1
         """, subject_key)
+
+        # Build connection lookup: from_patch_id -> [connections]
+        conn_map: dict = {}
+        for cr in conn_rows:
+            fid = str(cr['from_patch_id'])
+            to_value = cr['to_value']
+            to_text = None
+            if to_value:
+                if isinstance(to_value, str):
+                    try:
+                        parsed = json.loads(to_value)
+                        to_text = parsed.get('text', str(to_value)[:80])
+                    except Exception:
+                        to_text = str(to_value)[:80]
+                elif isinstance(to_value, dict):
+                    to_text = to_value.get('text', str(to_value)[:80])
+                else:
+                    to_text = str(to_value)[:80]
+            conn_map.setdefault(fid, []).append(PatchConnection(
+                to_patch_id=str(cr['to_patch_id']),
+                to_patch_type=cr['to_patch_type'],
+                to_text=to_text,
+                role=cr['connection_role'] or '',
+                label=cr['connection_label'],
+                context=cr['context'],
+            ))
 
         patches = []
         timeline = []
 
         for row in patch_rows:
+            pid = str(row['patch_id'])
             patches.append(QuiltPatch(
-                patch_id=str(row['patch_id']),
+                patch_id=pid,
                 patch_name=row['patch_name'],
-                value=str(row['value']), # Convert JSON/Any to string for display if needed
+                value=str(row['value']),
                 patch_type=row['patch_type'],
                 origin_mode=row['origin_mode'] or 'system',
                 source_prompt=row['source_prompt'] or 'none',
                 confidence=float(row['confidence']) if row['confidence'] is not None else 1.0,
                 sensitivity=row['sensitivity'] or 'normal',
                 created_at=row['created_at'],
-                user_id=user_id
+                user_id=user_id,
+                meeting_id=row['meeting_id'],
+                project_id=row['project_id'],
+                project_name=row['project_name'],
+                status=row['status'],
+                connections=conn_map.get(pid, []),
             ))
 
-            # Add to timeline
-            # Use value as description
             desc = str(row['value'])
             timeline.append(TimelineEvent(
                 date=row['created_at'].strftime("%b %d"),
@@ -649,7 +709,6 @@ async def get_user_quilt(user_id: str):
                 sentiment="neutral"
             ))
 
-        # Parse communication profile
         comm_profile = None
         if profile_row and profile_row['comm_profile']:
             cp = profile_row['comm_profile']
