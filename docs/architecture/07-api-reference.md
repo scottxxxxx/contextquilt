@@ -150,6 +150,22 @@ View all facts and action items CQ knows about a user.
 }
 ```
 
+### POST /v1/quilt/{user_id}/patches
+
+Create a patch manually. Origin is `declared` (user-created, not extracted). Returns the new `patch_id` so callers can immediately create connections.
+
+```json
+{
+  "type": "person",
+  "text": "Maria Chen — design lead for the rebrand",
+  "connections": [
+    {"target_patch_id": "uuid-of-project", "role": "informs", "label": "works_on"}
+  ]
+}
+```
+
+**Response:** `{"status": "created", "patch_id": "uuid", "type": "person", "connections": [...]}`
+
 ### PATCH /v1/quilt/{user_id}/patches/{patch_id}
 
 Correct a fact. Changes `origin_mode` to `declared` (user-verified).
