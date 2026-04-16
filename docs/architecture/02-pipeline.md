@@ -123,17 +123,19 @@ Four separate LLM calls, each with a specialized prompt and optionally a differe
 
 ## Model Selection
 
+For full model evaluation details, see [11-model-selection.md](11-model-selection.md).
+
 ### Default Configuration
 
-CQ ships with a default model configured via environment variables:
+CQ ships with **Claude Haiku 4.5** as the default extraction model:
 
 ```
 CQ_LLM_API_KEY=...
 CQ_LLM_BASE_URL=https://openrouter.ai/api/v1
-CQ_LLM_MODEL=mistralai/mistral-small-3.1-24b-instruct
+CQ_LLM_MODEL=anthropic/claude-haiku-4.5
 ```
 
-This model is used for all pipeline roles in single-call mode.
+This model is used for all pipeline roles in single-call mode. It was selected for best quality on real messy transcripts, particularly for correct `(you)` speaker attribution — see [11-model-selection.md](11-model-selection.md) for benchmark details.
 
 ### Multi-Role Configuration
 
@@ -141,7 +143,7 @@ In multi-role mode, each role can have its own model:
 
 ```
 CQ_PIPELINE_MODE=multi_role
-CQ_PICKER_MODEL=mistralai/mistral-small-3.1-24b-instruct
+CQ_PICKER_MODEL=anthropic/claude-haiku-4.5
 CQ_PICKER_BASE_URL=https://openrouter.ai/api/v1
 CQ_STITCHER_MODEL=qwen/qwen-turbo
 CQ_DESIGNER_MODEL=qwen/qwen3-14b
@@ -153,22 +155,9 @@ If a role's model is not specified, it falls back to the default `CQ_LLM_MODEL`.
 ### Supported Providers
 
 Any OpenAI-compatible API works:
-- **OpenRouter** — access to 200+ models via one API key
-- **OpenAI** — GPT-4.1-nano, GPT-4o-mini, GPT-5.4-nano
+- **OpenRouter** — access to 200+ models via one API key (recommended)
+- **Anthropic** — Claude Haiku 4.5 direct
+- **OpenAI** — GPT-4.1-nano, GPT-4o-mini
 - **Google Gemini** — via OpenAI-compatible endpoint
 - **Ollama** — local models, no API key needed
 - **vLLM / LiteLLM / LM Studio** — self-hosted endpoints
-
-### Benchmark Results
-
-Benchmarked across 8 models on 5 meeting summary test cases (March 2026):
-
-| Model | Fact Accuracy | Action Accuracy | Cost/extraction |
-|-------|-------------|----------------|-----------------|
-| Mistral Small 3.1 | 90% | 80% | $0.00009 |
-| gpt-5.4-nano | 87% | 70% | $0.00095 |
-| Qwen Turbo | 84% | 73% | $0.00008 |
-| Gemini 2.5 Flash-Lite | 75% | 93% | $0.00031 |
-| gpt-4.1-nano | 73% | 80% | $0.00027 |
-
-Mistral Small 3.1 selected as default for best accuracy-to-cost ratio.
