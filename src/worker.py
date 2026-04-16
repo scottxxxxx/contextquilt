@@ -29,8 +29,9 @@ from contextquilt.services.extraction_prompts import (
 )
 from contextquilt.services.extraction_schema import (
     EXTRACTION_SCHEMA,
-    enforce_you_marker_gate,
+    enforce_owner_gate,
     enforce_connection_requirements,
+    normalize_owner_in_transcript,
     strip_ephemeral_fields,
 )
 from contextquilt.gateway.extraction import classify_fact
@@ -1195,14 +1196,35 @@ class ColdPathWorker:
 
         logger.info("analyzing_meeting_summary", user_id=user_id, length=len(summary))
 
-        # Identify the submitting user so the LLM can attribute traits correctly.
-        # New convention: transcript labels the app user with "(you)" e.g. "[Scott (you)]".
-        # Fallback for older clients: prepend "The submitting user is: {name}" if no (you) marker.
+        # Identify the submitting user so the LLM can attribute self-typed
+        # patches correctly. Two signals the platform accepts:
+        #   1. Inline "(you)" marker in transcript — the LLM reads this directly
+        #      (e.g. SS injects "[Scott (you)]" client-side after voice match).
+        #   2. Structured metadata.owner_speaker_label — CQ injects the inline
+        #      marker server-side for apps that don't want to mutate transcript
+        #      text themselves.
+        # Either path lands at the same place: transcript with inline marker
+        # by the time the LLM sees it. display_name is a legacy fallback.
         metadata = payload.get("metadata", {})
+        owner_speaker_label = metadata.get("owner_speaker_label") if metadata else None
         display_name = metadata.get("display_name") if metadata else None
-        has_you_marker = "(you)" in summary.lower() if summary else False
+
+        effective_summary = normalize_owner_in_transcript(summary, owner_speaker_label)
+        injected_marker = (
+            owner_speaker_label is not None
+            and "(you)" not in summary
+            and "(you)" in effective_summary
+        )
+        if injected_marker:
+            logger.info(
+                "owner_marker_injected_server_side",
+                user_id=user_id,
+                owner_speaker_label=owner_speaker_label,
+            )
+
+        has_you_marker = "(you)" in effective_summary.lower()
         if has_you_marker:
-            user_context = ""  # (you) label in transcript is sufficient
+            user_context = ""  # inline marker is sufficient
         elif display_name:
             user_context = f"The submitting user is: {display_name}\n\n"
         else:
@@ -1214,14 +1236,14 @@ class ColdPathWorker:
 
             response = await llm.extract(
                 system_prompt=MEETING_SUMMARY_SYSTEM,
-                user_content=user_context + summary,
+                user_content=user_context + effective_summary,
                 json_schema=EXTRACTION_SCHEMA,
             )
-            enforce_you_marker_gate(response.content, summary)
-            if (g := response.content.get("_you_gate_enforced")):
+            enforce_owner_gate(response.content, effective_summary)
+            if (g := response.content.get("_owner_gate_enforced")):
                 if g.get("filtered"):
                     logger.warning(
-                        "you_gate_filtered_patches",
+                        "owner_gate_filtered_patches",
                         user_id=user_id,
                         filtered=g["filtered"],
                         model=response.model,
