@@ -126,10 +126,10 @@ PATCH TYPES — use the most specific type that fits:
 
 | Type       | When to use                                                    | Connects to project? |
 |------------|----------------------------------------------------------------|----------------------|
-| trait      | Self-disclosed behavioral pattern of the (you) speaker ("I tend to over-explain") | NEVER     |
-| preference | What the (you) speaker prefers ("prefers Nova 3 over Nova 2")  | NEVER                |
+| trait      | Self-disclosed behavioral pattern or tendency the (you) speaker exhibits. Describes how they operate, not a one-off action. | NEVER     |
+| preference | What the (you) speaker prefers — a tool, approach, working style, or choice between options. | NEVER                |
 | identity   | Factual biographical attribute of the (you) speaker — location, email, employer, tenure, timezone. Durable, slow-changing. Never applies to other speakers. | NEVER |
-| role       | Someone's role on a project ("Amanda handles escalation")      | YES via belongs_to   |
+| role       | Someone's durable function or responsibility on a project (who handles what). | YES via belongs_to   |
 | person     | A named participant and their relevant context                 | via works_on         |
 | project    | A work initiative the (you) speaker personally owns or is a core contributor on. Requires the (you) speaker to have commitments, decisions, or blockers within it. Topics discussed, referenced, or owned by OTHER speakers are NEVER projects. | IS the container     |
 | decision   | Something that was agreed upon in the meeting                  | YES via belongs_to   |
@@ -172,7 +172,7 @@ CONNECTION RULES:
 
 PEOPLE ARE PATCHES:
 - Every person who owns a commitment, blocker, or decision MUST be a person patch — not just an entity.
-- Person patches carry context about their role on the project (e.g., "Travis — handles file uploads for Florida Blue").
+- Person patches carry context about their role on the project (e.g., "<Person> — <what they handle or own on this project>").
 - The person patch has connects_to entries pointing TO the things they own/work on — NOT the other way around.
 - Without person patches, the quilt can't answer "who is responsible for what?"
 
@@ -184,15 +184,15 @@ NAME NORMALIZATION:
 
 RELEVANCE FILTER — apply to every candidate patch:
 "Would this patch be useful context in a FUTURE session about this same topic?"
-- YES: "Scott tends to over-explain" — durable trait
-- YES: "Use Nova 3 for Florida Blue transcription" — decision with impact
-- YES: "Deliver samples in 2 days" — commitment with owner and deliverable
-- NO: "Ticket 70293 is about call transfer visibility" — ephemeral ticket reference
-- NO: "Charon is available after 9:30 AM EST" — scheduling logistics
-- NO: "They need to provide a HAR file" — troubleshooting procedure
+- YES: a durable trait the (you) speaker self-disclosed
+- YES: a decision that shapes how future work gets done
+- YES: a commitment with a named owner and a deliverable
+- NO: ephemeral ticket references or bug tracker IDs
+- NO: scheduling logistics (who's available when)
+- NO: one-off troubleshooting steps or debug procedures
 
 TYPE ACCURACY:
-- A commitment has a specific NAMED OWNER who promised to DO something. "Someone should finalize the deck" has no owner — that's a takeaway. "Ravikanth said he'd create the stories" has an owner (Ravikanth) — that's a commitment.
+- A commitment has a specific NAMED OWNER who promised to DO something. Unowned statements ("someone should finalize the deck") are takeaways. Named promises ("<person> said they'd <action>") are commitments.
 - A project requires the (you) speaker to OWN work within it (commitments, decisions, or blockers). Merely offering to help or being aware of someone else's project does NOT make it the (you) speaker's project.
   - YES project: "[Scott (you)] I'll have the API schema reviewed by Friday" — Scott owns a deliverable
   - NOT a project: "[Scott (you)] I can help review the copy" — Scott is offering a favor, not owning an initiative
@@ -242,7 +242,7 @@ UNNAMED SPEAKERS:
 - Do NOT create entity or person patches for unnamed speakers (e.g., "Speaker 1", "Speaker 4").
 - These labels are temporary diarization artifacts — "Speaker 4" in one meeting is a different person than "Speaker 4" in another meeting.
 - If a speaker is only known by label, use the label in the patch fact text (e.g., "Speaker 4 committed to...") but do NOT create an entity for them.
-- Only create entities and person patches for people identified by real name (e.g., "Travis", "Kumar", "Amanda").
+- Only create entities and person patches for people identified by real name, not by diarization label.
 - The app will rename "Speaker 4" to the real name later, at which point the entity gets created.
 
 EXTRACTION RULES:
