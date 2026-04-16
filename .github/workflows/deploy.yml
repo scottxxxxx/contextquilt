@@ -47,10 +47,22 @@ jobs:
           script: |
             cd /opt/contextquilt
 
+            # Pull latest code (for migrations and config)
+            sudo git pull origin main --ff-only || true
+
             # Login to GHCR
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
             # Pull latest and restart CQ containers
             sudo docker compose -f docker-compose.prod.yml --env-file .env.prod pull
             sudo docker compose -f docker-compose.prod.yml --env-file .env.prod up -d
+
+            # Run migrations (idempotent — all use IF NOT EXISTS / ADD IF NOT EXISTS)
+            echo "Running migrations..."
+            for f in init-db/*.sql; do
+              echo "  → $f"
+              sudo docker exec -i $(sudo docker ps -q -f name=cq-postgres) psql -U postgres -d context_quilt < "$f" 2>&1 || true
+            done
+            echo "Migrations complete."
+
             sudo docker image prune -af --filter "until=24h"
