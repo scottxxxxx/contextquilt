@@ -215,6 +215,11 @@ TYPE ACCURACY:
   - NEVER a project: podcasts, books, competitors, articles, external events, news stories
 - A blocker is something specifically preventing progress. General challenges or observations are takeaways.
 
+PATCH TEXT RULES:
+- For trait, preference, and identity patches: write in SECOND PERSON. Say "You prefer async" not "Scott prefers async."
+- NEVER include the "(you)" suffix in any patch text. The speaker label "[Scott (you)]" is an identification marker in the transcript, not part of anyone's name. Write "Scott" not "Scott (you)."
+- For all other patch types (commitment, decision, blocker, etc.): use the speaker's name normally. "Vijay will import the agents" — not second person.
+
 (YOU)-MARKER GATING — HARD RULE:
 - If no speaker label contains "(you)", emit ZERO patches of type trait, preference, or identity.
 - This applies even if a speaker's name appears to match a known user, speaks most, or is clearly the subject of the meeting.

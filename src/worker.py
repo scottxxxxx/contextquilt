@@ -32,6 +32,7 @@ from contextquilt.services.extraction_schema import (
     enforce_owner_gate,
     enforce_connection_requirements,
     normalize_owner_in_transcript,
+    sanitize_you_marker_from_patches,
     strip_ephemeral_fields,
 )
 from contextquilt.gateway.extraction import classify_fact
@@ -1276,6 +1277,7 @@ class ColdPathWorker:
                     reasoning_chars=reasoning_chars,
                     model=response.model,
                 )
+            sanitize_you_marker_from_patches(response.content)
             strip_ephemeral_fields(response.content)
 
             timestamp = payload.get("timestamp")
