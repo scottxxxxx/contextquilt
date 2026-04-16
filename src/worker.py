@@ -27,7 +27,11 @@ from contextquilt.services.extraction_prompts import (
     TRACE_SYSTEM,
     COMMUNICATION_PROFILE_SYSTEM,
 )
-from contextquilt.services.extraction_schema import EXTRACTION_SCHEMA, enforce_you_marker_gate
+from contextquilt.services.extraction_schema import (
+    EXTRACTION_SCHEMA,
+    enforce_you_marker_gate,
+    strip_ephemeral_fields,
+)
 from contextquilt.gateway.extraction import classify_fact
 
 # Configure Logging
@@ -1221,6 +1225,16 @@ class ColdPathWorker:
                         filtered=g["filtered"],
                         model=response.model,
                     )
+            # Observability: track how much scratchpad the model is generating
+            # before we strip it — informs token-cost monitoring.
+            if (r := response.content.get("_reasoning")):
+                logger.debug(
+                    "extraction_reasoning",
+                    user_id=user_id,
+                    reasoning_chars=len(r),
+                    model=response.model,
+                )
+            strip_ephemeral_fields(response.content)
 
             timestamp = payload.get("timestamp")
             project = metadata.get("project") if metadata else None
