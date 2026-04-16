@@ -247,6 +247,92 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
     finally:
         await conn.close()
 
+class IngestionLogEntry(BaseModel):
+    metric_id: str
+    created_at: str
+    user_id: Optional[str]
+    app_id: Optional[str]
+    meeting_id: Optional[str]
+    model: Optional[str]
+    interaction_type: Optional[str]
+    owner_speaker_label: Optional[str]
+    owner_marker_present: Optional[bool]
+    input_tokens: Optional[int]
+    output_tokens: Optional[int]
+    cost_usd: Optional[float]
+    latency_ms: Optional[float]
+    patches_before_filters: Optional[int]
+    patches_after_filters: Optional[int]
+    owner_gate_filtered: Optional[int]
+    connection_dropped: Optional[int]
+    reasoning_chars: Optional[int]
+    transcript_chars: Optional[int]
+    patches_extracted: Optional[int]
+    entities_extracted: Optional[int]
+
+
+@router.get("/ingestion-log", response_model=List[IngestionLogEntry], dependencies=[Depends(verify_admin_key)])
+async def get_ingestion_log(limit: int = 50, user_id: Optional[str] = None, app_id: Optional[str] = None):
+    """Return recent ingestion events with full pipeline trace."""
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        conditions = []
+        params = []
+        idx = 1
+        if user_id:
+            conditions.append(f"user_id = ${idx}")
+            params.append(user_id)
+            idx += 1
+        if app_id:
+            conditions.append(f"app_id = ${idx}")
+            params.append(app_id)
+            idx += 1
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        params.append(min(limit, 200))
+        query = f"""
+            SELECT metric_id, created_at, user_id, app_id, meeting_id,
+                   model, interaction_type, owner_speaker_label, owner_marker_present,
+                   input_tokens, output_tokens, cost_usd, latency_ms,
+                   patches_before_filters, patches_after_filters,
+                   owner_gate_filtered, connection_dropped,
+                   reasoning_chars, transcript_chars,
+                   patches_extracted, entities_extracted
+            FROM extraction_metrics
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ${idx}
+        """
+        rows = await conn.fetch(query, *params)
+        return [
+            IngestionLogEntry(
+                metric_id=str(r["metric_id"]),
+                created_at=r["created_at"].isoformat() if r["created_at"] else "",
+                user_id=r["user_id"],
+                app_id=r["app_id"],
+                meeting_id=r["meeting_id"],
+                model=r["model"],
+                interaction_type=r["interaction_type"],
+                owner_speaker_label=r["owner_speaker_label"],
+                owner_marker_present=r["owner_marker_present"],
+                input_tokens=r["input_tokens"],
+                output_tokens=r["output_tokens"],
+                cost_usd=r["cost_usd"],
+                latency_ms=r["latency_ms"],
+                patches_before_filters=r["patches_before_filters"],
+                patches_after_filters=r["patches_after_filters"],
+                owner_gate_filtered=r["owner_gate_filtered"],
+                connection_dropped=r["connection_dropped"],
+                reasoning_chars=r["reasoning_chars"],
+                transcript_chars=r["transcript_chars"],
+                patches_extracted=r["patches_extracted"],
+                entities_extracted=r["entities_extracted"],
+            )
+            for r in rows
+        ]
+    finally:
+        await conn.close()
+
+
 @router.get("/apps", response_model=List[str], dependencies=[Depends(verify_admin_key)])
 async def get_apps():
     conn = await asyncpg.connect(DATABASE_URL)

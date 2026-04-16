@@ -516,6 +516,53 @@ function getDateParams() {
 
 
 
+async function fetchIngestionLog() {
+    try {
+        const res = await fetch('/api/dashboard/ingestion-log?limit=50');
+        const entries = await res.json();
+        const tbody = document.getElementById('ingestion-log-body');
+        if (!entries.length) {
+            tbody.innerHTML = '<tr><td colspan="11" style="text-align:center; color:var(--text-secondary);">No ingestion events yet</td></tr>';
+            return;
+        }
+        tbody.innerHTML = entries.map(e => {
+            const time = e.created_at ? new Date(e.created_at).toLocaleString() : '-';
+            const user = e.user_id ? e.user_id.substring(0, 12) + '...' : '-';
+            const model = e.model ? e.model.split('/').pop() : '-';
+            const owner = e.owner_speaker_label || '-';
+            const marker = e.owner_marker_present === true ? '✓' : e.owner_marker_present === false ? '✗' : '-';
+            const before = e.patches_before_filters ?? e.patches_extracted ?? '-';
+            const gated = e.owner_gate_filtered ?? 0;
+            const conn = e.connection_dropped ?? 0;
+            const after = e.patches_after_filters ?? e.patches_extracted ?? '-';
+            const cost = e.cost_usd != null ? '$' + e.cost_usd.toFixed(4) : '-';
+            const lat = e.latency_ms != null ? (e.latency_ms / 1000).toFixed(1) + 's' : '-';
+
+            const gatedClass = gated > 0 ? 'color: var(--accent-warning, #f59e0b)' : '';
+            const connClass = conn > 0 ? 'color: var(--accent-warning, #f59e0b)' : '';
+            const markerClass = marker === '✗' ? 'color: var(--accent-warning, #f59e0b)' : marker === '✓' ? 'color: var(--accent-success, #10b981)' : '';
+
+            return `<tr>
+                <td style="white-space:nowrap">${time}</td>
+                <td title="${e.user_id || ''}">${user}</td>
+                <td>${model}</td>
+                <td>${owner}</td>
+                <td style="${markerClass}">${marker}</td>
+                <td>${before}</td>
+                <td style="${gatedClass}">${gated}</td>
+                <td style="${connClass}">${conn}</td>
+                <td><strong>${after}</strong></td>
+                <td>${cost}</td>
+                <td>${lat}</td>
+            </tr>`;
+        }).join('');
+    } catch (error) {
+        console.error('Failed to fetch ingestion log:', error);
+        document.getElementById('ingestion-log-body').innerHTML =
+            '<tr><td colspan="11" style="text-align:center; color:var(--accent-error, #ef4444);">Failed to load</td></tr>';
+    }
+}
+
 async function fetchIngestionHistory() {
     if (!ingestionChart) return;
 
@@ -1309,6 +1356,7 @@ async function fetchDashboardData() {
 
     // 3. Fetch History (Chart)
     promises.push(fetchIngestionHistory().catch(e => console.error('Ingestion history failed:', e)));
+    promises.push(fetchIngestionLog().catch(e => console.error('Ingestion log failed:', e)));
 
     // 4. Fetch Distribution (Chart)
     promises.push(fetchDistribution(currentDistributionGroup).catch(e => console.error('Distribution failed:', e)));
