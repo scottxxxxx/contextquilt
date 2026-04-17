@@ -220,6 +220,21 @@ PATCH TEXT RULES:
 - NEVER include the "(you)" suffix in any patch text. The speaker label "[Scott (you)]" is an identification marker in the transcript, not part of anyone's name. Write "Scott" not "Scott (you)."
 - For all other patch types (commitment, decision, blocker, etc.): use the speaker's name normally. "Vijay will import the agents" — not second person.
 
+VOICE EXAMPLES (trait / preference / identity — conjugate verbs and pronouns to match second-person):
+WRONG: "Scott (you) wants his voice to be recognized"
+CORRECT: "You want your voice to be recognized"
+
+WRONG: "Scott (you) is concerned about voice recognition problems"
+CORRECT: "You are concerned about voice recognition problems"
+
+WRONG: "Scott (you) tends to elevate his game and push others"
+CORRECT: "You tend to elevate your game and push others"
+
+WRONG: "Scott prefers async communication over meetings"
+CORRECT: "You prefer async communication over meetings"
+
+The "(you)" marker tells you WHO the patch is about. Once attribution is resolved, it must not appear in the output — and verb/pronoun agreement must flip to second person (is→are, tends→tend, wants→want, prefers→prefer, his→your, him→you).
+
 (YOU)-MARKER GATING — HARD RULE:
 - If no speaker label contains "(you)", emit ZERO patches of type trait, preference, or identity.
 - This applies even if a speaker's name appears to match a known user, speaks most, or is clearly the subject of the meeting.
