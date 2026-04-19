@@ -35,6 +35,10 @@ from contextquilt.services.extraction_schema import (
     sanitize_you_marker_from_patches,
     strip_ephemeral_fields,
 )
+from contextquilt.services.schema_prompt_builder import (
+    build_prompt as build_schema_prompt,
+    build_output_schema as build_schema_output_schema,
+)
 from contextquilt.gateway.extraction import classify_fact
 
 # Configure Logging
@@ -1036,6 +1040,45 @@ class ColdPathWorker:
     # Handlers
     # ============================================
 
+    async def _resolve_extraction_prompt(
+        self, app_id: str | None
+    ) -> tuple[str, Dict[str, Any]]:
+        """Pick the system prompt + structured-output schema for this app.
+
+        If the app has a registered manifest in `app_schemas`, generate
+        the prompt from it (or use `extraction_prompt_override` verbatim
+        if present). Otherwise fall back to the universal hardcoded
+        MEETING_SUMMARY_SYSTEM + EXTRACTION_SCHEMA.
+        """
+        if not app_id:
+            return MEETING_SUMMARY_SYSTEM, EXTRACTION_SCHEMA
+
+        try:
+            row = await self.db.fetchrow(
+                """
+                SELECT manifest FROM app_schemas
+                WHERE app_id = $1::uuid
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                app_id,
+            )
+            if not row:
+                return MEETING_SUMMARY_SYSTEM, EXTRACTION_SCHEMA
+            manifest = row["manifest"]
+            if isinstance(manifest, str):
+                manifest = json.loads(manifest)
+            prompt = build_schema_prompt(manifest)
+            schema = build_schema_output_schema(manifest)
+            return prompt, schema
+        except Exception as e:
+            logger.warning(
+                "schema_prompt_resolution_failed",
+                app_id=app_id,
+                error=str(e),
+            )
+            return MEETING_SUMMARY_SYSTEM, EXTRACTION_SCHEMA
+
     async def _get_llm_for_app(self, app_id: str | None) -> LLMClient:
         """Get the LLM client for an app. Uses app's BYOK key if available, else server default."""
         if not app_id:
@@ -1308,10 +1351,15 @@ class ColdPathWorker:
             app_id = payload.get("app_id")
             llm = await self._get_llm_for_app(app_id)
 
+            # Prefer the app's registered schema-driven prompt. Falls back
+            # to the universal hardcoded MEETING_SUMMARY_SYSTEM only when
+            # the app has no registered manifest.
+            resolved_prompt, resolved_schema = await self._resolve_extraction_prompt(app_id)
+
             response = await llm.extract(
-                system_prompt=MEETING_SUMMARY_SYSTEM,
+                system_prompt=resolved_prompt,
                 user_content=user_context + effective_summary,
-                json_schema=EXTRACTION_SCHEMA,
+                json_schema=resolved_schema,
             )
 
             # --- Audit: capture pre-filter state ---
