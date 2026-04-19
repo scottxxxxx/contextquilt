@@ -119,6 +119,46 @@ Authorization: Bearer <app-jwt>
 
 Returns a context block to inject into the prompt.
 
+#### Context Injection Contract
+
+The `context` string returned by `/v1/recall` is a formatted block structured by section headers. The headers are **load-bearing** — they anchor pronouns and categorize content for the LLM. Integrators MUST preserve them when injecting.
+
+**Canonical output shape:**
+
+```
+About you:
+- You prefer async communication over meetings.
+- You tend to elevate your game and push others.
+
+Open commitments:
+- Vijay will import the agents (by Friday)
+- Pallavi will retest once the scope is corrected
+
+Decisions:
+- Use Nova 3 for transcription on the Florida Blue project.
+
+Key facts:
+- You are based out of Austin, Texas.
+```
+
+**Pronoun anchoring.** Trait, preference, and identity patches are emitted in **second person** ("You prefer X", "You are based in Y"). The `About you:` header tells the LLM the following bullets describe the user of the query — not the assistant. Without the header, "You" becomes ambiguous against the assistant's own "You are a helpful assistant" framing.
+
+**Do's:**
+
+- Inject the block verbatim into your system prompt, either via a template placeholder (e.g. `{{context_quilt}}`) or as a prepended block with a clear anchor (`[CONTEXT FROM PREVIOUS MEETINGS]\n{context}\n\n{system_prompt}`).
+- Preserve all section headers (`About you:`, `Open commitments:`, etc.) exactly as emitted.
+- Send verbatim — no truncation, re-wrapping, reordering, or header renaming.
+
+**Don'ts:**
+
+- Don't flatten the block into a single paragraph. The headers are the anchors.
+- Don't strip or rename headers. Even `"About you"` → `"About the user"` loses the pronoun-to-subject binding.
+- Don't try to rewrite pronouns client-side ("You" → "Scott"). CQ owns the voice contract; see [02-pipeline.md](02-pipeline.md) for how patches are generated.
+
+**Timeout guidance.** The recall endpoint targets <50ms on cache miss and <10ms on cache hit. A 200ms client-side timeout with graceful degrade (empty context on timeout) is a reasonable default. For best results, call `POST /v1/working-memory/prewarm` at session start to warm the user's entity index in Redis before the first live query.
+
+**Do not transform at render time.** If you find yourself adding post-processing to fix voice, pronouns, or stray markers in CQ's output, file an issue — the fix belongs in the extraction pipeline, not a client-side sanitizer. Sanitizers drift when new edge cases appear and produce subtly wrong text (e.g., replacing `"Scott (you) wants"` → `"You wants"` without verb agreement).
+
 ### Step 4 (Optional): Let users see their quilt
 
 ```
