@@ -158,17 +158,19 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
                 )
                 SELECT 
                     ds.hour, 
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'identity') as identity,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'preference') as preference,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'trait') as trait,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'experience') as experience,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'role') as role,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'preference') as preference,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'goal') as goal,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'constraint') as "constraint",
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'person') as person,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'org') as org,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'project') as project,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'role') as role,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'decision') as "decision",
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'commitment') as commitment,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'blocker') as blocker,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'takeaway') as takeaway
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'takeaway') as takeaway,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'event') as event
                 FROM date_series ds
                 LEFT JOIN context_patches p ON date_trunc('hour', p.created_at) = ds.hour
                 GROUP BY ds.hour
@@ -178,17 +180,19 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
             return [{
                 "date": row['hour'].strftime("%H:%M"), 
                 "counts": {
-                    "identity": row['identity'] or 0,
-                    "preference": row['preference'] or 0,
                     "trait": row['trait'] or 0,
-                    "experience": row['experience'] or 0,
-                    "role": row['role'] or 0,
+                    "preference": row['preference'] or 0,
+                    "goal": row['goal'] or 0,
+                    "constraint": row['constraint'] or 0,
                     "person": row['person'] or 0,
+                    "org": row['org'] or 0,
                     "project": row['project'] or 0,
+                    "role": row['role'] or 0,
                     "decision": row['decision'] or 0,
                     "commitment": row['commitment'] or 0,
                     "blocker": row['blocker'] or 0,
                     "takeaway": row['takeaway'] or 0,
+                    "event": row['event'] or 0,
                 }
             } for row in rows]
 
@@ -207,17 +211,19 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
                 )
                 SELECT 
                     ds.day, 
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'identity') as identity,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'preference') as preference,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'trait') as trait,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'experience') as experience,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'role') as role,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'preference') as preference,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'goal') as goal,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'constraint') as "constraint",
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'person') as person,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'org') as org,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'project') as project,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'role') as role,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'decision') as "decision",
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'commitment') as commitment,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'blocker') as blocker,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'takeaway') as takeaway
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'takeaway') as takeaway,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'event') as event
                 FROM date_series ds
                 LEFT JOIN context_patches p ON date_trunc('day', p.created_at)::date = ds.day
                 GROUP BY ds.day
@@ -227,17 +233,19 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
             return [{
                 "date": str(row['day']), 
                 "counts": {
-                    "identity": row['identity'] or 0,
-                    "preference": row['preference'] or 0,
                     "trait": row['trait'] or 0,
-                    "experience": row['experience'] or 0,
-                    "role": row['role'] or 0,
+                    "preference": row['preference'] or 0,
+                    "goal": row['goal'] or 0,
+                    "constraint": row['constraint'] or 0,
                     "person": row['person'] or 0,
+                    "org": row['org'] or 0,
                     "project": row['project'] or 0,
+                    "role": row['role'] or 0,
                     "decision": row['decision'] or 0,
                     "commitment": row['commitment'] or 0,
                     "blocker": row['blocker'] or 0,
                     "takeaway": row['takeaway'] or 0,
+                    "event": row['event'] or 0,
                 }
             } for row in rows]
 
@@ -253,17 +261,19 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
                 )
                 SELECT 
                     ds.day, 
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'identity') as identity,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'preference') as preference,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'trait') as trait,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'experience') as experience,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'role') as role,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'preference') as preference,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'goal') as goal,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'constraint') as "constraint",
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'person') as person,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'org') as org,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'project') as project,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'role') as role,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'decision') as "decision",
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'commitment') as commitment,
                     COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'blocker') as blocker,
-                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'takeaway') as takeaway
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'takeaway') as takeaway,
+                    COUNT(p.patch_id) FILTER (WHERE p.patch_type = 'event') as event
                 FROM date_series ds
                 LEFT JOIN context_patches p ON date_trunc('day', p.created_at)::date = ds.day
                 GROUP BY ds.day
@@ -273,17 +283,19 @@ async def get_patches_history(days: Optional[int] = 7, start_date: Optional[str]
             return [{
                 "date": str(row['day']), 
                 "counts": {
-                    "identity": row['identity'] or 0,
-                    "preference": row['preference'] or 0,
                     "trait": row['trait'] or 0,
-                    "experience": row['experience'] or 0,
-                    "role": row['role'] or 0,
+                    "preference": row['preference'] or 0,
+                    "goal": row['goal'] or 0,
+                    "constraint": row['constraint'] or 0,
                     "person": row['person'] or 0,
+                    "org": row['org'] or 0,
                     "project": row['project'] or 0,
+                    "role": row['role'] or 0,
                     "decision": row['decision'] or 0,
                     "commitment": row['commitment'] or 0,
                     "blocker": row['blocker'] or 0,
                     "takeaway": row['takeaway'] or 0,
+                    "event": row['event'] or 0,
                 }
             } for row in rows]
     finally:
@@ -294,7 +306,8 @@ class IngestionLogEntry(BaseModel):
     created_at: str
     user_id: Optional[str]
     app_id: Optional[str]
-    meeting_id: Optional[str]
+    origin_id: Optional[str]
+    origin_type: Optional[str]
     model: Optional[str]
     interaction_type: Optional[str]
     owner_speaker_label: Optional[str]
@@ -332,7 +345,7 @@ async def get_ingestion_log(limit: int = 50, user_id: Optional[str] = None, app_
         where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         params.append(min(limit, 200))
         query = f"""
-            SELECT metric_id, created_at, user_id, app_id, meeting_id,
+            SELECT metric_id, created_at, user_id, app_id, origin_id, origin_type,
                    model, interaction_type, owner_speaker_label, owner_marker_present,
                    input_tokens, output_tokens, cost_usd, latency_ms,
                    patches_before_filters, patches_after_filters,
@@ -351,7 +364,8 @@ async def get_ingestion_log(limit: int = 50, user_id: Optional[str] = None, app_
                 created_at=r["created_at"].isoformat() if r["created_at"] else "",
                 user_id=r["user_id"],
                 app_id=r["app_id"],
-                meeting_id=r["meeting_id"],
+                origin_id=r["origin_id"],
+                origin_type=r["origin_type"],
                 model=r["model"],
                 interaction_type=r["interaction_type"],
                 owner_speaker_label=r["owner_speaker_label"],
@@ -596,7 +610,8 @@ class QuiltPatch(BaseModel):
     sensitivity: str
     created_at: datetime
     user_id: str
-    meeting_id: Optional[str] = None
+    origin_id: Optional[str] = None
+    origin_type: Optional[str] = None
     project_id: Optional[str] = None
     project_name: Optional[str] = None
     status: Optional[str] = None
@@ -616,7 +631,11 @@ class UserQuilt(BaseModel):
     communication_profile: Optional[Dict[str, Any]] = None
 
 @router.get("/users/{user_id}/quilt", response_model=UserQuilt, dependencies=[Depends(verify_admin_key)])
-async def get_user_quilt(user_id: str, meeting_id: Optional[str] = None):
+async def get_user_quilt(
+    user_id: str,
+    origin_id: Optional[str] = None,
+    origin_type: Optional[str] = None,
+):
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         subject_key = f"user:{user_id}"
@@ -625,21 +644,22 @@ async def get_user_quilt(user_id: str, meeting_id: Optional[str] = None):
             "SELECT display_name, email, variables->'communication_profile' as comm_profile FROM profiles WHERE user_id = $1", user_id
         )
 
-        # Base query with optional meeting filter
-        meeting_filter = ""
+        # Base query with optional origin filter
+        origin_filter = ""
         params = [subject_key]
-        if meeting_id:
-            meeting_filter = "AND cp.meeting_id = $2"
-            params.append(meeting_id)
+        if origin_id and origin_type:
+            origin_filter = f"AND cp.origin_type = ${len(params) + 1} AND cp.origin_id = ${len(params) + 2}"
+            params.append(origin_type)
+            params.append(origin_id)
 
         patch_rows = await conn.fetch(f"""
             SELECT cp.patch_id, cp.patch_name, cp.value, cp.patch_type, cp.origin_mode, cp.created_at,
-                   cp.source_prompt, cp.confidence, cp.sensitivity, cp.meeting_id, cp.project_id,
-                   cp.status, pr.name as project_name
+                   cp.source_prompt, cp.confidence, cp.sensitivity, cp.origin_id, cp.origin_type,
+                   cp.project_id, cp.status, pr.name as project_name
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             LEFT JOIN projects pr ON cp.project_id = pr.project_id
-            WHERE ps.subject_key = $1 {meeting_filter}
+            WHERE ps.subject_key = $1 {origin_filter}
             ORDER BY cp.created_at DESC
         """, *params)
 
@@ -695,7 +715,8 @@ async def get_user_quilt(user_id: str, meeting_id: Optional[str] = None):
                 sensitivity=row['sensitivity'] or 'normal',
                 created_at=row['created_at'],
                 user_id=user_id,
-                meeting_id=row['meeting_id'],
+                origin_id=row['origin_id'],
+                origin_type=row['origin_type'],
                 project_id=row['project_id'],
                 project_name=row['project_name'],
                 status=row['status'],
