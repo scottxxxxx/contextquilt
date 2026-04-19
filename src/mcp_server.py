@@ -253,7 +253,8 @@ async def store_memory(
     interaction_type: str = "meeting_transcript",
     project_id: Optional[str] = None,
     project: Optional[str] = None,
-    meeting_id: Optional[str] = None,
+    origin_id: Optional[str] = None,
+    origin_type: Optional[str] = None,
 ) -> str:
     """Store a conversation, transcript, or interaction for async extraction.
 
@@ -267,7 +268,8 @@ async def store_memory(
         interaction_type: Type of content — 'meeting_transcript', 'chat_log', 'query', or 'tool_call'
         project_id: Optional project UUID for grouping
         project: Optional project display name
-        meeting_id: Optional session/meeting UUID
+        origin_id: Optional stable ID of the input unit (meeting UUID, session ID, note ID)
+        origin_type: Optional type of the input unit (e.g., "meeting", "practice_session", "typed_note")
 
     Returns:
         Confirmation that the memory update was queued
@@ -279,8 +281,10 @@ async def store_memory(
         metadata["project_id"] = project_id
     if project:
         metadata["project"] = project
-    if meeting_id:
-        metadata["meeting_id"] = meeting_id
+    if origin_id:
+        metadata["origin_id"] = origin_id
+    if origin_type:
+        metadata["origin_type"] = origin_type
 
     payload = {
         "user_id": user_id,

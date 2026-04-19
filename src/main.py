@@ -22,6 +22,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.dashboard.router import router as dashboard_router
+from src.contextquilt.routers.app_schemas import router as app_schemas_router
 
 import asyncpg
 import uuid
@@ -68,6 +69,9 @@ if os.path.exists(dashboard_path):
 
 # Include Dashboard Router
 app.include_router(dashboard_router)
+
+# Include App Schema Registration Router (admin-authenticated)
+app.include_router(app_schemas_router)
 
 @app.get("/", include_in_schema=False)
 async def root():
@@ -129,7 +133,7 @@ class MemoryUpdate(BaseModel):
     # Optional timestamp for backdating (e.g. historical import)
     timestamp: Optional[str] = None
 
-    # Generic metadata — app-defined key-value pairs (e.g., meeting_id, project)
+    # Generic metadata — app-defined key-value pairs (e.g., origin_id, origin_type, project)
     # CQ stores these alongside extracted facts for filtering and grouping.
     metadata: Optional[Dict[str, Any]] = None
 
@@ -932,7 +936,8 @@ class QuiltPatchResponse(BaseModel):
     created_at: Optional[str] = None
     project: Optional[str] = None
     project_id: Optional[str] = None
-    meeting_id: Optional[str] = None
+    origin_id: Optional[str] = None
+    origin_type: Optional[str] = None
     connections: List[PatchConnectionResponse] = []
 
 class QuiltResponse(BaseModel):
@@ -994,7 +999,7 @@ async def get_user_quilt(
     query = f"""
         SELECT cp.patch_id, cp.patch_name, cp.patch_type, cp.value,
                cp.origin_mode, cp.source_prompt, cp.created_at, cp.project,
-               cp.project_id, cp.meeting_id, cp.status
+               cp.project_id, cp.origin_id, cp.origin_type, cp.status
         FROM context_patches cp
         JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
         {acl_join}
@@ -1074,7 +1079,8 @@ async def get_user_quilt(
             created_at=row["created_at"].isoformat() if row["created_at"] else None,
             project=row["project"],
             project_id=row.get("project_id"),
-            meeting_id=row.get("meeting_id"),
+            origin_id=row.get("origin_id"),
+            origin_type=row.get("origin_type"),
             connections=connections_by_patch.get(pid, []),
         )
 
@@ -1954,22 +1960,24 @@ async def update_project(
     return {"status": "updated", "project_id": project_id}
 
 
-class MeetingProjectAssignment(BaseModel):
+class OriginProjectAssignment(BaseModel):
     project_id: str
     project_name: str
 
-@app.post("/v1/meetings/{user_id}/{meeting_id}/assign-project", tags=["Projects"])
-async def assign_meeting_to_project(
+@app.post("/v1/origins/{user_id}/{origin_type}/{origin_id}/assign-project", tags=["Projects"])
+async def assign_origin_to_project(
     user_id: str,
-    meeting_id: str,
-    assignment: MeetingProjectAssignment,
+    origin_type: str,
+    origin_id: str,
+    assignment: OriginProjectAssignment,
     app_id: str = Depends(verify_application_access),
 ):
     """
-    Retroactively assign a meeting's patches to a project.
-    Use when a user records a meeting without selecting a project, then
-    assigns it to a project later. Bulk-updates all patches with the
-    given meeting_id to the specified project_id.
+    Retroactively assign an origin's patches to a project.
+    Use when a user records a meeting / practice session / note without
+    selecting a project, then assigns it to a project later. Bulk-updates
+    all patches with the given (origin_type, origin_id) to the specified
+    project_id.
     """
     project_id = assignment.project_id
     project_name = assignment.project_name
@@ -1984,7 +1992,7 @@ async def assign_meeting_to_project(
         project_id, user_id, project_name
     )
 
-    # Find all patches for this meeting that are currently unscoped
+    # Find all patches for this origin that are currently unscoped
     subject_key = f"user:{user_id}"
     updated = await db_pool.execute(
         """
@@ -1996,11 +2004,12 @@ async def assign_meeting_to_project(
             SELECT cp.patch_id FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $3
-              AND cp.meeting_id = $4
+              AND cp.origin_type = $4
+              AND cp.origin_id = $5
               AND cp.patch_type NOT IN ('trait', 'preference')
         )
         """,
-        project_id, project_name, subject_key, meeting_id
+        project_id, project_name, subject_key, origin_type, origin_id
     )
 
     # Extract count from "UPDATE N"
@@ -2013,7 +2022,8 @@ async def assign_meeting_to_project(
 
     return {
         "status": "assigned",
-        "meeting_id": meeting_id,
+        "origin_type": origin_type,
+        "origin_id": origin_id,
         "project_id": project_id,
         "patches_updated": patches_updated,
     }
