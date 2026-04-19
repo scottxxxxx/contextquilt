@@ -3,17 +3,22 @@
 -- ============================================================
 -- Adds:
 --   1. facet and permanence columns on patch_type_registry
---   2. app_schemas table (versioned manifest history per app)
---   3. origin_id and origin_type columns on context_patches
---      (generalizes meeting_id)
---   4. about_patch_id column on context_patches (Attribute patches
+--   2. Hard cleanup of retired patch types (identity, experience,
+--      feature, deadline) and their associated patches
+--   3. app_schemas table (versioned manifest history per app)
+--   4. entity_type_registry (per-app entity type declarations)
+--   5. Replaces meeting_id with origin_id + origin_type on
+--      context_patches and extraction_metrics
+--   6. about_patch_id column on context_patches (Attribute patches
 --      can describe non-user Connection patches)
---   5. Relaxed belongs_to vocabulary to allow Connection → Connection
+--   7. Relaxed belongs_to vocabulary to allow Connection → Connection
 --      hierarchies
 --
 -- Prerequisite: migrations 01-09 applied.
--- Backward compatibility: meeting_id column is retained during
--- transition. Code that reads from it continues to work.
+-- No backward compatibility: SS is pre-launch, data is test-only.
+-- This migration deletes retired-type patches and drops the old
+-- meeting_id column directly. If existing clients rely on either,
+-- they will break — intentional per the v1 taxonomy decision.
 -- ============================================================
 
 
@@ -26,10 +31,10 @@ ALTER TABLE patch_type_registry
     ADD COLUMN IF NOT EXISTS permanence TEXT;
 
 -- Backfill facet and permanence for the universal built-in types
--- (based on the v1 6-facet model — see docs/memos/patch-taxonomy-simplification.md).
+-- we're keeping. identity and experience are deleted in section 2.
+-- See docs/memos/patch-taxonomy-simplification.md for the v1 6-facet model.
 UPDATE patch_type_registry SET facet = 'Attribute',  permanence = 'year'    WHERE type_key = 'trait';
 UPDATE patch_type_registry SET facet = 'Affinity',   permanence = 'year'    WHERE type_key = 'preference';
-UPDATE patch_type_registry SET facet = 'Attribute',  permanence = 'year'    WHERE type_key = 'identity';
 UPDATE patch_type_registry SET facet = 'Connection', permanence = 'decade'  WHERE type_key = 'person';
 UPDATE patch_type_registry SET facet = 'Connection', permanence = 'quarter' WHERE type_key = 'project';
 UPDATE patch_type_registry SET facet = 'Connection', permanence = 'year'    WHERE type_key = 'role';
@@ -37,7 +42,6 @@ UPDATE patch_type_registry SET facet = 'Episode',    permanence = 'year'    WHER
 UPDATE patch_type_registry SET facet = 'Episode',    permanence = 'month'   WHERE type_key = 'commitment';
 UPDATE patch_type_registry SET facet = 'Episode',    permanence = 'week'    WHERE type_key = 'blocker';
 UPDATE patch_type_registry SET facet = 'Episode',    permanence = 'week'    WHERE type_key = 'takeaway';
-UPDATE patch_type_registry SET facet = 'Episode',    permanence = 'month'   WHERE type_key = 'experience';
 
 -- Add constraints (only if not already present)
 DO $$
@@ -66,38 +70,35 @@ END $$;
 
 
 -- ------------------------------------------------------------
--- 2. Remove dead universal types (identity, experience)
+-- 2. Hard cleanup of retired patch types
 -- ------------------------------------------------------------
--- Only remove if no active patches reference them.
--- Per the taxonomy validation tests (see docs/memos/patch-taxonomy-simplification.md),
--- these types have zero data in the ShoulderSurf corpus.
+-- Per the v1 taxonomy decision:
+--   - identity: cut (redundant with trait + connection)
+--   - experience: legacy, replaced by decision/commitment/blocker/takeaway/event
+--   - feature, deadline: were never patch types in CQ, but delete any
+--     misclassified rows defensively.
+--
+-- Deletes patches unconditionally. Cascades through FK constraints
+-- to patch_subjects, patch_usage_metrics, patch_connections, and
+-- context_patch_acl. SS is pre-launch; test data is disposable.
 
 DO $$
 DECLARE
-    identity_patch_count INTEGER;
-    experience_patch_count INTEGER;
+    deleted_patches INTEGER;
 BEGIN
-    SELECT COUNT(*) INTO identity_patch_count
-        FROM context_patches WHERE patch_type = 'identity';
-    SELECT COUNT(*) INTO experience_patch_count
-        FROM context_patches WHERE patch_type = 'experience';
-
-    IF identity_patch_count = 0 THEN
-        DELETE FROM patch_type_registry
-            WHERE type_key = 'identity' AND app_id IS NULL;
-        RAISE NOTICE 'Removed universal identity type from registry (0 patches referenced it).';
-    ELSE
-        RAISE NOTICE 'Retained identity type — % patches still reference it.', identity_patch_count;
-    END IF;
-
-    IF experience_patch_count = 0 THEN
-        DELETE FROM patch_type_registry
-            WHERE type_key = 'experience' AND app_id IS NULL;
-        RAISE NOTICE 'Removed universal experience type from registry (0 patches referenced it).';
-    ELSE
-        RAISE NOTICE 'Retained experience type — % patches still reference it.', experience_patch_count;
-    END IF;
+    WITH deleted AS (
+        DELETE FROM context_patches
+        WHERE patch_type IN ('identity', 'experience', 'feature', 'deadline')
+        RETURNING patch_id
+    )
+    SELECT COUNT(*) INTO deleted_patches FROM deleted;
+    RAISE NOTICE 'Deleted % patches of retired types (identity, experience, feature, deadline).', deleted_patches;
 END $$;
+
+-- Remove the registry rows for these types.
+DELETE FROM patch_type_registry
+    WHERE type_key IN ('identity', 'experience', 'feature', 'deadline')
+      AND app_id IS NULL;
 
 
 -- ------------------------------------------------------------
@@ -119,7 +120,7 @@ CREATE INDEX IF NOT EXISTS idx_app_schemas_current
 
 
 -- ------------------------------------------------------------
--- 3b. Create entity_type_registry (parallel to patch_type_registry)
+-- 4. Create entity_type_registry (parallel to patch_type_registry)
 -- ------------------------------------------------------------
 -- Per-app declaration of which entity types are valid and should be
 -- indexed for name-matching during recall. Apps that don't register
@@ -156,30 +157,35 @@ ON CONFLICT DO NOTHING;
 
 
 -- ------------------------------------------------------------
--- 4. Generalize meeting_id → origin_id + origin_type
+-- 5. Replace meeting_id with origin_id + origin_type
 -- ------------------------------------------------------------
--- Adds new columns and backfills from meeting_id. The old meeting_id
--- column is retained during the transition; code should prefer
--- origin_id going forward.
+-- SS is pre-launch; existing meeting_id values are test data and
+-- are not preserved. Add new columns, drop the old column directly.
 
 ALTER TABLE context_patches
     ADD COLUMN IF NOT EXISTS origin_id TEXT,
     ADD COLUMN IF NOT EXISTS origin_type TEXT;
 
--- Backfill: any existing patch with a meeting_id becomes an
--- origin_id with origin_type = 'meeting'.
-UPDATE context_patches
-    SET origin_id = meeting_id,
-        origin_type = 'meeting'
-    WHERE meeting_id IS NOT NULL
-      AND origin_id IS NULL;
-
 CREATE INDEX IF NOT EXISTS idx_patches_origin
     ON context_patches(origin_type, origin_id);
 
+DROP INDEX IF EXISTS idx_patches_meeting_id;
+ALTER TABLE context_patches DROP COLUMN IF EXISTS meeting_id;
+
+-- Same rename on extraction_metrics (admin dashboard ingestion log).
+ALTER TABLE extraction_metrics
+    ADD COLUMN IF NOT EXISTS origin_id TEXT,
+    ADD COLUMN IF NOT EXISTS origin_type TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_metrics_origin
+    ON extraction_metrics(origin_type, origin_id);
+
+DROP INDEX IF EXISTS idx_metrics_meeting;
+ALTER TABLE extraction_metrics DROP COLUMN IF EXISTS meeting_id;
+
 
 -- ------------------------------------------------------------
--- 5. Add about_patch_id for Attribute patches targeting non-user entities
+-- 6. Add about_patch_id for Attribute patches targeting non-user entities
 -- ------------------------------------------------------------
 -- Nullable. When non-NULL, the patch describes the target Connection
 -- patch rather than the submitting user.
@@ -192,7 +198,7 @@ CREATE INDEX IF NOT EXISTS idx_patches_about ON context_patches(about_patch_id);
 
 
 -- ------------------------------------------------------------
--- 6. Relax belongs_to vocabulary for Connection → Connection hierarchy
+-- 7. Relax belongs_to vocabulary for Connection → Connection hierarchy
 -- ------------------------------------------------------------
 -- Allows novel → chapter → scene, dissertation → chapter, and
 -- sub-project relationships without requiring a new connection label.
@@ -206,19 +212,6 @@ UPDATE connection_vocabulary
 -- Note: individual apps can further extend belongs_to's from_types when
 -- they register their own schemas, e.g., a research app may add
 -- ARRAY['citation', 'experiment'] to its belongs_to definition.
-
-
--- ------------------------------------------------------------
--- 7. Add origin_types declaration to app_schemas manifest
--- ------------------------------------------------------------
--- No DDL needed — this lives inside the manifest JSONB on app_schemas.
--- Documented here for discoverability.
---
--- Example manifest origin_types array:
---   "origin_types": ["meeting", "imported_recording", "typed_note"]
---
--- The schema registration endpoint validates that any origin_type
--- used on a patch for this app appears in the registered list.
 
 
 -- ------------------------------------------------------------

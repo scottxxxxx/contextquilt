@@ -59,12 +59,16 @@ MAX_PATCHES_PER_MEETING = 12  # Connected quilt model (replaces facts+actions fo
 MAX_ENTITIES_PER_MEETING = 10
 MAX_RELATIONSHIPS_PER_MEETING = 10
 
-# Default persistence by patch type (used when registry lookup unavailable)
+# Default persistence by patch type (used when registry lookup unavailable).
+# identity and experience have been retired per the v1 taxonomy decision —
+# see docs/memos/patch-taxonomy-simplification.md.
 DEFAULT_PERSISTENCE = {
-    "trait": "sticky", "preference": "sticky", "identity": "sticky",
+    "trait": "sticky", "preference": "sticky",
     "role": "sticky", "person": "sticky", "project": "sticky",
-    "decision": "sticky", "experience": "decaying", "takeaway": "decaying",
+    "decision": "sticky", "takeaway": "decaying",
     "commitment": "sticky", "blocker": "sticky",
+    "goal": "sticky", "constraint": "sticky", "org": "sticky",
+    "event": "decaying",
 }
 
 # Known context windows for common models (tokens)
@@ -121,11 +125,12 @@ async def store_facts(
             fact_text = fact_item.get("fact", str(fact_item))
             # Use LLM-provided category if available, fall back to Python classifier
             category = fact_item.get("category", classify_fact(fact_text))
-            # Facts about other participants must be stored as "experience",
-            # not identity/preference/trait (those describe the submitting user only)
+            # Facts about other participants that got classified as user-only
+            # types (trait / preference) must be reclassified as takeaway
+            # instead — traits/preferences describe the submitting user only.
             about_user = fact_item.get("about_user", True)
-            if not about_user and category in ("identity", "preference", "trait"):
-                category = "experience"
+            if not about_user and category in ("trait", "preference"):
+                category = "takeaway"
         elif isinstance(fact_item, str):
             fact_text = fact_item
             category = classify_fact(fact_text)
@@ -151,7 +156,7 @@ async def store_facts(
             """,
             patch_id, patch_name, category, value_json,
             "inferred", source_prompt, 0.8,
-            "sticky" if category in ("identity", "preference", "trait") else "decaying",
+            "sticky" if category in ("trait", "preference") else "decaying",
             project,
             created_at, created_at
         )
@@ -191,7 +196,7 @@ async def store_action_items(
     timestamp: str | None = None,
     project: str | None = None,
 ):
-    """Store extracted action items as experience-type patches."""
+    """Store extracted action items as commitment-type patches (V1 fallback path)."""
     if not action_items:
         return 0
 
@@ -222,7 +227,7 @@ async def store_action_items(
                 origin_mode, source_prompt, confidence, persistence, project, created_at, updated_at
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             """,
-            patch_id, patch_name, "experience", value_json,
+            patch_id, patch_name, "commitment", value_json,
             "inferred", "meeting_summary", 0.8, "decaying", project, created_at, created_at
         )
 
@@ -262,7 +267,8 @@ async def store_connected_patches(
     timestamp: str | None = None,
     project: str | None = None,
     project_id: str | None = None,
-    meeting_id: str | None = None,
+    origin_id: str | None = None,
+    origin_type: str | None = None,
 ):
     """
     Store typed, connected patches (Connected Quilt V2 model).
@@ -287,7 +293,7 @@ async def store_connected_patches(
         if not isinstance(patch, dict):
             continue
 
-        patch_type = patch.get("type", "experience")
+        patch_type = patch.get("type", "takeaway")
         value = patch.get("value", {})
         if isinstance(value, str):
             value = {"text": value}
@@ -330,8 +336,11 @@ async def store_connected_patches(
         value_json = json.dumps(value)
         persistence = DEFAULT_PERSISTENCE.get(patch_type, "decaying")
 
-        # Project-scoped types get the project tag
-        project_scoped_types = ("decision", "commitment", "blocker", "takeaway", "experience")
+        # Project-scoped types get the project tag (per the v1 SS schema)
+        project_scoped_types = (
+            "decision", "commitment", "blocker", "takeaway",
+            "goal", "constraint", "event",
+        )
         patch_project = project if patch_type in project_scoped_types else None
         # Role patches can also be project-scoped if they have a belongs_to connection
         if patch_type == "role" and project:
@@ -341,19 +350,21 @@ async def store_connected_patches(
 
         # Project-scoped patches get both the text project name and the stable project_id
         patch_project_id = project_id if patch_type in project_scoped_types or (patch_type == "role" and patch_project) else None
-        patch_meeting_id = meeting_id if patch_type in project_scoped_types else None
+        patch_origin_id = origin_id if patch_type in project_scoped_types else None
+        patch_origin_type = origin_type if patch_origin_id else None
 
         await db.execute(
             """
             INSERT INTO context_patches (
                 patch_id, patch_name, patch_type, value,
                 origin_mode, source_prompt, confidence, persistence,
-                project, project_id, meeting_id, status, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                project, project_id, origin_id, origin_type,
+                status, created_at, updated_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             """,
             patch_id, patch_name, patch_type, value_json,
             "inferred", source_prompt, 0.8, persistence,
-            patch_project, patch_project_id, patch_meeting_id,
+            patch_project, patch_project_id, patch_origin_id, patch_origin_type,
             "active", created_at, created_at
         )
 
@@ -395,7 +406,7 @@ async def store_connected_patches(
         if isinstance(value, str):
             value = {"text": value}
         from_text = value.get("text", "").lower().strip()
-        from_type = patch.get("type", "experience")
+        from_type = patch.get("type", "takeaway")
         from_id = patch_lookup.get((from_text, from_type))
         if not from_id:
             continue
@@ -435,19 +446,21 @@ async def store_connected_patches(
                 stub_persistence = DEFAULT_PERSISTENCE.get(target_type, "sticky")
                 stub_project = project if target_type in project_scoped_types else None
                 stub_project_id = project_id if target_type in project_scoped_types else None
-                stub_meeting_id = meeting_id if target_type in project_scoped_types else None
+                stub_origin_id = origin_id if target_type in project_scoped_types else None
+                stub_origin_type = origin_type if stub_origin_id else None
 
                 await db.execute(
                     """
                     INSERT INTO context_patches (
                         patch_id, patch_name, patch_type, value,
                         origin_mode, source_prompt, confidence, persistence,
-                        project, project_id, meeting_id, status, created_at, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                        project, project_id, origin_id, origin_type,
+                        status, created_at, updated_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                     """,
                     to_id, stub_name, target_type, stub_value,
                     "inferred", source_prompt, 0.6, stub_persistence,
-                    stub_project, stub_project_id, stub_meeting_id,
+                    stub_project, stub_project_id, stub_origin_id, stub_origin_type,
                     "active", created_at, created_at
                 )
                 await db.execute(
@@ -729,7 +742,7 @@ class ColdPathWorker:
             "takeaway": 14,
             "blocker": 30,
             "commitment": 30,
-            "experience": 30,
+            "event": 90,
         }
         # Run every 6 hours
         DECAY_INTERVAL_SECONDS = 6 * 60 * 60
@@ -786,7 +799,7 @@ class ColdPathWorker:
         # Scan for meeting queue keys
         cursor = b"0"
         while True:
-            cursor, keys = await self.redis.scan(cursor=cursor, match="meeting_queue:*", count=100)
+            cursor, keys = await self.redis.scan(cursor=cursor, match="origin_queue:*", count=100)
             for key in keys:
                 # Check last event timestamp
                 last_ts_str = await self.redis.get(f"{key}:last_event")
@@ -798,19 +811,18 @@ class ColdPathWorker:
 
                 if elapsed_minutes >= QUEUE_MAX_WAIT_MINUTES:
                     # Time trigger: queue is quiet for long enough
-                    meeting_key = key if isinstance(key, str) else key.decode()
-                    # Key format: meeting_queue:{user_id}:{meeting_id}
-                    # Extract the full suffix after "meeting_queue:"
-                    queue_suffix = meeting_key.replace("meeting_queue:", "")
+                    origin_key = key if isinstance(key, str) else key.decode()
+                    # Key format: origin_queue:{user_id}:{origin_type}:{origin_id}
+                    queue_suffix = origin_key.replace("origin_queue:", "")
                     logger.info("queue_time_trigger", queue=queue_suffix, elapsed_minutes=round(elapsed_minutes))
-                    await self._process_queue_by_key(meeting_key)
+                    await self._process_queue_by_key(origin_key)
 
             if cursor == b"0" or cursor == 0:
                 break
 
-    async def _buffer_event(self, payload: Dict[str, Any], meeting_id: str):
-        """Add an event to a meeting's queue. Check budget trigger."""
-        queue_key = f"meeting_queue:{payload.get('user_id', 'unknown')}:{meeting_id}"
+    async def _buffer_event(self, payload: Dict[str, Any], origin_id: str, origin_type: str):
+        """Add an event to an origin's queue. Check budget trigger."""
+        queue_key = f"origin_queue:{payload.get('user_id', 'unknown')}:{origin_type}:{origin_id}"
         event_json = json.dumps(payload)
 
         await self.redis.rpush(queue_key, event_json)
@@ -833,15 +845,15 @@ class ColdPathWorker:
         estimated_tokens = total_chars // 4
 
         if estimated_tokens >= self.context_budget:
-            logger.info("queue_budget_trigger", meeting_id=meeting_id,
+            logger.info("queue_budget_trigger", origin_id=origin_id, origin_type=origin_type,
                         estimated_tokens=estimated_tokens, budget=self.context_budget)
             await self._process_queue_by_key(queue_key)
         else:
-            logger.info("event_buffered", meeting_id=meeting_id,
+            logger.info("event_buffered", origin_id=origin_id, origin_type=origin_type,
                         queue_size=queue_size, estimated_tokens=estimated_tokens)
 
     async def _process_queue_by_key(self, queue_key: str):
-        """Consolidate all events in a meeting queue and run one extraction."""
+        """Consolidate all events in an origin queue and run one extraction."""
 
         # Pop all events from the queue
         events = await self.redis.lrange(queue_key, 0, -1)
@@ -873,12 +885,16 @@ class ColdPathWorker:
             if evt_type == "sentiment" and evt.get("content"):
                 sections.append(f"[SENTIMENT] {evt['content']}")
 
+        origin_id = metadata.get("origin_id")
+        origin_type = metadata.get("origin_type")
+
         if not user_id or not sections:
-            logger.warning("queue_empty_after_consolidation", meeting_id=meeting_id)
+            logger.warning("queue_empty_after_consolidation",
+                           origin_id=origin_id, origin_type=origin_type)
             return
 
         consolidated_text = "\n\n".join(sections)
-        logger.info("queue_processing", meeting_id=meeting_id,
+        logger.info("queue_processing", origin_id=origin_id, origin_type=origin_type,
                      events=len(events), consolidated_length=len(consolidated_text))
 
         # Run as a single meeting_summary extraction
@@ -892,13 +908,15 @@ class ColdPathWorker:
         await self.handle_meeting_summary(consolidated_payload)
 
     async def process_task(self, payload: Dict[str, Any]):
-        """Router for different task types. Buffers events with meeting_id."""
+        """Router for different task types. Buffers events with origin_id."""
         task_type = payload.get("interaction_type") or payload.get("type")
         user_id = payload.get("user_id")
         metadata = payload.get("metadata", {})
-        meeting_id = metadata.get("meeting_id") if metadata else None
+        origin_id = metadata.get("origin_id") if metadata else None
+        origin_type = metadata.get("origin_type") if metadata else None
 
-        logger.info("processing_task", type=task_type, user_id=user_id, meeting_id=meeting_id)
+        logger.info("processing_task", type=task_type, user_id=user_id,
+                    origin_id=origin_id, origin_type=origin_type)
 
         # Update profile identity fields if provided in metadata
         if user_id and metadata:
@@ -917,25 +935,27 @@ class ColdPathWorker:
 
         # End-of-meeting full transcript — process immediately, never buffer.
         # (this IS the complete meeting, sent by ShoulderSurf at session end)
-        # Flush any orphaned buffered events for this meeting — the transcript supersedes them.
+        # Flush any orphaned buffered events for this origin — the transcript supersedes them.
         if task_type == "meeting_transcript":
-            if meeting_id and user_id:
-                queue_key = f"meeting_queue:{user_id}:{meeting_id}"
+            if origin_id and origin_type and user_id:
+                queue_key = f"origin_queue:{user_id}:{origin_type}:{origin_id}"
                 flushed = await self.redis.llen(queue_key)
                 if flushed:
                     await self.redis.delete(queue_key)
                     await self.redis.delete(f"{queue_key}:last_event")
-                    logger.info("queue_flushed_by_transcript", meeting_id=meeting_id, flushed_events=flushed)
+                    logger.info("queue_flushed_by_transcript",
+                                origin_id=origin_id, origin_type=origin_type,
+                                flushed_events=flushed)
             payload["summary"] = payload.get("content", "")
             await self.handle_meeting_summary(payload)
             return
 
-        # If event has a meeting_id, buffer it for consolidated processing
-        if meeting_id and task_type in ("meeting_summary", "query", "summary", "sentiment"):
-            await self._buffer_event(payload, meeting_id)
+        # If event has an origin_id, buffer it for consolidated processing
+        if origin_id and origin_type and task_type in ("meeting_summary", "query", "summary", "sentiment"):
+            await self._buffer_event(payload, origin_id, origin_type)
             return
 
-        # No meeting_id — process immediately
+        # No origin_id — process immediately
         if task_type in ("meeting_summary", "summary"):
             await self.handle_meeting_summary(payload)
         elif task_type in ("query", "analysis"):
@@ -1283,7 +1303,8 @@ class ColdPathWorker:
             timestamp = payload.get("timestamp")
             project = metadata.get("project") if metadata else None
             project_id = metadata.get("project_id") if metadata else None
-            meeting_id = metadata.get("meeting_id") if metadata else None
+            origin_id = metadata.get("origin_id") if metadata else None
+            origin_type = metadata.get("origin_type") if metadata else None
 
             # Auto-register project if project_id provided
             if project_id and project:
@@ -1310,7 +1331,7 @@ class ColdPathWorker:
 
                 patches_stored = await store_connected_patches(
                     self.db, user_id, patches, "meeting_summary", app_id, timestamp,
-                    project, project_id, meeting_id
+                    project, project_id, origin_id, origin_type
                 )
                 facts_stored = patches_stored
                 actions_stored = 0
@@ -1370,17 +1391,17 @@ class ColdPathWorker:
                     INSERT INTO extraction_metrics (
                         user_id, model, input_tokens, output_tokens,
                         cost_usd, latency_ms, patches_extracted, entities_extracted,
-                        source_prompt, app_id, meeting_id, interaction_type,
+                        source_prompt, app_id, origin_id, origin_type, interaction_type,
                         owner_speaker_label, owner_marker_present,
                         owner_gate_filtered, connection_dropped,
                         patches_before_filters, patches_after_filters,
                         reasoning_chars, transcript_chars
                     )
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
                     """,
                     user_id, response.model, response.input_tokens, response.output_tokens,
                     response.cost_usd, response.latency_ms, facts_stored, entities_stored,
-                    "meeting_summary", app_id, meeting_id, "meeting_summary",
+                    "meeting_summary", app_id, origin_id, origin_type, "meeting_summary",
                     owner_speaker_label, has_you_marker,
                     owner_gate_filtered, connection_dropped,
                     patches_before_filters, patches_after_filters,
