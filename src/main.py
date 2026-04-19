@@ -23,6 +23,11 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.dashboard.router import router as dashboard_router
 from src.contextquilt.routers.app_schemas import router as app_schemas_router
+from src.contextquilt.services.recall_scorer import score_patches
+from src.contextquilt.services.recall_formatter import (
+    format_flat_ranked,
+    format_category_grouped,
+)
 
 import asyncpg
 import uuid
@@ -148,6 +153,14 @@ class RecallRequest(BaseModel):
     text: str = Field(..., description="Query or transcript text to match entities against")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional hints (e.g., project name)")
     max_hops: Optional[int] = Field(default=2, description="Graph traversal depth")
+    output_format: Optional[str] = Field(
+        default="flat",
+        description="'flat' (query-scoped ranked list, default) or 'grouped' (category-grouped block)",
+    )
+    max_patches: Optional[int] = Field(
+        default=15,
+        description="Upper bound on patches surfaced in the output (flat mode). Default 15.",
+    )
 
 class RecallResponse(BaseModel):
     """Context recalled from the graph"""
@@ -566,87 +579,36 @@ async def recall_context(
 
     timings["postgres_patches"] = round((time.monotonic() - t2) * 1000, 2)
 
-    # Step 5: Build context block — grouped by patch type
-    # Locale-aware section headers (default: English)
-    locale = request.metadata.get("locale", "en") if request.metadata else "en"
-    labels = _recall_labels(locale)
+    # Step 5: Score and format the context block.
+    #
+    # Output mode (PR 4):
+    #   - "flat" (default): relevance-ranked flat list, query-scoped,
+    #     compact enough to drop into an LLM prompt as-is.
+    #   - "grouped": category-grouped block with section headers, the
+    #     pre-PR-4 shape. Retained for apps that want it.
 
-    sections = []
+    # Rank all patches against the query first.
+    scored = score_patches(all_patches, request.text, matched_names)
 
-    # Entities summary
-    entity_map = {row["entity_id"]: row for row in entity_rows}
-    people = [r for r in entity_rows if r["entity_type"] == "person"]
-    projects = [r for r in entity_rows if r["entity_type"] == "project"]
+    # Cap for flat output — avoids runaway context blocks for users
+    # with large quilts.
+    flat_cap = request.max_patches or 15
+    scored_for_output = scored[:flat_cap] if request.output_format == "flat" else scored
 
-    if projects:
-        for p in projects:
-            sections.append(f"{labels['project']}: {p['name']} — {p['description'] or ''}")
-    if people:
-        sections.append(labels["people"] + ": " + ", ".join(
-            f"{p['name']} ({p['description']})" if p['description'] else p['name']
-            for p in people
-        ))
-
-    # Relationships
-    if rel_rows:
-        rel_lines = []
-        for r in rel_rows:
-            rel_lines.append(f"{r['from_name']} {r['relationship_type']} {r['to_name']}"
-                           + (f" ({r['context']})" if r['context'] else ""))
-        sections.append(f"{labels['connections']}:\n" + "\n".join(f"- {l}" for l in rel_lines))
-
-    # Parse all patches by type
-    def parse_value(row):
-        v = row["value"]
-        return json.loads(v) if isinstance(v, str) else v
-
-    # About you (traits, preferences)
-    universals = [parse_value(r) for r in all_patches if r["patch_type"] in ("trait", "preference")]
-    if universals:
-        sections.append(f"{labels['about_you']}:\n" + "\n".join(f"- {v.get('text', '')}" for v in universals))
-
-    # Decisions
-    decisions = [parse_value(r) for r in all_patches if r["patch_type"] == "decision"]
-    if decisions:
-        sections.append(f"{labels['decisions']}:\n" + "\n".join(f"- {v.get('text', '')}" for v in decisions))
-
-    # Open commitments
-    commitments = [parse_value(r) for r in all_patches if r["patch_type"] == "commitment"]
-    if commitments:
-        lines = []
-        for v in commitments:
-            owner = v.get("owner", "")
-            deadline = v.get("deadline", "")
-            dl = f" (by {deadline})" if deadline else ""
-            prefix = f"{owner}: " if owner else ""
-            lines.append(f"- {prefix}{v.get('text', '')}{dl}")
-        sections.append(f"{labels['commitments']}:\n" + "\n".join(lines))
-
-    # Blockers
-    blockers = [parse_value(r) for r in all_patches if r["patch_type"] == "blocker"]
-    if blockers:
-        sections.append(f"{labels['blockers']}:\n" + "\n".join(f"- {v.get('text', '')}" for v in blockers))
-
-    # Roles
-    roles = [parse_value(r) for r in all_patches if r["patch_type"] == "role"]
-    if roles:
-        sections.append(f"{labels['roles']}:\n" + "\n".join(f"- {v.get('text', '')}" for v in roles))
-
-    # Takeaways and remaining facts (experience, identity, person, etc.)
-    other_types = ("experience", "identity", "takeaway", "person")
-    others = [parse_value(r) for r in all_patches if r["patch_type"] in other_types]
-    # Also include V1 action_items
-    for r in all_patches:
-        v = parse_value(r)
-        if v.get("type") == "action_item":
-            owner = v.get("owner", "")
-            deadline = v.get("deadline", "")
-            dl = f" (by {deadline})" if deadline else ""
-            others.append({"text": f"{owner}: {v.get('text', '')}{dl}"})
-    if others:
-        sections.append(f"{labels['key_facts']}:\n" + "\n".join(f"- {v.get('text', '')}" for v in others[:10]))
-
-    context = "\n\n".join(sections)
+    if request.output_format == "grouped":
+        locale = request.metadata.get("locale", "en") if request.metadata else "en"
+        labels = _recall_labels(locale)
+        try:
+            context = format_category_grouped(scored_for_output, entity_rows, rel_rows, labels)
+        except Exception as fmt_exc:  # pragma: no cover — defensive; test coverage is flat-mode
+            context = ""
+    else:
+        try:
+            context = format_flat_ranked(scored_for_output, entity_rows, rel_rows)
+        except Exception:
+            # Emergency fallback: empty string, the endpoint still returns
+            # matched entities and patch ids so callers aren't blocked.
+            context = ""
 
     # Look up communication profile and format as a natural language hint.
     # The calling gateway decides whether to inject this (e.g., only for chat modes).
