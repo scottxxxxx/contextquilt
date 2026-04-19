@@ -736,13 +736,33 @@ class ColdPathWorker:
                 logger.error("queue_check_error", error=str(e))
 
     async def decay_loop(self):
-        """Periodically archive stale patches based on type-specific TTLs."""
-        # Default TTLs by patch type (days). NULL = never decays.
+        """Periodically archive stale patches based on effective TTL.
+
+        Effective TTL per patch:
+          COALESCE(
+              permanence_override → PERMANENCE_CLASS_DAYS[class],
+              patch_type_registry.default_ttl_days for the type
+          )
+
+        Access-based refresh (patch_usage_metrics.last_accessed_at recent)
+        exempts a patch regardless of override or type default.
+        """
+        # Fallback TTLs by patch_type when registry has no entry.
         DEFAULT_TTLS = {
             "takeaway": 14,
             "blocker": 30,
             "commitment": 30,
             "event": 90,
+        }
+        # Maps the 7 permanence classes → days. None = never expires.
+        PERMANENCE_CLASS_DAYS = {
+            "permanent": None,
+            "decade": None,
+            "year": 365,
+            "quarter": 90,
+            "month": 30,
+            "week": 14,
+            "day": 1,
         }
         # Run every 6 hours
         DECAY_INTERVAL_SECONDS = 6 * 60 * 60
@@ -752,6 +772,37 @@ class ColdPathWorker:
         while self.running:
             try:
                 total_archived = 0
+
+                # Step 1: Archive patches with explicit permanence_override.
+                # These run per-class and cross-cut patch_type.
+                for perm_class, ttl_days in PERMANENCE_CLASS_DAYS.items():
+                    if ttl_days is None:
+                        continue  # permanent/decade never expire
+                    result = await self.db.execute(
+                        """
+                        UPDATE context_patches SET status = 'archived', updated_at = NOW()
+                        WHERE permanence_override = $1
+                          AND COALESCE(status, 'active') = 'active'
+                          AND updated_at < NOW() - INTERVAL '1 day' * $2
+                          AND patch_id NOT IN (
+                              SELECT patch_id FROM patch_usage_metrics
+                              WHERE last_accessed_at > NOW() - INTERVAL '1 day' * $2
+                          )
+                        """,
+                        perm_class, ttl_days
+                    )
+                    count = int(result.split()[-1]) if result else 0
+                    if count > 0:
+                        total_archived += count
+                        logger.info(
+                            "decay_archived_override",
+                            permanence_override=perm_class,
+                            count=count,
+                            ttl_days=ttl_days,
+                        )
+
+                # Step 2: Archive patches using their type's default TTL.
+                # Exclude patches with an override (handled in Step 1).
                 for patch_type, ttl_days in DEFAULT_TTLS.items():
                     # Look up TTL from registry if available, fall back to default
                     try:
@@ -765,10 +816,12 @@ class ColdPathWorker:
                         pass  # Registry table may not exist yet
 
                     # Archive patches older than TTL that haven't been accessed recently
+                    # and have no explicit override.
                     result = await self.db.execute(
                         """
                         UPDATE context_patches SET status = 'archived', updated_at = NOW()
                         WHERE patch_type = $1
+                          AND permanence_override IS NULL
                           AND COALESCE(status, 'active') = 'active'
                           AND updated_at < NOW() - INTERVAL '1 day' * $2
                           AND patch_id NOT IN (
