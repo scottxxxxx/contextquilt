@@ -22,6 +22,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.dashboard.router import router as dashboard_router
+from src.contextquilt.routers.app_schemas import router as app_schemas_router
 
 import asyncpg
 import uuid
@@ -68,6 +69,9 @@ if os.path.exists(dashboard_path):
 
 # Include Dashboard Router
 app.include_router(dashboard_router)
+
+# Include App Schema Registration Router (admin-authenticated)
+app.include_router(app_schemas_router)
 
 @app.get("/", include_in_schema=False)
 async def root():
