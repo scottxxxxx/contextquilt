@@ -382,6 +382,57 @@ async def enrich_context(
         missing_variables=missing_vars
     )
 
+@app.get("/v1/schema", tags=["App Schemas"])
+async def get_own_schema(app_id: str = Depends(verify_application_access)):
+    """
+    Return the caller's own registered schema.
+
+    Uses app JWT auth (or X-App-ID legacy) to infer which app is asking
+    and returns that app's current manifest. Clients use this to:
+      - Build UI pickers data-driven (e.g., connection label matrix)
+      - Detect drift between the manifest bundled at build time and
+        what's registered server-side
+      - Discover the current CQ-assigned revision for diff tooling
+
+    404 if no schema has been registered for the calling app.
+    """
+    import uuid as _uuid
+    try:
+        app_uuid = _uuid.UUID(app_id)
+    except (ValueError, AttributeError, TypeError):
+        # Legacy non-UUID app IDs never have registered schemas
+        raise HTTPException(
+            status_code=404,
+            detail="No schema registered for this application.",
+        )
+
+    row = await db_pool.fetchrow(
+        """
+        SELECT version, manifest, registered_at, registered_by
+        FROM app_schemas
+        WHERE app_id = $1
+        ORDER BY version DESC
+        LIMIT 1
+        """,
+        app_uuid,
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No schema registered for this application.",
+        )
+    manifest = row["manifest"]
+    if isinstance(manifest, str):
+        manifest = json.loads(manifest)
+    return {
+        "app_id": app_id,
+        "version": row["version"],
+        "registered_at": row["registered_at"].isoformat(),
+        "registered_by": row["registered_by"],
+        "manifest": manifest,
+    }
+
+
 @app.post("/v1/recall", response_model=RecallResponse, tags=["Hot Path"])
 async def recall_context(
     request: RecallRequest,
