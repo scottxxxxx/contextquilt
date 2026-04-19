@@ -107,11 +107,29 @@ An app's full schema is a single JSON document. The manifest declares which vers
 | `to_types` | yes | string[] | Valid target domain_types |
 | `description` | yes | free string | What this connection means |
 
+**`entity_types[]`:** see the "entity_types" section above. Covers the graph-layer name index separately from patch types.
+
 **`extraction_prompt_guidance`:** app-specific prompt tuning. CQ core auto-generates the extraction prompt from `patch_types` + `connection_labels`, then injects this guidance as contextual instructions. Apps control voice and priority; they don't hand-write the whole prompt.
 
 **`extraction_prompt_override` (optional, advanced):** a full raw prompt string. If present, CQ uses it verbatim instead of generating one from structural rules + guidance. Apps opt into this when they have mature, tuned prompts they don't want CQ rewriting. Trade-off: CQ can't validate the override against the manifest, so the app takes full responsibility for keeping the prompt aligned with registered types. Not the default path.
 
 **`facet_enum_version`:** which version of CQ's facet enum this manifest is registered against. v1 = the 6-facet model (Attribute, Affinity, Intention, Constraint, Connection, Episode). Future facet additions bump the version; older manifests continue to work under their declared version.
+
+**`entity_types` (optional array of objects):** types of entities the app wants indexed for graph traversal during recall. Entities are NOT user-editable memory — they're an internal name-matching index that makes recall fast. An entity is something like a person name, a project name, a company, an artifact — any identifier that appears across multiple patches and needs fast lookup.
+
+Fields per entity type:
+- `entity_type` (required, string): the type key used in extraction (e.g., `"person"`, `"project"`, `"company"`, `"artifact"`)
+- `display_name` (required, string)
+- `description` (required, string)
+- `indexed` (optional, bool, default true): keep a Redis name index for fast recall
+- `extraction_rules` (optional, object): extraction guidance for when to emit entities of this type
+
+Apps that don't register `entity_types` fall back to CQ's default set (`person`, `project`, `company`, `feature`, `artifact`, `deadline`, `metric`).
+
+**Patch types vs. entity types — when to use which:**
+- User-editable memory shown in UI → patch type.
+- Internal name-matching index for fast recall → entity type.
+- Many concepts appear in both (a `person` is both a patch type AND an entity type). That duplication is intentional: the patch carries user-editable fields; the entity is just a fast-lookup index. The extraction pipeline emits both automatically when configured.
 
 ---
 

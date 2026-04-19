@@ -192,6 +192,8 @@ For the full architecture: **`docs/design/app-schema-registration.md`** — how 
 
 For the test evidence behind the design: **`tests/benchmark/taxonomy_validation/SUMMARY.md`**.
 
+For the post-launch three-tier memory UI sketch (answer to your Q9): **`docs/design/ss-memory-ui-grouping.md`** — not blocking TestFlight or App Store submission, but gives you a frame to design around once the immediate UX stabilizes.
+
 For SS's specific manifest: **`init-db/05_shouldersurf_schema.json`**.
 
 ---

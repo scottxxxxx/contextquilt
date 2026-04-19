@@ -12,9 +12,61 @@
   ],
 
   "origin_types": [
-    "meeting",
-    "imported_recording",
-    "typed_note"
+    "meeting"
+  ],
+
+  "entity_types": [
+    {
+      "entity_type": "person",
+      "display_name": "Person",
+      "description": "A named individual identified in a meeting transcript. Indexed for fast entity matching during recall.",
+      "indexed": true,
+      "extraction_rules": {
+        "guidance": "Only emit for specifically named individuals. Unnamed speakers (Speaker 4, Speaker 16) must NOT become entities. If a speaker is later renamed via rename-speaker API, the entity is created at rename time."
+      }
+    },
+    {
+      "entity_type": "project",
+      "display_name": "Project",
+      "description": "A named unit of ongoing work the user tracks across meetings.",
+      "indexed": true,
+      "extraction_rules": {
+        "guidance": "Emit for named initiatives, matters, campaigns, listings, weddings, grants — any topic the user treats as a recurring thread."
+      }
+    },
+    {
+      "entity_type": "company",
+      "display_name": "Company",
+      "description": "A named organizational entity — company, firm, charity, agency, venue.",
+      "indexed": true,
+      "extraction_rules": {
+        "guidance": "Emit for named organizations. Do NOT emit for generic role groups ('the backend team')."
+      }
+    },
+    {
+      "entity_type": "feature",
+      "display_name": "Feature",
+      "description": "A named product feature or capability discussed in a meeting.",
+      "indexed": true
+    },
+    {
+      "entity_type": "artifact",
+      "display_name": "Artifact",
+      "description": "A concrete deliverable or document (prototype, deck, model, report).",
+      "indexed": true
+    },
+    {
+      "entity_type": "deadline",
+      "display_name": "Deadline",
+      "description": "A specific date mentioned as a deadline for a commitment or deliverable.",
+      "indexed": true
+    },
+    {
+      "entity_type": "metric",
+      "display_name": "Metric",
+      "description": "A quantitative value or target mentioned in a meeting (budget, KPI, threshold).",
+      "indexed": true
+    }
   ],
 
   "patch_types": [
