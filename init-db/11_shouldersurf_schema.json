@@ -1,0 +1,378 @@
+{
+  "app_id": "shouldersurf",
+  "version": 1,
+  "facet_enum_version": 1,
+  "display_name": "ShoulderSurf",
+  "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
+
+  "design_principles": [
+    "Schema must work for any meeting type without vertical-specific branching — SS is consumer, not B2B per-vertical.",
+    "Every CQ facet is represented by at least one SS domain type, so recall has all six cognitive roles to draw from.",
+    "Extraction prompts stay domain-agnostic. Examples in guidance span multiple meeting contexts (legal, coaching, creative, corporate, personal) to prevent overfitting to any one vertical."
+  ],
+
+  "origin_types": [
+    "meeting"
+  ],
+
+  "entity_types": [
+    {
+      "entity_type": "person",
+      "display_name": "Person",
+      "description": "A named individual identified in a meeting transcript. Indexed for fast entity matching during recall.",
+      "indexed": true,
+      "extraction_rules": {
+        "guidance": "Only emit for specifically named individuals. Unnamed speakers (Speaker 4, Speaker 16) must NOT become entities. If a speaker is later renamed via rename-speaker API, the entity is created at rename time."
+      }
+    },
+    {
+      "entity_type": "project",
+      "display_name": "Project",
+      "description": "A named unit of ongoing work the user tracks across meetings.",
+      "indexed": true,
+      "extraction_rules": {
+        "guidance": "Emit for named initiatives, matters, campaigns, listings, weddings, grants — any topic the user treats as a recurring thread."
+      }
+    },
+    {
+      "entity_type": "company",
+      "display_name": "Company",
+      "description": "A named organizational entity — company, firm, charity, agency, venue.",
+      "indexed": true,
+      "extraction_rules": {
+        "guidance": "Emit for named organizations. Do NOT emit for generic role groups ('the backend team')."
+      }
+    },
+    {
+      "entity_type": "feature",
+      "display_name": "Feature",
+      "description": "A named product feature or capability discussed in a meeting.",
+      "indexed": true
+    },
+    {
+      "entity_type": "artifact",
+      "display_name": "Artifact",
+      "description": "A concrete deliverable or document (prototype, deck, model, report).",
+      "indexed": true
+    },
+    {
+      "entity_type": "deadline",
+      "display_name": "Deadline",
+      "description": "A specific date mentioned as a deadline for a commitment or deliverable.",
+      "indexed": true
+    },
+    {
+      "entity_type": "metric",
+      "display_name": "Metric",
+      "description": "A quantitative value or target mentioned in a meeting (budget, KPI, threshold).",
+      "indexed": true
+    }
+  ],
+
+  "patch_types": [
+    {
+      "domain_type": "trait",
+      "facet": "Attribute",
+      "permanence": "year",
+      "display_name": "Trait",
+      "description": "A self-disclosed behavioral or communication pattern of the submitting user.",
+      "value_shape": { "text": "string" },
+      "completable": false,
+      "project_scoped": false,
+      "self_only": true,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "Traits apply ONLY to the (you) speaker. 'Speaker 3 is meticulous' is NOT a trait. Aim for patterns the user explicitly self-discloses."
+      }
+    },
+    {
+      "domain_type": "preference",
+      "facet": "Affinity",
+      "permanence": "year",
+      "display_name": "Preference",
+      "description": "A lean, value, or stylistic preference — how the user (or another named participant) prefers to work, decide, or communicate.",
+      "value_shape": { "text": "string", "owner": "string?" },
+      "completable": false,
+      "project_scoped": false,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "Examples: 'prefers async standups', 'values thorough documentation', 'prefers candid over posed', 'prefers phased rollouts over big-bang'."
+      }
+    },
+    {
+      "domain_type": "goal",
+      "facet": "Intention",
+      "permanence": "year",
+      "display_name": "Goal",
+      "description": "A forward-looking target the subject (person, team, or project) is steering toward. May have a time horizon. Not a commitment (nobody is on the hook for execution yet) and not a decision (nothing has been decided).",
+      "value_shape": { "text": "string", "owner": "string?", "target_date": "string?" },
+      "completable": false,
+      "project_scoped": true,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "Examples: 'retire at 62', 'raise $500k by year-end', 'land a Martha Stewart Weddings feature this year', 'settle matter by Q3', '10% awareness lift', 'close by end of summer'. Distinguish from commitment (promise with owner) and decision (call already made). A goal is an aspirational target."
+      }
+    },
+    {
+      "domain_type": "constraint",
+      "facet": "Constraint",
+      "permanence": "year",
+      "display_name": "Constraint",
+      "description": "A hard rule, limit, or boundary applying to the user, a project, or a decision. Not a preference (a hard rule, not a lean) and not a blocker (an enduring boundary, not a current impediment).",
+      "value_shape": { "text": "string", "scope": "string?" },
+      "completable": false,
+      "project_scoped": true,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "Examples: 'no flash during ceremony', 'legal prohibits guaranteed in ad copy', 'ethics wall on Acme Holdings', 'max budget $650k', '30-min session cap', 'must comply with Regulation X', 'non-compete covers direct competitors for 6 months'. A constraint is non-negotiable within its scope."
+      }
+    },
+    {
+      "domain_type": "person",
+      "facet": "Connection",
+      "permanence": "decade",
+      "display_name": "Person",
+      "description": "A named individual in the user's world.",
+      "value_shape": { "text": "string" },
+      "completable": false,
+      "project_scoped": false,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "Only emit for specifically named individuals. Unnamed speakers (Speaker 4, Speaker 16) must NOT become person patches. The person patch text may include brief role-agnostic context like 'spouse', 'mentor', 'former colleague' when the relationship is personal rather than project-scoped."
+      }
+    },
+    {
+      "domain_type": "org",
+      "facet": "Connection",
+      "permanence": "decade",
+      "display_name": "Organization",
+      "description": "Any organizational entity in the user's world — company, team, committee, firm, practice group, school, charity, venue, brokerage, agency, foundation.",
+      "value_shape": { "text": "string", "kind": "string?" },
+      "completable": false,
+      "project_scoped": false,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "Emit for any named organizational entity. Optional 'kind' can specify 'firm', 'school', 'committee', 'charity', 'client', 'venue', 'regulator', etc. Do NOT emit for generic role groups ('the backend team') unless they have a proper name."
+      }
+    },
+    {
+      "domain_type": "project",
+      "facet": "Connection",
+      "permanence": "quarter",
+      "display_name": "Project",
+      "description": "Any unit of ongoing work the user tracks across meetings — project, matter, campaign, listing, engagement, grant, program, wedding, case, initiative.",
+      "value_shape": { "text": "string", "status": "string?" },
+      "completable": false,
+      "project_scoped": false,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "CQ doesn't editorialize — any topic the user records repeatedly is a valid project. Use the user's own framing: a wedding photographer's 'Smith Wedding' is a project; a lawyer's 'TechCorp v. DataSys' is a project; a realtor's 'Johnson home search' is a project."
+      }
+    },
+    {
+      "domain_type": "role",
+      "facet": "Connection",
+      "permanence": "year",
+      "display_name": "Role",
+      "description": "A person's specific function on a specific project. Scoped to the (person, project) pair via connections — role is immutable for the life of the project and cascades on project archival.",
+      "value_shape": { "text": "string" },
+      "completable": false,
+      "project_scoped": true,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "required_connections": ["belongs_to", "describes"],
+        "guidance": "Emit when someone is stated or clearly implied to have a specific function on a specific project: 'Ravikanth is backend lead on the Benefits App MVP', 'Sarah Liu is opposing counsel on TechCorp v. DataSys', 'CRO chairs the Risk Committee', 'I'm the buyer's agent on 123 Oak'. Must connect to both the project (belongs_to) and the person (describes). Skip unnamed speakers, generic participation, and project-agnostic identity claims (those are traits)."
+      }
+    },
+    {
+      "domain_type": "decision",
+      "facet": "Episode",
+      "permanence": "year",
+      "display_name": "Decision",
+      "description": "A call that was made during the meeting, with optional rationale.",
+      "value_shape": { "text": "string", "rationale": "string?" },
+      "completable": false,
+      "project_scoped": true,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "Decisions are durable statements that stay true until superseded. 'Will use Nova 3 for June release', 'approved $2M budget', 'going with direction B'. Exploratory discussion without a conclusion is NOT a decision."
+      }
+    },
+    {
+      "domain_type": "commitment",
+      "facet": "Episode",
+      "permanence": "month",
+      "display_name": "Commitment",
+      "description": "A promise with a named owner and optional deadline.",
+      "value_shape": { "text": "string", "owner": "string?", "deadline": "string?" },
+      "completable": true,
+      "project_scoped": true,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "Commitments require a SPECIFIC NAMED owner. 'Someone should finalize the deck' (no owner) is a takeaway. Extract the owner exactly as named."
+      }
+    },
+    {
+      "domain_type": "blocker",
+      "facet": "Episode",
+      "permanence": "week",
+      "display_name": "Blocker",
+      "description": "Something currently preventing progress on a project or commitment.",
+      "value_shape": { "text": "string", "owner": "string?" },
+      "completable": true,
+      "project_scoped": true,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "Blockers are current impediments — missing resources, unresolved dependencies, stalled approvals. Distinct from constraints: a constraint is an enduring rule ('cannot use flash'); a blocker is a specific current obstacle ('waiting on venue confirmation')."
+      }
+    },
+    {
+      "domain_type": "takeaway",
+      "facet": "Episode",
+      "permanence": "week",
+      "display_name": "Takeaway",
+      "description": "An evaluative lesson or insight worth remembering, with decision implications.",
+      "value_shape": { "text": "string" },
+      "completable": false,
+      "project_scoped": true,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "Takeaways are EVALUATIVE observations with decision implications — 'Flux introduces churn risk', 'board wants measurable outcomes in reports', 'buyers prioritize schools over commute', 'Liu's motion patterns suggest fishing'. Restated facts, procedural statements, and plot summaries are NOT takeaways. Hard cap: 3 per meeting."
+      }
+    },
+    {
+      "domain_type": "event",
+      "facet": "Episode",
+      "permanence": "quarter",
+      "display_name": "Event",
+      "description": "An external occurrence with context implications — something that happened which affects the subject's work but isn't itself a commitment, decision, blocker, or evaluative lesson.",
+      "value_shape": { "text": "string", "occurred_at": "string?" },
+      "completable": false,
+      "project_scoped": true,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "guidance": "Examples: 'court ruled in our favor on March 3', 'client team restructured last week', 'SEC released new guidance last month', 'engagement session held', 'market dropped 12% this week'. Events are historical/external; they explain why other patches exist but are not themselves choices or promises."
+      }
+    }
+  ],
+
+  "connection_labels": [
+    {
+      "label": "belongs_to",
+      "role": "parent",
+      "from_types": ["role", "decision", "commitment", "blocker", "takeaway", "goal", "constraint", "event"],
+      "to_types": ["project"],
+      "description": "Child patch belongs inside a parent project. Project archival cascades to children."
+    },
+    {
+      "label": "works_on",
+      "role": "informs",
+      "from_types": ["person"],
+      "to_types": ["project"],
+      "description": "Person is actively involved in a project."
+    },
+    {
+      "label": "owns",
+      "role": "informs",
+      "from_types": ["person"],
+      "to_types": ["commitment", "blocker", "decision", "goal"],
+      "description": "Person is responsible for or author of this item."
+    },
+    {
+      "label": "blocked_by",
+      "role": "depends_on",
+      "from_types": ["commitment"],
+      "to_types": ["blocker"],
+      "description": "Commitment cannot be completed until the blocker is resolved."
+    },
+    {
+      "label": "motivated_by",
+      "role": "informs",
+      "from_types": ["decision"],
+      "to_types": ["preference", "takeaway"],
+      "description": "Backward-looking: decision was driven by this preference or prior lesson."
+    },
+    {
+      "label": "aims_for",
+      "role": "informs",
+      "from_types": ["commitment", "decision", "project"],
+      "to_types": ["goal"],
+      "description": "Forward-looking: this commitment/decision/project advances toward a goal."
+    },
+    {
+      "label": "bound_by",
+      "role": "informs",
+      "from_types": ["commitment", "decision", "project"],
+      "to_types": ["constraint"],
+      "description": "This action or project is bound by a hard rule that must be respected."
+    },
+    {
+      "label": "describes",
+      "role": "informs",
+      "from_types": ["role"],
+      "to_types": ["person"],
+      "description": "Role patch describes a specific person's function on its parent project."
+    },
+    {
+      "label": "member_of",
+      "role": "informs",
+      "from_types": ["person"],
+      "to_types": ["org"],
+      "description": "Person is a member, employee, or affiliate of an organization."
+    },
+    {
+      "label": "reports_to",
+      "role": "informs",
+      "from_types": ["person"],
+      "to_types": ["person"],
+      "description": "Person A reports to Person B in an organizational hierarchy. Emit only when the transcript explicitly states the relationship."
+    }
+  ],
+
+  "extraction_prompt_guidance": {
+    "role_context": "You are extracting typed memory patches from a diarized meeting transcript for ShoulderSurf. SS is a consumer iOS app used for all kinds of meetings — work, coaching, legal, creative, personal. Your output grounds future LLM conversations with the user.",
+    "speaker_conventions": "Use the (you) marker convention to identify the submitting user. Traits apply ONLY to the (you) speaker. Ownership/authorship can be attributed to any named speaker. Unnamed speakers (Speaker 4, Speaker 16) must never become person patches or entities.",
+    "priority_order": [
+      "Self-disclosed traits and preferences of the (you) speaker",
+      "Goals expressed by any named subject (user, team, client, project)",
+      "Constraints stated or clearly implied (rules, limits, boundaries)",
+      "Project patches for named units of work (projects, matters, campaigns, listings, weddings, grants)",
+      "Person patches for named individuals",
+      "Org patches for named organizational entities",
+      "Role patches for clearly-stated (person, project, function) triples",
+      "Decisions that were reached",
+      "Commitments with named owners",
+      "Blockers preventing current progress",
+      "Events (external occurrences affecting the project)",
+      "Takeaways — evaluative lessons only (max 3 per meeting)"
+    ],
+    "hard_caps": {
+      "total_patches_per_meeting": 14,
+      "entities_per_meeting": 10,
+      "relationships_per_meeting": 10,
+      "per_type_caps": { "takeaway": 3 }
+    },
+    "exclusion_examples": [
+      "Scheduling logistics ('let's move this to Tuesday')",
+      "Meeting procedural chatter ('can you hear me?')",
+      "Technical identifiers and ticket numbers (extraction context only)",
+      "Exploratory what-ifs that never reach a conclusion",
+      "Restated facts or plot summaries presented as takeaways",
+      "Generic participation ('attended the meeting')"
+    ],
+    "reasoning_requirement": "Before emitting patches, include a short _reasoning scratchpad identifying: the (you) speaker, the active projects in scope, any explicit role attributions, and any goals/constraints mentioned. This reduces misattribution of ownership and traits.",
+    "domain_agnostic_examples": "When generating examples for the LLM, span multiple meeting contexts: legal ('file motion by June 18'), coaching ('client will write vision by next session'), creative ('deliver revised boards Thursday'), corporate ('CRO presents to board'), family/personal ('parents' travel unconfirmed'). Never privilege any one vertical."
+  }
+}
