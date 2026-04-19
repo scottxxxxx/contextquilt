@@ -1202,12 +1202,13 @@ async def get_user_quilt_graph(
                 user_person_pid = str(row["patch_id"])
                 break
 
+    generated_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     dot.attr(
         bgcolor="#0F172A",
         fontcolor="#F1F5F9",
         fontname="Helvetica Neue",
         fontsize="20",
-        label=f"{display_name}'s Quilt\n ",
+        label=f'<<FONT POINT-SIZE="22"><B>{display_name}\'s Quilt</B></FONT><BR/><FONT POINT-SIZE="11" COLOR="#94A3B8">Generated {generated_at}</FONT>>',
         labelloc="t",
         labeljust="c",
         pad="2.0",
