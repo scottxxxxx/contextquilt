@@ -199,14 +199,14 @@ def test_shouldersurf_manifest_generates_coherent_prompt():
     prompt = build_prompt(manifest)
     schema = build_output_schema(manifest)
 
-    # Sanity check: prompt mentions each of SS's 13 types
+    # Sanity check: prompt mentions every type declared in the manifest
     for patch_type in manifest["patch_types"]:
         assert patch_type["domain_type"] in prompt, (
             f"SS manifest type {patch_type['domain_type']!r} missing from generated prompt"
         )
 
-    # Sanity check: schema enum includes all 13 types
+    # Sanity check: schema enum matches the manifest's declared types
     patch_type_enum = (
         schema["properties"]["patches"]["items"]["properties"]["type"]["enum"]
     )
-    assert len(patch_type_enum) == 13
+    assert len(patch_type_enum) == len(manifest["patch_types"])

@@ -340,10 +340,13 @@ async def store_connected_patches(
         value_json = json.dumps(value)
         persistence = DEFAULT_PERSISTENCE.get(patch_type, "decaying")
 
-        # Project-scoped types get the project tag (per the v1 SS schema)
+        # Project-scoped types get the project tag (per the v1.1 SS schema).
+        # `deliverable` is a Connection-facet type but project-scoped: every
+        # deliverable lives inside a project and should carry the parent's
+        # project/origin metadata alongside the episode types.
         project_scoped_types = (
             "decision", "commitment", "blocker", "takeaway",
-            "goal", "constraint", "event",
+            "goal", "constraint", "event", "deliverable",
         )
         patch_project = project if patch_type in project_scoped_types else None
         # Role patches can also be project-scoped if they have a belongs_to connection
