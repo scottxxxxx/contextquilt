@@ -1,6 +1,6 @@
 {
   "app_id": "shouldersurf",
-  "version": 1,
+  "version": 2,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
@@ -165,14 +165,30 @@
       "facet": "Connection",
       "permanence": "quarter",
       "display_name": "Project",
-      "description": "Any unit of ongoing work the user tracks across meetings — project, matter, campaign, listing, engagement, grant, program, wedding, case, initiative.",
+      "description": "The top-level container of ongoing work the user tracks across meetings — the client, matter, campaign, account, engagement, case, listing, or initiative the user has named. Projects hold deliverables, episodes, and roles.",
       "value_shape": { "text": "string", "status": "string?" },
       "completable": false,
       "project_scoped": false,
       "self_only": false,
       "extraction_rules": {
         "required_fields": ["text"],
-        "guidance": "CQ doesn't editorialize — any topic the user records repeatedly is a valid project. Use the user's own framing: a wedding photographer's 'Smith Wedding' is a project; a lawyer's 'TechCorp v. DataSys' is a project; a realtor's 'Johnson home search' is a project."
+        "guidance": "Reserved for the TOP-LEVEL container the (you) speaker is working under — the client, matter, case, campaign, or account. Examples: 'ABM' (client), 'TechCorp v. DataSys' (case), 'Smith Wedding' (engagement), 'Johnson home search' (listing). If the transcript is tagged with a project name (metadata.project), trust that tag — do not emit a new project patch for a sub-scope under it. For named products/features/systems being BUILT inside the project (e.g., 'IT helpdesk chatbot' within 'ABM'), use `deliverable` instead. Rule of thumb: one `project` patch per named client/case/engagement, not per named deliverable."
+      }
+    },
+    {
+      "domain_type": "deliverable",
+      "facet": "Connection",
+      "permanence": "quarter",
+      "display_name": "Deliverable",
+      "description": "A concrete product, feature, system, artifact, or workstream being built as part of a project. Sits between the top-level `project` container and the specific episodes (commitments, blockers, decisions) that drive its delivery. A single project often contains multiple deliverables.",
+      "value_shape": { "text": "string", "status": "string?" },
+      "completable": false,
+      "project_scoped": true,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": ["text"],
+        "required_connections": ["belongs_to"],
+        "guidance": "Emit when the transcript describes a named product, feature, system, or workstream that the (you) speaker is helping build INSIDE a broader project. Must connect via `belongs_to` to its parent project. Examples: 'IT helpdesk chatbot' (within 'ABM'), 'Customer onboarding flow' (within 'Kaiser rollout'), 'Pre-trial motion bundle' (within 'TechCorp v. DataSys'), 'Reception photo sequence' (within 'Smith Wedding'). If the concept IS the whole project (the user's top-level named thing), use `project` instead. Deliverables can themselves be the parent of commitments, blockers, decisions, and events via `belongs_to`."
       }
     },
     {
@@ -272,9 +288,9 @@
     {
       "label": "belongs_to",
       "role": "parent",
-      "from_types": ["role", "decision", "commitment", "blocker", "takeaway", "goal", "constraint", "event"],
-      "to_types": ["project"],
-      "description": "Child patch belongs inside a parent project. Project archival cascades to children."
+      "from_types": ["role", "decision", "commitment", "blocker", "takeaway", "goal", "constraint", "event", "deliverable", "project"],
+      "to_types": ["project", "deliverable"],
+      "description": "Child patch belongs inside a parent container. Valid parents are `project` (top-level) and `deliverable` (sub-scope inside a project). Archival cascades to children. Hierarchy: project ← deliverable ← episode/role. A `project` may belong_to another `project` only when the user explicitly models nested engagements (e.g., 'ABM Q2 rollout' within 'ABM')."
     },
     {
       "label": "works_on",
