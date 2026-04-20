@@ -1377,17 +1377,39 @@ class ColdPathWorker:
                         filtered=owner_gate_filtered,
                         model=response.model,
                     )
-            enforce_connection_requirements(response.content)
+            # Meeting-level project context (from payload metadata) — when
+            # present, the enforcer injects synthetic parent connections for
+            # patches missing them instead of dropping them. The Pass-2
+            # resolver later matches the injected target against existing
+            # DB rows, so child patches survive when the LLM correctly omits
+            # a project that already exists.
+            meeting_project_for_enforcement = (
+                metadata.get("project") if metadata else None
+            )
+            enforce_connection_requirements(
+                response.content, meeting_project=meeting_project_for_enforcement
+            )
             connection_dropped = 0
             if (c := response.content.get("_connection_enforced")):
                 connection_dropped = c.get("count", 0)
-                logger.warning(
-                    "connection_enforced_dropped_patches",
-                    user_id=user_id,
-                    count=connection_dropped,
-                    dropped=c["dropped"],
-                    model=response.model,
-                )
+                auto_parented = c.get("auto_parented", [])
+                if connection_dropped:
+                    logger.warning(
+                        "connection_enforced_dropped_patches",
+                        user_id=user_id,
+                        count=connection_dropped,
+                        dropped=c["dropped"],
+                        model=response.model,
+                    )
+                if auto_parented:
+                    logger.info(
+                        "connection_enforced_auto_parented",
+                        user_id=user_id,
+                        count=len(auto_parented),
+                        project=meeting_project_for_enforcement,
+                        patches=auto_parented,
+                        model=response.model,
+                    )
 
             patches_after_filters = len(response.content.get("patches") or [])
 
