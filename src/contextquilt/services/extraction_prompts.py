@@ -52,29 +52,29 @@ Scan the transcript for the literal string "(you)" inside any speaker label:
 
 - If at least one speaker label contains "(you)":
     Set "you_speaker_present": true
-    You MAY emit trait, preference, and identity patches for the (you) speaker only.
+    You MAY emit trait, preference, goal, and constraint patches for the (you) speaker only.
 
 - If no speaker label contains "(you)":
     Set "you_speaker_present": false
-    The patches array MUST NOT contain ANY patch of type trait, preference, or identity.
+    The patches array MUST NOT contain ANY patch of type trait, preference, goal, or constraint.
     This holds even if:
       * A speaker's name appears familiar
       * A speaker speaks most of the time
       * A speaker clearly makes self-disclosures ("I prefer X", "I'm based in Y")
       * External context hints at who the user is
     Without (you), you cannot know who the app user is. Emit zero self-typed patches.
-    Project, decision, commitment, blocker, takeaway, person, and role patches are still allowed.
+    Project, decision, commitment, blocker, takeaway, event, person, org, and role patches are still allowed.
 
 NEGATIVE EXAMPLE (you_speaker_present = false):
-Input: "[Scott] I prefer async communication. [Alan] I'm based in Dallas."
+Input: "[Scott] I prefer async communication. [Alan] We can't deploy on Fridays."
 WRONG output: preference patch "Scott prefers async" — there is no (you) marker
-WRONG output: identity patch "Scott based in Boston" — there is no (you) marker
-CORRECT output: zero trait/preference/identity patches. Extract only decisions, commitments, etc.
+WRONG output: constraint patch "No Friday deploys" attributed to the app user — no (you) marker means we don't know whose constraint this is
+CORRECT output: zero trait/preference/goal/constraint patches. Extract only decisions, commitments, etc.
 
 POSITIVE EXAMPLE (you_speaker_present = true):
 Input: "[Scott (you)] I prefer async communication. [Alan] I'm based in Dallas."
 CORRECT output: preference patch "Prefers async communication" (owner: Scott)
-WRONG output: identity patch "Alan based in Dallas" — Alan is not the (you) speaker
+WRONG output: trait patch about Alan — Alan is not the (you) speaker
 
 === END STEP 0 ===
 
@@ -97,9 +97,11 @@ In "_reasoning", list the 3-8 most load-bearing quotes from the transcript
 type it supports and why.
 
 This is NOT exhaustive — pick the quotes that will anchor the most patches.
-Pay particular attention to distinguishing "prefers X over Y" statements
-(preference) from behavioral patterns (trait) and factual attributes
-(identity).
+Pay particular attention to distinguishing:
+  - "prefers X over Y" statements (preference)
+  - stable behavioral patterns the user self-discloses (trait)
+  - explicit future aims the user wants to achieve (goal)
+  - hard rules or limits the user must respect (constraint)
 
 Keep "_reasoning" under 400 words.
 
@@ -107,7 +109,7 @@ Keep "_reasoning" under 400 words.
 
 APP USER IDENTIFICATION:
 The transcript uses speaker labels in brackets. The speaker whose label contains "(you)" is the app user — the person this memory is being built for. Example: "[Scott (you)]" means Scott is the app user.
-- Traits, preferences, and identity apply ONLY to the (you) speaker, and ONLY when a (you) marker is present in the transcript
+- Traits, preferences, goals, and constraints apply ONLY to the (you) speaker, and ONLY when a (you) marker is present in the transcript
 - Project patches require ownership signals from the (you) speaker
 - All speakers can own commitments, blockers, and decisions
 
@@ -137,20 +139,23 @@ The angle-bracket placeholders above describe the SHAPE of each field. Do
 NOT copy the placeholder text into your output — every value must be
 grounded in THIS transcript, not in any example.
 
-PATCH TYPES — use the most specific type that fits:
+PATCH TYPES — use the most specific type that fits. The 13 types cluster into 6 cognitive facets:
 
-| Type       | When to use                                                    | Connects to project? |
-|------------|----------------------------------------------------------------|----------------------|
-| trait      | Self-disclosed behavioral pattern or tendency the (you) speaker exhibits. Describes how they operate, not a one-off action. | NEVER     |
-| preference | What the (you) speaker prefers — a tool, approach, working style, or choice between options. | NEVER                |
-| identity   | Factual biographical attribute of the (you) speaker — location, email, employer, tenure, timezone. Durable, slow-changing. Never applies to other speakers. | NEVER |
-| role       | Someone's durable function or responsibility on a project (who handles what). | YES via belongs_to   |
-| person     | A named participant and their relevant context                 | via works_on         |
-| project    | A work initiative the (you) speaker personally owns or is a core contributor on. Requires the (you) speaker to have commitments, decisions, or blockers within it. Topics discussed, referenced, or owned by OTHER speakers are NEVER projects. | IS the container     |
-| decision   | Something that was agreed upon in the meeting                  | YES via belongs_to   |
-| commitment | A promise with an owner and a deliverable                      | YES via belongs_to   |
-| blocker    | Something preventing progress                                 | YES via belongs_to   |
-| takeaway   | A notable observation worth remembering short-term             | YES via belongs_to   |
+| Type       | Facet      | When to use                                                    | Connects to project? |
+|------------|------------|----------------------------------------------------------------|----------------------|
+| trait      | Attribute  | Self-disclosed behavioral pattern or tendency the (you) speaker exhibits. Describes how they operate, not a one-off action. | NEVER |
+| preference | Affinity   | What the (you) speaker prefers — a tool, approach, working style, or choice between options. | NEVER |
+| goal       | Intention  | A future aim the (you) speaker wants to achieve. Stable, forward-looking ("I want to ship X by Q2", "I'm trying to get into management"). Not a commitment made to someone else. | NEVER |
+| constraint | Constraint | A hard rule or limit the (you) speaker must respect. Binds their actions ("I can't travel", "No deploys on Fridays", "Everything must be HIPAA compliant"). Distinct from preference — constraints are non-negotiable. | NEVER |
+| person     | Connection | A named participant and their relevant context                 | via works_on         |
+| org        | Connection | A named company, team, or organization referenced in the meeting that matters as an external entity (clients, vendors, partners, rival products). Do NOT create an org patch for the (you) speaker's own employer unless it's relevant to a specific project. | via works_on |
+| project    | Connection | A work initiative the (you) speaker personally owns or is a core contributor on. Requires the (you) speaker to have commitments, decisions, or blockers within it. Topics discussed, referenced, or owned by OTHER speakers are NEVER projects. | IS the container |
+| role       | Connection | Someone's durable function or responsibility on a project (who handles what). | YES via belongs_to   |
+| decision   | Episode    | Something that was agreed upon in the meeting                  | YES via belongs_to   |
+| commitment | Episode    | A promise with an owner and a deliverable                      | YES via belongs_to   |
+| blocker    | Episode    | Something preventing progress                                  | YES via belongs_to   |
+| takeaway   | Episode    | A notable observation worth remembering short-term             | YES via belongs_to   |
+| event      | Episode    | A scheduled or notable happening distinct from an agreement (launch date, demo, conference, deadline moment). Not a commitment — an event is something that occurs, not something someone promised. | YES via belongs_to |
 
 CONNECTIONS — the "connects_to" array stitches patches together:
 
@@ -178,12 +183,14 @@ RIGHT: person → decision with label "owns" (reads as "person owns decision")
 CONNECTION RULES:
 - connects_to is OPTIONAL — not every patch connects to another. Traits often stand alone.
 - ONLY create connections that genuinely exist. Do not force connections.
-- Project-scoped patches (decision, commitment, blocker, takeaway, role) should have a "parent"/"belongs_to" connection to their project patch.
+- Project-scoped patches (decision, commitment, blocker, takeaway, event, role) should have a "parent"/"belongs_to" connection to their project patch.
 - Person patches connect via "informs"/"works_on" to a project (not "parent" — people survive project archival).
+- Org patches connect via "informs"/"works_on" to a project the org is involved with.
 - Person patches connect via "informs"/"owns" to commitments/blockers/decisions they are responsible for. Direction: FROM person TO the item they own.
-- Preferences and traits NEVER connect to a project — they are universal to the person.
+- Traits, preferences, goals, and constraints NEVER connect to a project — they are universal to the person.
 - A commitment that depends on a blocker should have a "depends_on"/"blocked_by" connection.
-- A decision motivated by a preference should have an "informs"/"motivated_by" connection.
+- A commitment bound by a constraint should have a "depends_on"/"blocked_by" connection from commitment to constraint (the commitment is constrained by the rule).
+- A decision motivated by a preference or goal should have an "informs"/"motivated_by" connection.
 
 PEOPLE ARE PATCHES:
 - Every person who owns a commitment, blocker, or decision MUST be a person patch — not just an entity.
@@ -216,16 +223,13 @@ TYPE ACCURACY:
 - A blocker is something specifically preventing progress. General challenges or observations are takeaways.
 
 PATCH TEXT RULES:
-- For trait, preference, and identity patches: write in SECOND PERSON. Say "You prefer async" not "Scott prefers async."
+- For trait, preference, goal, and constraint patches: write in SECOND PERSON. Say "You prefer async" / "You want to ship by Q2" / "You can't deploy on Fridays" — not "Scott prefers async."
 - NEVER include the "(you)" suffix in any patch text. The speaker label "[Scott (you)]" is an identification marker in the transcript, not part of anyone's name. Write "Scott" not "Scott (you)."
-- For all other patch types (commitment, decision, blocker, etc.): use the speaker's name normally. "Vijay will import the agents" — not second person.
+- For all other patch types (commitment, decision, blocker, event, person, org, role, project, takeaway): use the speaker's name normally. "Vijay will import the agents" — not second person.
 
-VOICE EXAMPLES (trait / preference / identity — conjugate verbs and pronouns to match second-person):
+VOICE EXAMPLES (trait / preference / goal / constraint — conjugate verbs and pronouns to match second-person):
 WRONG: "Scott (you) wants his voice to be recognized"
 CORRECT: "You want your voice to be recognized"
-
-WRONG: "Scott (you) is concerned about voice recognition problems"
-CORRECT: "You are concerned about voice recognition problems"
 
 WRONG: "Scott (you) tends to elevate his game and push others"
 CORRECT: "You tend to elevate your game and push others"
@@ -233,22 +237,29 @@ CORRECT: "You tend to elevate your game and push others"
 WRONG: "Scott prefers async communication over meetings"
 CORRECT: "You prefer async communication over meetings"
 
-The "(you)" marker tells you WHO the patch is about. Once attribution is resolved, it must not appear in the output — and verb/pronoun agreement must flip to second person (is→are, tends→tend, wants→want, prefers→prefer, his→your, him→you).
+WRONG (goal): "Scott aims to ship the new API by Q2"
+CORRECT (goal): "You aim to ship the new API by Q2"
+
+WRONG (constraint): "Scott cannot deploy on Fridays"
+CORRECT (constraint): "You cannot deploy on Fridays"
+
+The "(you)" marker tells you WHO the patch is about. Once attribution is resolved, it must not appear in the output — and verb/pronoun agreement must flip to second person (is→are, tends→tend, wants→want, prefers→prefer, aims→aim, his→your, him→you).
 
 (YOU)-MARKER GATING — HARD RULE:
-- If no speaker label contains "(you)", emit ZERO patches of type trait, preference, or identity.
+- If no speaker label contains "(you)", emit ZERO patches of type trait, preference, goal, or constraint.
 - This applies even if a speaker's name appears to match a known user, speaks most, or is clearly the subject of the meeting.
 - Do not infer app-user identity from name matching, context, dominance of speaking time, or external hints like "the submitting user is X".
 - The "(you)" marker is the ONLY signal that grants self-typed patch emission.
-- Without a (you) marker, trait / preference / identity are off the table. Project, decision, commitment, blocker, takeaway, person, and role patches are still allowed.
+- Without a (you) marker, trait / preference / goal / constraint are off the table. Project, decision, commitment, blocker, takeaway, event, person, org, and role patches are still allowed.
 
-TRAIT / PREFERENCE / IDENTITY RULES (when a (you) marker IS present):
-- These three self-typed patches apply ONLY to the (you) speaker, never to other participants.
+SELF-TYPED PATCH RULES (when a (you) marker IS present):
+- trait / preference / goal / constraint apply ONLY to the (you) speaker, never to other participants.
 - "[Speaker 3] I prioritize fairness" is NOT a trait — Speaker 3 is not the (you) speaker.
 - "[Sarah] I tend to ramble" is NOT a trait unless Sarah is the (you) speaker.
-- "[Alan] I'm based in Dallas" is NOT an identity patch — Alan is not the (you) speaker.
 - "[Priya] I prefer async" is NOT a preference — Priya is not the (you) speaker.
-- Only self-disclosures by the (you) speaker become trait, preference, or identity patches.
+- "[Alan] I want to move into management" is NOT a goal — Alan is not the (you) speaker.
+- "[Dana] I can't work weekends" is NOT a constraint — Dana is not the (you) speaker.
+- Only self-disclosures by the (you) speaker become trait, preference, goal, or constraint patches.
 
 HARD LIMITS:
 - Maximum 12 patches total. Zero is acceptable if nothing durable emerges.
@@ -264,14 +275,16 @@ DO NOT EXTRACT:
 - Generic statements about how support/escalation processes work
 
 PRIORITY ORDER (when you must choose what to keep within the limit):
-1. Self-disclosed traits, preferences, and identity attributes — rare and extremely valuable. Extract these ONLY when the (you) marker is present.
+1. Self-disclosed traits, preferences, goals, and constraints — rare and extremely valuable. Extract these ONLY when the (you) marker is present.
 2. Project patches — the container everything else connects to
 3. Person patches for anyone who owns a commitment or blocker — the quilt needs to know WHO is responsible
 4. Commitments with their owners — what was promised, by whom
 5. Blockers — what's preventing progress
 6. Decisions — what was agreed
-7. Roles — someone's function on the project (if not already captured as a person patch)
-8. Takeaways — notable observations, only if truly insightful
+7. Events — scheduled/notable happenings (launches, demos, deadlines as dated moments)
+8. Org patches — external companies/teams that matter for context
+9. Roles — someone's function on the project (if not already captured as a person patch)
+10. Takeaways — notable observations, only if truly insightful
 
 UNNAMED SPEAKERS:
 - Do NOT create entity or person patches for unnamed speakers (e.g., "Speaker 1", "Speaker 4").
