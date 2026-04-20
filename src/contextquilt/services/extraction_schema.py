@@ -230,28 +230,53 @@ PROJECT_SCOPED_TYPES = frozenset(
     }
 )
 
+# Subset of project-scoped types that should prefer a `deliverable` as
+# their auto-parent target when one is unambiguously present in the
+# same extraction output. These are the "what happened / what needs to
+# happen" episodes that naturally hang off a specific deliverable. The
+# remaining project-scoped types (goal, constraint, role, deliverable
+# itself) stay parented to the top-level project — goals and constraints
+# are usually engagement-wide, and deliverable/role parent to project by
+# definition.
+DELIVERABLE_CHILD_TYPES = frozenset(
+    {"decision", "commitment", "blocker", "takeaway", "event"}
+)
+
+# Valid parent target types (mirrors manifest belongs_to.to_types).
+# `deliverable` joined `project` as a valid parent target in v1.1 so
+# children of a deliverable get grouped under it rather than flattened
+# under the top-level project.
+VALID_PARENT_TARGET_TYPES = frozenset({"project", "deliverable"})
+
 
 def enforce_connection_requirements(
     content: dict, meeting_project: str | None = None
 ) -> dict:
     """
-    Ensure project-scoped patches have a valid parent connection to a project.
+    Ensure project-scoped patches have a valid parent connection.
 
     When `meeting_project` is supplied (the project context the extraction
     is running under), patches missing a parent connection — or pointing at
-    a project name absent from the current output — get a synthetic parent
-    connection to `meeting_project` injected instead of being dropped. The
-    Pass-2 connection resolver in `store_connected_patches` already matches
-    targets against existing DB patches, so the injected edge resolves to
-    the pre-existing project patch.
+    a target name absent from the current output — get a synthetic parent
+    connection injected instead of being dropped. The Pass-2 connection
+    resolver in `store_connected_patches` already matches targets against
+    existing DB patches, so the injected edge resolves to the pre-existing
+    project or deliverable row.
+
+    Auto-parent target selection (v1.1):
+      - If exactly ONE `deliverable` patch is present in the same output
+        AND the orphan patch type is in DELIVERABLE_CHILD_TYPES, parent
+        to the deliverable (narrowest valid parent).
+      - Otherwise parent to `meeting_project`.
 
     Dropped only when the source is genuinely malformed:
-      - parent_target_not_project: parent points at a non-project target
+      - parent_target_invalid: parent points at a target type that isn't
+        `project` or `deliverable`.
 
     When no `meeting_project` is supplied (e.g. trace/conversation paths),
     behavior falls back to the strict pre-injection rule set:
       - no_parent_connection
-      - parent_target_not_project
+      - parent_target_invalid
       - parent_target_not_in_output
 
     Audit detail is recorded in content["_connection_enforced"]:
@@ -272,24 +297,49 @@ def enforce_connection_requirements(
     }
     project_texts.discard("")
 
+    deliverable_texts = [
+        (p.get("value") or {}).get("text", "")
+        for p in patches
+        if p.get("type") == "deliverable"
+    ]
+    deliverable_texts = [t for t in deliverable_texts if t]
+    # Prefer deliverable as parent only when exactly one is in scope —
+    # ambiguity with multiple deliverables defeats the safety net.
+    preferred_deliverable = (
+        deliverable_texts[0] if len(deliverable_texts) == 1 else None
+    )
+
+    valid_parent_texts = project_texts | set(deliverable_texts)
+
     kept: list = []
     dropped: list = []
     auto_parented: list = []
 
     def _inject_parent(patch: dict) -> None:
+        ptype = patch.get("type")
+        if (
+            preferred_deliverable is not None
+            and ptype in DELIVERABLE_CHILD_TYPES
+        ):
+            target_text = preferred_deliverable
+            target_type = "deliverable"
+        else:
+            target_text = meeting_project
+            target_type = "project"
         patch.setdefault("connects_to", []).append(
             {
                 "role": "parent",
                 "label": "belongs_to",
-                "target_type": "project",
-                "target_text": meeting_project,
+                "target_type": target_type,
+                "target_text": target_text,
             }
         )
         auto_parented.append(
             {
-                "type": patch.get("type"),
+                "type": ptype,
                 "text": (patch.get("value") or {}).get("text", ""),
-                "project": meeting_project,
+                "parent_type": target_type,
+                "parent_text": target_text,
             }
         )
 
@@ -309,19 +359,21 @@ def enforce_connection_requirements(
                 kept.append(p)
                 continue
             reason = "no_parent_connection"
-        elif all(c.get("target_type") != "project" for c in parent_conns):
-            reason = "parent_target_not_project"
-        elif not any(
-            c.get("target_text") in project_texts
+        elif all(
+            c.get("target_type") not in VALID_PARENT_TARGET_TYPES
             for c in parent_conns
-            if c.get("target_type") == "project"
+        ):
+            reason = "parent_target_invalid"
+        elif not any(
+            c.get("target_text") in valid_parent_texts
+            for c in parent_conns
+            if c.get("target_type") in VALID_PARENT_TARGET_TYPES
         ):
             if meeting_project:
-                # The LLM wired a parent but pointed at a project name not
-                # emitted in this output. If `meeting_project` is in scope,
-                # trust the Pass-2 resolver to match it against the existing
-                # DB row — no synthetic injection needed beyond the one the
-                # LLM already supplied.
+                # LLM wired a parent but pointed at a project/deliverable
+                # name not emitted in this output. If `meeting_project` is
+                # in scope, trust the Pass-2 resolver to match against
+                # existing DB rows — no synthetic injection needed.
                 kept.append(p)
                 continue
             reason = "parent_target_not_in_output"
