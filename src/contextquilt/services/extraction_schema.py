@@ -226,7 +226,7 @@ def sanitize_you_marker_from_patches(content: dict) -> dict:
 PROJECT_SCOPED_TYPES = frozenset(
     {
         "decision", "commitment", "blocker", "takeaway", "role",
-        "goal", "constraint", "event",
+        "goal", "constraint", "event", "deliverable",
     }
 )
 
