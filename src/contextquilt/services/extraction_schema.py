@@ -224,23 +224,45 @@ def sanitize_you_marker_from_patches(content: dict) -> dict:
 # Person patches are intentionally excluded: context about humans the user
 # knows has standalone value even without project linkage.
 PROJECT_SCOPED_TYPES = frozenset(
-    {"decision", "commitment", "blocker", "takeaway", "role"}
+    {
+        "decision", "commitment", "blocker", "takeaway", "role",
+        "goal", "constraint", "event",
+    }
 )
 
 
-def enforce_connection_requirements(content: dict) -> dict:
+def enforce_connection_requirements(
+    content: dict, meeting_project: str | None = None
+) -> dict:
     """
-    Drop project-scoped patches (decision/commitment/blocker/takeaway/role)
-    that lack a valid parent connection to a project in the same extraction.
+    Ensure project-scoped patches have a valid parent connection to a project.
 
-    Three drop reasons, logged in content["_connection_enforced"]:
-      - no_parent_connection:      patch has no role="parent" entry
-      - parent_target_not_project: parent connection points at wrong type
-      - parent_target_not_in_output: parent target_text doesn't match any
-                                     emitted project patch
+    When `meeting_project` is supplied (the project context the extraction
+    is running under), patches missing a parent connection — or pointing at
+    a project name absent from the current output — get a synthetic parent
+    connection to `meeting_project` injected instead of being dropped. The
+    Pass-2 connection resolver in `store_connected_patches` already matches
+    targets against existing DB patches, so the injected edge resolves to
+    the pre-existing project patch.
 
-    Call after enforce_owner_gate, before strip_ephemeral_fields.
-    Mutates content in place; returns it for convenience.
+    Dropped only when the source is genuinely malformed:
+      - parent_target_not_project: parent points at a non-project target
+
+    When no `meeting_project` is supplied (e.g. trace/conversation paths),
+    behavior falls back to the strict pre-injection rule set:
+      - no_parent_connection
+      - parent_target_not_project
+      - parent_target_not_in_output
+
+    Audit detail is recorded in content["_connection_enforced"]:
+      {
+        "dropped":     [...patches dropped for structural violations...],
+        "count":       total dropped,
+        "auto_parented": [...patches given a synthetic parent connection...],
+      }
+
+    Call after enforce_owner_gate, before strip_ephemeral_fields. Mutates
+    content in place; returns it for convenience.
     """
     patches = content.get("patches") or []
     project_texts = {
@@ -252,6 +274,25 @@ def enforce_connection_requirements(content: dict) -> dict:
 
     kept: list = []
     dropped: list = []
+    auto_parented: list = []
+
+    def _inject_parent(patch: dict) -> None:
+        patch.setdefault("connects_to", []).append(
+            {
+                "role": "parent",
+                "label": "belongs_to",
+                "target_type": "project",
+                "target_text": meeting_project,
+            }
+        )
+        auto_parented.append(
+            {
+                "type": patch.get("type"),
+                "text": (patch.get("value") or {}).get("text", ""),
+                "project": meeting_project,
+            }
+        )
+
     for p in patches:
         ptype = p.get("type")
         if ptype not in PROJECT_SCOPED_TYPES:
@@ -263,6 +304,10 @@ def enforce_connection_requirements(content: dict) -> dict:
         ]
 
         if not parent_conns:
+            if meeting_project:
+                _inject_parent(p)
+                kept.append(p)
+                continue
             reason = "no_parent_connection"
         elif all(c.get("target_type") != "project" for c in parent_conns):
             reason = "parent_target_not_project"
@@ -271,6 +316,14 @@ def enforce_connection_requirements(content: dict) -> dict:
             for c in parent_conns
             if c.get("target_type") == "project"
         ):
+            if meeting_project:
+                # The LLM wired a parent but pointed at a project name not
+                # emitted in this output. If `meeting_project` is in scope,
+                # trust the Pass-2 resolver to match it against the existing
+                # DB row — no synthetic injection needed beyond the one the
+                # LLM already supplied.
+                kept.append(p)
+                continue
             reason = "parent_target_not_in_output"
         else:
             kept.append(p)
@@ -285,10 +338,11 @@ def enforce_connection_requirements(content: dict) -> dict:
         )
 
     content["patches"] = kept
-    if dropped:
+    if dropped or auto_parented:
         content["_connection_enforced"] = {
             "dropped": dropped,
             "count": len(dropped),
+            "auto_parented": auto_parented,
         }
     return content
 
