@@ -180,7 +180,7 @@
       "facet": "Connection",
       "permanence": "quarter",
       "display_name": "Deliverable",
-      "description": "A concrete product, feature, system, artifact, or workstream being built as part of a project. Sits between the top-level `project` container and the specific episodes (commitments, blockers, decisions) that drive its delivery. A single project often contains multiple deliverables.",
+      "description": "A concrete product, feature, system, artifact, or workstream being built as part of a project. Sits between the top-level `project` container and the specific episodes (commitments, blockers, decisions, takeaways, events) that drive its delivery. A single project often contains multiple deliverables. **When a deliverable is emitted in the same extraction as episode patches, those episodes should parent to the deliverable, not to the top-level project** — this preserves the two-level hierarchy the user cares about.",
       "value_shape": { "text": "string", "status": "string?" },
       "completable": false,
       "project_scoped": true,
@@ -188,7 +188,7 @@
       "extraction_rules": {
         "required_fields": ["text"],
         "required_connections": ["belongs_to"],
-        "guidance": "Emit when the transcript describes a named product, feature, system, or workstream that the (you) speaker is helping build INSIDE a broader project. Must connect via `belongs_to` to its parent project. Examples: 'IT helpdesk chatbot' (within 'ABM'), 'Customer onboarding flow' (within 'Kaiser rollout'), 'Pre-trial motion bundle' (within 'TechCorp v. DataSys'), 'Reception photo sequence' (within 'Smith Wedding'). If the concept IS the whole project (the user's top-level named thing), use `project` instead. Deliverables can themselves be the parent of commitments, blockers, decisions, and events via `belongs_to`."
+        "guidance": "Emit when the transcript describes a named product, feature, system, workstream, or artifact that the (you) speaker is helping build INSIDE a broader project. Must connect via `belongs_to` to its parent project. Once a deliverable is emitted, **every episode patch from that same meeting that is specifically about building THIS deliverable must `belongs_to` the deliverable, not the project**. Reserve `belongs_to → project` for patches that apply to the engagement as a whole (e.g., a goal spanning multiple deliverables, a constraint that applies to the entire client relationship). Examples: 'IT helpdesk chatbot' (within 'ABM') → CORS blocker, CORS enablement commitment, and the sample-app decision all `belongs_to` the chatbot deliverable. 'Customer onboarding flow' (within 'Kaiser rollout') → its own onboarding commitments and blockers `belongs_to` the deliverable, while a project-wide 'maintain HIPAA compliance' constraint `belongs_to` the project. 'Pre-trial motion bundle' (within 'TechCorp v. DataSys') → motion-specific deadlines `belongs_to` the deliverable. 'Reception photo sequence' (within 'Smith Wedding') → sequence-specific shot-list commitments `belongs_to` the deliverable. If the concept IS the whole project (the user's top-level named thing), use `project` instead."
       }
     },
     {
@@ -290,7 +290,7 @@
       "role": "parent",
       "from_types": ["role", "decision", "commitment", "blocker", "takeaway", "goal", "constraint", "event", "deliverable", "project"],
       "to_types": ["project", "deliverable"],
-      "description": "Child patch belongs inside a parent container. Valid parents are `project` (top-level) and `deliverable` (sub-scope inside a project). Archival cascades to children. Hierarchy: project ← deliverable ← episode/role. A `project` may belong_to another `project` only when the user explicitly models nested engagements (e.g., 'ABM Q2 rollout' within 'ABM')."
+      "description": "Child patch belongs inside a parent container. Valid parents are `project` (top-level) and `deliverable` (sub-scope inside a project). Archival cascades to children. **Rule: pick the NARROWEST valid parent.** If a deliverable exists in the same extraction that this patch is specifically about, parent to the deliverable — NOT the top-level project. Hierarchy: project ← deliverable ← episode/role. A `project` may belong_to another `project` only when the user explicitly models nested engagements (e.g., 'ABM Q2 rollout' within 'ABM'). Role patches require both `belongs_to → project` AND `describes → person`."
     },
     {
       "label": "works_on",
@@ -364,7 +364,8 @@
       "Self-disclosed traits and preferences of the (you) speaker",
       "Goals expressed by any named subject (user, team, client, project)",
       "Constraints stated or clearly implied (rules, limits, boundaries)",
-      "Project patches for named units of work (projects, matters, campaigns, listings, weddings, grants)",
+      "Project patches for named units of work (projects, matters, campaigns, listings, weddings, grants) — reserved for the TOP-LEVEL user-declared container, typically matching the meeting's project tag",
+      "Deliverable patches for the specific product / feature / system / artifact being built INSIDE a project — when both exist, child episodes must `belongs_to` the deliverable, not the project",
       "Person patches for named individuals",
       "Org patches for named organizational entities",
       "Role patches for clearly-stated (person, project, function) triples",
@@ -388,7 +389,7 @@
       "Restated facts or plot summaries presented as takeaways",
       "Generic participation ('attended the meeting')"
     ],
-    "reasoning_requirement": "Before emitting patches, include a short _reasoning scratchpad identifying: the (you) speaker, the active projects in scope, any explicit role attributions, and any goals/constraints mentioned. This reduces misattribution of ownership and traits.",
+    "reasoning_requirement": "Before emitting patches, include a short _reasoning scratchpad identifying: the (you) speaker, the active project(s) in scope (typically matching the meeting's project tag), any named deliverables being built inside those projects (the specific product/feature/system), any explicit role attributions, and any goals/constraints mentioned. For each substantive episode (commitment/blocker/decision/takeaway/event) you plan to emit, note which parent it belongs to — the deliverable if one is in scope and the episode is about that deliverable, otherwise the project. This pre-scan reduces misattribution of ownership, traits, and parent hierarchy.",
     "domain_agnostic_examples": "When generating examples for the LLM, span multiple meeting contexts: legal ('file motion by June 18'), coaching ('client will write vision by next session'), creative ('deliver revised boards Thursday'), corporate ('CRO presents to board'), family/personal ('parents' travel unconfirmed'). Never privilege any one vertical."
   }
 }
