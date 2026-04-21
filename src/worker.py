@@ -181,7 +181,7 @@ async def store_facts(
         if app_id:
             try:
                 await db.execute(
-                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read) VALUES ($1, $2::uuid, TRUE)",
+                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read, can_write, can_delete) VALUES ($1, $2::uuid, TRUE, TRUE, TRUE)",
                     patch_id, app_id
                 )
             except Exception:
@@ -251,7 +251,7 @@ async def store_action_items(
         if app_id:
             try:
                 await db.execute(
-                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read) VALUES ($1, $2::uuid, TRUE)",
+                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read, can_write, can_delete) VALUES ($1, $2::uuid, TRUE, TRUE, TRUE)",
                     patch_id, app_id
                 )
             except Exception:
@@ -391,7 +391,7 @@ async def store_connected_patches(
         if app_id:
             try:
                 await db.execute(
-                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read) VALUES ($1, $2::uuid, TRUE)",
+                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read, can_write, can_delete) VALUES ($1, $2::uuid, TRUE, TRUE, TRUE)",
                     patch_id, app_id
                 )
             except Exception:
