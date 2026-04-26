@@ -94,6 +94,27 @@ services:
     networks:
       - cq-internal
 
+  cq-backup:
+    build: ./docker/cq-backup
+    container_name: cq-backup
+    environment:
+      - POSTGRES_HOST=cq-postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=context_quilt
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - GCS_BACKUP_BUCKET=${GCS_BACKUP_BUCKET}
+      - GCS_KEY_FILE=/secrets/cq-backup-sa.json
+      - BACKUP_HOUR_UTC=${BACKUP_HOUR_UTC:-3}
+    volumes:
+      - /opt/contextquilt/secrets/cq-backup-sa.json:/secrets/cq-backup-sa.json:ro
+    depends_on:
+      cq-postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - cq-internal
+
 volumes:
   cq-postgres-data:
   cq-redis-data:
