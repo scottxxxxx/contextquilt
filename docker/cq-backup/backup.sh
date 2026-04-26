@@ -52,7 +52,7 @@ gcloud auth activate-service-account --key-file="${GCS_KEY_FILE}" --quiet >/dev/
 }
 
 RUN_ID=$(PGPASSWORD="${POSTGRES_PASSWORD}" $PSQL -c \
-  "INSERT INTO backup_runs (status) VALUES ('running') RETURNING id;" | tr -d ' ')
+  "INSERT INTO backup_runs (status) VALUES ('running') RETURNING id;" | head -n1 | tr -d '[:space:]')
 
 if [ -z "${RUN_ID}" ]; then
   log "ERROR: failed to insert audit row"
