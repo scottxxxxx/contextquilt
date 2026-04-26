@@ -2,35 +2,37 @@
 
 Everything you need to operate ContextQuilt in production without having to reverse-engineer it. If a routine operation is missing here, add it after you do it.
 
+> **Operator note:** This runbook is a public template. The actual host, project, IPs, and account names live in a private operator-only copy referenced from your team's secrets store. The variables referenced below (e.g. `${PROD_VM_IP}`, `${GCP_PROJECT_ID}`) must be defined in your local shell or read from the private runbook before running any command. Never paste real values into a PR or issue.
+
 ---
 
 ## Access
 
 ### Production VM
 
-- **Host:** `35.239.227.192`
-- **GCP project:** `weirtech-shared-infra`
-- **Instance name:** `web-gateway` (`us-central1-a`)
-- **Deploy path:** `/opt/contextquilt/` (now a real git checkout as of 2026-04-19)
+- **Host:** `${PROD_VM_IP}`
+- **GCP project:** `${GCP_PROJECT_ID}`
+- **Instance name:** `${PROD_VM_NAME}` (`${PROD_VM_ZONE}`)
+- **Deploy path:** `/opt/contextquilt/` (a real git checkout)
 
 ### SSH — two paths
 
 **Direct SSH (fastest):**
 ```bash
-ssh -i ~/.ssh/id_ed25519 scottguida@35.239.227.192
+ssh -i ~/.ssh/id_ed25519 ${PROD_SSH_USER}@${PROD_VM_IP}
 ```
 
-The `id_ed25519` key matches the one stored in the instance's metadata `ssh-keys`. If that metadata entry is removed you need to re-add it or fall through to OS Login.
+The SSH key must match the one stored in the instance's metadata `ssh-keys`. If that metadata entry is removed you need to re-add it or fall through to OS Login.
 
 **gcloud (fallback):**
 ```bash
-gcloud compute ssh web-gateway --zone=us-central1-a --project=weirtech-shared-infra
+gcloud compute ssh ${PROD_VM_NAME} --zone=${PROD_VM_ZONE} --project=${GCP_PROJECT_ID}
 ```
 
-OS Login username is `gixxerscott_gmail_com`. If you hit `Permission denied (publickey)`, add your key:
+If you hit `Permission denied (publickey)`, add your key:
 ```bash
 gcloud compute os-login ssh-keys add \
-  --project=weirtech-shared-infra \
+  --project=${GCP_PROJECT_ID} \
   --key-file=$HOME/.ssh/google_compute_engine.pub
 ```
 
@@ -47,7 +49,7 @@ Two separate env files, two separate stacks:
 | `/opt/contextquilt/.env.prod` | Main CQ API, worker, Postgres, Redis | `docker-compose.prod.yml` |
 | `/opt/contextquilt/.env.mcp` | MCP server stack (`cq-mcp-*` containers) | `docker-compose.mcp.yml` |
 
-**Do not mix.** Using `--env-file .env.prod` against `docker-compose.mcp.yml` will recreate `cq-mcp-redis` with an empty `requirepass` and crash it. (This happened during the v1 rollout — see `docs/ops/incidents/2026-04-19-v1-prod-bootstrap.md`.)
+**Do not mix.** Using `--env-file .env.prod` against `docker-compose.mcp.yml` will recreate `cq-mcp-redis` with an empty `requirepass` and crash it. (See incident log for prior occurrence during a v1 rollout.)
 
 Both files are `.gitignore`d and live only on the VM.
 
@@ -90,7 +92,7 @@ Any container in `(unhealthy)` for more than 2 minutes warrants investigation.
 ### 1. Manual redeploy (skipping GitHub Actions)
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 scottguida@35.239.227.192
+ssh -i ~/.ssh/id_ed25519 ${PROD_SSH_USER}@${PROD_VM_IP}
 cd /opt/contextquilt
 sudo git fetch origin main
 sudo git reset --hard origin/main
@@ -109,7 +111,7 @@ sudo docker compose -f docker-compose.mcp.yml --env-file .env.mcp up -d
 Migrations live in `init-db/*.sql`. The normal deploy workflow applies them automatically. To apply manually:
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 scottguida@35.239.227.192
+ssh -i ~/.ssh/id_ed25519 ${PROD_SSH_USER}@${PROD_VM_IP}
 cd /opt/contextquilt
 sudo git fetch origin main && sudo git reset --hard origin/main
 
@@ -125,7 +127,7 @@ All migrations are idempotent — re-running them on an up-to-date DB should be 
 ### 3. Register a new application
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 scottguida@35.239.227.192
+ssh -i ~/.ssh/id_ed25519 ${PROD_SSH_USER}@${PROD_VM_IP}
 sudo docker exec contextquilt curl -s -X POST \
   http://localhost:8000/v1/auth/register \
   -H 'Content-Type: application/json' \
@@ -139,7 +141,7 @@ Returns `{app_id, client_secret, ...}`. **Save the `client_secret` immediately �
 Prerequisite: the manifest JSON must be committed to `init-db/` (e.g. `11_shouldersurf_schema.json`).
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 scottguida@35.239.227.192
+ssh -i ~/.ssh/id_ed25519 ${PROD_SSH_USER}@${PROD_VM_IP}
 
 # Preview before writing
 sudo docker exec \
@@ -229,14 +231,14 @@ Postgres volumes:
 - `cq-postgres-data` — primary CQ DB
 - `cq-mcp-pgdata` — MCP DB
 
-Snapshot before risky operations:
+The production backup architecture (daily `pg_dump` to a dual-region GCS bucket with a 30-day retention lock) is documented in `DEPLOYMENT.md`. The bucket name and service-account email are operator-only and live in `.env.prod`.
+
+Ad-hoc snapshot before risky operations:
 ```bash
-ssh -i ~/.ssh/id_ed25519 scottguida@35.239.227.192
+ssh -i ~/.ssh/id_ed25519 ${PROD_SSH_USER}@${PROD_VM_IP}
 sudo docker exec cq-postgres pg_dump -U postgres context_quilt \
   > /tmp/context_quilt-$(date +%Y%m%d-%H%M%S).sql
 ```
-
-(No automated backup job exists yet — known gap.)
 
 ---
 
@@ -245,7 +247,7 @@ sudo docker exec cq-postgres pg_dump -U postgres context_quilt \
 1. **`.env.prod` vs `.env.mcp`** — always pair the right env file with the right compose file. Mixing breaks Redis config parsing.
 2. **`/opt/contextquilt` must be a git repo** — the deploy workflow now requires this. If it isn't, bootstrap via `git init && git remote add origin ... && git fetch && git reset --hard origin/main`.
 3. **Migrations use `ON_ERROR_STOP=1`** in the deploy — a broken migration fails the deploy loudly instead of silently continuing. If you add a migration, test it is idempotent.
-4. **`patch_type_registry` PK** is a NULL-safe composite via index, not a single-column PK. Don't add `ALTER TABLE ... PRIMARY KEY (type_key)` — that was the v1 bug. See migration `13_relax_patch_type_registry_pk.sql`.
+4. **`patch_type_registry` PK** is a NULL-safe composite via index, not a single-column PK. Don't add `ALTER TABLE ... PRIMARY KEY (type_key)` — that was a v1 bug. See migration `13_relax_patch_type_registry_pk.sql`.
 5. **Workers don't serve HTTP** — their healthcheck reads `/proc/1/cmdline`, not a localhost port.
 6. **SSH rate limiting** — fail2ban on the VM. If you lock yourself out, wait 10-30 min.
 
