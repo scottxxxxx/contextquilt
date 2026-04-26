@@ -79,9 +79,17 @@ Your Agent → recall_context("Set up the user's IDE")
 
 No LLM call on the read path. Pure graph traversal.
 
+## Pricing
+
+**Free tier (hosted)** — Use `mcp.contextquilt.com` with a free API key. Reasonable rate limits apply. Good for individual use, evals, and small teams.
+
+**BYOK (hosted)** — Same hosted server, but configure your own LLM provider key (OpenAI, Anthropic, OpenRouter, any OpenAI-compatible API) for the extraction worker. You pay your provider directly, with no extraction-call rate limits from us. Keys are encrypted at rest with rotation support.
+
+**Self-host (free, forever)** — Apache 2.0. Run the whole stack on your infrastructure. See below.
+
 ## Get an API Key
 
-Email [scott@contextquilt.com](mailto:scott@contextquilt.com) to get your MCP API key.
+Email [scott@contextquilt.com](mailto:scott@contextquilt.com) to get your MCP API key. Mention "BYOK" if you want to wire up your own LLM provider.
 
 ## Self-Host
 
