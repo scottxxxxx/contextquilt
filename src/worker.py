@@ -1317,17 +1317,33 @@ class ColdPathWorker:
         logger.info("analyzing_meeting_summary", user_id=user_id, length=len(summary))
 
         # Identify the submitting user so the LLM can attribute self-typed
-        # patches correctly. Two signals the platform accepts:
+        # patches correctly. Three signals the platform accepts:
         #   1. Inline "(you)" marker in transcript — the LLM reads this directly
         #      (e.g. SS injects "[Scott (you)]" client-side after voice match).
-        #   2. Structured metadata.owner_speaker_label — CQ injects the inline
-        #      marker server-side for apps that don't want to mutate transcript
-        #      text themselves.
-        # Either path lands at the same place: transcript with inline marker
+        #   2. Legacy structured metadata.owner_speaker_label — CQ injects the
+        #      marker server-side for apps that pre-date the user_label name.
+        #   3. New structured metadata.user_label + user_identified +
+        #      identification_source — GhostPour-forwarded fields from the
+        #      caller's identity layer. Only honored when user_identified is
+        #      true and identification_source is not "none", so a passthrough
+        #      label without confidence does NOT trigger marker injection.
+        # All three paths land at the same place: transcript with inline marker
         # by the time the LLM sees it. display_name is a legacy fallback.
-        metadata = payload.get("metadata", {})
-        owner_speaker_label = metadata.get("owner_speaker_label") if metadata else None
-        display_name = metadata.get("display_name") if metadata else None
+        metadata = payload.get("metadata", {}) or {}
+        owner_speaker_label = metadata.get("owner_speaker_label")
+        display_name = metadata.get("display_name")
+
+        user_label = metadata.get("user_label")
+        user_identified = metadata.get("user_identified")
+        identification_source = metadata.get("identification_source")
+        if (
+            not owner_speaker_label
+            and user_label
+            and user_identified is True
+            and identification_source
+            and identification_source != "none"
+        ):
+            owner_speaker_label = user_label
 
         effective_summary = normalize_owner_in_transcript(summary, owner_speaker_label)
         injected_marker = (
@@ -1340,6 +1356,7 @@ class ColdPathWorker:
                 "owner_marker_injected_server_side",
                 user_id=user_id,
                 owner_speaker_label=owner_speaker_label,
+                identification_source=identification_source,
             )
 
         has_you_marker = "(you)" in effective_summary.lower()
@@ -1521,9 +1538,10 @@ class ColdPathWorker:
                         owner_speaker_label, owner_marker_present,
                         owner_gate_filtered, connection_dropped,
                         patches_before_filters, patches_after_filters,
-                        reasoning_chars, transcript_chars
+                        reasoning_chars, transcript_chars,
+                        user_identified, identification_source
                     )
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
                     """,
                     user_id, response.model, response.input_tokens, response.output_tokens,
                     response.cost_usd, response.latency_ms, facts_stored, entities_stored,
@@ -1532,6 +1550,7 @@ class ColdPathWorker:
                     owner_gate_filtered, connection_dropped,
                     patches_before_filters, patches_after_filters,
                     reasoning_chars, len(summary),
+                    user_identified, identification_source,
                 )
             except Exception as e:
                 logger.warning("metrics_insert_failed", error=str(e))
