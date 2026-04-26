@@ -838,7 +838,33 @@
                     <div class="card kpi-card" id="health-redis-card"><div class="kpi-icon blue"><i class="fa-solid fa-bolt"></i></div><div class="kpi-content"><h3>Redis</h3><div class="value" id="health-redis-status">--</div><div class="trend" id="health-redis-detail">--</div></div></div>
                     <div class="card kpi-card" id="health-worker-card"><div class="kpi-icon purple"><i class="fa-solid fa-gears"></i></div><div class="kpi-content"><h3>Worker Queue</h3><div class="value" id="health-worker-pending">--</div><div class="trend" id="health-worker-detail">pending events</div></div></div>
                     <div class="card kpi-card" id="health-llm-card"><div class="kpi-icon orange"><i class="fa-solid fa-brain"></i></div><div class="kpi-content"><h3>LLM Provider</h3><div class="value" id="health-llm-model">--</div><div class="trend" id="health-llm-url">--</div></div></div>
+                    <div class="card kpi-card" id="health-backup-card"><div class="kpi-icon green"><i class="fa-solid fa-shield-halved"></i></div><div class="kpi-content"><h3>Backup &amp; DR</h3><div class="value" id="health-backup-status">--</div><div class="trend" id="health-backup-detail">--</div></div></div>
                 </div>
+
+                <div class="card" style="padding: 1.5rem; margin-top: 2rem;">
+                    <div class="card-header" style="margin-bottom: 1rem;">
+                        <h2><i class="fa-solid fa-shield-halved"></i> Backup &amp; Disaster Recovery</h2>
+                        <button class="sm-btn" onclick="initBackupSection()"><i class="fa-solid fa-arrows-rotate"></i> Refresh</button>
+                    </div>
+                    <div id="backup-summary" style="background:rgba(15,23,42,0.6); padding:1rem; border-radius:0.5rem; color:var(--text-muted); font-size:0.9rem; margin-bottom:1rem; line-height:1.6;">Loading backup status…</div>
+                    <h3 style="margin-bottom: 0.5rem; font-size: 1rem; color: var(--text-muted);">Recent backup runs</h3>
+                    <div class="table-responsive">
+                        <table class="data-table">
+                            <thead>
+                                <tr>
+                                    <th>Started</th>
+                                    <th>Status</th>
+                                    <th>Duration</th>
+                                    <th>Size</th>
+                                    <th>GCS Object</th>
+                                    <th>Notes</th>
+                                </tr>
+                            </thead>
+                            <tbody id="backup-history-body"><tr><td colspan="6" style="text-align:center; padding:1rem; color:var(--text-muted);">Loading…</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+
                 <div class="card" style="padding: 1.5rem; margin-top: 2rem;">
                     <h2 style="margin-bottom: 1rem;"><i class="fa-solid fa-sliders"></i> Runtime Configuration</h2>
                     <pre id="health-config-display" style="background:rgba(15,23,42,0.6); padding:1rem; border-radius:0.5rem; color:var(--text-muted); font-size:0.85rem; overflow-x:auto;">Loading...</pre>
@@ -924,7 +950,7 @@
             return _origFetch.call(this, url, opts);
         };
     </script>
-    <script src="app.js?v=22"></script>
+    <script src="app.js?v=23"></script>
 </body>
 
 </html>

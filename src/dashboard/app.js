@@ -331,6 +331,112 @@ async function initSystemView() {
         console.error('Failed to fetch health:', error);
         document.getElementById('health-pg-status').textContent = 'Error';
     }
+
+    // Backup & DR runs in parallel; failure here shouldn't block the rest of system view.
+    initBackupSection().catch(err => console.error('Failed to fetch backup status:', err));
+}
+
+// ============================================================
+// Backup & DR
+// ============================================================
+
+function formatBytes(n) {
+    if (n === null || n === undefined) return '--';
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(2)} MB`;
+    return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function formatRelativeTime(iso) {
+    if (!iso) return '--';
+    const ms = Date.now() - new Date(iso).getTime();
+    const s = Math.round(ms / 1000);
+    if (s < 60) return `${s}s ago`;
+    const m = Math.round(s / 60);
+    if (m < 60) return `${m}m ago`;
+    const h = Math.round(m / 60);
+    if (h < 48) return `${h}h ago`;
+    const d = Math.round(h / 24);
+    return `${d}d ago`;
+}
+
+async function initBackupSection() {
+    const statusEl = document.getElementById('health-backup-status');
+    const detailEl = document.getElementById('health-backup-detail');
+    const cardEl = document.getElementById('health-backup-card');
+    const summaryEl = document.getElementById('backup-summary');
+    const historyBody = document.getElementById('backup-history-body');
+
+    if (!statusEl || !summaryEl) return; // backup UI not present (older HTML)
+
+    try {
+        const [statusRes, historyRes] = await Promise.all([
+            fetch('/api/dashboard/backup/status'),
+            fetch('/api/dashboard/backup/history?limit=30'),
+        ]);
+        const status = await statusRes.json();
+        const history = await historyRes.json();
+
+        // KPI card
+        const healthMap = {
+            healthy:  { label: 'Healthy',  color: 'green'  },
+            stale:    { label: 'Stale',    color: 'orange' },
+            critical: { label: 'Critical', color: 'red'    },
+            unknown:  { label: 'Unknown',  color: 'orange' },
+        };
+        const meta = healthMap[status.health] || healthMap.unknown;
+        statusEl.textContent = meta.label;
+        cardEl.querySelector('.kpi-icon').className = `kpi-icon ${meta.color}`;
+        if (status.last_success_age_hours !== null && status.last_success_age_hours !== undefined) {
+            detailEl.textContent = `Last success ${status.last_success_age_hours.toFixed(1)}h ago · ${formatBytes(status.last_success_size_bytes)}`;
+        } else {
+            detailEl.textContent = status.health_reason;
+        }
+
+        // Summary block
+        const lines = [];
+        lines.push(`<strong>Status:</strong> ${meta.label} — ${status.health_reason}`);
+        if (status.last_success_at) {
+            lines.push(`<strong>Last successful backup:</strong> ${new Date(status.last_success_at).toLocaleString()} (${formatRelativeTime(status.last_success_at)}) · ${formatBytes(status.last_success_size_bytes)}`);
+            lines.push(`<strong>GCS object:</strong> <code>${status.last_success_object || '--'}</code>`);
+        }
+        lines.push(`<strong>Last 30 days:</strong> ${status.total_successes_30d} successful, ${status.total_failures_30d} failed`);
+        if (status.last_run_status === 'failure' && status.last_run_error) {
+            lines.push(`<span style="color:#e74c3c;"><strong>Most recent error:</strong> ${status.last_run_error}</span>`);
+        }
+        summaryEl.innerHTML = lines.join('<br>');
+
+        // History table
+        if (!Array.isArray(history) || history.length === 0) {
+            historyBody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding:1rem; color:var(--text-muted);">No backup runs yet.</td></tr>';
+        } else {
+            historyBody.innerHTML = history.map(r => {
+                const statusBadge = r.status === 'success'
+                    ? '<span style="color:#22c55e;">✓ success</span>'
+                    : r.status === 'failure'
+                        ? '<span style="color:#e74c3c;">✗ failure</span>'
+                        : '<span style="color:#f59e0b;">⟳ running</span>';
+                const dur = r.duration_seconds != null ? `${r.duration_seconds.toFixed(1)}s` : '--';
+                const obj = r.gcs_object ? `<code style="font-size:0.75rem;">${r.gcs_object}</code>` : '--';
+                const note = r.error_message ? `<span style="color:#e74c3c; font-size:0.8rem;">${r.error_message}</span>` : '';
+                return `<tr>
+                    <td>${new Date(r.started_at).toLocaleString()}</td>
+                    <td>${statusBadge}</td>
+                    <td>${dur}</td>
+                    <td>${formatBytes(r.size_bytes)}</td>
+                    <td>${obj}</td>
+                    <td>${note}</td>
+                </tr>`;
+            }).join('');
+        }
+    } catch (err) {
+        statusEl.textContent = 'Error';
+        cardEl.querySelector('.kpi-icon').className = 'kpi-icon red';
+        detailEl.textContent = err.message || 'fetch failed';
+        summaryEl.innerHTML = `<span style="color:#e74c3c;">Failed to load backup status: ${err.message || err}</span>`;
+        historyBody.innerHTML = '<tr><td colspan="6" style="text-align:center; padding:1rem; color:var(--text-muted);">Failed to load.</td></tr>';
+    }
 }
 
 // ============================================================
