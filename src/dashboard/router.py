@@ -1344,3 +1344,137 @@ FINAL JSON:
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
+
+# ============================================================
+# Backup & DR
+# ============================================================
+
+class BackupStatus(BaseModel):
+    health: str  # "healthy" | "stale" | "critical" | "unknown"
+    health_reason: str
+    last_success_at: Optional[datetime]
+    last_success_age_hours: Optional[float]
+    last_success_size_bytes: Optional[int]
+    last_success_object: Optional[str]
+    last_run_status: Optional[str]
+    last_run_at: Optional[datetime]
+    last_run_error: Optional[str]
+    total_successes_30d: int
+    total_failures_30d: int
+
+class BackupRunItem(BaseModel):
+    id: int
+    started_at: datetime
+    completed_at: Optional[datetime]
+    status: str
+    gcs_object: Optional[str]
+    size_bytes: Optional[int]
+    duration_seconds: Optional[float]
+    error_message: Optional[str]
+
+
+@router.get("/backup/status", response_model=BackupStatus, dependencies=[Depends(verify_admin_key)])
+async def get_backup_status():
+    """
+    Surface DR posture for the dashboard. Health is derived from the
+    age of the most recent successful backup:
+      healthy   — newest success ≤ 26h old
+      stale     — newest success 26–48h old
+      critical  — newest success > 48h old, or no success ever, or last run failed
+      unknown   — backup_runs table is empty (sidecar may not have started yet)
+    """
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        # Last successful run
+        last_success = await conn.fetchrow(
+            """SELECT completed_at, size_bytes, gcs_object,
+                      EXTRACT(EPOCH FROM (now() - completed_at))/3600.0 AS age_hours
+               FROM backup_runs
+               WHERE status = 'success'
+               ORDER BY completed_at DESC
+               LIMIT 1"""
+        )
+
+        # Most recent run regardless of status
+        last_run = await conn.fetchrow(
+            """SELECT status, started_at, completed_at, error_message
+               FROM backup_runs
+               ORDER BY started_at DESC
+               LIMIT 1"""
+        )
+
+        # 30-day rollups
+        rollup = await conn.fetchrow(
+            """SELECT
+                  COUNT(*) FILTER (WHERE status = 'success') AS successes,
+                  COUNT(*) FILTER (WHERE status = 'failure') AS failures
+               FROM backup_runs
+               WHERE started_at >= now() - INTERVAL '30 days'"""
+        )
+
+        if last_run is None:
+            health = "unknown"
+            health_reason = "No backup runs recorded yet — sidecar may not have started or first run is pending."
+        elif last_run["status"] == "failure":
+            health = "critical"
+            health_reason = f"Most recent backup attempt FAILED: {last_run['error_message'] or 'unknown error'}"
+        elif last_success is None:
+            health = "critical"
+            health_reason = "No successful backup has ever completed."
+        else:
+            age_h = float(last_success["age_hours"])
+            if age_h <= 26:
+                health = "healthy"
+                health_reason = f"Last successful backup {age_h:.1f}h ago."
+            elif age_h <= 48:
+                health = "stale"
+                health_reason = f"Last successful backup {age_h:.1f}h ago — exceeds 26h freshness target."
+            else:
+                health = "critical"
+                health_reason = f"Last successful backup {age_h:.1f}h ago — exceeds 48h critical threshold."
+
+        return BackupStatus(
+            health=health,
+            health_reason=health_reason,
+            last_success_at=last_success["completed_at"] if last_success else None,
+            last_success_age_hours=round(float(last_success["age_hours"]), 2) if last_success else None,
+            last_success_size_bytes=last_success["size_bytes"] if last_success else None,
+            last_success_object=last_success["gcs_object"] if last_success else None,
+            last_run_status=last_run["status"] if last_run else None,
+            last_run_at=last_run["started_at"] if last_run else None,
+            last_run_error=last_run["error_message"] if last_run else None,
+            total_successes_30d=rollup["successes"] if rollup else 0,
+            total_failures_30d=rollup["failures"] if rollup else 0,
+        )
+    finally:
+        await conn.close()
+
+
+@router.get("/backup/history", response_model=List[BackupRunItem], dependencies=[Depends(verify_admin_key)])
+async def get_backup_history(limit: int = 30):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            """SELECT id, started_at, completed_at, status, gcs_object,
+                      size_bytes, duration_seconds, error_message
+               FROM backup_runs
+               ORDER BY started_at DESC
+               LIMIT $1""",
+            min(limit, 200),
+        )
+        return [
+            BackupRunItem(
+                id=r["id"],
+                started_at=r["started_at"],
+                completed_at=r["completed_at"],
+                status=r["status"],
+                gcs_object=r["gcs_object"],
+                size_bytes=r["size_bytes"],
+                duration_seconds=float(r["duration_seconds"]) if r["duration_seconds"] is not None else None,
+                error_message=r["error_message"],
+            )
+            for r in rows
+        ]
+    finally:
+        await conn.close()
+
