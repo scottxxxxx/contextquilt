@@ -1909,6 +1909,209 @@ async def rename_speaker(
 
 
 # ============================================
+# Speaker Reassign — bulk fix attribution after diarization gets it wrong
+# ============================================
+
+class FromLabel(BaseModel):
+    label: str
+    meeting_id: str
+
+class ReassignSpeakerRequest(BaseModel):
+    from_labels: List[FromLabel]
+    to_person_id: Optional[str] = None
+    to_self: Optional[bool] = None
+
+
+def _reassign_error(code: str, message: str, **extra) -> HTTPException:
+    detail = {"code": code, "message": message}
+    detail.update(extra)
+    return HTTPException(status_code=422, detail=detail)
+
+
+@app.post("/v1/quilt/{user_id}/reassign-speaker", tags=["Quilt"])
+async def reassign_speaker(
+    user_id: str,
+    req: ReassignSpeakerRequest,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Bulk-reassign patches/entities from one or more diarization labels to a
+    target person (or to the submitting user). Covers the case where a single
+    user fragments across N diarized labels in one meeting and the user wants
+    to merge them into a single attribution.
+
+    Authorization: GP's proxy enforces user.id == path user_id before
+    forwarding. CQ trusts the (app, user_id) pair — same pattern as
+    rename-speaker.
+
+    See contract: docs design pinned 2026-04-26.
+    """
+    # ------------------------------------------------------------
+    # 1. xor + non-empty validation
+    # ------------------------------------------------------------
+    if bool(req.to_self) == bool(req.to_person_id):
+        raise _reassign_error(
+            "INVALID_TARGET",
+            "Provide exactly one of to_self=true or to_person_id",
+        )
+    if not req.from_labels:
+        raise _reassign_error("EMPTY_FROM_LABELS", "from_labels must not be empty")
+    for fl in req.from_labels:
+        if not fl.label or not fl.meeting_id:
+            raise _reassign_error(
+                "INVALID_LABEL_FORMAT",
+                "Every from_labels entry must have non-empty label and meeting_id",
+            )
+
+    # ------------------------------------------------------------
+    # 2. Validate all referenced meetings are known to this user's
+    #    quilt. There is no separate `meetings` table — meeting_id
+    #    lives on context_patches (and extraction_metrics). A meeting
+    #    is considered "known" if at least one patch exists for it
+    #    under this user's subject_key. All-or-nothing: no partial
+    #    writes if any meeting_id is unknown.
+    # ------------------------------------------------------------
+    subject_key = f"user:{user_id}"
+    meeting_ids = list({fl.meeting_id for fl in req.from_labels})
+    found_rows = await db_pool.fetch(
+        """
+        SELECT DISTINCT cp.meeting_id
+        FROM context_patches cp
+        JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+        WHERE cp.meeting_id = ANY($1::text[]) AND ps.subject_key = $2
+        """,
+        meeting_ids, subject_key,
+    )
+    found = {r["meeting_id"] for r in found_rows}
+    missing_meetings = sorted(set(meeting_ids) - found)
+    if missing_meetings:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "MEETING_NOT_FOUND",
+                "missing_meeting_ids": missing_meetings,
+            },
+        )
+
+    # ------------------------------------------------------------
+    # 3. Resolve target.
+    #    to_person_id  -> look up entity name; 404 if not found.
+    #    to_self       -> target_owner is None; the owner field is removed
+    #                     from value (since (you) speaker attribution is
+    #                     implicit via subject_key=user:{user_id}).
+    # ------------------------------------------------------------
+    if req.to_person_id:
+        target_row = await db_pool.fetchrow(
+            "SELECT name FROM entities WHERE entity_id = $1::uuid AND user_id = $2",
+            req.to_person_id, user_id,
+        )
+        if not target_row:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "PERSON_NOT_FOUND", "person_id": req.to_person_id},
+            )
+        target_owner: Optional[str] = target_row["name"]
+    else:
+        target_owner = None  # to_self: clear the owner field
+
+    # ------------------------------------------------------------
+    # 4. All-or-nothing transaction.
+    # ------------------------------------------------------------
+    patches_updated = 0
+    labels_skipped = 0
+    entities_merged = 0
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            for fl in req.from_labels:
+                if target_owner is None:
+                    update_sql = """
+                        UPDATE context_patches
+                        SET value = value - 'owner', updated_at = NOW()
+                        WHERE meeting_id = $1
+                          AND value->>'owner' = $2
+                          AND patch_id IN (
+                              SELECT patch_id FROM patch_subjects WHERE subject_key = $3
+                          )
+                          AND COALESCE(status, 'active') = 'active'
+                    """
+                    result = await conn.execute(update_sql, fl.meeting_id, fl.label, subject_key)
+                else:
+                    update_sql = """
+                        UPDATE context_patches
+                        SET value = jsonb_set(value, '{owner}', to_jsonb($1::text)),
+                            updated_at = NOW()
+                        WHERE meeting_id = $2
+                          AND value->>'owner' = $3
+                          AND patch_id IN (
+                              SELECT patch_id FROM patch_subjects WHERE subject_key = $4
+                          )
+                          AND COALESCE(status, 'active') = 'active'
+                    """
+                    result = await conn.execute(
+                        update_sql, target_owner, fl.meeting_id, fl.label, subject_key,
+                    )
+
+                # asyncpg returns command tags like "UPDATE 5" — count is the tail.
+                count = int(result.rsplit(" ", 1)[-1])
+                if count == 0:
+                    labels_skipped += 1
+                else:
+                    patches_updated += count
+
+            # --------------------------------------------------------
+            # 5. Entity cleanup. For to_person_id, drop entities whose
+            # name matches one of the from_labels AND have no remaining
+            # graph relationships. Conservative — only deletes truly
+            # orphaned label-derived entities (e.g., "Speaker 3"
+            # entities that were created from misattributed speech and
+            # have no other anchors).
+            #
+            # For to_self, skip entity cleanup — the (you) speaker
+            # doesn't get a person entity, so there's nothing to merge.
+            # --------------------------------------------------------
+            if target_owner is not None:
+                from_label_names = list({fl.label for fl in req.from_labels})
+                merge_result = await conn.execute(
+                    """
+                    DELETE FROM entities
+                    WHERE user_id = $1
+                      AND name = ANY($2::text[])
+                      AND entity_id NOT IN (
+                          SELECT from_entity_id FROM relationships
+                          WHERE user_id = $1 AND from_entity_id IS NOT NULL
+                          UNION
+                          SELECT to_entity_id FROM relationships
+                          WHERE user_id = $1 AND to_entity_id IS NOT NULL
+                      )
+                    """,
+                    user_id, from_label_names,
+                )
+                entities_merged = int(merge_result.rsplit(" ", 1)[-1])
+
+    # ------------------------------------------------------------
+    # 6. Rebuild Redis entity index when we removed any entities, so
+    #    recall stops matching on the dropped names.
+    # ------------------------------------------------------------
+    if entities_merged > 0:
+        entity_index_key = f"entity_index:{user_id}"
+        all_names = await db_pool.fetch(
+            "SELECT name FROM entities WHERE user_id = $1", user_id,
+        )
+        await redis_client.delete(entity_index_key)
+        if all_names:
+            await redis_client.sadd(entity_index_key, *[r["name"] for r in all_names])
+            await redis_client.expire(entity_index_key, 7200)
+
+    return {
+        "patches_updated": patches_updated,
+        "connections_updated": 0,  # v1: patch attribution changes; connection structure unchanged
+        "entities_merged": entities_merged,
+        "labels_skipped": labels_skipped,
+    }
+
+
+# ============================================
 # Projects
 # ============================================
 
