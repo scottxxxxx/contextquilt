@@ -172,6 +172,15 @@ class RecallResponse(BaseModel):
     timing_ms: Optional[Dict[str, float]] = None
 
 # ============================================
+# Recall constants
+# ============================================
+
+# Redis TTL for the entity index. Recall lazily rehydrates from Postgres on
+# miss and slides the TTL forward on every hit, so a steady stream of recall
+# calls keeps the cache warm indefinitely. Prewarm uses the same value.
+ENTITY_INDEX_TTL = 7200  # 2 hours
+
+# ============================================
 # i18n — Recall section labels by locale
 # ============================================
 
@@ -455,6 +464,26 @@ async def recall_context(
     # Step 1: Find matching entities from Redis index (fast)
     entity_index_key = f"entity_index:{user_id}"
     known_entities = await redis_client.smembers(entity_index_key)
+
+    # Cache-miss self-heal. Without this, recall silently degrades to empty
+    # ~ENTITY_INDEX_TTL after the last prewarm — a session that runs longer
+    # than the TTL stops returning entity matches.
+    if not known_entities:
+        rehydrate_t = time.monotonic()
+        rows = await db_pool.fetch(
+            "SELECT name FROM entities WHERE user_id = $1", user_id
+        )
+        if rows:
+            names = [r["name"] for r in rows]
+            await redis_client.delete(entity_index_key)
+            await redis_client.sadd(entity_index_key, *names)
+            await redis_client.expire(entity_index_key, ENTITY_INDEX_TTL)
+            known_entities = set(names)
+            timings["entity_index_rehydrated_ms"] = round((time.monotonic() - rehydrate_t) * 1000, 2)
+    else:
+        # Sliding TTL — keep an actively used cache from expiring under a long meeting.
+        await redis_client.expire(entity_index_key, ENTITY_INDEX_TTL)
+
     timings["redis_entity_lookup"] = round((time.monotonic() - t0) * 1000, 2)
 
     matched_names = []
@@ -471,64 +500,69 @@ async def recall_context(
                 if known_entities and val in known_entities:
                     matched_names.append(val)
 
-    if not matched_names:
+    # Project scope decides whether an entity-less query is still answerable.
+    # A scope-shaped question ("anyone have any commitments?") has no entity
+    # names but, given a project_id, can still pull the right patches via
+    # the project-scoped fetch in step 4.
+    recall_project_id = request.metadata.get("project_id") if request.metadata else None
+    recall_project = request.metadata.get("project") if request.metadata else None
+    has_project_scope = bool(recall_project_id or recall_project)
+
+    if not matched_names and not has_project_scope:
         return RecallResponse(context="", matched_entities=[], patch_count=0, timing_ms=timings)
 
-    # Step 2: Traverse graph from matched entities (Postgres)
-    t1 = time.monotonic()
-    # Find entity IDs for matched names
-    entity_rows = await db_pool.fetch(
-        """
-        SELECT entity_id, name, entity_type, description
-        FROM entities
-        WHERE user_id = $1 AND name = ANY($2)
-        """,
-        user_id, matched_names
-    )
-
-    if not entity_rows:
-        return RecallResponse(context="", matched_entities=matched_names, patch_count=0)
-
-    entity_ids = [row["entity_id"] for row in entity_rows]
-
-    # Step 3: Get relationships within N hops via recursive CTE
-    max_hops = request.max_hops or 2
-    rel_rows = await db_pool.fetch(
-        """
-        WITH RECURSIVE graph AS (
-            -- Seed: relationships from/to matched entities
-            SELECT r.from_entity_id, r.to_entity_id, r.relationship_type, r.context,
-                   1 as depth
-            FROM relationships r
-            WHERE r.user_id = $1
-              AND (r.from_entity_id = ANY($2) OR r.to_entity_id = ANY($2))
-
-            UNION
-
-            -- Hop: follow edges from discovered entities
-            SELECT r.from_entity_id, r.to_entity_id, r.relationship_type, r.context,
-                   g.depth + 1
-            FROM relationships r
-            JOIN graph g ON (r.from_entity_id = g.to_entity_id OR r.from_entity_id = g.from_entity_id
-                          OR r.to_entity_id = g.from_entity_id OR r.to_entity_id = g.to_entity_id)
-            WHERE r.user_id = $1 AND g.depth < $3
+    # Step 2 & 3: entity rows + graph traversal — only meaningful when we
+    # actually matched entities. The project-scope fallthrough skips this and
+    # goes straight to the patch fetch.
+    entity_rows: list = []
+    rel_rows: list = []
+    if matched_names:
+        t1 = time.monotonic()
+        entity_rows = await db_pool.fetch(
+            """
+            SELECT entity_id, name, entity_type, description
+            FROM entities
+            WHERE user_id = $1 AND name = ANY($2)
+            """,
+            user_id, matched_names
         )
-        SELECT DISTINCT g.from_entity_id, g.to_entity_id, g.relationship_type, g.context,
-               e1.name as from_name, e1.entity_type as from_type,
-               e2.name as to_name, e2.entity_type as to_type
-        FROM graph g
-        JOIN entities e1 ON g.from_entity_id = e1.entity_id
-        JOIN entities e2 ON g.to_entity_id = e2.entity_id
-        """,
-        user_id, entity_ids, max_hops
-    )
-    timings["postgres_entities_and_graph"] = round((time.monotonic() - t1) * 1000, 2)
+
+        if entity_rows:
+            entity_ids = [row["entity_id"] for row in entity_rows]
+            max_hops = request.max_hops or 2
+            rel_rows = await db_pool.fetch(
+                """
+                WITH RECURSIVE graph AS (
+                    -- Seed: relationships from/to matched entities
+                    SELECT r.from_entity_id, r.to_entity_id, r.relationship_type, r.context,
+                           1 as depth
+                    FROM relationships r
+                    WHERE r.user_id = $1
+                      AND (r.from_entity_id = ANY($2) OR r.to_entity_id = ANY($2))
+
+                    UNION
+
+                    -- Hop: follow edges from discovered entities
+                    SELECT r.from_entity_id, r.to_entity_id, r.relationship_type, r.context,
+                           g.depth + 1
+                    FROM relationships r
+                    JOIN graph g ON (r.from_entity_id = g.to_entity_id OR r.from_entity_id = g.from_entity_id
+                                  OR r.to_entity_id = g.from_entity_id OR r.to_entity_id = g.to_entity_id)
+                    WHERE r.user_id = $1 AND g.depth < $3
+                )
+                SELECT DISTINCT g.from_entity_id, g.to_entity_id, g.relationship_type, g.context,
+                       e1.name as from_name, e1.entity_type as from_type,
+                       e2.name as to_name, e2.entity_type as to_type
+                FROM graph g
+                JOIN entities e1 ON g.from_entity_id = e1.entity_id
+                JOIN entities e2 ON g.to_entity_id = e2.entity_id
+                """,
+                user_id, entity_ids, max_hops
+            )
+        timings["postgres_entities_and_graph"] = round((time.monotonic() - t1) * 1000, 2)
 
     # Step 4: Get patches for this user
     t2 = time.monotonic()
-    # Prefer project_id (stable UUID) over project name (can be renamed)
-    recall_project_id = request.metadata.get("project_id") if request.metadata else None
-    recall_project = request.metadata.get("project") if request.metadata else None
     subject_key = f"user:{user_id}"
 
     # Step 4a: Flat patch query (works for both V1 and V2 patches)
@@ -837,7 +871,7 @@ async def prewarm_cache(
         names = [r["name"] for r in entity_rows]
         await redis_client.delete(entity_key)
         await redis_client.sadd(entity_key, *names)
-        await redis_client.expire(entity_key, 7200)
+        await redis_client.expire(entity_key, ENTITY_INDEX_TTL)
 
     return {
         "status": "warm",
