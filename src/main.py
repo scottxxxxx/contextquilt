@@ -1999,24 +1999,31 @@ async def reassign_speaker(
 
     # ------------------------------------------------------------
     # 2. Validate all referenced meetings are known to this user's
-    #    quilt. There is no separate `meetings` table — meeting_id
-    #    lives on context_patches (and extraction_metrics). A meeting
-    #    is considered "known" if at least one patch exists for it
-    #    under this user's subject_key. All-or-nothing: no partial
-    #    writes if any meeting_id is unknown.
+    #    quilt. There is no separate `meetings` table — the meeting
+    #    UUID lives on context_patches as `origin_id` (with
+    #    `origin_type='meeting'`). A meeting is considered "known"
+    #    if at least one patch exists for it under this user's
+    #    subject_key. All-or-nothing: no partial writes if any
+    #    meeting_id is unknown.
+    #
+    #    The Pydantic field stays named `meeting_id` because that's
+    #    the SS-facing public name — we just translate it to the
+    #    canonical `origin_id` column at the SQL boundary.
     # ------------------------------------------------------------
     subject_key = f"user:{user_id}"
     meeting_ids = list({fl.meeting_id for fl in req.from_labels})
     found_rows = await db_pool.fetch(
         """
-        SELECT DISTINCT cp.meeting_id
+        SELECT DISTINCT cp.origin_id
         FROM context_patches cp
         JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
-        WHERE cp.meeting_id = ANY($1::text[]) AND ps.subject_key = $2
+        WHERE cp.origin_id = ANY($1::text[])
+          AND cp.origin_type = 'meeting'
+          AND ps.subject_key = $2
         """,
         meeting_ids, subject_key,
     )
-    found = {r["meeting_id"] for r in found_rows}
+    found = {r["origin_id"] for r in found_rows}
     missing_meetings = sorted(set(meeting_ids) - found)
     if missing_meetings:
         raise HTTPException(
@@ -2062,7 +2069,8 @@ async def reassign_speaker(
                     update_sql = """
                         UPDATE context_patches
                         SET value = value - 'owner', updated_at = NOW()
-                        WHERE meeting_id = $1
+                        WHERE origin_id = $1
+                          AND origin_type = 'meeting'
                           AND value->>'owner' = $2
                           AND patch_id IN (
                               SELECT patch_id FROM patch_subjects WHERE subject_key = $3
@@ -2075,7 +2083,8 @@ async def reassign_speaker(
                         UPDATE context_patches
                         SET value = jsonb_set(value, '{owner}', to_jsonb($1::text)),
                             updated_at = NOW()
-                        WHERE meeting_id = $2
+                        WHERE origin_id = $2
+                          AND origin_type = 'meeting'
                           AND value->>'owner' = $3
                           AND patch_id IN (
                               SELECT patch_id FROM patch_subjects WHERE subject_key = $4
