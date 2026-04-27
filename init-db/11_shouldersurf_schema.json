@@ -1,6 +1,6 @@
 {
   "app_id": "shouldersurf",
-  "version": 4,
+  "version": 5,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
@@ -97,7 +97,7 @@
       "self_only": false,
       "extraction_rules": {
         "required_fields": ["text"],
-        "guidance": "Examples: 'prefers async standups', 'values thorough documentation', 'prefers candid over posed', 'prefers phased rollouts over big-bang'. Any statement of the form 'prefers X', 'prefers X over Y', 'leans toward X', or 'values X' is a preference — even when described as a habit or default behavior. Mental model: preferences capture WHAT the user chooses; traits capture HOW the user operates."
+        "guidance": "Examples: 'prefers async standups', 'values thorough documentation', 'prefers candid over posed', 'prefers phased rollouts over big-bang'. Any statement of the form 'prefers X', 'prefers X over Y', 'leans toward X', or 'values X' is a preference — even when described as a habit or default behavior. Mental model: preferences capture WHAT the user chooses; traits capture HOW the user operates. When a preference is attributed to a NAMED participant other than the (you) speaker (e.g., 'Sarah prefers candid over posed'), also emit a `held_by` connection from the preference to that person's patch — this lets recall surface the preference under that person's context."
       }
     },
     {
@@ -354,6 +354,13 @@
       "from_types": ["person"],
       "to_types": ["person"],
       "description": "Person A reports to Person B in an organizational hierarchy. Emit only when the transcript explicitly states the relationship."
+    },
+    {
+      "label": "held_by",
+      "role": "informs",
+      "from_types": ["preference"],
+      "to_types": ["person"],
+      "description": "Preference is held by a specific named person other than the (you) speaker. Emit only when the transcript attributes the preference to a named participant (e.g., 'Sarah prefers candid over posed'). Preferences from the (you) speaker do NOT need this connection — their attribution is implicit via patch ownership. Lets recall surface 'preferences held by Sarah' when Sarah's name is in the query."
     }
   ],
 
