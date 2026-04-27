@@ -1,6 +1,6 @@
 {
   "app_id": "shouldersurf",
-  "version": 3,
+  "version": 4,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
@@ -75,14 +75,14 @@
       "facet": "Attribute",
       "permanence": "year",
       "display_name": "Trait",
-      "description": "A self-disclosed behavioral or communication pattern of the submitting user.",
+      "description": "A self-disclosed pattern in HOW the submitting user operates — focus, communication style, decision-making style, working rhythm. Captures the user's mode of operation, not the choices they make.",
       "value_shape": { "text": "string" },
       "completable": false,
       "project_scoped": false,
       "self_only": true,
       "extraction_rules": {
         "required_fields": ["text"],
-        "guidance": "Traits apply ONLY to the (you) speaker. 'Speaker 3 is meticulous' is NOT a trait. Aim for patterns the user explicitly self-discloses."
+        "guidance": "Traits apply ONLY to the (you) speaker. 'Speaker 3 is meticulous' is NOT a trait. Aim for patterns the user explicitly self-discloses about HOW they operate (e.g., 'I tend to ramble', 'I think in systems', 'I get overwhelmed by long threads'). Statements about WHAT the user prefers, leans toward, chooses, or values — including any 'prefers X', 'prefers X over Y', 'leans toward X', or 'values X' phrasing — are PREFERENCES, not traits, even when habitual or self-disclosed."
       }
     },
     {
@@ -90,14 +90,14 @@
       "facet": "Affinity",
       "permanence": "year",
       "display_name": "Preference",
-      "description": "A lean, value, or stylistic preference — how the user (or another named participant) prefers to work, decide, or communicate.",
+      "description": "A lean, value, or stylistic choice — WHAT the user (or another named participant) prefers, leans toward, or values. Captures the choice itself, distinct from trait, which captures HOW the user operates.",
       "value_shape": { "text": "string", "owner": "string?" },
       "completable": false,
       "project_scoped": false,
       "self_only": false,
       "extraction_rules": {
         "required_fields": ["text"],
-        "guidance": "Examples: 'prefers async standups', 'values thorough documentation', 'prefers candid over posed', 'prefers phased rollouts over big-bang'."
+        "guidance": "Examples: 'prefers async standups', 'values thorough documentation', 'prefers candid over posed', 'prefers phased rollouts over big-bang'. Any statement of the form 'prefers X', 'prefers X over Y', 'leans toward X', or 'values X' is a preference — even when described as a habit or default behavior. Mental model: preferences capture WHAT the user chooses; traits capture HOW the user operates."
       }
     },
     {

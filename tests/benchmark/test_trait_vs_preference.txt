@@ -1,0 +1,30 @@
+Sprint planning - April 26, 2026
+
+[Scott (you)] I prefer async standups over the daily 9am call. Can we move to written updates in the channel?
+[Alan] Sure, that works for the team.
+[Scott (you)] Also, I tend to ramble when I'm thinking out loud, so written updates actually help me get to the point faster.
+[Priya] Makes sense.
+[Scott (you)] One more thing — I lean toward shipping smaller PRs over big bundles. I'd rather review five 200-line PRs than one 1000-line one.
+[Alan] Agreed in general, though sometimes the work doesn't split cleanly.
+[Scott (you)] Fair. I get overwhelmed by long PR threads with lots of back-and-forth, so smaller PRs help me stay focused.
+[Priya] I'll keep that in mind for the auth refactor.
+[Scott (you)] Last thing — I value thorough documentation over clever code. If a junior can't read it, it's not done.
+[Alan] Strong opinion, but I get it.
+
+---
+
+Expected extraction (under v4 manifest):
+
+PREFERENCES (WHAT the user chooses):
+- "You prefer async standups over the daily 9am call"
+- "You lean toward shipping smaller PRs over big bundles"
+- "You value thorough documentation over clever code"
+
+TRAITS (HOW the user operates):
+- "You tend to ramble when thinking out loud"
+- "You get overwhelmed by long PR threads with back-and-forth"
+
+The pre-v4 failure mode: Haiku occasionally classified the "lean toward" /
+"prefer X over Y" statements as traits because they describe habitual
+behavior. The v4 guidance disambiguates: any "prefers X" / "leans toward X" /
+"values X" phrasing is a preference, even when habitual.
