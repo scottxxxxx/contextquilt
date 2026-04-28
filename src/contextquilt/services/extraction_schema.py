@@ -399,6 +399,163 @@ def enforce_connection_requirements(
     return content
 
 
+# Action-item types that gain a `person → owns → action` connection when
+# the LLM extracts a named human as their owner. Mirrors the SS app's
+# `owns` connection vocabulary: from={person} to={commitment,blocker,decision,goal}.
+PERSON_OWNED_ACTION_TYPES = frozenset(
+    {"commitment", "blocker", "decision", "goal"}
+)
+
+# Owner-text values that MUST NOT trigger a synthetic person patch:
+# - the (you) speaker (their attribution is implicit via patch ownership)
+# - diarization placeholders that aren't real human names
+# - empty / unknown markers
+_OWNER_PLACEHOLDER_PREFIXES = ("speaker ", "speaker_", "unknown", "unidentified")
+_OWNER_YOU_TOKENS = frozenset({"(you)", "you", "self", "me", "i"})
+
+
+def _is_real_person_owner(owner_text: str | None, user_label: str | None) -> bool:
+    """Return True iff `owner_text` looks like a real named human (not the
+    submitting user, not a diarization placeholder).
+
+    Used by enforce_person_ownership to decide whether an action-item
+    patch's owner warrants a synthetic person patch.
+    """
+    if not owner_text:
+        return False
+    s = owner_text.strip()
+    if not s:
+        return False
+    low = s.lower()
+    if low in _OWNER_YOU_TOKENS:
+        return False
+    if any(low.startswith(p) for p in _OWNER_PLACEHOLDER_PREFIXES):
+        return False
+    if user_label and low == user_label.strip().lower():
+        # The (you) speaker. Their ownership is implicit.
+        return False
+    return True
+
+
+def enforce_person_ownership(
+    content: dict, user_label: str | None = None
+) -> dict:
+    """
+    Ensure every action-item patch with a named human owner has a
+    corresponding `person` patch + `owns` connection in the output.
+
+    The prompt already requires this (extraction_prompts.py: "Every person
+    who owns a commitment, blocker, or decision MUST be a person patch —
+    not just an entity"), but real-world Haiku 4.5 compliance is unreliable.
+    Action items routinely come back with `value.owner: "Brian"` and no
+    Brian person patch and no `owns` connection. This is the structural
+    safety net — same shape as enforce_connection_requirements for parents.
+
+    For each commitment/blocker/decision/goal in content["patches"]:
+      1. Read value.owner. Skip if empty, the (you) speaker, or a
+         diarization placeholder ("Speaker N", "Unknown").
+      2. Find an existing person patch in patches[] whose value.text
+         matches the owner name (case-insensitive).
+      3. If absent, inject a synthetic person patch.
+      4. Ensure a `person → action_item` `owns` connection exists. If
+         absent, append one to the person patch's connects_to.
+
+    Audit detail recorded in content["_person_ownership_enforced"]:
+      {
+        "persons_injected":     [...names of person patches added...],
+        "connections_injected": [...{owner, target_text, target_type}...],
+      }
+
+    Idempotent: running twice on the same content does nothing the second
+    time.
+
+    Call after enforce_connection_requirements, before
+    strip_ephemeral_fields. Mutates content in place; returns it for
+    convenience.
+    """
+    patches = content.get("patches") or []
+    if not patches:
+        return content
+
+    # Fast lookup of existing person patches by lowercased text.
+    person_index: dict[str, dict] = {}
+    for p in patches:
+        if p.get("type") != "person":
+            continue
+        text = ((p.get("value") or {}).get("text") or "").strip()
+        if text:
+            person_index[text.lower()] = p
+
+    persons_injected: list[str] = []
+    connections_injected: list[dict] = []
+
+    def _ensure_person(name: str) -> dict:
+        """Return the person patch for `name`, creating it if absent."""
+        key = name.strip().lower()
+        existing = person_index.get(key)
+        if existing is not None:
+            return existing
+        synthetic = {
+            "type": "person",
+            "value": {"text": name.strip()},
+            "connects_to": [],
+        }
+        patches.append(synthetic)
+        person_index[key] = synthetic
+        persons_injected.append(name.strip())
+        return synthetic
+
+    def _ensure_owns_edge(person: dict, target_text: str, target_type: str) -> None:
+        """Append a person → action `owns` edge if not already present."""
+        edges = person.setdefault("connects_to", [])
+        for c in edges:
+            if (
+                c.get("label") == "owns"
+                and c.get("target_type") == target_type
+                and (c.get("target_text") or "").strip().lower()
+                    == target_text.strip().lower()
+            ):
+                return
+        edges.append(
+            {
+                "role": "informs",
+                "label": "owns",
+                "target_type": target_type,
+                "target_text": target_text,
+            }
+        )
+        connections_injected.append(
+            {
+                "owner": (person.get("value") or {}).get("text", ""),
+                "target_text": target_text,
+                "target_type": target_type,
+            }
+        )
+
+    # Snapshot the patches list before we start mutating it — we only
+    # iterate the action items present at entry, not any synthetic person
+    # patches we append below.
+    action_items = [
+        p for p in list(patches) if p.get("type") in PERSON_OWNED_ACTION_TYPES
+    ]
+    for p in action_items:
+        owner = (p.get("value") or {}).get("owner")
+        if not _is_real_person_owner(owner, user_label):
+            continue
+        target_text = (p.get("value") or {}).get("text") or ""
+        if not target_text:
+            continue
+        person = _ensure_person(owner)
+        _ensure_owns_edge(person, target_text, p.get("type"))
+
+    if persons_injected or connections_injected:
+        content["_person_ownership_enforced"] = {
+            "persons_injected": persons_injected,
+            "connections_injected": connections_injected,
+        }
+    return content
+
+
 def normalize_owner_in_transcript(
     transcript: str, owner_speaker_label: str | None
 ) -> str:
