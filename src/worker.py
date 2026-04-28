@@ -31,6 +31,7 @@ from contextquilt.services.extraction_schema import (
     EXTRACTION_SCHEMA,
     enforce_owner_gate,
     enforce_connection_requirements,
+    enforce_person_ownership,
     normalize_owner_in_transcript,
     sanitize_you_marker_from_patches,
     strip_ephemeral_fields,
@@ -1428,6 +1429,27 @@ class ColdPathWorker:
                         count=len(auto_parented),
                         project=meeting_project_for_enforcement,
                         patches=auto_parented,
+                        model=response.model,
+                    )
+
+            # Person-ownership safety net. The prompt requires a person
+            # patch + owns connection for every named action-item owner,
+            # but Haiku 4.5 compliance is unreliable. enforce_person_ownership
+            # walks commitment/blocker/decision/goal patches with a real
+            # human owner_text, ensures a matching person patch exists, and
+            # appends a person→action `owns` connection. Pass user_label so
+            # the (you) speaker doesn't get a synthetic person patch about
+            # themselves.
+            enforce_person_ownership(response.content, user_label=user_label)
+            if (po := response.content.get("_person_ownership_enforced")):
+                injected_persons = po.get("persons_injected", [])
+                injected_edges = po.get("connections_injected", [])
+                if injected_persons or injected_edges:
+                    logger.info(
+                        "person_ownership_enforced",
+                        user_id=user_id,
+                        persons_injected=injected_persons,
+                        connections_injected=len(injected_edges),
                         model=response.model,
                     )
 
