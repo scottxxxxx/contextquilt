@@ -1661,19 +1661,31 @@ async def delete_all_patches(
 # Patch Create
 # ============================================
 
+# Aligned to the v5 SS manifest (init-db/11_shouldersurf_schema.json).
+# `identity` and `experience` are retired per the v1 taxonomy decision —
+# see docs/memos/patch-taxonomy-simplification.md and worker.py's
+# DEFAULT_PERSISTENCE for the matching list on the extraction path.
 VALID_PATCH_TYPES = {
-    "trait", "preference", "identity", "role", "person", "project",
-    "decision", "commitment", "blocker", "takeaway",
+    "trait", "preference", "goal", "constraint",
+    "person", "org", "project", "deliverable",
+    "role", "decision", "commitment", "blocker",
+    "takeaway", "event",
 }
 
 PATCH_PERSISTENCE = {
-    "trait": "sticky", "preference": "sticky", "identity": "sticky",
-    "role": "sticky", "person": "sticky", "project": "sticky",
+    "trait": "sticky", "preference": "sticky",
+    "goal": "sticky", "constraint": "sticky",
+    "role": "sticky", "person": "sticky", "org": "sticky",
+    "project": "sticky", "deliverable": "sticky",
     "decision": "sticky", "commitment": "sticky", "blocker": "sticky",
-    "experience": "decaying", "takeaway": "decaying",
+    "takeaway": "decaying", "event": "decaying",
 }
 
-PROJECT_SCOPED_TYPES = {"decision", "commitment", "blocker", "takeaway", "role"}
+PROJECT_SCOPED_TYPES = {
+    "goal", "constraint", "deliverable",
+    "role", "decision", "commitment", "blocker",
+    "takeaway", "event",
+}
 
 
 class PatchConnectionInput(BaseModel):
@@ -1684,7 +1696,7 @@ class PatchConnectionInput(BaseModel):
 
 
 class PatchCreate(BaseModel):
-    type: str = Field(..., description="Patch type: trait, preference, identity, role, person, project, decision, commitment, blocker, takeaway")
+    type: str = Field(..., description="Patch type: trait, preference, goal, constraint, person, org, project, deliverable, role, decision, commitment, blocker, takeaway, event")
     text: str = Field(..., description="The patch content")
     owner: Optional[str] = Field(default=None, description="Owner name (for commitment, blocker, decision)")
     project_id: Optional[str] = Field(default=None, description="Project UUID to scope this patch to")
