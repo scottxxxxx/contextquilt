@@ -1432,6 +1432,24 @@ class ColdPathWorker:
                         model=response.model,
                     )
 
+            # Apply MAX_PATCHES_PER_MEETING to LLM output BEFORE the
+            # enforcer runs. The cap exists to bound LLM-output noise; the
+            # enforcer's job is structural completeness (every named owner
+            # must have a person patch + owns edge). Capping the
+            # post-enforcer list silently drops the synthetic person
+            # patches it appends, which silently breaks PR #84 for any
+            # meeting where the LLM emitted ≥ MAX_PATCHES_PER_MEETING
+            # patches on its own. Cap first; then enforce.
+            raw_patches = response.content.get("patches") or []
+            if len(raw_patches) > MAX_PATCHES_PER_MEETING:
+                logger.warning(
+                    "extraction_capped",
+                    type="patches",
+                    original=len(raw_patches),
+                    capped=MAX_PATCHES_PER_MEETING,
+                )
+                response.content["patches"] = raw_patches[:MAX_PATCHES_PER_MEETING]
+
             # Person-ownership safety net. The prompt requires a person
             # patch + owns connection for every named action-item owner,
             # but Haiku 4.5 compliance is unreliable. enforce_person_ownership
@@ -1489,11 +1507,10 @@ class ColdPathWorker:
             relationships = response.content.get("relationships", [])
 
             if patches:
-                # V2 model — typed, connected patches
-                if len(patches) > MAX_PATCHES_PER_MEETING:
-                    logger.warning("extraction_capped", type="patches", original=len(patches), capped=MAX_PATCHES_PER_MEETING)
-                    patches = patches[:MAX_PATCHES_PER_MEETING]
-
+                # V2 model — typed, connected patches.
+                # Note: the cap was already applied above, BEFORE the
+                # enforcer ran, so the enforcer's synthetic person patches
+                # are exempt from the count.
                 patches_stored = await store_connected_patches(
                     self.db, user_id, patches, "meeting_summary", app_id, timestamp,
                     project, project_id, origin_id, origin_type
