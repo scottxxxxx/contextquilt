@@ -1337,6 +1337,15 @@ class ColdPathWorker:
         user_label = metadata.get("user_label")
         user_identified = metadata.get("user_identified")
         identification_source = metadata.get("identification_source")
+
+        # Subscription tier — forwarded by GhostPour on every /v1/memory
+        # write. previous_tier is only set when the user crossed a tier
+        # boundary inside the last 24h, letting us detect transitions
+        # from the audit stream alone (without a separate webhook).
+        # Both fields stay None when the upstream app doesn't populate
+        # them — non-breaking.
+        subscription_tier = metadata.get("subscription_tier")
+        previous_tier = metadata.get("previous_tier")
         if (
             not owner_speaker_label
             and user_label
@@ -1578,9 +1587,10 @@ class ColdPathWorker:
                         owner_gate_filtered, connection_dropped,
                         patches_before_filters, patches_after_filters,
                         reasoning_chars, transcript_chars,
-                        user_identified, identification_source
+                        user_identified, identification_source,
+                        subscription_tier, previous_tier
                     )
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
                     """,
                     user_id, response.model, response.input_tokens, response.output_tokens,
                     response.cost_usd, response.latency_ms, facts_stored, entities_stored,
@@ -1590,6 +1600,7 @@ class ColdPathWorker:
                     patches_before_filters, patches_after_filters,
                     reasoning_chars, len(summary),
                     user_identified, identification_source,
+                    subscription_tier, previous_tier,
                 )
             except Exception as e:
                 logger.warning("metrics_insert_failed", error=str(e))

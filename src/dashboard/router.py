@@ -975,6 +975,12 @@ class ModelCost(BaseModel):
     cost: float
     count: int
 
+class TierCost(BaseModel):
+    tier: str
+    cost: float
+    count: int
+    avg_patches: float
+
 class ExtractionMetricItem(BaseModel):
     user_id: Optional[str]
     model: Optional[str]
@@ -1042,6 +1048,44 @@ async def get_metrics_models(days: Optional[int] = 30):
             GROUP BY model ORDER BY cost DESC""", days
         )
         return [ModelCost(model=r["model"] or "unknown", cost=float(r["cost"]), count=r["count"]) for r in rows]
+    finally:
+        await conn.close()
+
+
+@router.get("/metrics/tiers", response_model=List[TierCost], dependencies=[Depends(verify_admin_key)])
+async def get_metrics_tiers(days: Optional[int] = 30):
+    """
+    Extraction cost grouped by subscription_tier.
+
+    Answers the operator's "how much are we paying for Free user
+    extractions?" question — the line item we're concerned about given
+    that Free users can't read what they captured (recall is disabled
+    for them on the GP side).
+
+    Tier label "(missing)" covers any rows ingested before GP started
+    forwarding subscription_tier on /v1/memory.
+    """
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            """SELECT COALESCE(subscription_tier, '(missing)') AS tier,
+                      SUM(cost_usd) AS cost,
+                      COUNT(*) AS count,
+                      COALESCE(AVG(patches_extracted), 0) AS avg_patches
+            FROM extraction_metrics
+            WHERE created_at >= NOW() - INTERVAL '1 day' * $1
+            GROUP BY COALESCE(subscription_tier, '(missing)')
+            ORDER BY cost DESC""", days
+        )
+        return [
+            TierCost(
+                tier=r["tier"],
+                cost=float(r["cost"] or 0),
+                count=r["count"],
+                avg_patches=float(r["avg_patches"] or 0),
+            )
+            for r in rows
+        ]
     finally:
         await conn.close()
 
