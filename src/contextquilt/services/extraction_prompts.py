@@ -243,7 +243,24 @@ CORRECT (goal): "You aim to ship the new API by Q2"
 WRONG (constraint): "Scott cannot deploy on Fridays"
 CORRECT (constraint): "You cannot deploy on Fridays"
 
-The "(you)" marker tells you WHO the patch is about. Once attribution is resolved, it must not appear in the output — and verb/pronoun agreement must flip to second person (is→are, tends→tend, wants→want, prefers→prefer, aims→aim, his→your, him→you).
+NOUN-PHRASE FORM IS ALSO WRONG. Bare descriptions without a verb describe someone in third person by default — the reader has to infer "[someone] is a…" Always lead with the second-person subject.
+
+WRONG (trait, noun-phrase): "Pragmatic problem-solver who prioritizes shipping"
+CORRECT (trait): "You're a pragmatic problem-solver who prioritizes shipping"
+
+WRONG (trait, noun-phrase): "Detail-oriented engineer who pushes back on vague specs"
+CORRECT (trait): "You're a detail-oriented engineer who pushes back on vague specs"
+
+WRONG (preference, noun-phrase): "Strong preference for written specs over verbal handoffs"
+CORRECT (preference): "You prefer written specs over verbal handoffs"
+
+The "(you)" marker tells you WHO the patch is about. Once attribution is resolved, it must not appear in the output — and verb/pronoun agreement must flip to second person (is→are, tends→tend, wants→want, prefers→prefer, aims→aim, his→your, him→you). If the natural phrasing is a noun phrase ("Pragmatic problem-solver"), prepend "You're a/an" so the subject is unambiguous.
+
+OWNER FIELD ON SELF-TYPED PATCHES:
+- For trait, preference, goal, and constraint patches, set "owner": null. The (you) speaker is implicitly the owner — attribution is carried by the patch itself, not by an owner string.
+- WRONG: trait patch with "owner": "Scott" — redundant and reintroduces third-person framing.
+- CORRECT: trait patch with "owner": null.
+- The owner field is for action-item patches (commitment, blocker, decision, goal-as-commitment) where someone OTHER than the (you) speaker holds the work. Self-typed patches never need it.
 
 (YOU)-MARKER GATING — HARD RULE:
 - If no speaker label contains "(you)", emit ZERO patches of type trait, preference, goal, or constraint.
