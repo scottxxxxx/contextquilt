@@ -217,6 +217,39 @@ def sanitize_you_marker_from_patches(content: dict) -> dict:
     return content
 
 
+# Patch types where the (you) speaker is implicitly the owner — setting an
+# owner string on these is wrong by definition (the (you) speaker doesn't
+# own anything to anyone else; the patch IS about them). Used to strip
+# owner=name on trait/preference/goal/constraint patches that the LLM
+# emitted in third-person form.
+_SELF_TYPED_PATCH_TYPES_WITH_IMPLICIT_OWNER = frozenset(
+    {"trait", "preference", "goal", "constraint"}
+)
+
+
+def strip_owner_on_self_typed_patches(content: dict) -> dict:
+    """Set owner=null on trait/preference/goal/constraint patches.
+
+    The prompt instructs the model to leave owner empty on these types
+    because the (you) speaker is implicitly the owner. Haiku 4.5
+    occasionally ignores that and emits ``owner: "Scott"`` (or whatever
+    the user_label is), which both reintroduces third-person framing
+    and confuses downstream consumers that read owner as "person to
+    attribute work to."
+
+    Belt-and-suspenders: prompt says "set owner to null", this sanitizer
+    enforces it post-hoc. Run after sanitize_you_marker_from_patches,
+    before strip_ephemeral_fields. Mutates content in place.
+    """
+    for patch in content.get("patches") or []:
+        if patch.get("type") not in _SELF_TYPED_PATCH_TYPES_WITH_IMPLICIT_OWNER:
+            continue
+        value = patch.get("value")
+        if isinstance(value, dict) and value.get("owner"):
+            value["owner"] = None
+    return content
+
+
 # Types that only make sense attached to a project the (you) speaker owns.
 # The quilt is user-centric — patches must anchor to something the user
 # cares about. A decision/commitment/blocker/takeaway/role with no project
