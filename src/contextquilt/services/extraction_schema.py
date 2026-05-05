@@ -414,6 +414,34 @@ _OWNER_PLACEHOLDER_PREFIXES = ("speaker ", "speaker_", "unknown", "unidentified"
 _OWNER_YOU_TOKENS = frozenset({"(you)", "you", "self", "me", "i"})
 
 
+def _split_compound_owner(owner_text: str | None) -> list[str]:
+    """Split a slash-joined owner string into individual name parts.
+
+    The LLM occasionally emits joint owners like ``"Srikanth/Ella"`` or
+    ``"Sai/Santosh"`` when a transcript line says "Srikanth and Ella will
+    handle it." Without splitting, the enforcer creates one synthetic
+    person patch with the literal compound text and a single owns edge —
+    losing the per-person attribution.
+
+    Conservative splitter: ``/`` only. We don't split on ``,``, ``&``,
+    or ``" and "`` — those legitimately appear inside single names
+    ("Smith, John", "AT&T", "Arvind and family") and over-splitting would
+    fragment real names. Slash is unambiguous in human-name contexts.
+
+    Returns the list of trimmed parts. Single-part owners are returned
+    as a one-element list. Empty / None / whitespace-only input returns
+    an empty list. Empty parts after split are dropped.
+    """
+    if not owner_text:
+        return []
+    s = owner_text.strip()
+    if not s:
+        return []
+    if "/" not in s:
+        return [s]
+    return [p.strip() for p in s.split("/") if p.strip()]
+
+
 def _is_real_person_owner(owner_text: str | None, user_label: str | None) -> bool:
     """Return True iff `owner_text` looks like a real named human (not the
     submitting user, not a diarization placeholder).
@@ -452,12 +480,15 @@ def enforce_person_ownership(
     safety net — same shape as enforce_connection_requirements for parents.
 
     For each commitment/blocker/decision/goal in content["patches"]:
-      1. Read value.owner. Skip if empty, the (you) speaker, or a
+      1. Read value.owner.
+      2. Split slash-joined compound owners ("Srikanth/Ella") into
+         individual names — each gets its own person patch + owns edge.
+      3. For each split name: skip if empty, the (you) speaker, or a
          diarization placeholder ("Speaker N", "Unknown").
-      2. Find an existing person patch in patches[] whose value.text
-         matches the owner name (case-insensitive).
-      3. If absent, inject a synthetic person patch.
-      4. Ensure a `person → action_item` `owns` connection exists. If
+      4. Find an existing person patch in patches[] whose value.text
+         matches the name (case-insensitive).
+      5. If absent, inject a synthetic person patch.
+      6. Ensure a `person → action_item` `owns` connection exists. If
          absent, append one to the person patch's connects_to.
 
     Audit detail recorded in content["_person_ownership_enforced"]:
@@ -540,13 +571,17 @@ def enforce_person_ownership(
     ]
     for p in action_items:
         owner = (p.get("value") or {}).get("owner")
-        if not _is_real_person_owner(owner, user_label):
-            continue
         target_text = (p.get("value") or {}).get("text") or ""
         if not target_text:
             continue
-        person = _ensure_person(owner)
-        _ensure_owns_edge(person, target_text, p.get("type"))
+        # Split compound owners ("Srikanth/Ella") into individual names
+        # so each gets a real person patch and an owns edge. Single-name
+        # owners pass through as a one-element list.
+        for name in _split_compound_owner(owner):
+            if not _is_real_person_owner(name, user_label):
+                continue
+            person = _ensure_person(name)
+            _ensure_owns_edge(person, target_text, p.get("type"))
 
     if persons_injected or connections_injected:
         content["_person_ownership_enforced"] = {
