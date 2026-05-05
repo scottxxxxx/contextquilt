@@ -356,9 +356,13 @@ async def store_connected_patches(
             if any(c.get("role") == "parent" for c in connects_to):
                 patch_project = project
 
-        # Project-scoped patches get both the text project name and the stable project_id
+        # Project-scoped patches get both the text project name and the stable project_id.
+        # Role-with-parent inherits the same project metadata; origin_id must follow
+        # the same gate so the (project_id, origin_id) pair is internally consistent.
+        # Without this, role patches landed with project_id set but origin_id NULL,
+        # which SS's diagnostic surfaced as a NULL-origin "regression" 2026-05-04.
         patch_project_id = project_id if patch_type in project_scoped_types or (patch_type == "role" and patch_project) else None
-        patch_origin_id = origin_id if patch_type in project_scoped_types else None
+        patch_origin_id = origin_id if patch_type in project_scoped_types or (patch_type == "role" and patch_project) else None
         patch_origin_type = origin_type if patch_origin_id else None
 
         await db.execute(
