@@ -35,6 +35,7 @@ from contextquilt.services.extraction_schema import (
     normalize_owner_in_transcript,
     sanitize_you_marker_from_patches,
     strip_ephemeral_fields,
+    strip_owner_on_self_typed_patches,
 )
 from contextquilt.services.schema_prompt_builder import (
     build_prompt as build_schema_prompt,
@@ -1516,6 +1517,7 @@ class ColdPathWorker:
                     model=response.model,
                 )
             sanitize_you_marker_from_patches(response.content)
+            strip_owner_on_self_typed_patches(response.content)
             strip_ephemeral_fields(response.content)
 
             timestamp = payload.get("timestamp")
