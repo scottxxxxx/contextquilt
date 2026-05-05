@@ -401,8 +401,17 @@ async def store_connected_patches(
         patch_lookup[(text.lower().strip(), patch_type)] = patch_id
         stored += 1
 
-    # Pass 2: Create connections between patches
+    # Pass 2: Create connections between patches.
+    #
+    # connections_created counts rows ACTUALLY inserted; ON-CONFLICT skips
+    # land in connections_skipped_dup. Pre-fix, this counter incremented
+    # unconditionally after every db.execute() — including the ON CONFLICT
+    # DO NOTHING no-ops — which produced misleading log lines like
+    # "connections=6" on a meeting where only 3 fresh edges hit the DB.
+    # That gap was the unsolved part of the 2026-04-30 audit (separate
+    # from PR #87's cap-vs-enforcer ordering bug).
     connections_created = 0
+    connections_skipped_dup = 0
     for patch in patches:
         if not isinstance(patch, dict):
             continue
@@ -492,9 +501,12 @@ async def store_connected_patches(
             if label == "owns" and from_type != "person" and target_type == "person":
                 actual_from, actual_to = to_id, from_id
 
-            # Create the connection
+            # Create the connection. asyncpg's db.execute returns the
+            # command tag (e.g. "INSERT 0 1" on insert, "INSERT 0 0" on
+            # ON CONFLICT skip). We split the two so the log line
+            # accurately reflects what actually hit the DB.
             try:
-                await db.execute(
+                cmd_tag = await db.execute(
                     """
                     INSERT INTO patch_connections (from_patch_id, to_patch_id, connection_role, connection_label, context)
                     VALUES ($1::uuid, $2::uuid, $3, $4, $5)
@@ -502,18 +514,28 @@ async def store_connected_patches(
                     """,
                     actual_from, actual_to, role, label, conn.get("context")
                 )
-                connections_created += 1
-
-                # Lifecycle trigger: REPLACES → archive the target
-                if role == "replaces":
-                    await db.execute(
-                        "UPDATE context_patches SET status = 'archived', completed_at = NOW() WHERE patch_id = $1::uuid",
-                        to_id
-                    )
+                if isinstance(cmd_tag, str) and cmd_tag.endswith(" 1"):
+                    connections_created += 1
+                    # Lifecycle trigger: REPLACES → archive the target.
+                    # Only fire when we actually wrote the edge — re-running
+                    # an already-applied replaces shouldn't re-archive.
+                    if role == "replaces":
+                        await db.execute(
+                            "UPDATE context_patches SET status = 'archived', completed_at = NOW() WHERE patch_id = $1::uuid",
+                            to_id
+                        )
+                else:
+                    connections_skipped_dup += 1
             except Exception as e:
                 logger.warning("connection_failed", error=str(e), from_id=from_id, to_id=to_id)
 
-    logger.info("connected_patches_stored", patches=stored, connections=connections_created, user_id=user_id)
+    logger.info(
+        "connected_patches_stored",
+        patches=stored,
+        connections=connections_created,
+        connections_skipped_dup=connections_skipped_dup,
+        user_id=user_id,
+    )
     return stored
 
 
