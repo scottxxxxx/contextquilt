@@ -12,6 +12,7 @@ import pytest
 from src.contextquilt.services.extraction_schema import (
     enforce_person_ownership,
     _is_real_person_owner,
+    _split_compound_owner,
 )
 
 
@@ -293,3 +294,167 @@ class TestEnforcePersonOwnership:
         if audit is not None:
             assert not audit.get("persons_injected")
             assert not audit.get("connections_injected")
+
+
+# ============================================================
+# _split_compound_owner — slash-separated owner splitter
+# ============================================================
+
+class TestCompoundOwnerSplitter:
+    def test_single_name_returns_one_element(self):
+        assert _split_compound_owner("Thorne") == ["Thorne"]
+
+    def test_slash_splits_into_two(self):
+        assert _split_compound_owner("Marlowe/Quill") == ["Marlowe", "Quill"]
+
+    def test_slash_three_way(self):
+        assert _split_compound_owner("Zephyra/Yardley/Kinsley") == ["Zephyra", "Yardley", "Kinsley"]
+
+    def test_whitespace_around_parts_trimmed(self):
+        assert _split_compound_owner(" Marlowe / Quill ") == ["Marlowe", "Quill"]
+
+    def test_empty_parts_dropped(self):
+        # Trailing slash, double slash — drop the empty parts.
+        assert _split_compound_owner("Thorne/") == ["Thorne"]
+        assert _split_compound_owner("Thorne//Fenwick") == ["Thorne", "Fenwick"]
+
+    def test_empty_input_returns_empty(self):
+        assert _split_compound_owner(None) == []
+        assert _split_compound_owner("") == []
+        assert _split_compound_owner("   ") == []
+
+    def test_no_split_on_other_separators(self):
+        # Conservative: don't split on ', ', ' & ', ' and '. These can
+        # legitimately appear inside single names ("Mayfield, Corwin", "AT&T",
+        # "Arvind and family").
+        assert _split_compound_owner("Mayfield, Corwin") == ["Mayfield, Corwin"]
+        assert _split_compound_owner("AT&T") == ["AT&T"]
+        assert _split_compound_owner("Arvind and family") == ["Arvind and family"]
+
+
+# ============================================================
+# Compound-owner end-to-end via enforce_person_ownership
+# ============================================================
+
+class TestCompoundOwnerInEnforcer:
+    def test_two_person_patches_and_two_owns_edges_for_compound_owner(self):
+        content = {
+            "patches": [
+                _commitment("Ship the new SDK", "Marlowe/Quill"),
+            ]
+        }
+        enforce_person_ownership(content)
+
+        person_texts = sorted(
+            (p.get("value") or {}).get("text", "")
+            for p in content["patches"]
+            if p.get("type") == "person"
+        )
+        assert person_texts == ["Quill", "Marlowe"]
+
+        # Each person patch owns the same commitment.
+        for p in content["patches"]:
+            if p.get("type") != "person":
+                continue
+            owns = [
+                c for c in p.get("connects_to", [])
+                if c.get("label") == "owns" and c.get("target_text") == "Ship the new SDK"
+            ]
+            assert len(owns) == 1, f"{p['value']['text']} should have exactly one owns edge"
+
+        audit = content.get("_person_ownership_enforced")
+        assert audit is not None
+        assert sorted(audit["persons_injected"]) == ["Quill", "Marlowe"]
+        assert len(audit["connections_injected"]) == 2
+
+    def test_compound_owner_dedups_against_existing_person(self):
+        """If 'Marlowe' already has a person patch, only 'Quill' is created."""
+        content = {
+            "patches": [
+                _person("Marlowe"),
+                _commitment("Ship the new SDK", "Marlowe/Quill"),
+            ]
+        }
+        enforce_person_ownership(content)
+
+        person_texts = sorted(
+            (p.get("value") or {}).get("text", "")
+            for p in content["patches"]
+            if p.get("type") == "person"
+        )
+        assert person_texts == ["Quill", "Marlowe"]
+
+        audit = content["_person_ownership_enforced"]
+        assert audit["persons_injected"] == ["Quill"]  # Marlowe not re-injected
+        assert len(audit["connections_injected"]) == 2  # Both owns edges land
+
+    def test_compound_owner_drops_invalid_part_only(self):
+        """'Thorne/Speaker 4' → Thorne gets a person, 'Speaker 4' does not."""
+        content = {
+            "patches": [
+                _commitment("Ship something", "Thorne/Speaker 4"),
+            ]
+        }
+        enforce_person_ownership(content)
+
+        person_texts = [
+            (p.get("value") or {}).get("text", "")
+            for p in content["patches"]
+            if p.get("type") == "person"
+        ]
+        assert person_texts == ["Thorne"]
+
+    def test_compound_owner_skips_user_label_part(self):
+        """Compound owner where one part is the (you) speaker — only the other lands."""
+        content = {
+            "patches": [
+                _commitment("Joint commitment", "Scott/Thorne"),
+            ]
+        }
+        enforce_person_ownership(content, user_label="Scott")
+
+        person_texts = [
+            (p.get("value") or {}).get("text", "")
+            for p in content["patches"]
+            if p.get("type") == "person"
+        ]
+        # Scott is the (you) speaker — implicit ownership, no synthetic person.
+        assert person_texts == ["Thorne"]
+
+    def test_compound_owner_idempotent(self):
+        """Running twice on the same content adds nothing new."""
+        content = {
+            "patches": [
+                _commitment("Ship the SDK", "Marlowe/Quill"),
+            ]
+        }
+        enforce_person_ownership(content)
+        snapshot = copy.deepcopy(content["patches"])
+        enforce_person_ownership(content)
+        assert content["patches"] == snapshot
+
+    def test_compound_owner_shared_across_action_items(self):
+        """Two action items with same compound owner share person patches."""
+        content = {
+            "patches": [
+                _commitment("First commitment", "Marlowe/Quill"),
+                _commitment("Second commitment", "Marlowe/Quill"),
+            ]
+        }
+        enforce_person_ownership(content)
+
+        # Exactly one person patch per name, regardless of how many
+        # commitments cited the compound owner.
+        person_texts = sorted(
+            (p.get("value") or {}).get("text", "")
+            for p in content["patches"]
+            if p.get("type") == "person"
+        )
+        assert person_texts == ["Quill", "Marlowe"]
+
+        # Each person should have 2 owns edges (one per commitment).
+        for p in content["patches"]:
+            if p.get("type") != "person":
+                continue
+            owns = [c for c in p.get("connects_to", []) if c.get("label") == "owns"]
+            assert len(owns) == 2, f"{p['value']['text']} should own 2 commitments"
