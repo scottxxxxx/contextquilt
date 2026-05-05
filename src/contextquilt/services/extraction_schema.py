@@ -282,6 +282,76 @@ DELIVERABLE_CHILD_TYPES = frozenset(
 VALID_PARENT_TARGET_TYPES = frozenset({"project", "deliverable"})
 
 
+# Stopwords used by _best_matching_deliverable. Kept small and conservative —
+# we want short content words like "API", "doc", "patch" to count, but we
+# need to filter out the high-frequency glue words that would inflate every
+# pairing's overlap score. NOT a general English stopword list; tuned for
+# meeting-extraction text (verbs of action, deictics, conjunctions).
+_DELIV_STOPWORDS = frozenset({
+    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
+    "and", "or", "but", "if", "then", "so",
+    "of", "in", "on", "at", "by", "for", "to", "from", "with", "as", "into",
+    "this", "that", "these", "those", "it", "its",
+    "i", "you", "he", "she", "we", "they",
+    "do", "does", "did", "have", "has", "had",
+    "will", "would", "should", "could", "can", "may", "might",
+    "not", "no", "yes", "all", "any", "some",
+    "after", "before", "during", "while", "until",
+})
+
+
+def _content_words(text: str) -> set[str]:
+    """Lowercase, split on word boundaries, drop stopwords + tokens <3 chars."""
+    if not text:
+        return set()
+    tokens = []
+    cur: list[str] = []
+    for ch in text.lower():
+        if ch.isalnum() or ch == "'":
+            cur.append(ch)
+        else:
+            if cur:
+                tokens.append("".join(cur))
+                cur = []
+    if cur:
+        tokens.append("".join(cur))
+    return {t for t in tokens if len(t) > 2 and t not in _DELIV_STOPWORDS}
+
+
+def _best_matching_deliverable(
+    orphan_text: str, deliverable_texts: list[str]
+) -> str | None:
+    """Return the deliverable text whose content words overlap most with
+    the orphan, or None if there's no clear winner.
+
+    "Clear winner" requires:
+      - best overlap >= 2 content words (avoids matches off a single
+        coincidental word like "API")
+      - best overlap strictly greater than runner-up (no ties)
+
+    Conservative on purpose. The pre-fix behavior was to fall back to
+    the meeting project for the multi-deliverable case — a safe default
+    that loses granularity. This function only overrides that default
+    when the text evidence is unambiguous; otherwise it returns None
+    and the caller falls back to project, same as before.
+    """
+    orphan_words = _content_words(orphan_text)
+    if not orphan_words or len(deliverable_texts) < 2:
+        return None
+    scored = []
+    for dtext in deliverable_texts:
+        overlap = len(orphan_words & _content_words(dtext))
+        scored.append((overlap, dtext))
+    scored.sort(key=lambda t: (-t[0], t[1]))  # desc by overlap, tiebreak alphabetical
+    best_score, best_text = scored[0]
+    runner_up_score = scored[1][0] if len(scored) > 1 else 0
+    if best_score < 2:
+        return None
+    if best_score == runner_up_score:
+        return None
+    return best_text
+
+
 def enforce_connection_requirements(
     content: dict, meeting_project: str | None = None
 ) -> dict:
@@ -296,10 +366,16 @@ def enforce_connection_requirements(
     existing DB patches, so the injected edge resolves to the pre-existing
     project or deliverable row.
 
-    Auto-parent target selection (v1.1):
+    Auto-parent target selection (v1.2):
       - If exactly ONE `deliverable` patch is present in the same output
         AND the orphan patch type is in DELIVERABLE_CHILD_TYPES, parent
         to the deliverable (narrowest valid parent).
+      - If TWO OR MORE deliverables are present and the orphan type is
+        in DELIVERABLE_CHILD_TYPES, score the orphan text against each
+        deliverable text by content-word overlap. If there's a clear
+        winner (best overlap >= 2 words AND strictly greater than
+        runner-up), parent to that deliverable. Otherwise fall back to
+        meeting_project (the safe default).
       - Otherwise parent to `meeting_project`.
 
     Dropped only when the source is genuinely malformed:
@@ -336,8 +412,9 @@ def enforce_connection_requirements(
         if p.get("type") == "deliverable"
     ]
     deliverable_texts = [t for t in deliverable_texts if t]
-    # Prefer deliverable as parent only when exactly one is in scope —
-    # ambiguity with multiple deliverables defeats the safety net.
+    # Single deliverable → trivial: it's the only viable child target.
+    # Multiple deliverables → no single "preferred" — selection happens
+    # per-orphan via _best_matching_deliverable below.
     preferred_deliverable = (
         deliverable_texts[0] if len(deliverable_texts) == 1 else None
     )
@@ -350,13 +427,26 @@ def enforce_connection_requirements(
 
     def _inject_parent(patch: dict) -> None:
         ptype = patch.get("type")
-        if (
-            preferred_deliverable is not None
-            and ptype in DELIVERABLE_CHILD_TYPES
-        ):
-            target_text = preferred_deliverable
-            target_type = "deliverable"
-        else:
+        target_text = None
+        target_type = None
+        if ptype in DELIVERABLE_CHILD_TYPES:
+            if preferred_deliverable is not None:
+                target_text = preferred_deliverable
+                target_type = "deliverable"
+            elif len(deliverable_texts) >= 2:
+                # Multi-deliverable case: pick the deliverable whose text
+                # has the strongest content-word overlap with the orphan
+                # text. Falls back to project when there's no clear
+                # winner — this preserves the pre-fix safe behavior for
+                # truly ambiguous cases.
+                match = _best_matching_deliverable(
+                    (patch.get("value") or {}).get("text", ""),
+                    deliverable_texts,
+                )
+                if match is not None:
+                    target_text = match
+                    target_type = "deliverable"
+        if target_text is None:
             target_text = meeting_project
             target_type = "project"
         patch.setdefault("connects_to", []).append(
