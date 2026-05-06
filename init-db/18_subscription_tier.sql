@@ -6,8 +6,11 @@
 -- downgrade transitions from the audit stream alone (without a
 -- separate webhook event).
 --
--- Free / Plus / Pro / Trial / Admin are the documented values today,
--- but stored as TEXT to keep new tiers cheap to add.
+-- Canonical values forwarded by GhostPour today are lowercase: free,
+-- plus, pro (sourced from UserRecord.tier / config/tiers.yml). Stored
+-- as TEXT to keep new tiers cheap to add. Note: trial is tracked
+-- separately as is_trial boolean upstream, and admin is a role not a
+-- tier — neither currently appears as an effective_tier value.
 --
 -- The index on subscription_tier supports cost-by-tier dashboards —
 -- answering questions like "how much are we paying for Free user
