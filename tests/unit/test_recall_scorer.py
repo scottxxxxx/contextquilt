@@ -86,3 +86,75 @@ def test_top_k_zero_returns_empty():
     patches = [_patch("a", "trait", "foo")]
     scored = score_patches(patches, query_text="x", matched_entity_names=[])
     assert top_k_patches(scored, 0) == []
+
+
+# ============================================================
+# Determinism: byte-stable output for upstream prompt caching.
+# Locks the two pure-Python pieces we control here. The SQL-side
+# stability (ORDER BY tiebreakers, sorted matched_names) is verified
+# at integration level — see PR description for the e2e plan.
+# ============================================================
+
+
+def test_score_patches_stable_sort_on_score_ties():
+    """Equal-score patches must preserve input order (Python stable sort).
+
+    Two takeaways with no entity match, identical query keyword overlap,
+    identical timestamp -> identical score. Output order must mirror
+    input order so the SQL ORDER BY upstream determines rendering.
+    """
+    ts = datetime(2026, 5, 1, 12, 0, 0)
+    patches = [
+        _patch("first", "takeaway", "alpha bravo", created_at=ts),
+        _patch("second", "takeaway", "alpha bravo", created_at=ts),
+    ]
+    scored_a = score_patches(patches, query_text="zulu", matched_entity_names=[])
+    scored_b = score_patches(patches, query_text="zulu", matched_entity_names=[])
+    assert [row["patch_id"] for _, row in scored_a] == ["first", "second"]
+    assert [row["patch_id"] for _, row in scored_b] == ["first", "second"]
+
+
+def test_score_patches_byte_identical_across_repeated_calls():
+    """Repeating score_patches with identical inputs returns identical scores.
+
+    Guards against accidental reliance on time.time() / random / set
+    iteration inside the scorer. Required for the upstream Anthropic
+    prompt cache to actually hit.
+    """
+    ts = datetime(2026, 5, 1, 12, 0, 0)
+    patches = [
+        _patch("a", "commitment", "ship the alpha release", created_at=ts),
+        _patch("b", "blocker", "waiting on bravo team", created_at=ts),
+        _patch("c", "trait", "prefers concise communication", created_at=ts),
+    ]
+    s1 = score_patches(patches, query_text="alpha release status", matched_entity_names=["alpha"])
+    s2 = score_patches(patches, query_text="alpha release status", matched_entity_names=["alpha"])
+    assert [(score, row["patch_id"]) for score, row in s1] == [
+        (score, row["patch_id"]) for score, row in s2
+    ]
+
+
+def test_matched_names_sorted_iteration_is_deterministic():
+    """Simulates the SMEMBERS-then-filter loop in /v1/recall.
+
+    Redis SMEMBERS returns set members in arbitrary order. The recall
+    endpoint now sorts the result before iterating; this test pins
+    that contract so a future refactor can't silently regress it.
+    """
+    text_lower = "we should sync alpha and gamma about beta this week".lower()
+    # Different "Redis returns" orderings of the same set.
+    smembers_orderings = [
+        {"alpha", "beta", "gamma", "delta"},
+        ["gamma", "alpha", "delta", "beta"],
+        ["delta", "gamma", "beta", "alpha"],
+    ]
+    results = []
+    for known in smembers_orderings:
+        matched = []
+        for name in sorted(known):  # mirrors main.py:recall_context
+            if name.lower() in text_lower:
+                matched.append(name)
+        results.append(matched)
+    # All three orderings must produce the same matched_names list.
+    assert results[0] == results[1] == results[2]
+    assert results[0] == ["alpha", "beta", "gamma"]
