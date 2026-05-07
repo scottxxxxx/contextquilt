@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, Union
+import hashlib
 import os
 import redis.asyncio as redis
 import json
@@ -179,6 +180,17 @@ class RecallResponse(BaseModel):
 # miss and slides the TTL forward on every hit, so a steady stream of recall
 # calls keeps the cache warm indefinitely. Prewarm uses the same value.
 ENTITY_INDEX_TTL = 7200  # 2 hours
+
+# Short-TTL cache on the rendered RecallResponse body (context, matched
+# entities, patch ids, comm style). Same (user_id + request shape) within
+# the TTL window returns byte-identical output, which is required for
+# upstream prompt caching (Anthropic 5-min cache_control) to actually
+# hit. Trade-off: cold-path patch writes that land mid-window won't be
+# visible to recall for up to RECALL_RENDER_CACHE_TTL seconds. Kept short
+# so meeting-level extractions surface quickly. If staleness becomes a
+# problem before this is merged, swap to a per-user version-bump key
+# that the worker invalidates on patch insert/update.
+RECALL_RENDER_CACHE_TTL = 30  # seconds
 
 # ============================================
 # i18n — Recall section labels by locale
@@ -461,6 +473,50 @@ async def recall_context(
     t0 = time.monotonic()
     timings = {}
 
+    # Render-cache lookup. Identical request shape within
+    # RECALL_RENDER_CACHE_TTL returns the previously rendered body so that
+    # upstream prompt caches (Anthropic cache_control) see a byte-stable
+    # prefix. timing_ms is rebuilt fresh on every call so the cache is
+    # observable in dashboards.
+    cache_key_payload = {
+        "text": request.text,
+        "metadata": request.metadata or {},
+        "max_hops": request.max_hops if request.max_hops is not None else 2,
+        "output_format": request.output_format or "flat",
+        "max_patches": request.max_patches if request.max_patches is not None else 15,
+    }
+    cache_key_hash = hashlib.sha256(
+        json.dumps(cache_key_payload, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    render_cache_key = f"recall:render:{user_id}:{cache_key_hash}"
+    cache_t = time.monotonic()
+    cached_blob = None
+    try:
+        cached_blob = await redis_client.get(render_cache_key)
+    except Exception:
+        # Cache is best-effort — never fail recall on Redis hiccups.
+        cached_blob = None
+    timings["render_cache_lookup_ms"] = round((time.monotonic() - cache_t) * 1000, 2)
+    if cached_blob:
+        try:
+            cached = json.loads(cached_blob)
+            timings["total"] = round((time.monotonic() - t0) * 1000, 2)
+            timings["render_cache_hit"] = 1
+            return RecallResponse(
+                context=cached["context"],
+                matched_entities=cached["matched_entities"],
+                matched_patch_ids=cached.get("matched_patch_ids", []),
+                patch_count=cached["patch_count"],
+                communication_style=cached.get("communication_style"),
+                timing_ms=timings,
+            )
+        except (json.JSONDecodeError, KeyError):
+            # Corrupt cache entry — drop it and fall through to a fresh build.
+            try:
+                await redis_client.delete(render_cache_key)
+            except Exception:
+                pass
+
     # Step 1: Find matching entities from Redis index (fast)
     entity_index_key = f"entity_index:{user_id}"
     known_entities = await redis_client.smembers(entity_index_key)
@@ -488,7 +544,13 @@ async def recall_context(
 
     matched_names = []
     if known_entities:
-        for name in known_entities:
+        # Sort the SMEMBERS result before iterating — Redis sets and Python sets
+        # have undefined iteration order, so leaving this unsorted produces
+        # different matched_names ordering across calls with identical inputs.
+        # That ordering propagates into entity-row fetches, the formatter
+        # header, and the LLM prompt prefix — breaking byte-stable prompt
+        # caching downstream (GP TestFlight, May 2026).
+        for name in sorted(known_entities):
             if name.lower() in text_lower:
                 matched_names.append(name)
 
@@ -523,6 +585,7 @@ async def recall_context(
             SELECT entity_id, name, entity_type, description
             FROM entities
             WHERE user_id = $1 AND name = ANY($2)
+            ORDER BY entity_id
             """,
             user_id, matched_names
         )
@@ -556,6 +619,7 @@ async def recall_context(
                 FROM graph g
                 JOIN entities e1 ON g.from_entity_id = e1.entity_id
                 JOIN entities e2 ON g.to_entity_id = e2.entity_id
+                ORDER BY g.from_entity_id, g.to_entity_id, g.relationship_type
                 """,
                 user_id, entity_ids, max_hops
             )
@@ -566,6 +630,9 @@ async def recall_context(
     subject_key = f"user:{user_id}"
 
     # Step 4a: Flat patch query (works for both V1 and V2 patches)
+    # cp.patch_id is the secondary sort everywhere — created_at ties on
+    # microsecond-equal inserts (workers batching) gave undefined order,
+    # which silently drove different rendered strings for identical inputs.
     if recall_project_id:
         fact_rows = await db_pool.fetch(
             """
@@ -575,7 +642,7 @@ async def recall_context(
             WHERE ps.subject_key = $1
               AND (cp.project_id = $2 OR cp.project_id IS NULL OR cp.patch_type IN ('trait', 'preference'))
               AND COALESCE(cp.status, 'active') = 'active'
-            ORDER BY cp.created_at DESC
+            ORDER BY cp.created_at DESC, cp.patch_id ASC
             LIMIT 20
             """,
             subject_key, recall_project_id
@@ -590,7 +657,7 @@ async def recall_context(
             WHERE ps.subject_key = $1
               AND (cp.project = $2 OR cp.project IS NULL OR cp.patch_type IN ('trait', 'preference'))
               AND COALESCE(cp.status, 'active') = 'active'
-            ORDER BY cp.created_at DESC
+            ORDER BY cp.created_at DESC, cp.patch_id ASC
             LIMIT 20
             """,
             subject_key, recall_project
@@ -607,7 +674,7 @@ async def recall_context(
             WHERE ps.subject_key = $1
               AND cp.patch_type IN ('trait', 'preference')
               AND COALESCE(cp.status, 'active') = 'active'
-            ORDER BY cp.created_at DESC
+            ORDER BY cp.created_at DESC, cp.patch_id ASC
             LIMIT 20
             """,
             subject_key
@@ -649,6 +716,7 @@ async def recall_context(
                 JOIN context_patches cp ON pc.from_patch_id = cp.patch_id
                 WHERE pc.to_patch_id = $1 AND pc.connection_role = 'parent'
                   AND COALESCE(cp.status, 'active') = 'active'
+                ORDER BY cp.created_at DESC, cp.patch_id ASC
                 """,
                 project_patch["patch_id"]
             )
@@ -775,13 +843,35 @@ async def recall_context(
     scored.sort(key=lambda t: (-t[0], -t[1]))
     matched_patch_ids = [pid for _, _, pid in scored]
 
+    patch_count = len(fact_rows) + len(rel_rows)
+
+    # Best-effort write to the render cache. Skip the empty-context case
+    # (cheap to recompute and we don't want to cache "the user has no
+    # entities yet" through transient prewarm gaps).
+    if context:
+        try:
+            await redis_client.set(
+                render_cache_key,
+                json.dumps({
+                    "context": context,
+                    "matched_entities": matched_names,
+                    "matched_patch_ids": matched_patch_ids,
+                    "patch_count": patch_count,
+                    "communication_style": comm_style,
+                }),
+                ex=RECALL_RENDER_CACHE_TTL,
+            )
+        except Exception:
+            pass
+
     timings["total"] = round((time.monotonic() - t0) * 1000, 2)
+    timings["render_cache_hit"] = 0
 
     return RecallResponse(
         context=context,
         matched_entities=matched_names,
         matched_patch_ids=matched_patch_ids,
-        patch_count=len(fact_rows) + len(rel_rows),
+        patch_count=patch_count,
         communication_style=comm_style,
         timing_ms=timings,
     )
