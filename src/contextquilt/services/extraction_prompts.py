@@ -194,7 +194,13 @@ CONNECTION RULES:
 
 PEOPLE ARE PATCHES:
 - Every person who owns a commitment, blocker, or decision MUST be a person patch — not just an entity.
-- Person patches carry context about their role on the project (e.g., "<Person> — <what they handle or own on this project>").
+- value.text is the person's NAME ONLY — a short identifier. NOT a sentence, NOT a description, NOT a bio. Their relationships to projects and items are captured by `connects_to` edges (works_on, owns) and by separate `role` patches; do NOT stuff that context into the name.
+
+  WRONG: {"type": "person", "value": {"text": "Ashby - customer success point of contact for post-implementation support"}}
+  WRONG: {"type": "person", "value": {"text": "Yardley is a developer working for Morgan Stanley on the Angular version of the SDK."}}
+  WRONG: {"type": "person", "value": {"text": "Speaker 5, AI tool operator and technical interview practice partner"}}
+  CORRECT: {"type": "person", "value": {"text": "Ashby"}}  — plus, optionally, a separate `role` patch describing "Customer success point of contact for post-implementation support" with a belongs_to connection to the project and a `describes` connection back to Ashby.
+
 - The person patch has connects_to entries pointing TO the things they own/work on — NOT the other way around.
 - Without person patches, the quilt can't answer "who is responsible for what?"
 
