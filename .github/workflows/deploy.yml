@@ -95,20 +95,20 @@ jobs:
             sudo bash -c "cd /opt/cq-ops && docker compose --project-name contextquilt -f docker-compose.prod.yml --env-file .env.prod up -d context-quilt context-quilt-worker"
 
             # --- Smoke test ---
-            # Give the API a few seconds to come up, then hit /health.
-            # If it doesn't return 200 within the budget, fail the deploy
-            # so the operator gets paged instead of a silent "merged but
-            # not actually live."
-            echo "Smoke-testing /health…"
-            HEALTH_URL="http://localhost:8000/health"
-            for i in $(seq 1 30); do
-              if curl -fsS -o /dev/null "$HEALTH_URL"; then
+            # The API container only `expose`s 8000 (no host port mapping
+            # — it's reachable through Bifrost on the proxy-tier network).
+            # So we smoke-test by execing curl inside the container itself,
+            # using its own loopback. Wait up to 90s because uvicorn cold
+            # start with 4 workers takes ~30s on this VM.
+            echo "Smoke-testing /health inside the container…"
+            for i in $(seq 1 90); do
+              if sudo docker exec contextquilt curl -fsS -o /dev/null http://localhost:8000/health 2>/dev/null; then
                 echo "  ✓ /health returned 200 after ${i}s"
                 break
               fi
-              if [ "$i" -eq 30 ]; then
-                echo "ERROR: /health did not return 200 within 30s"
-                sudo docker logs --tail=50 contextquilt || true
+              if [ "$i" -eq 90 ]; then
+                echo "ERROR: /health did not return 200 within 90s"
+                sudo docker logs --tail=80 contextquilt || true
                 exit 1
               fi
               sleep 1
