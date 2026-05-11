@@ -274,6 +274,90 @@ _PERSON_NAME_PROSE_SEPARATORS = (
 )
 
 
+def drop_placeholder_and_self_person_patches(
+    content: dict, user_label: str | None = None
+) -> dict:
+    """Drop `person` patches whose value.text is a diarization placeholder
+    (``"Speaker 5"``, ``"Unknown"``) or matches the (you) speaker
+    themselves.
+
+    Placeholders shouldn't become person entities — the LLM occasionally
+    emits them when a transcript only has diarized labels with no real
+    names. Self-reference person patches (e.g. ``"Scott"`` in Scott's
+    quilt) are also wrong: the (you) speaker's attribution is implicit
+    via subject_key, so a third-party-style person patch about themselves
+    is a duplicate that confuses recall and clutters the dashboard.
+
+    ``enforce_person_ownership`` already guards against creating these
+    via its safety net (via ``_is_real_person_owner``). This sanitizer
+    catches the case where the LLM emitted the placeholder/self-reference
+    person patch *directly* in its output, bypassing the enforcer.
+
+    Behavior:
+      - Detects placeholders by lowercase prefix
+        (``_OWNER_PLACEHOLDER_PREFIXES``).
+      - Detects self-reference by case-insensitive equality of trimmed
+        ``value.text`` to ``user_label`` (when provided).
+      - Removes matching patches from ``content["patches"]`` in place.
+      - Removes any other patch's ``connects_to`` entry whose
+        ``target_text`` referenced a dropped name (avoids dangling
+        edges).
+
+    Pass ``user_label=None`` to skip the self-reference check (e.g. when
+    the (you) speaker isn't known at extraction time).
+    """
+    patches = content.get("patches") or []
+    if not patches:
+        return content
+
+    drop_names: set[str] = set()
+    kept: list[dict] = []
+    user_label_lower = (
+        user_label.strip().lower() if isinstance(user_label, str) and user_label.strip()
+        else None
+    )
+
+    for patch in patches:
+        if patch.get("type") != "person":
+            kept.append(patch)
+            continue
+        value = patch.get("value")
+        text = value.get("text") if isinstance(value, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            kept.append(patch)
+            continue
+
+        low = text.strip().lower()
+        is_placeholder = any(low.startswith(p) for p in _OWNER_PLACEHOLDER_PREFIXES)
+        is_self = user_label_lower is not None and low == user_label_lower
+        if is_placeholder or is_self:
+            drop_names.add(text.strip().lower())
+            continue
+        kept.append(patch)
+
+    if not drop_names:
+        return content
+
+    content["patches"] = kept
+
+    # Strip connects_to entries pointing at the dropped names (would
+    # otherwise produce dangling edges during connection resolution).
+    for patch in kept:
+        connects = patch.get("connects_to")
+        if not isinstance(connects, list):
+            continue
+        patch["connects_to"] = [
+            c
+            for c in connects
+            if not (
+                isinstance(c, dict)
+                and isinstance(c.get("target_text"), str)
+                and c["target_text"].strip().lower() in drop_names
+            )
+        ]
+    return content
+
+
 def strip_prose_from_person_names(content: dict) -> dict:
     """Truncate trailing prose from person-patch value.text.
 
