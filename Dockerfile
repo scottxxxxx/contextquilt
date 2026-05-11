@@ -63,6 +63,12 @@ COPY --from=builder /root/.local /home/contextquilt/.local
 
 # Copy application code
 COPY --chown=contextquilt:contextquilt src/ ./src/
+# scripts/ and init-db/ ride along so the migration runner
+# (scripts/run_migrations.py) and one-shot operator scripts can be
+# invoked via `docker compose run` against the deployed image without
+# needing the source tree mounted in.
+COPY --chown=contextquilt:contextquilt scripts/ ./scripts/
+COPY --chown=contextquilt:contextquilt init-db/ ./init-db/
 COPY --chown=contextquilt:contextquilt README.md .
 
 # Switch to non-root user
