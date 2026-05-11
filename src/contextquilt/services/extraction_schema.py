@@ -250,6 +250,74 @@ def strip_owner_on_self_typed_patches(content: dict) -> dict:
     return content
 
 
+# Tokens that, when they appear with spaces around them inside a
+# person-patch value.text, mark the boundary between the name and a
+# trailing description the LLM should not have included. The order
+# doesn't matter (we use the earliest match), but the set is kept
+# conservative so multi-word names like "Bramble Martinez" survive.
+#
+# Notably absent: " and " (occurs in "Arvind and Family"-style legit
+# names — handled by split_compound_person_patches), bare hyphens
+# without surrounding spaces (preserves "Jean-Luc", "O'Brien-Mayfield"),
+# and " of " (preserves "Catherine of Aragon"-style; not common in our
+# data but cheap to keep).
+_PERSON_NAME_PROSE_SEPARATORS = (
+    " — ",   # em-dash with spaces (the worst offender — prompt example used this)
+    " – ",   # en-dash with spaces
+    " - ",   # ASCII hyphen with spaces ("Redfern - technical lead and primary presenter")
+    ", ",    # ("Speaker 5, AI tool operator and ...")
+    " is ",  # ("Yardley is a developer working for ...")
+    " was ",
+    " has ",
+    " will ",
+    " who ",
+)
+
+
+def strip_prose_from_person_names(content: dict) -> dict:
+    """Truncate trailing prose from person-patch value.text.
+
+    The LLM occasionally writes a sentence into a person patch's name
+    field (``"Ashby - customer success point of contact for ..."``)
+    when the prompt asked for a name. The dashboard then renders that
+    sentence as the person's display name and the entity index can't
+    match it against future mentions of just "Ashby".
+
+    This sanitizer finds the FIRST occurrence of any of the
+    _PERSON_NAME_PROSE_SEPARATORS in value.text and truncates to the
+    prefix. Conservative: only acts when a separator is present, never
+    blindly truncates by length. If the resulting prefix is empty or
+    shorter than 2 chars, the original text is kept (don't corrupt
+    data we can't confidently fix).
+
+    Mutates content in place. Same belt-and-suspenders pattern as
+    strip_owner_on_self_typed_patches.
+    """
+    for patch in content.get("patches") or []:
+        if patch.get("type") != "person":
+            continue
+        value = patch.get("value")
+        if not isinstance(value, dict):
+            continue
+        text = value.get("text")
+        if not isinstance(text, str):
+            continue
+
+        cut: int | None = None
+        for sep in _PERSON_NAME_PROSE_SEPARATORS:
+            idx = text.find(sep)
+            if idx >= 0 and (cut is None or idx < cut):
+                cut = idx
+        if cut is None:
+            continue
+
+        cleaned = text[:cut].strip()
+        if len(cleaned) < 2:
+            continue
+        value["text"] = cleaned
+    return content
+
+
 # Types that only make sense attached to a project the (you) speaker owns.
 # The quilt is user-centric — patches must anchor to something the user
 # cares about. A decision/commitment/blocker/takeaway/role with no project
