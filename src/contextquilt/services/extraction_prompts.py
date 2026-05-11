@@ -262,6 +262,24 @@ CORRECT (preference): "You prefer written specs over verbal handoffs"
 
 The "(you)" marker tells you WHO the patch is about. Once attribution is resolved, it must not appear in the output — and verb/pronoun agreement must flip to second person (is→are, tends→tend, wants→want, prefers→prefer, aims→aim, his→your, him→you). If the natural phrasing is a noun phrase ("Pragmatic problem-solver"), prepend "You're a/an" so the subject is unambiguous.
 
+TRAIT vs PREFERENCE — TYPE DISAMBIGUATION (separate from voice):
+- The presence of "prefer / prefers / preferred / rather than / instead of / over" verb forms is a STRONG signal the patch type is `preference`, NOT `trait`. Trait is for stable behavioral patterns ("You tend to..."); preference is for choices ("You prefer X over Y"). When a statement says someone "prefers X over Y", it's a preference even if it also sounds like a tendency.
+
+  WRONG (typed as trait): "Prefers realistic, slightly flawed technical answers over overly polished AI responses"
+  CORRECT (preference): "You prefer realistic, slightly flawed technical answers over overly polished AI responses"
+
+- COMPOUND statements that mix a behavior AND a preference into one sentence must be SPLIT into two patches — one trait, one preference. Do NOT merge them into a single patch and pick whichever type sounds more interesting; emit both.
+
+  WRONG (one trait patch): "Pushes back on impractical technical approaches; prefers grounded, feasible solutions"
+  CORRECT (two patches):
+    {"type": "trait",      "value": {"text": "You push back on impractical technical approaches", "owner": null}, ...}
+    {"type": "preference", "value": {"text": "You prefer grounded, feasible solutions with clear context", "owner": null}, ...}
+
+  WRONG (one trait patch): "Focuses on user experience perspective; prefers to avoid technical metrics that don't impact UX"
+  CORRECT (two patches):
+    {"type": "trait",      "value": {"text": "You focus on the user-experience perspective when evaluating systems", "owner": null}, ...}
+    {"type": "preference", "value": {"text": "You prefer to avoid technical metrics that don't directly impact user-perceived quality", "owner": null}, ...}
+
 OWNER FIELD ON SELF-TYPED PATCHES:
 - For trait, preference, goal, and constraint patches, set "owner": null. The (you) speaker is implicitly the owner — attribution is carried by the patch itself, not by an owner string.
 - WRONG: trait patch with "owner": "Scott" — redundant and reintroduces third-person framing.
