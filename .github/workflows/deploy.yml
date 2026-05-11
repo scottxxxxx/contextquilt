@@ -71,9 +71,13 @@ jobs:
             sudo git reset --hard origin/main
 
             # --- Pull image ---
+            # /opt/cq-ops is mode 700 root:root — the compose file and
+            # .env.prod live there with restricted perms. Every compose
+            # invocation runs through `sudo bash -c "cd /opt/cq-ops &&
+            # ..."` so the working directory + reads happen as root.
+            # Matches the manual deploy recipe in contextquilt-ops/CLAUDE.md.
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            cd /opt/cq-ops
-            sudo docker compose --project-name contextquilt -f docker-compose.prod.yml --env-file .env.prod pull
+            sudo bash -c "cd /opt/cq-ops && docker compose --project-name contextquilt -f docker-compose.prod.yml --env-file .env.prod pull"
 
             # --- Migrations BEFORE app restart ---
             # The new image is on disk after `compose pull`. Run the
@@ -85,17 +89,10 @@ jobs:
             # Idempotent: runner skips already-applied migrations by
             # filename + sha256 from the schema_migrations table.
             echo "Running migrations…"
-            sudo docker compose --project-name contextquilt \
-              -f docker-compose.prod.yml --env-file .env.prod \
-              run --rm --no-deps \
-              --entrypoint python \
-              context-quilt \
-              scripts/run_migrations.py
+            sudo bash -c "cd /opt/cq-ops && docker compose --project-name contextquilt -f docker-compose.prod.yml --env-file .env.prod run --rm --no-deps --entrypoint python context-quilt scripts/run_migrations.py"
 
             # --- Restart app + worker with new image and migrated schema ---
-            sudo docker compose --project-name contextquilt \
-              -f docker-compose.prod.yml --env-file .env.prod \
-              up -d context-quilt context-quilt-worker
+            sudo bash -c "cd /opt/cq-ops && docker compose --project-name contextquilt -f docker-compose.prod.yml --env-file .env.prod up -d context-quilt context-quilt-worker"
 
             # --- Smoke test ---
             # Give the API a few seconds to come up, then hit /health.
@@ -118,10 +115,13 @@ jobs:
             done
 
             # --- MCP stack (separate compose + env file) ---
-            if [ -f /opt/cq-ops/docker-compose.mcp.yml ] && [ -f /opt/cq-ops/.env.mcp ]; then
+            # Same `sudo bash -c` pattern as the main stack — the test
+            # itself must run under sudo because /opt/cq-ops is root-only,
+            # so the user-side `[ -f ... ]` would always be false.
+            if sudo test -f /opt/cq-ops/docker-compose.mcp.yml && sudo test -f /opt/cq-ops/.env.mcp; then
               echo "Syncing MCP stack…"
-              sudo docker compose -f /opt/cq-ops/docker-compose.mcp.yml --env-file /opt/cq-ops/.env.mcp pull
-              sudo docker compose -f /opt/cq-ops/docker-compose.mcp.yml --env-file /opt/cq-ops/.env.mcp up -d
+              sudo bash -c "cd /opt/cq-ops && docker compose -f docker-compose.mcp.yml --env-file .env.mcp pull"
+              sudo bash -c "cd /opt/cq-ops && docker compose -f docker-compose.mcp.yml --env-file .env.mcp up -d"
             fi
 
             sudo docker image prune -af --filter "until=24h"
