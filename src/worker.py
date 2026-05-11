@@ -10,38 +10,42 @@ import asyncio
 import json
 import os
 import sys
-import structlog
-import redis.asyncio as redis
-import asyncpg
-from typing import Dict, Any, List
-from datetime import datetime
 import uuid
+from datetime import datetime
+from typing import Any
+
+import asyncpg
+import redis.asyncio as redis
+import structlog
 
 # Add src to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from contextquilt.services.llm_client import LLMClient
+from contextquilt.gateway.extraction import classify_fact
 from contextquilt.services.extraction_prompts import (
-    MEETING_SUMMARY_SYSTEM,
-    CONVERSATION_SYSTEM,
-    TRACE_SYSTEM,
     COMMUNICATION_PROFILE_SYSTEM,
+    CONVERSATION_SYSTEM,
+    MEETING_SUMMARY_SYSTEM,
+    TRACE_SYSTEM,
 )
 from contextquilt.services.extraction_schema import (
     EXTRACTION_SCHEMA,
-    enforce_owner_gate,
     enforce_connection_requirements,
+    enforce_owner_gate,
     enforce_person_ownership,
     normalize_owner_in_transcript,
     sanitize_you_marker_from_patches,
     strip_ephemeral_fields,
     strip_owner_on_self_typed_patches,
+    strip_prose_from_person_names,
+)
+from contextquilt.services.llm_client import LLMClient
+from contextquilt.services.schema_prompt_builder import (
+    build_output_schema as build_schema_output_schema,
 )
 from contextquilt.services.schema_prompt_builder import (
     build_prompt as build_schema_prompt,
-    build_output_schema as build_schema_output_schema,
 )
-from contextquilt.gateway.extraction import classify_fact
 
 # Configure Logging
 logger = structlog.get_logger()
@@ -90,7 +94,7 @@ KNOWN_CONTEXT_WINDOWS = {
 DEFAULT_CONTEXT_WINDOW = 128000
 
 
-def batch_messages(messages: List[Dict], batch_size: int = 10) -> List[List[Dict]]:
+def batch_messages(messages: list[dict], batch_size: int = 10) -> list[list[dict]]:
     """Batch long conversations into chunks to prevent LLM timeout."""
     if len(messages) <= batch_size:
         return [messages]
@@ -104,7 +108,7 @@ def batch_messages(messages: List[Dict], batch_size: int = 10) -> List[List[Dict
 async def store_facts(
     db,
     user_id: str,
-    facts: List[Dict[str, Any]],
+    facts: list[dict[str, Any]],
     source_prompt: str,
     app_id: str | None = None,
     timestamp: str | None = None,
@@ -197,7 +201,7 @@ async def store_facts(
 async def store_action_items(
     db,
     user_id: str,
-    action_items: List[Dict[str, Any]],
+    action_items: list[dict[str, Any]],
     app_id: str | None = None,
     timestamp: str | None = None,
     project: str | None = None,
@@ -267,7 +271,7 @@ async def store_action_items(
 async def store_connected_patches(
     db,
     user_id: str,
-    patches: List[Dict[str, Any]],
+    patches: list[dict[str, Any]],
     source_prompt: str,
     app_id: str | None = None,
     timestamp: str | None = None,
@@ -692,7 +696,7 @@ class ColdPathWorker:
         self.redis = redis.from_url(REDIS_URL, decode_responses=True)
         self.db = await asyncpg.connect(DATABASE_URL)
         self.llm = LLMClient()  # Default LLM client (server's own key)
-        self._app_llm_cache: Dict[str, LLMClient] = {}  # Per-app BYOK clients
+        self._app_llm_cache: dict[str, LLMClient] = {}  # Per-app BYOK clients
 
         # Get context window for budget calculation
         model_name = self.llm.model
@@ -908,7 +912,7 @@ class ColdPathWorker:
             if cursor == b"0" or cursor == 0:
                 break
 
-    async def _buffer_event(self, payload: Dict[str, Any], origin_id: str, origin_type: str):
+    async def _buffer_event(self, payload: dict[str, Any], origin_id: str, origin_type: str):
         """Add an event to an origin's queue. Check budget trigger."""
         queue_key = f"origin_queue:{payload.get('user_id', 'unknown')}:{origin_type}:{origin_id}"
         event_json = json.dumps(payload)
@@ -995,7 +999,7 @@ class ColdPathWorker:
         }
         await self.handle_meeting_summary(consolidated_payload)
 
-    async def process_task(self, payload: Dict[str, Any]):
+    async def process_task(self, payload: dict[str, Any]):
         """Router for different task types. Buffers events with origin_id."""
         task_type = payload.get("interaction_type") or payload.get("type")
         user_id = payload.get("user_id")
@@ -1073,7 +1077,7 @@ class ColdPathWorker:
 
     async def _resolve_extraction_prompt(
         self, app_id: str | None
-    ) -> tuple[str, Dict[str, Any]]:
+    ) -> tuple[str, dict[str, Any]]:
         """Pick the system prompt + structured-output schema for this app.
 
         If the app has a registered manifest in `app_schemas`, generate
@@ -1264,7 +1268,7 @@ class ColdPathWorker:
         except Exception as e:
             logger.warning("user_project_connections_failed", error=str(e), user_id=user_id)
 
-    async def handle_active_learning(self, payload: Dict[str, Any]):
+    async def handle_active_learning(self, payload: dict[str, Any]):
         """Active Learning: Agent explicitly saved a fact. Direct write, no LLM needed."""
         fact = payload.get("fact")
         category = payload.get("category")
@@ -1331,7 +1335,7 @@ class ColdPathWorker:
 
         await self.hydrate_cache(user_id)
 
-    async def handle_meeting_summary(self, payload: Dict[str, Any]):
+    async def handle_meeting_summary(self, payload: dict[str, Any]):
         """
         Meeting Summary: Extract facts and action items from a meeting summary.
         Primary use case for ShoulderSurf via CloudZap.
@@ -1518,6 +1522,7 @@ class ColdPathWorker:
                 )
             sanitize_you_marker_from_patches(response.content)
             strip_owner_on_self_typed_patches(response.content)
+            strip_prose_from_person_names(response.content)
             strip_ephemeral_fields(response.content)
 
             timestamp = payload.get("timestamp")
@@ -1718,7 +1723,7 @@ class ColdPathWorker:
         except Exception as e:
             logger.warning("comm_profile_failed", user_id=user_id, error=str(e))
 
-    async def handle_passive_learning(self, payload: Dict[str, Any]):
+    async def handle_passive_learning(self, payload: dict[str, Any]):
         """Passive Learning: Analyze agent execution trace."""
         trace = payload.get("execution_trace")
         if not trace:
@@ -1752,7 +1757,7 @@ class ColdPathWorker:
         except Exception as e:
             logger.error("trace_analysis_failed", error=str(e))
 
-    async def handle_chat_log(self, payload: Dict[str, Any]):
+    async def handle_chat_log(self, payload: dict[str, Any]):
         """Analyze conversation log. Batches long conversations."""
         messages = payload.get("messages")
         if not messages:
