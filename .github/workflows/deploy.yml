@@ -1,0 +1,127 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lowercase image name
+        run: echo "IMAGE_NAME=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      # Deploy step is operator-specific — it expects secrets pointing at
+      # a host running docker-compose.prod.yml from /opt/cq-ops. Forks
+      # won't have these and the step skips cleanly.
+      - name: Deploy to GCP via SSH
+        if: ${{ vars.DEPLOY_ENABLED == 'true' }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.GCP_HOST }}
+          username: ${{ secrets.GCP_USERNAME }}
+          key: ${{ secrets.GCP_SSH_KEY }}
+          passphrase: ${{ secrets.GCP_SSH_PASSPHRASE }}
+          script: |
+            set -euo pipefail
+
+            cd /opt/contextquilt
+
+            # --- Repo sync ---
+            # /opt/contextquilt must be a checked-out git repo. If it
+            # isn't (drift recovery), initialize it before pulling.
+            if [ ! -d .git ]; then
+              echo "WARN: /opt/contextquilt is not a git repo — bootstrapping"
+              sudo git init
+              sudo git remote add origin https://github.com/${{ github.repository }}.git \
+                || sudo git remote set-url origin https://github.com/${{ github.repository }}.git
+            fi
+
+            sudo git fetch origin main
+            # Hard reset to origin/main to guarantee on-disk init-db/ and
+            # scripts/ match the commit that triggered this deploy.
+            # Tracked files get overwritten; .gitignored files (.env.prod,
+            # .env.mcp) survive.
+            sudo git reset --hard origin/main
+
+            # --- Pull image ---
+            echo "${{ secrets.GITHUB_TOKEN }}" | sudo docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            cd /opt/cq-ops
+            sudo docker compose --project-name contextquilt -f docker-compose.prod.yml --env-file .env.prod pull
+
+            # --- Migrations BEFORE app restart ---
+            # The new image is on disk after `compose pull`. Run the
+            # tracked migration runner inside a one-shot container from
+            # that new image, against the already-running cq-postgres.
+            # This must succeed before we restart the app/worker, so the
+            # new code never sees a pre-migration schema.
+            #
+            # Idempotent: runner skips already-applied migrations by
+            # filename + sha256 from the schema_migrations table.
+            echo "Running migrations…"
+            sudo docker compose --project-name contextquilt \
+              -f docker-compose.prod.yml --env-file .env.prod \
+              run --rm --no-deps \
+              --entrypoint python \
+              context-quilt \
+              scripts/run_migrations.py
+
+            # --- Restart app + worker with new image and migrated schema ---
+            sudo docker compose --project-name contextquilt \
+              -f docker-compose.prod.yml --env-file .env.prod \
+              up -d context-quilt context-quilt-worker
+
+            # --- Smoke test ---
+            # Give the API a few seconds to come up, then hit /health.
+            # If it doesn't return 200 within the budget, fail the deploy
+            # so the operator gets paged instead of a silent "merged but
+            # not actually live."
+            echo "Smoke-testing /health…"
+            HEALTH_URL="http://localhost:8000/health"
+            for i in $(seq 1 30); do
+              if curl -fsS -o /dev/null "$HEALTH_URL"; then
+                echo "  ✓ /health returned 200 after ${i}s"
+                break
+              fi
+              if [ "$i" -eq 30 ]; then
+                echo "ERROR: /health did not return 200 within 30s"
+                sudo docker logs --tail=50 contextquilt || true
+                exit 1
+              fi
+              sleep 1
+            done
+
+            # --- MCP stack (separate compose + env file) ---
+            if [ -f /opt/cq-ops/docker-compose.mcp.yml ] && [ -f /opt/cq-ops/.env.mcp ]; then
+              echo "Syncing MCP stack…"
+              sudo docker compose -f /opt/cq-ops/docker-compose.mcp.yml --env-file /opt/cq-ops/.env.mcp pull
+              sudo docker compose -f /opt/cq-ops/docker-compose.mcp.yml --env-file /opt/cq-ops/.env.mcp up -d
+            fi
+
+            sudo docker image prune -af --filter "until=24h"
