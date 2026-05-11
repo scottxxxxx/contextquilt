@@ -126,7 +126,15 @@ jobs:
             # Sudo test because /opt/cq-ops is mode 700.
             if sudo test -f /opt/cq-ops/docker-compose.mcp.yml && sudo test -f /opt/cq-ops/.env.mcp; then
               echo "Syncing MCP stack…"
-              sudo bash -c "cd /opt/cq-ops && docker compose --project-name contextquilt -f docker-compose.mcp.yml --env-file .env.mcp pull"
+              # MCP's cq-mcp + cq-mcp-worker use the same GHCR image as
+              # the main stack — already pulled (and rate-limit ticked)
+              # by the `compose pull` above. The MCP-side pull is just
+              # a manifest HEAD against that same image plus refreshes
+              # on the public postgres/redis tags. Use
+              # --ignore-pull-failures so a transient GHCR auth/rate-
+              # limit blip doesn't fail the whole deploy — the local
+              # image is current either way, and `up -d` will use it.
+              sudo bash -c "cd /opt/cq-ops && docker compose --project-name contextquilt -f docker-compose.mcp.yml --env-file .env.mcp pull --ignore-pull-failures"
               sudo bash -c "cd /opt/cq-ops && docker compose --project-name contextquilt -f docker-compose.mcp.yml --env-file .env.mcp up -d"
             fi
 
