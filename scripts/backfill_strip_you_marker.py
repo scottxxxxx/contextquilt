@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import copy
 import json
 import os
 import sys
@@ -68,12 +69,17 @@ UPDATE context_patches
 
 
 def _sanitize_value(value: dict) -> dict | None:
-    """Return the cleaned value iff the sanitizer would change it,
-    otherwise None."""
-    content = {"patches": [{"value": value}]}
+    """Return a cleaned copy of `value` iff the sanitizer would change
+    it, otherwise None.
+
+    Note: sanitize_you_marker_from_patches mutates the passed dict in
+    place. We deepcopy before sanitizing so the original `value` (used
+    for the audit print loop) stays intact and the comparison is
+    meaningful.
+    """
+    new_value = copy.deepcopy(value)
+    content = {"patches": [{"value": new_value}]}
     sanitize_you_marker_from_patches(content)
-    new_value = content["patches"][0]["value"]
-    # Compare on the two fields the sanitizer touches.
     if (new_value.get("text") != value.get("text")) or (
         new_value.get("owner") != value.get("owner")
     ):
