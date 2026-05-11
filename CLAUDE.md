@@ -46,6 +46,21 @@ The worker processes transcripts/conversations through a single LLM call that ex
 
 The extraction prompt uses the `(you)` speaker marker convention to identify the app user in diarized transcripts, enabling accurate trait attribution and project ownership.
 
+After the LLM call, the worker runs a fixed chain of sanitizers (`src/contextquilt/services/extraction_schema.py`, invoked from `src/worker.py`) that enforce post-extraction invariants the LLM is unreliable about:
+
+1. `enforce_owner_gate`, `enforce_connection_requirements`, `enforce_person_ownership` — structural enforcers (drop ungated patches, require parent connections, synthesize missing `person + owns` edges for named action owners)
+2. `sanitize_you_marker_from_patches` — strip the literal `(you)` token from `value.text` / `value.owner`
+3. `strip_owner_on_self_typed_patches` — force `owner=null` on trait/preference/goal/constraint
+4. `strip_prose_from_person_names` — `person.value.text` must be a name, not a sentence
+5. `drop_placeholder_and_self_person_patches` — drop diarization placeholders (`"Speaker N"`) and (you)-speaker self-references
+6. `strip_ephemeral_fields` — final cleanup
+
+If you add a new sanitizer, slot it in by editing this chain. Each sanitizer mutates `content` in place and is independently unit-tested under `tests/unit/`. The corresponding backfill scripts in `scripts/backfill_*.py` reuse the live sanitizer rather than duplicating logic — write new ones the same way.
+
+### Database Migrations
+
+Migrations live in `init-db/*.sql` and are tracked in a `schema_migrations` table by filename + sha256. The runner is `scripts/run_migrations.py`, invoked by `.github/workflows/deploy.yml` from a one-shot container built from the new image. Already-applied files are skipped; editing an applied file is detected as drift and aborts the deploy. To change behavior, add a new file — never rewrite history.
+
 ### Recall (Hot Path)
 
 `POST /v1/recall` performs entity matching + graph traversal to return relevant context:
