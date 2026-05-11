@@ -15,5 +15,6 @@ COPY src src
 # Set python path
 ENV PYTHONPATH=/app/src
 
-# Run the server
-CMD ["python", "-m", "contextquilt.mcp_server.server"]
+# Run the server (matches docker-compose.yml command override; ensures the
+# image is correct even when run standalone without compose).
+CMD ["python", "src/mcp_server.py", "--transport", "sse", "--port", "8001"]
