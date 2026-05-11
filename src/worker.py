@@ -30,6 +30,7 @@ from contextquilt.services.extraction_prompts import (
 )
 from contextquilt.services.extraction_schema import (
     EXTRACTION_SCHEMA,
+    drop_placeholder_and_self_person_patches,
     enforce_connection_requirements,
     enforce_owner_gate,
     enforce_person_ownership,
@@ -1523,6 +1524,9 @@ class ColdPathWorker:
             sanitize_you_marker_from_patches(response.content)
             strip_owner_on_self_typed_patches(response.content)
             strip_prose_from_person_names(response.content)
+            drop_placeholder_and_self_person_patches(
+                response.content, user_label=user_label
+            )
             strip_ephemeral_fields(response.content)
 
             timestamp = payload.get("timestamp")
