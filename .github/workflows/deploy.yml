@@ -115,13 +115,19 @@ jobs:
             done
 
             # --- MCP stack (separate compose + env file) ---
-            # Same `sudo bash -c` pattern as the main stack — the test
-            # itself must run under sudo because /opt/cq-ops is root-only,
-            # so the user-side `[ -f ... ]` would always be false.
+            # `--project-name contextquilt` matches the project the running
+            # MCP containers were created under (when docker-compose.mcp.yml
+            # lived at /opt/contextquilt/). Without it, `cd /opt/cq-ops`
+            # makes compose default to project=cq-ops and try to create
+            # NEW containers with the same names as the existing MCP ones,
+            # which fails on name conflict. The cq-mcp + cq-mcp-worker
+            # services use the same image as the main stack, so this
+            # pulls/restarts MCP on every deploy — historical behavior.
+            # Sudo test because /opt/cq-ops is mode 700.
             if sudo test -f /opt/cq-ops/docker-compose.mcp.yml && sudo test -f /opt/cq-ops/.env.mcp; then
               echo "Syncing MCP stack…"
-              sudo bash -c "cd /opt/cq-ops && docker compose -f docker-compose.mcp.yml --env-file .env.mcp pull"
-              sudo bash -c "cd /opt/cq-ops && docker compose -f docker-compose.mcp.yml --env-file .env.mcp up -d"
+              sudo bash -c "cd /opt/cq-ops && docker compose --project-name contextquilt -f docker-compose.mcp.yml --env-file .env.mcp pull"
+              sudo bash -c "cd /opt/cq-ops && docker compose --project-name contextquilt -f docker-compose.mcp.yml --env-file .env.mcp up -d"
             fi
 
             sudo docker image prune -af --filter "until=24h"
