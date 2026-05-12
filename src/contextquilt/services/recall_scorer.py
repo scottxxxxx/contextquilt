@@ -15,8 +15,9 @@ a few hundred patches.
 from __future__ import annotations
 
 import json
+import math
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 
@@ -37,6 +38,27 @@ TYPE_PRIORITY: Dict[str, int] = {
     "preference": 10,
     "takeaway": 5,
 }
+
+
+# Self-typed (you)-speaker patches that get a staleness multiplier.
+# Matches the FRESHNESS_TRACKED_TYPES set in src/worker.py:decay_loop
+# and the partial index in init-db/20_preference_freshness.sql.
+FRESHNESS_TRACKED_TYPES = frozenset({"trait", "preference", "goal", "constraint"})
+
+# Exponential time constant for the staleness multiplier. A patch
+# re-observed today scores at multiplier=1.0; the multiplier
+# decays as exp(-days_stale / FRESHNESS_TIME_CONSTANT_DAYS), floored
+# at FRESHNESS_FLOOR so a still-active-but-aging preference never
+# disappears entirely from recall.
+#
+#   0 days   → 1.00
+#   90 days  → 0.78
+#   180 days → 0.61
+#   365 days → 0.37
+#   540 days → 0.30 (floor) — by which point the decay worker
+#              archives the patch under the 540d TTL anyway.
+FRESHNESS_TIME_CONSTANT_DAYS = 365.0
+FRESHNESS_FLOOR = 0.30
 
 
 # Stopwords filtered out of query keyword matching. Kept small — we want
@@ -94,8 +116,7 @@ def _patch_owner(row: Any) -> str:
     return ""
 
 
-def _created_at(row: Any) -> float:
-    ts = row.get("created_at") if isinstance(row, dict) else getattr(row, "created_at", None)
+def _to_epoch(ts: Any) -> float:
     if not ts:
         return 0.0
     if isinstance(ts, (int, float)):
@@ -108,6 +129,38 @@ def _created_at(row: Any) -> float:
     if isinstance(ts, datetime):
         return ts.timestamp()
     return 0.0
+
+
+def _created_at(row: Any) -> float:
+    ts = row.get("created_at") if isinstance(row, dict) else getattr(row, "created_at", None)
+    return _to_epoch(ts)
+
+
+def _last_observed_at(row: Any) -> float:
+    """Freshness anchor for self-typed patches. Falls back to created_at
+    so pre-migration rows behave sensibly even if the backfill hasn't
+    landed yet."""
+    ts = row.get("last_observed_at") if isinstance(row, dict) else getattr(row, "last_observed_at", None)
+    epoch = _to_epoch(ts)
+    if epoch > 0.0:
+        return epoch
+    return _created_at(row)
+
+
+def _freshness_multiplier(patch_type: str, last_observed: float, now: float) -> float:
+    """Multiplicative staleness penalty for self-typed patches.
+
+    Returns 1.0 for any patch type outside FRESHNESS_TRACKED_TYPES,
+    or for any patch missing a timestamp. Otherwise returns
+    `max(FRESHNESS_FLOOR, exp(-days_stale / FRESHNESS_TIME_CONSTANT_DAYS))`.
+    """
+    if patch_type not in FRESHNESS_TRACKED_TYPES:
+        return 1.0
+    if last_observed <= 0.0 or now <= last_observed:
+        return 1.0
+    days_stale = (now - last_observed) / 86400.0
+    decayed = math.exp(-days_stale / FRESHNESS_TIME_CONSTANT_DAYS)
+    return max(FRESHNESS_FLOOR, decayed)
 
 
 def score_patches(
@@ -124,17 +177,32 @@ def score_patches(
       entity-match boost             +100 per matched entity appearing in text
       query keyword overlap          +15 per overlapping keyword (capped at 60)
       recency (0..10)                +10 for newest, decaying to 0 as rows age
+      freshness multiplier           applied last for trait/preference/goal/
+                                     constraint based on last_observed_at —
+                                     scales the running total down to a
+                                     floor of FRESHNESS_FLOOR for very stale
+                                     self-typed patches.
     """
     query_words = set(_keywords(query_text))
     entity_names_lower = [n.lower() for n in matched_entity_names if n]
 
-    # Find the freshest timestamp in the set for normalized recency scoring
+    # Recency normalization uses last_observed_at when available
+    # (freshness anchor for self-typed patches), falling back to
+    # created_at for non-freshness-tracked types.
     newest = 0.0
     oldest = 0.0
-    timestamps = [_created_at(r) for r in patches]
+    timestamps = [_last_observed_at(r) for r in patches]
     if timestamps:
         newest = max(timestamps)
         oldest = min(timestamps)
+
+    # Bucket `now` to the UTC day so back-to-back recall calls produce
+    # byte-identical scores. Upstream prompt caching (RECALL_RENDER_CACHE_TTL
+    # in main.py + Anthropic cache_control) depends on the rendered context
+    # being stable across the cache window; freshness penalties stepping
+    # by the second would break that. The freshness multiplier itself is
+    # measured in days so day-grain is the natural quantization.
+    now = float(int(datetime.now(timezone.utc).timestamp() // 86400) * 86400)
 
     scored: List[Tuple[float, Any]] = []
     for row in patches:
@@ -156,12 +224,17 @@ def score_patches(
             score += min(overlap * 15.0, 60.0)
 
         # Recency — normalized to 0..10 across the current patch batch
-        ts = _created_at(row)
+        ts = _last_observed_at(row)
         if newest > oldest:
             norm = (ts - oldest) / (newest - oldest)
             score += norm * 10.0
         else:
             score += 5.0  # single patch / identical timestamps — neutral
+
+        # Freshness multiplier — only affects self-typed patches.
+        # Applied last so the multiplier scales the full composite
+        # score, not just the recency component.
+        score *= _freshness_multiplier(patch_type, ts, now)
 
         scored.append((score, row))
 
