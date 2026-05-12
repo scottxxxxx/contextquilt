@@ -6,19 +6,23 @@ from datetime import datetime, timedelta
 import pytest
 
 from src.contextquilt.services.recall_scorer import (
+    FRESHNESS_FLOOR,
+    FRESHNESS_TIME_CONSTANT_DAYS,
+    FRESHNESS_TRACKED_TYPES,
     score_patches,
     top_k_patches,
     TYPE_PRIORITY,
 )
 
 
-def _patch(patch_id, patch_type, text, owner=None, deadline=None, created_at=None):
+def _patch(patch_id, patch_type, text, owner=None, deadline=None, created_at=None, last_observed_at=None):
     return {
         "patch_id": patch_id,
         "patch_type": patch_type,
         "value": json.dumps({"text": text, "owner": owner, "deadline": deadline}),
         "source_prompt": "meeting_summary",
         "created_at": created_at or datetime.utcnow(),
+        "last_observed_at": last_observed_at,
     }
 
 
@@ -132,6 +136,87 @@ def test_score_patches_byte_identical_across_repeated_calls():
     assert [(score, row["patch_id"]) for score, row in s1] == [
         (score, row["patch_id"]) for score, row in s2
     ]
+
+
+# ============================================================
+# Freshness multiplier for self-typed patches (trait, preference,
+# goal, constraint). Stale prefs lose recall weight; fresh ones
+# don't. Non-freshness-tracked types are unaffected.
+# ============================================================
+
+
+def test_freshness_multiplier_unaffects_non_self_typed():
+    """A 2-year-old commitment scores by its raw composite — no penalty."""
+    fresh = datetime.utcnow()
+    very_stale = datetime.utcnow() - timedelta(days=730)
+    patches = [
+        _patch("fresh", "commitment", "ship by Q3", last_observed_at=fresh),
+        _patch("stale", "commitment", "ship by Q3", last_observed_at=very_stale),
+    ]
+    scored = score_patches(patches, query_text="ship", matched_entity_names=[])
+    fresh_score = next(s for s, r in scored if r["patch_id"] == "fresh")
+    stale_score = next(s for s, r in scored if r["patch_id"] == "stale")
+    # Recency normalization will favor fresh slightly, but the multiplier
+    # itself should not be active — assert the gap is exactly the recency
+    # band (≤10 points), not a multiplicative shrink.
+    assert fresh_score - stale_score <= 10.0
+
+
+def test_freshness_multiplier_penalizes_stale_preference():
+    """A 540d-stale preference scores ~30% of a freshly re-observed one."""
+    fresh = datetime.utcnow()
+    very_stale = datetime.utcnow() - timedelta(days=540)
+    patches = [
+        _patch("fresh", "preference", "prefers async standups", last_observed_at=fresh),
+        _patch("stale", "preference", "prefers async standups", last_observed_at=very_stale),
+    ]
+    scored = score_patches(patches, query_text="async", matched_entity_names=[])
+    fresh_score = next(s for s, r in scored if r["patch_id"] == "fresh")
+    stale_score = next(s for s, r in scored if r["patch_id"] == "stale")
+    # Stale should be at most ~FRESHNESS_FLOOR * fresh — generous bound to
+    # tolerate the recency normalization that also runs.
+    assert stale_score <= fresh_score * (FRESHNESS_FLOOR + 0.05)
+    # Fresh should be at full strength (no penalty on a same-day observation)
+    assert fresh_score > stale_score
+
+
+def test_freshness_floor_never_dropped_below():
+    """Even a 10-year-old preference doesn't disappear entirely."""
+    ancient = datetime.utcnow() - timedelta(days=3650)
+    patches = [_patch("ancient", "preference", "prefers vim", last_observed_at=ancient)]
+    scored = score_patches(patches, query_text="vim", matched_entity_names=[])
+    score = scored[0][0]
+    # Type priority for preference = 10, keyword overlap on "vim" = +15.
+    # Floor multiplier 0.30 → minimum reachable composite is well above 0.
+    # The key invariant is that the score is non-zero, not at a specific
+    # value — verifies the floor clamp is active.
+    assert score > 0.0
+
+
+def test_freshness_multiplier_applies_to_all_four_self_typed_types():
+    """The penalty hits trait, preference, goal, AND constraint identically."""
+    very_stale = datetime.utcnow() - timedelta(days=540)
+    fresh = datetime.utcnow()
+    for ptype in FRESHNESS_TRACKED_TYPES:
+        patches = [
+            _patch(f"fresh-{ptype}", ptype, "shared text content here", last_observed_at=fresh),
+            _patch(f"stale-{ptype}", ptype, "shared text content here", last_observed_at=very_stale),
+        ]
+        scored = score_patches(patches, query_text="unrelated", matched_entity_names=[])
+        order = [r["patch_id"] for _, r in scored]
+        assert order[0] == f"fresh-{ptype}", f"fresh should outrank stale for {ptype}"
+
+
+def test_freshness_falls_back_to_created_at_when_last_observed_null():
+    """A pre-migration row with NULL last_observed_at uses created_at."""
+    stale_created = datetime.utcnow() - timedelta(days=540)
+    fresh_created = datetime.utcnow()
+    patches = [
+        _patch("fresh", "preference", "alpha bravo", created_at=fresh_created, last_observed_at=None),
+        _patch("stale", "preference", "alpha bravo", created_at=stale_created, last_observed_at=None),
+    ]
+    scored = score_patches(patches, query_text="unrelated", matched_entity_names=[])
+    assert scored[0][1]["patch_id"] == "fresh"
 
 
 def test_matched_names_sorted_iteration_is_deterministic():

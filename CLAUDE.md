@@ -57,6 +57,18 @@ After the LLM call, the worker runs a fixed chain of sanitizers (`src/contextqui
 
 If you add a new sanitizer, slot it in by editing this chain. Each sanitizer mutates `content` in place and is independently unit-tested under `tests/unit/`. The corresponding backfill scripts in `scripts/backfill_*.py` reuse the live sanitizer rather than duplicating logic — write new ones the same way.
 
+### Freshness Model (Self-Typed Patches)
+
+The four (you)-speaker self-disclosed types — `trait`, `preference`, `goal`, `constraint` — carry a dedicated `last_observed_at` timestamp on `context_patches`. It is bumped **only** in the worker's pg_trgm dedup path (`src/worker.py` ~335) when a fresh extraction matches an existing patch — a true "user re-affirmed this in a transcript" signal, distinct from `updated_at` (any UPDATE, including admin edits) and `patch_usage_metrics.last_accessed_at` (recall hits).
+
+Consumers:
+
+1. **Decay worker** (`src/worker.py:decay_loop`) — for these four types the staleness anchor is `COALESCE(last_observed_at, created_at)`, not `updated_at`. TTL is 540 days, configurable per type via `patch_type_registry.default_ttl_days`.
+
+2. **Recall scorer** (`src/contextquilt/services/recall_scorer.py`) — applies a multiplicative penalty `max(0.30, exp(-days_stale / 365))` as the final scoring step. `now` is bucketed to the UTC day so back-to-back recall calls remain byte-identical (required for upstream prompt caching).
+
+If you add a new self-disclosed type that should follow the same lifecycle, add it to (a) `FRESHNESS_TRACKED_TYPES` in `recall_scorer.py`, (b) `FRESHNESS_TRACKED_TYPES` + `DEFAULT_TTLS` in `worker.decay_loop`, and (c) the partial index `WHERE` clause in `init-db/20_preference_freshness.sql`. The three must stay in sync.
+
 ### Database Migrations
 
 Migrations live in `init-db/*.sql` and are tracked in a `schema_migrations` table by filename + sha256. The runner is `scripts/run_migrations.py`, invoked by `.github/workflows/deploy.yml` from a one-shot container built from the new image. Already-applied files are skipped; editing an applied file is detected as drift and aborts the deploy. To change behavior, add a new file — never rewrite history.
