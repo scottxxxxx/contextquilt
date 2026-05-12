@@ -22,6 +22,7 @@ import structlog
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from contextquilt.gateway.extraction import classify_fact
+from contextquilt.services.attribution import validate_user_attribution_hint
 from contextquilt.services.extraction_prompts import (
     COMMUNICATION_PROFILE_SYSTEM,
     CONVERSATION_SYSTEM,
@@ -1378,6 +1379,39 @@ class ColdPathWorker:
         # them — non-breaking.
         subscription_tier = metadata.get("subscription_tier")
         previous_tier = metadata.get("previous_tier")
+
+        # Soft-signal user attribution hint — forwarded by the calling
+        # app's identity layer when no hard user_identified=True claim
+        # is available (in-chat-nudge path, replacing the post-meeting
+        # attribution sheet). v1 is log-only — captured to
+        # extraction_metrics for calibration; gating remains on the
+        # hard user_identified path. Malformed hints are logged and
+        # dropped without breaking the ingestion.
+        attribution_hint = validate_user_attribution_hint(
+            metadata.get("user_attribution_hint")
+        )
+        attribution_hint_label = (
+            attribution_hint.get("speaker_label") if attribution_hint else None
+        )
+        attribution_hint_conf = (
+            attribution_hint.get("confidence") if attribution_hint else None
+        )
+        attribution_hint_basis = (
+            attribution_hint.get("confidence_basis") if attribution_hint else None
+        )
+        attribution_hint_secondary = (
+            attribution_hint.get("secondary_candidate") if attribution_hint else None
+        )
+        attribution_hint_secondary_label = (
+            attribution_hint_secondary.get("speaker_label")
+            if attribution_hint_secondary
+            else None
+        )
+        attribution_hint_secondary_conf = (
+            attribution_hint_secondary.get("confidence")
+            if attribution_hint_secondary
+            else None
+        )
         if (
             not owner_speaker_label
             and user_label
@@ -1625,9 +1659,12 @@ class ColdPathWorker:
                         patches_before_filters, patches_after_filters,
                         reasoning_chars, transcript_chars,
                         user_identified, identification_source,
-                        subscription_tier, previous_tier
+                        subscription_tier, previous_tier,
+                        attribution_hint_speaker_label, attribution_hint_confidence,
+                        attribution_hint_basis,
+                        attribution_hint_secondary_label, attribution_hint_secondary_confidence
                     )
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
                     """,
                     user_id, response.model, response.input_tokens, response.output_tokens,
                     response.cost_usd, response.latency_ms, facts_stored, entities_stored,
@@ -1638,6 +1675,9 @@ class ColdPathWorker:
                     reasoning_chars, len(summary),
                     user_identified, identification_source,
                     subscription_tier, previous_tier,
+                    attribution_hint_label, attribution_hint_conf,
+                    attribution_hint_basis,
+                    attribution_hint_secondary_label, attribution_hint_secondary_conf,
                 )
             except Exception as e:
                 logger.warning("metrics_insert_failed", error=str(e))
