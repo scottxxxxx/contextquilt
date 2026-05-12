@@ -795,14 +795,33 @@ class ColdPathWorker:
 
         Access-based refresh (patch_usage_metrics.last_accessed_at recent)
         exempts a patch regardless of override or type default.
+
+        Staleness anchor:
+          - Self-typed patches (trait/preference/goal/constraint) use
+            `last_observed_at` — bumped only when the worker dedup path
+            re-observes the patch in a new transcript. Admin edits do
+            not refresh these.
+          - All other types use `updated_at`.
         """
         # Fallback TTLs by patch_type when registry has no entry.
+        # The four FRESHNESS_TRACKED_TYPES are sticky-self-disclosure
+        # patches; their long horizon reflects that people change but
+        # not weekly. After 540d without re-observation we assume the
+        # preference is stale and let the decay archive collect it.
         DEFAULT_TTLS = {
             "takeaway": 14,
             "blocker": 30,
             "commitment": 30,
             "event": 90,
+            "trait": 540,
+            "preference": 540,
+            "goal": 540,
+            "constraint": 540,
         }
+        # Types whose staleness is measured from `last_observed_at`
+        # rather than `updated_at`. Matches the partial index in
+        # init-db/20_preference_freshness.sql.
+        FRESHNESS_TRACKED_TYPES = {"trait", "preference", "goal", "constraint"}
         # Maps the 7 permanence classes → days. None = never expires.
         PERMANENCE_CLASS_DAYS = {
             "permanent": None,
@@ -864,15 +883,25 @@ class ColdPathWorker:
                     except Exception:
                         pass  # Registry table may not exist yet
 
+                    # Pick the staleness anchor. Self-typed patches use
+                    # `last_observed_at` (bumped only on re-observation in
+                    # an extraction); everything else uses `updated_at`.
+                    # COALESCE protects against pre-PR rows that may have
+                    # NULL last_observed_at before the backfill runs.
+                    if patch_type in FRESHNESS_TRACKED_TYPES:
+                        staleness_anchor_sql = "COALESCE(last_observed_at, created_at)"
+                    else:
+                        staleness_anchor_sql = "updated_at"
+
                     # Archive patches older than TTL that haven't been accessed recently
                     # and have no explicit override.
                     result = await self.db.execute(
-                        """
+                        f"""
                         UPDATE context_patches SET status = 'archived', updated_at = NOW()
                         WHERE patch_type = $1
                           AND permanence_override IS NULL
                           AND COALESCE(status, 'active') = 'active'
-                          AND updated_at < NOW() - INTERVAL '1 day' * $2
+                          AND {staleness_anchor_sql} < NOW() - INTERVAL '1 day' * $2
                           AND patch_id NOT IN (
                               SELECT patch_id FROM patch_usage_metrics
                               WHERE last_accessed_at > NOW() - INTERVAL '1 day' * $2
@@ -884,7 +913,13 @@ class ColdPathWorker:
                     count = int(result.split()[-1]) if result else 0
                     if count > 0:
                         total_archived += count
-                        logger.info("decay_archived", patch_type=patch_type, count=count, ttl_days=ttl_days)
+                        logger.info(
+                            "decay_archived",
+                            patch_type=patch_type,
+                            count=count,
+                            ttl_days=ttl_days,
+                            anchor="last_observed_at" if patch_type in FRESHNESS_TRACKED_TYPES else "updated_at",
+                        )
 
                 if total_archived > 0:
                     logger.info("decay_cycle_complete", total_archived=total_archived)
