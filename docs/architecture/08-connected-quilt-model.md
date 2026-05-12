@@ -19,8 +19,10 @@ All 11 types are registered in `patch_type_registry` with `app_id = NULL` (unive
 
 | type_key | persistence | TTL (days) | completable | project_scoped | description |
 |----------|------------|------------|-------------|----------------|-------------|
-| `trait` | sticky | never | no | no | Self-disclosed behavioral pattern (submitting user ONLY) |
-| `preference` | sticky | never | no | no | What the user prefers |
+| `trait` | sticky | 540 (freshness) | no | no | Self-disclosed behavioral pattern (submitting user ONLY) |
+| `preference` | sticky | 540 (freshness) | no | no | What the user prefers |
+| `goal` | sticky | 540 (freshness) | no | no | Future aim the user wants to achieve |
+| `constraint` | sticky | 540 (freshness) | no | no | Hard rule or limit the user must respect |
 | `identity` | sticky | never | no | no | Who the user is (role, org) |
 | `role` | sticky | never | no | optional | Someone's function on a project |
 | `person` | sticky | never | no | no | A named participant |
@@ -120,9 +122,27 @@ Runs every 6 hours. Archives patches that exceed their type's TTL and haven't be
 - Experience: 30 days
 - Commitments: 30 days
 - Blockers: 30 days
-- Sticky types (trait, preference, decision, project, person, role): never
+- Self-typed (you)-speaker patches — trait, preference, goal, constraint: 540 days, anchored on `last_observed_at` (see Freshness Model below)
+- Sticky types (identity, decision, project, person, role): never
 
 TTLs are configurable via `patch_type_registry.default_ttl_days`. Access-based exemption: if `patch_usage_metrics.last_accessed_at` is recent, the patch survives even past TTL.
+
+### Freshness Model (Self-Typed Patches)
+
+The four (you)-speaker self-disclosed types — `trait`, `preference`, `goal`, `constraint` — carry a `last_observed_at` timestamp distinct from `created_at`, `updated_at`, and `patch_usage_metrics.last_accessed_at`:
+
+| signal | bumps on |
+| --- | --- |
+| `created_at` | initial insert only |
+| `updated_at` | any UPDATE — admin edits, status changes, dedup re-observation |
+| `patch_usage_metrics.last_accessed_at` | recall hits (read activity) |
+| **`last_observed_at`** | **only when the worker's pg_trgm dedup path matches a fresh extraction to an existing patch — a true "user re-affirmed this in a transcript" signal** |
+
+This drives two behaviors:
+
+1. **Decay archive anchor.** For these four types the staleness clock is `COALESCE(last_observed_at, created_at)` — not `updated_at`. An admin editing a preference in the dashboard does NOT reset its freshness; only a re-observation in an extraction does.
+
+2. **Recall staleness penalty.** A multiplicative penalty is applied to the recall score: `max(0.30, exp(-days_stale / 365))`. A 90-day-stale preference scores at ~0.78× its base; 180d at 0.61×; 365d at 0.37×; 540d hits the 0.30 floor and the decay worker is about to archive it anyway. Non-freshness-tracked types keep multiplier 1.0.
 
 ### Lifecycle Through Connections
 - **Project archival**: `PATCH /v1/projects/{user_id}/{project_id}` with `status: "archived"` → cascades to all patches with that `project_id`
