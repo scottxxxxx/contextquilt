@@ -1838,12 +1838,12 @@ async def create_patch(
         INSERT INTO context_patches (
             patch_id, patch_name, patch_type, value,
             origin_mode, source_prompt, confidence, persistence,
-            project, project_id, status, created_at, updated_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            project, project_id, status, created_at, updated_at, last_observed_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         """,
         patch_id, f"declared_{patch_id[:8]}", patch.type, json.dumps(value),
         "declared", "manual", 1.0, persistence,
-        patch_project, patch_project_id, "active", now, now
+        patch_project, patch_project_id, "active", now, now, now
     )
 
     await db_pool.execute(
