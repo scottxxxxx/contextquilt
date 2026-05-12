@@ -186,3 +186,75 @@ CQ accepts arbitrary key-value metadata on every event. This metadata:
 | Sales tool | `deal_id`, `company`, `stage` |
 
 CQ doesn't know what these keys mean. It stores them and filters by them.
+
+## Reserved Metadata Keys
+
+Some `metadata` keys are interpreted by CQ rather than passed through opaquely. Apps may send them, but the values must match the contracts below or CQ will drop them with a warning (graceful degrade — the rest of the event still ingests).
+
+| Key | Type | Purpose |
+|-----|------|---------|
+| `user_label` | string | Hard claim from the app's identity layer of which transcript speaker is the submitting user. Used together with `user_identified` and `identification_source`. |
+| `user_identified` | bool | `true` only when the app has a hard claim (e.g., voice enrollment match). |
+| `identification_source` | enum string | `"enrollment"` \| `"user_confirmation"` \| `"none"`. CQ honors the claim when this is non-`"none"`. |
+| `owner_speaker_label` | string | Legacy server-side marker injection. New integrators should use `user_label` + `user_identified`. |
+| `display_name` | string | Fallback for user-context when no `(you)` marker is present. |
+| `subscription_tier` | enum string | Lowercase: `"free"` \| `"plus"` \| `"pro"`. Forwarded on every write for cost-by-tier analytics. |
+| `previous_tier` | enum string | Same shape; set only when a tier boundary was crossed in the previous 24h. |
+| `user_attribution_hint` | object | Soft-signal attribution when no hard claim is available. See below. |
+
+### `user_attribution_hint`
+
+Soft attribution signal for cases where the app's identity layer has a best-guess speaker mapping but not enough confidence to set `user_identified = true`. Wire shape:
+
+```json
+{
+  "user_attribution_hint": {
+    "speaker_label": "Speaker 3",
+    "confidence": 0.42,
+    "confidence_basis": "combined",
+    "secondary_candidate": {
+      "speaker_label": "Speaker 5",
+      "confidence": 0.31
+    }
+  }
+}
+```
+
+**Field contract:**
+
+| Field | Type | Required | Constraint |
+|-------|------|----------|------------|
+| `speaker_label` | string | yes | Must match a `Speaker N` label that appears in the transcript chunks of this request. |
+| `confidence` | float | yes | `[0.0, 1.0]` inclusive. |
+| `confidence_basis` | enum | yes | One of: `enrolled_similarity`, `cumulative_seconds`, `embedding_consistency`, `combined`. |
+| `secondary_candidate` | object | no | Same shape as parent, depth-1 only. `confidence` must be `≤` primary confidence. |
+
+**`confidence_basis` semantics:**
+
+- `enrolled_similarity` — raw cosine to the user's enrolled voice centroid. Lowest signal-to-noise; weighted least in gating.
+- `cumulative_seconds` — most-talkative-speaker heuristic. Strong on long meetings, weak on short ones.
+- `embedding_consistency` — within-cluster embedding variance, normalized. High = stable cluster.
+- `combined` — sender-side weighted blend. CQ treats this as opaque and trusts the number.
+
+**CQ gating behavior (pre-calibration thresholds; revisable):**
+
+| Confidence | CQ treatment |
+|------------|--------------|
+| `≥ 0.70` | Functionally-confirmed identity. Extract personal types (trait, preference, identity) from the speaker's content. |
+| `0.40 – 0.70` | Soft prior. Requires corroboration (cross-meeting agreement, explicit `(you)` markers, etc.) before extracting personal types. Safe to use for non-personal extraction. |
+| `< 0.40` | Treated as noise. Personal-type gating falls through to cross-meeting heuristics or the legacy markerless path. |
+
+**When the hint is absent:**
+
+The producer should omit `user_attribution_hint` entirely (not send it as `null`) when:
+
+- No enrolled profile exists for the signed-in user.
+- The diarizer mode does not compute embeddings (e.g., Sortformer / Apple Foundation Model mode).
+- The meeting has zero confidently-attributed single-speaker segments.
+- Multiple candidates are within ~5% of each other (genuinely ambiguous — better to send nothing than mislead).
+
+CQ falls through to the existing markerless path when the field is absent.
+
+**Multi-speaker chunks:** Chunks tagged `[Multiple]` (auto-detected or user-tagged as overlap) should be excluded by the producer from the input to the hint computation — their embeddings are mixed and would pull the similarity / consistency signals in misleading directions.
+
+**Not in v1:** per-segment confidence breakdowns, confidence intervals, negative-attribution hints (`"definitely NOT this user"`). The wire shape is stable; iOS senders may ship against this contract.

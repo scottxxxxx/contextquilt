@@ -99,10 +99,82 @@ components:
         response:
           type: string
         metadata:
-          type: object
+          $ref: "#/components/schemas/MemoryMetadata"
         timestamp:
           type: string
           format: date-time
+
+    MemoryMetadata:
+      type: object
+      description: >
+        App-defined key-value bag. CQ accepts arbitrary keys and stores them
+        alongside extracted facts. Some keys are reserved — CQ interprets them
+        per the contract below. Apps may still add any additional keys.
+      additionalProperties: true
+      properties:
+        user_label:
+          type: string
+          description: Hard claim of which transcript speaker is the submitting user.
+        user_identified:
+          type: boolean
+          description: True only when the app has a hard identity claim (e.g., voice match).
+        identification_source:
+          type: string
+          enum: [enrollment, user_confirmation, none]
+          description: Source of the identity claim. CQ honors the claim when non-"none".
+        owner_speaker_label:
+          type: string
+          description: Legacy server-side marker injection. New integrators use user_label.
+        display_name:
+          type: string
+          description: Fallback for user-context when no (you) marker is present.
+        subscription_tier:
+          type: string
+          enum: [free, plus, pro]
+        previous_tier:
+          type: string
+          enum: [free, plus, pro]
+          description: Set only when a tier boundary was crossed in the previous 24h.
+        user_attribution_hint:
+          $ref: "#/components/schemas/UserAttributionHint"
+
+    UserAttributionHint:
+      type: object
+      description: >
+        Soft-signal attribution from the app's identity layer when no hard
+        `user_identified=true` claim is available. See
+        docs/architecture/05-integration.md for the full gating contract.
+        Omit the field entirely (do not send null) when the sender can't
+        compute a hint.
+      required: [speaker_label, confidence, confidence_basis]
+      properties:
+        speaker_label:
+          type: string
+          description: Must match a Speaker N label that appears in the request's transcript.
+        confidence:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+        confidence_basis:
+          type: string
+          enum: [enrolled_similarity, cumulative_seconds, embedding_consistency, combined]
+          description: >
+            How the confidence was computed. `combined` is a sender-side blend
+            CQ treats as opaque. See integration docs for individual basis
+            semantics.
+        secondary_candidate:
+          type: object
+          description: Second-best guess. `confidence` must be <= primary confidence.
+          required: [speaker_label, confidence]
+          properties:
+            speaker_label:
+              type: string
+            confidence:
+              type: number
+              format: float
+              minimum: 0.0
+              maximum: 1.0
 
     MemoryResponse:
       type: object
