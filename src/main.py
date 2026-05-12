@@ -636,7 +636,8 @@ async def recall_context(
     if recall_project_id:
         fact_rows = await db_pool.fetch(
             """
-            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt
+            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
+                   cp.created_at, cp.last_observed_at
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
@@ -651,7 +652,8 @@ async def recall_context(
         # Fallback: filter by project display name (backward compat)
         fact_rows = await db_pool.fetch(
             """
-            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt
+            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
+                   cp.created_at, cp.last_observed_at
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
@@ -668,7 +670,8 @@ async def recall_context(
         # would be irrelevant noise in an unrelated session.
         fact_rows = await db_pool.fetch(
             """
-            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt
+            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
+                   cp.created_at, cp.last_observed_at
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
@@ -711,7 +714,8 @@ async def recall_context(
         if project_patch:
             connected_rows = await db_pool.fetch(
                 """
-                SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt
+                SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
+                       cp.created_at, cp.last_observed_at
                 FROM patch_connections pc
                 JOIN context_patches cp ON pc.from_patch_id = cp.patch_id
                 WHERE pc.to_patch_id = $1 AND pc.connection_role = 'parent'
