@@ -163,14 +163,15 @@ async def store_facts(
             """
             INSERT INTO context_patches (
                 patch_id, patch_name, patch_type, value,
-                origin_mode, source_prompt, confidence, persistence, project, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                origin_mode, source_prompt, confidence, persistence, project,
+                created_at, updated_at, last_observed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             """,
             patch_id, patch_name, category, value_json,
             "inferred", source_prompt, 0.8,
             "sticky" if category in ("trait", "preference") else "decaying",
             project,
-            created_at, created_at
+            created_at, created_at, created_at
         )
 
         await db.execute(
@@ -236,11 +237,13 @@ async def store_action_items(
             """
             INSERT INTO context_patches (
                 patch_id, patch_name, patch_type, value,
-                origin_mode, source_prompt, confidence, persistence, project, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                origin_mode, source_prompt, confidence, persistence, project,
+                created_at, updated_at, last_observed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             """,
             patch_id, patch_name, "commitment", value_json,
-            "inferred", "meeting_summary", 0.8, "decaying", project, created_at, created_at
+            "inferred", "meeting_summary", 0.8, "decaying", project,
+            created_at, created_at, created_at
         )
 
         await db.execute(
@@ -329,10 +332,15 @@ async def store_connected_patches(
             subject_key, patch_type, text
         )
         if existing:
-            # Reuse existing patch — update last_seen timestamp
+            # Reuse existing patch — update last_seen timestamp.
+            # `last_observed_at` is the freshness anchor consumed by the
+            # decay worker and recall scorer for self-typed patches
+            # (trait/preference/goal/constraint). Bumping it here is the
+            # only path that should ever move it — admin edits should
+            # only move `updated_at`.
             patch_id = str(existing["patch_id"])
             await db.execute(
-                "UPDATE context_patches SET updated_at = $1 WHERE patch_id = $2::uuid",
+                "UPDATE context_patches SET updated_at = $1, last_observed_at = $1 WHERE patch_id = $2::uuid",
                 created_at, patch_id
             )
             await db.execute(
@@ -378,13 +386,13 @@ async def store_connected_patches(
                 patch_id, patch_name, patch_type, value,
                 origin_mode, source_prompt, confidence, persistence,
                 project, project_id, origin_id, origin_type,
-                status, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                status, created_at, updated_at, last_observed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             """,
             patch_id, patch_name, patch_type, value_json,
             "inferred", source_prompt, 0.8, persistence,
             patch_project, patch_project_id, patch_origin_id, patch_origin_type,
-            "active", created_at, created_at
+            "active", created_at, created_at, created_at
         )
 
         await db.execute(
@@ -483,13 +491,13 @@ async def store_connected_patches(
                         patch_id, patch_name, patch_type, value,
                         origin_mode, source_prompt, confidence, persistence,
                         project, project_id, origin_id, origin_type,
-                        status, created_at, updated_at
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                        status, created_at, updated_at, last_observed_at
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
                     """,
                     to_id, stub_name, target_type, stub_value,
                     "inferred", source_prompt, 0.6, stub_persistence,
                     stub_project, stub_project_id, stub_origin_id, stub_origin_type,
-                    "active", created_at, created_at
+                    "active", created_at, created_at, created_at
                 )
                 await db.execute(
                     "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
@@ -1301,11 +1309,13 @@ class ColdPathWorker:
                 """
                 INSERT INTO context_patches (
                     patch_id, patch_name, patch_type, value,
-                    origin_mode, source_prompt, confidence, persistence, created_at, updated_at
-                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                    origin_mode, source_prompt, confidence, persistence,
+                    created_at, updated_at, last_observed_at
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                 patch_id, patch_name, category, value_json,
-                origin_mode, "manual", 1.0, persistence, created_at, created_at
+                origin_mode, "manual", 1.0, persistence,
+                created_at, created_at, created_at
             )
 
             await self.db.execute(
