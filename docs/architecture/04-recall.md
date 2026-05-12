@@ -110,6 +110,22 @@ If the app provides metadata hints (e.g., `"project": "Widget 2.0"`), CQ uses th
 
 Without the hint, "What's the status?" has no entity names to match. With the hint, CQ knows to start from Widget 2.0.
 
+## Scoring
+
+After patches are pulled for the recall set, they're ranked by `score_patches` in `src/contextquilt/services/recall_scorer.py` and trimmed to `max_patches` (default 15). The composite score per patch:
+
+| Component | Range | Description |
+| --- | --- | --- |
+| Type priority | 5..50 | Actionable types (commitment, blocker) float above passive (preference, takeaway) |
+| Entity-match boost | +100 per match | A matched entity name appears in the patch text |
+| Keyword overlap | +0..60 | Shared content words with the query (capped) |
+| Recency | +0..10 | Newest patch in the batch gets +10, oldest gets +0 — anchored on `last_observed_at` for self-typed patches, `created_at` otherwise |
+| **Freshness multiplier** | ×0.30..1.00 | **Self-typed patches only (trait, preference, goal, constraint).** `max(0.30, exp(-days_stale / 365))` applied as the final multiplicative step. Other types keep multiplier 1.0. |
+
+The freshness multiplier is the recall-side half of the freshness model documented in `docs/architecture/08-connected-quilt-model.md#freshness-model-self-typed-patches`. A 540d-stale preference scores at 30% of a freshly re-affirmed one — still surfaced if nothing fresher exists, but never preferred over a more recent signal.
+
+`now` is bucketed to the UTC day so back-to-back recall calls return byte-identical scores. This is load-bearing for upstream prompt caching (Anthropic `cache_control` + the 30s `RECALL_RENDER_CACHE_TTL`) — without it, the cache window would never hit.
+
 ## Performance
 
 | Operation | Where it happens | Target latency |
