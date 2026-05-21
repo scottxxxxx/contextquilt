@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Any
 
 import asyncpg
+import httpx
 import redis.asyncio as redis
 import structlog
 
@@ -22,6 +23,7 @@ import structlog
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from contextquilt.gateway.extraction import classify_fact
+from contextquilt.services.alerting import report_incident
 from contextquilt.services.attribution import validate_user_attribution_hint
 from contextquilt.services.extraction_prompts import (
     COMMUNICATION_PROFILE_SYSTEM,
@@ -1735,6 +1737,47 @@ class ColdPathWorker:
 
         except Exception as e:
             logger.error("meeting_summary_failed", error=str(e), user_id=user_id)
+            await self._maybe_alert_llm_failure(e)
+
+    async def _maybe_alert_llm_failure(self, exc: Exception) -> None:
+        """Fire a critical-failure alert when an LLM call fails with an
+        operator-actionable HTTP status. Specifically 401/403 (key
+        rotated/revoked/billing lapsed) and 402 (budget exhausted).
+        Other failure classes (transient 5xx, timeouts, JSON parse) are
+        not alerted here, they fall under provider_unreachable which
+        needs threshold logic (v2).
+
+        Swallows every downstream error including alerting transport
+        failures — alerting must not break the request that triggered
+        it. This is the call site that would have caught the May 2026
+        OpenRouter 16-day silent outage on day one."""
+        try:
+            if not isinstance(exc, httpx.HTTPStatusError):
+                return
+            status = exc.response.status_code
+            if status in (401, 403):
+                category = "provider_auth_failed"
+            elif status == 402:
+                category = "provider_budget_exhausted"
+            else:
+                return
+            body_preview = ""
+            try:
+                body_preview = exc.response.text[:300]
+            except Exception:
+                pass
+            await report_incident(
+                self.db,
+                category=category,
+                subject="openrouter",
+                details={
+                    "status_code": status,
+                    "model": getattr(self.llm, "model", "unknown") if self.llm else "unknown",
+                    "response_body": body_preview,
+                },
+            )
+        except Exception as alert_exc:
+            logger.warning("alert_dispatch_failed", reason=str(alert_exc)[:200])
 
     async def _extract_communication_profile(self, user_id: str, transcript: str, app_id: str = None):
         """Extract communication style scores from the (you) speaker's dialogue.
