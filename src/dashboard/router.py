@@ -1522,3 +1522,221 @@ async def get_backup_history(limit: int = 30):
     finally:
         await conn.close()
 
+
+# ============================================================================
+# Critical-failure alerting (mirrors GhostPour cloudzap PR #194).
+# ============================================================================
+
+class AlertRecipientRequest(BaseModel):
+    email: Optional[str] = None
+    display_name: Optional[str] = None
+    active: Optional[bool] = None
+    categories: Optional[List[str]] = None
+
+
+class AlertTestSendRequest(BaseModel):
+    category: str
+    subject: str = "synthetic"
+    note: Optional[str] = None
+
+
+@router.get("/alerts/categories", dependencies=[Depends(verify_admin_key)])
+async def list_alert_categories():
+    """Stable category catalog. The dashboard renders the subscription
+    picker and the test-send dropdown against this, so a new category
+    only needs to be added in alerting.py to surface everywhere."""
+    from src.contextquilt.services.alerting import KNOWN_CATEGORIES
+    return {
+        "categories": [
+            {"id": k, "label": v["label"], "description": v["description"]}
+            for k, v in KNOWN_CATEGORIES.items()
+        ],
+    }
+
+
+@router.get("/alerts/recipients", dependencies=[Depends(verify_admin_key)])
+async def list_alert_recipients():
+    """All recipients, active and inactive. UI distinguishes by the
+    `active` column."""
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            """SELECT id::text AS id, email, display_name, active,
+                      categories, created_at, updated_at
+                 FROM alert_recipients
+                 ORDER BY email"""
+        )
+        return {
+            "recipients": [
+                {
+                    "id": r["id"],
+                    "email": r["email"],
+                    "display_name": r["display_name"],
+                    "active": r["active"],
+                    "categories": r["categories"] or [],
+                    "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                    "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None,
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        await conn.close()
+
+
+@router.post("/alerts/recipients", dependencies=[Depends(verify_admin_key)])
+async def create_alert_recipient(body: AlertRecipientRequest):
+    """Add a recipient. Email is required and must be unique. Categories
+    list is optional, empty or missing means subscribed to everything."""
+    if not body.email or "@" not in body.email:
+        raise HTTPException(status_code=400, detail="valid email required")
+
+    from src.contextquilt.services.alerting import KNOWN_CATEGORIES
+    if body.categories:
+        bad = [c for c in body.categories if c not in KNOWN_CATEGORIES]
+        if bad:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown categories: {bad} (known: {list(KNOWN_CATEGORIES)})",
+            )
+
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        try:
+            row = await conn.fetchrow(
+                """INSERT INTO alert_recipients (email, display_name, active, categories)
+                   VALUES ($1, $2, $3, $4::jsonb)
+                   RETURNING id::text AS id, email""",
+                body.email.lower().strip(),
+                body.display_name,
+                True if body.active is None else body.active,
+                json.dumps(body.categories) if body.categories else None,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail="email already registered")
+        return {"id": row["id"], "email": row["email"]}
+    finally:
+        await conn.close()
+
+
+@router.patch("/alerts/recipients/{recipient_id}", dependencies=[Depends(verify_admin_key)])
+async def update_alert_recipient(recipient_id: str, body: AlertRecipientRequest):
+    """Patch a recipient. Only fields present in the body are updated.
+    Toggling `active=false` keeps the row but stops alerts."""
+    from src.contextquilt.services.alerting import KNOWN_CATEGORIES
+    if body.categories:
+        bad = [c for c in body.categories if c not in KNOWN_CATEGORIES]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"unknown categories: {bad}")
+
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        exists = await conn.fetchrow(
+            "SELECT id FROM alert_recipients WHERE id = $1::uuid", recipient_id,
+        )
+        if exists is None:
+            raise HTTPException(status_code=404, detail="recipient not found")
+
+        sets: list[str] = []
+        args: list = []
+        idx = 1
+        if body.email is not None:
+            sets.append(f"email = ${idx}")
+            args.append(body.email.lower().strip())
+            idx += 1
+        if body.display_name is not None:
+            sets.append(f"display_name = ${idx}")
+            args.append(body.display_name)
+            idx += 1
+        if body.active is not None:
+            sets.append(f"active = ${idx}")
+            args.append(body.active)
+            idx += 1
+        if body.categories is not None:
+            sets.append(f"categories = ${idx}::jsonb")
+            args.append(json.dumps(body.categories) if body.categories else None)
+            idx += 1
+
+        if not sets:
+            return {"id": recipient_id, "updated": False}
+
+        sets.append("updated_at = NOW()")
+        args.append(recipient_id)
+
+        try:
+            await conn.execute(
+                f"UPDATE alert_recipients SET {', '.join(sets)} WHERE id = ${idx}::uuid",
+                *args,
+            )
+        except asyncpg.UniqueViolationError:
+            raise HTTPException(status_code=409, detail="email already in use")
+        return {"id": recipient_id, "updated": True}
+    finally:
+        await conn.close()
+
+
+@router.delete("/alerts/recipients/{recipient_id}", dependencies=[Depends(verify_admin_key)])
+async def delete_alert_recipient(recipient_id: str):
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        result = await conn.execute(
+            "DELETE FROM alert_recipients WHERE id = $1::uuid", recipient_id,
+        )
+        # asyncpg returns "DELETE n" — parse the count.
+        try:
+            deleted = int(result.split()[-1])
+        except (ValueError, IndexError):
+            deleted = 0
+        if deleted == 0:
+            raise HTTPException(status_code=404, detail="recipient not found")
+        return {"id": recipient_id, "deleted": True}
+    finally:
+        await conn.close()
+
+
+@router.get("/alerts/incidents", dependencies=[Depends(verify_admin_key)])
+async def list_alert_incidents(limit: int = 100):
+    """Recent incidents (open + resolved). Newest first. Used by the
+    dashboard's history panel."""
+    from src.contextquilt.services.alerting import list_incidents
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await list_incidents(conn, limit=min(limit, 500))
+        return {"incidents": rows}
+    finally:
+        await conn.close()
+
+
+@router.post("/alerts/test-send", dependencies=[Depends(verify_admin_key)])
+async def test_send_alert(body: AlertTestSendRequest):
+    """Fire a synthetic incident under the chosen category so all
+    active subscribed recipients receive an email. Useful right after
+    adding a new address to confirm deliverability + Resend DKIM
+    setup. The synthetic incident lands in the history list and
+    auto-resolves like any other."""
+    from src.contextquilt.services.alerting import report_incident, KNOWN_CATEGORIES
+    if body.category not in KNOWN_CATEGORIES:
+        raise HTTPException(status_code=400, detail=f"unknown category: {body.category}")
+
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        result = await report_incident(
+            conn,
+            category=body.category,
+            subject=f"test-send/{body.subject}",
+            details={
+                "test_send": True,
+                "note": body.note or "Manual deliverability check from admin dashboard.",
+                "triggered_at": datetime.utcnow().isoformat(),
+            },
+            from_addr=os.getenv("CQ_ALERT_EMAIL_FROM"),
+        )
+        return {
+            "incident_id": result.incident_id,
+            "is_new": result.is_new,
+            "emailed_to": result.emailed_to,
+            "suppressed_reason": result.suppressed_reason,
+        }
+    finally:
+        await conn.close()
+

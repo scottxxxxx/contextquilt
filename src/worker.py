@@ -725,11 +725,13 @@ class ColdPathWorker:
                      base_url=self.llm.base_url,
                      context_budget=self.context_budget)
 
-        # Run stream consumer, queue checker, and decay worker concurrently
+        # Run stream consumer, queue checker, decay worker, and backup
+        # failure watcher concurrently.
         await asyncio.gather(
             self.consume_stream(),
             self.check_queues_loop(),
             self.decay_loop(),
+            self.backup_failure_watch_loop(),
         )
 
     async def stop(self):
@@ -1738,6 +1740,48 @@ class ColdPathWorker:
         except Exception as e:
             logger.error("meeting_summary_failed", error=str(e), user_id=user_id)
             await self._maybe_alert_llm_failure(e)
+
+    async def backup_failure_watch_loop(self):
+        """Poll backup_runs for status='failed' rows and report each
+        as a critical-failure incident. Fingerprint includes the
+        backup_run id so a single failure produces a single incident
+        even though this loop fires every 5 minutes. After 30 min of
+        no re-fire (per alerting auto-resolve), the row resolves; if
+        the same backup_run is somehow re-attempted and fails again
+        with the same id, a fresh incident opens.
+
+        Backups happen daily, so this loop is quiet ~99% of the time.
+        Reads from backup_runs are bounded by the 1h lookback."""
+        check_interval_s = 300  # 5 minutes
+        while self.running:
+            try:
+                rows = await self.db.fetch(
+                    """
+                    SELECT id::text AS id, started_at, error_message
+                      FROM backup_runs
+                     WHERE status = 'failed'
+                       AND started_at >= NOW() - INTERVAL '1 hour'
+                     ORDER BY started_at DESC
+                     LIMIT 50
+                    """
+                )
+                for row in rows:
+                    try:
+                        await report_incident(
+                            self.db,
+                            category="backup_failed",
+                            subject=row["id"],
+                            details={
+                                "backup_run_id": row["id"],
+                                "started_at": row["started_at"].isoformat() if row["started_at"] else None,
+                                "error_message": (row["error_message"] or "")[:300],
+                            },
+                        )
+                    except Exception as exc:
+                        logger.warning("backup_alert_failed", reason=str(exc)[:200])
+            except Exception as e:
+                logger.error("backup_failure_watch_error", error=str(e))
+            await asyncio.sleep(check_interval_s)
 
     async def _maybe_alert_llm_failure(self, exc: Exception) -> None:
         """Fire a critical-failure alert when an LLM call fails with an
