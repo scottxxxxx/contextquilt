@@ -70,6 +70,10 @@
                     <i class="fa-solid fa-server"></i>
                     <span>System Health</span>
                 </a>
+                <a href="#" class="nav-item" data-view="alerts">
+                    <i class="fa-solid fa-bell"></i>
+                    <span>Alerts</span>
+                </a>
                 <a href="#" class="nav-item" data-view="developer">
                     <i class="fa-solid fa-key"></i>
                     <span>Application Access</span>
@@ -868,6 +872,75 @@
                 <div class="card" style="padding: 1.5rem; margin-top: 2rem;">
                     <h2 style="margin-bottom: 1rem;"><i class="fa-solid fa-sliders"></i> Runtime Configuration</h2>
                     <pre id="health-config-display" style="background:rgba(15,23,42,0.6); padding:1rem; border-radius:0.5rem; color:var(--text-muted); font-size:0.85rem; overflow-x:auto;">Loading...</pre>
+                </div>
+            </div>
+
+            <!-- Alerts -->
+            <div id="alerts-view" class="view-container">
+                <div class="page-header">
+                    <h1>Critical-Failure Alerts</h1>
+                    <button class="sm-btn" onclick="initAlertsView()"><i class="fa-solid fa-arrows-rotate"></i> Refresh</button>
+                </div>
+
+                <div class="card" style="padding:1.5rem; margin-bottom:1.5rem;">
+                    <h2 style="margin-bottom:0.5rem;"><i class="fa-solid fa-envelope"></i> Recipients</h2>
+                    <p style="color:var(--text-muted); margin-bottom:1rem; font-size:0.9rem;">
+                        Emails that receive operator alerts when a critical system failure fires. Suppression is once-per-incident; the same fingerprint re-fires only after 30 minutes of quiet.
+                    </p>
+                    <div style="display:flex; gap:0.75rem; align-items:flex-end; flex-wrap:wrap; margin-bottom:1rem;">
+                        <div style="flex:2; min-width:240px;">
+                            <label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:0.25rem;">Email</label>
+                            <input type="email" id="alert-add-email" placeholder="oncall@example.com" style="width:100%; padding:0.5rem; background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid var(--border); border-radius:0.25rem;">
+                        </div>
+                        <div style="flex:1; min-width:160px;">
+                            <label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:0.25rem;">Display name (optional)</label>
+                            <input type="text" id="alert-add-name" placeholder="Scott" style="width:100%; padding:0.5rem; background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid var(--border); border-radius:0.25rem;">
+                        </div>
+                        <button class="sm-btn" style="background:#2563eb; color:#fff;" onclick="addAlertRecipient()">Add</button>
+                    </div>
+                    <div id="alert-add-error" style="color:#ef4444; margin-bottom:0.75rem; font-size:0.9rem; min-height:1.1em;"></div>
+                    <div style="overflow-x:auto;">
+                        <table class="data-table" id="alert-recipients-table">
+                            <thead><tr>
+                                <th>Email</th><th>Name</th><th>Active</th><th>Added</th><th></th>
+                            </tr></thead>
+                            <tbody id="alert-recipients-body"></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="card" style="padding:1.5rem; margin-bottom:1.5rem;">
+                    <h2 style="margin-bottom:0.5rem;"><i class="fa-solid fa-paper-plane"></i> Test Send</h2>
+                    <p style="color:var(--text-muted); margin-bottom:1rem; font-size:0.9rem;">
+                        Fire a synthetic incident under the chosen category so every active recipient receives a test email. Lands in the history table below.
+                    </p>
+                    <div style="display:flex; gap:0.75rem; align-items:flex-end; flex-wrap:wrap; margin-bottom:1rem;">
+                        <div style="min-width:240px;">
+                            <label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:0.25rem;">Category</label>
+                            <select id="alert-test-category" style="padding:0.5rem; background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid var(--border); border-radius:0.25rem; width:100%;"></select>
+                        </div>
+                        <div style="flex:1; min-width:240px;">
+                            <label style="display:block; font-size:0.8rem; color:var(--text-muted); margin-bottom:0.25rem;">Note (optional)</label>
+                            <input type="text" id="alert-test-note" placeholder="Verifying new on-call email" style="width:100%; padding:0.5rem; background:rgba(15,23,42,0.6); color:var(--text-primary); border:1px solid var(--border); border-radius:0.25rem;">
+                        </div>
+                        <button class="sm-btn" style="background:#16a34a; color:#fff;" onclick="testSendAlert()">Send Test</button>
+                    </div>
+                    <div id="alert-test-result" style="margin-bottom:0.5rem; font-size:0.9rem; min-height:1.1em;"></div>
+                </div>
+
+                <div class="card" style="padding:1.5rem;">
+                    <h2 style="margin-bottom:0.5rem;"><i class="fa-solid fa-clock-rotate-left"></i> Incident History</h2>
+                    <p style="color:var(--text-muted); margin-bottom:1rem; font-size:0.9rem;">
+                        Last 100 incidents. Open rows in red, resolved rows in green. Incidents auto-resolve after 30 minutes of quiet on the same fingerprint.
+                    </p>
+                    <div style="overflow-x:auto;">
+                        <table class="data-table" id="alert-incidents-table">
+                            <thead><tr>
+                                <th>Status</th><th>Category</th><th>Subject</th><th>First seen</th><th>Last seen</th><th>Triggers</th><th>Emailed</th>
+                            </tr></thead>
+                            <tbody id="alert-incidents-body"></tbody>
+                        </table>
+                    </div>
                 </div>
             </div>
 

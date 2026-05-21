@@ -52,6 +52,9 @@ function initNavigation() {
             if (item.dataset.view === 'system') {
                 initSystemView();
             }
+            if (item.dataset.view === 'alerts') {
+                initAlertsView();
+            }
             if (item.dataset.view === 'settings') {
                 initSettingsView();
             }
@@ -2146,4 +2149,242 @@ async function runPipelineTest() {
             statusBadge.className = 'status-badge error';
         }
     }
+}
+
+
+// ============================================================
+// Critical-Failure Alerts
+// ============================================================
+
+let _alertCategoriesCache = null;
+
+async function initAlertsView() {
+    try {
+        await Promise.all([
+            loadAlertCategories(),
+            loadAlertRecipients(),
+            loadAlertIncidents(),
+        ]);
+    } catch (err) {
+        console.error('Failed to init alerts view:', err);
+    }
+}
+
+async function loadAlertCategories() {
+    if (_alertCategoriesCache) {
+        renderAlertCategoryDropdown();
+        return;
+    }
+    const res = await fetch('/api/dashboard/alerts/categories');
+    if (!res.ok) {
+        console.error('alerts: failed to load categories', res.status);
+        return;
+    }
+    const data = await res.json();
+    _alertCategoriesCache = data.categories || [];
+    renderAlertCategoryDropdown();
+}
+
+function renderAlertCategoryDropdown() {
+    const sel = document.getElementById('alert-test-category');
+    if (!sel || !_alertCategoriesCache) return;
+    sel.innerHTML = '';
+    _alertCategoriesCache.forEach(c => {
+        const opt = document.createElement('option');
+        opt.value = c.id;
+        opt.textContent = `${c.label} (${c.id})`;
+        sel.appendChild(opt);
+    });
+}
+
+async function loadAlertRecipients() {
+    const tbody = document.getElementById('alert-recipients-body');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Loading...</td></tr>';
+    try {
+        const res = await fetch('/api/dashboard/alerts/recipients');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderAlertRecipients(data.recipients || []);
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center; color:#ef4444;">Failed to load: ${err.message}</td></tr>`;
+    }
+}
+
+function renderAlertRecipients(recipients) {
+    const tbody = document.getElementById('alert-recipients-body');
+    if (!tbody) return;
+    if (recipients.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No recipients yet. Add one above.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = '';
+    recipients.forEach(r => {
+        const tr = document.createElement('tr');
+        const added = r.created_at ? new Date(r.created_at).toLocaleString() : '';
+        const activeBadge = r.active
+            ? '<span style="color:#16a34a;">Yes</span>'
+            : '<span style="color:#94a3b8;">Paused</span>';
+        tr.innerHTML = `
+            <td style="font-family:var(--font-mono);">${escapeHtml(r.email)}</td>
+            <td>${escapeHtml(r.display_name || '')}</td>
+            <td>${activeBadge}</td>
+            <td style="color:var(--text-muted); font-size:0.85rem;">${added}</td>
+            <td style="text-align:right;">
+                <button class="sm-btn" onclick="toggleAlertRecipient('${r.id}', ${!r.active})">${r.active ? 'Pause' : 'Resume'}</button>
+                <button class="sm-btn" style="color:#ef4444;" onclick="deleteAlertRecipient('${r.id}', '${escapeHtml(r.email)}')">Delete</button>
+            </td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+async function addAlertRecipient() {
+    const emailInput = document.getElementById('alert-add-email');
+    const nameInput = document.getElementById('alert-add-name');
+    const errorEl = document.getElementById('alert-add-error');
+    errorEl.textContent = '';
+
+    const email = (emailInput.value || '').trim();
+    const display_name = (nameInput.value || '').trim() || null;
+    if (!email || !email.includes('@')) {
+        errorEl.textContent = 'Enter a valid email address.';
+        return;
+    }
+    try {
+        const res = await fetch('/api/dashboard/alerts/recipients', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({email, display_name, active: true}),
+        });
+        if (!res.ok) {
+            const detail = (await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`;
+            errorEl.textContent = `Failed: ${detail}`;
+            return;
+        }
+        emailInput.value = '';
+        nameInput.value = '';
+        await loadAlertRecipients();
+    } catch (err) {
+        errorEl.textContent = `Failed: ${err.message}`;
+    }
+}
+
+async function toggleAlertRecipient(id, active) {
+    try {
+        const res = await fetch(`/api/dashboard/alerts/recipients/${id}`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({active}),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await loadAlertRecipients();
+    } catch (err) {
+        console.error('toggle failed', err);
+    }
+}
+
+async function deleteAlertRecipient(id, email) {
+    if (!confirm(`Delete recipient ${email}? This stops alerts to this address.`)) return;
+    try {
+        const res = await fetch(`/api/dashboard/alerts/recipients/${id}`, {method: 'DELETE'});
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        await loadAlertRecipients();
+    } catch (err) {
+        console.error('delete failed', err);
+    }
+}
+
+async function testSendAlert() {
+    const catSel = document.getElementById('alert-test-category');
+    const noteInput = document.getElementById('alert-test-note');
+    const resultEl = document.getElementById('alert-test-result');
+    resultEl.textContent = '';
+    const category = catSel.value;
+    const note = (noteInput.value || '').trim() || null;
+    if (!category) {
+        resultEl.textContent = 'Pick a category first.';
+        resultEl.style.color = '#ef4444';
+        return;
+    }
+    try {
+        const res = await fetch('/api/dashboard/alerts/test-send', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({category, subject: 'synthetic', note}),
+        });
+        if (!res.ok) {
+            const detail = (await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`;
+            resultEl.textContent = `Failed: ${detail}`;
+            resultEl.style.color = '#ef4444';
+            return;
+        }
+        const data = await res.json();
+        if (data.suppressed_reason === 'no_recipients') {
+            resultEl.textContent = 'Incident recorded but no active recipients to email. Add one above first.';
+            resultEl.style.color = '#f59e0b';
+        } else if (data.suppressed_reason === 'incident_already_open') {
+            resultEl.textContent = `Existing test incident already open (id: ${data.incident_id}). Wait 30 min for auto-resolve or it'll re-fire then.`;
+            resultEl.style.color = '#f59e0b';
+        } else {
+            resultEl.textContent = `Sent to ${data.emailed_to.length} recipient(s): ${data.emailed_to.join(', ')}`;
+            resultEl.style.color = '#16a34a';
+        }
+        await loadAlertIncidents();
+    } catch (err) {
+        resultEl.textContent = `Failed: ${err.message}`;
+        resultEl.style.color = '#ef4444';
+    }
+}
+
+async function loadAlertIncidents() {
+    const tbody = document.getElementById('alert-incidents-body');
+    if (!tbody) return;
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">Loading...</td></tr>';
+    try {
+        const res = await fetch('/api/dashboard/alerts/incidents?limit=100');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        renderAlertIncidents(data.incidents || []);
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center; color:#ef4444;">Failed to load: ${err.message}</td></tr>`;
+    }
+}
+
+function renderAlertIncidents(incidents) {
+    const tbody = document.getElementById('alert-incidents-body');
+    if (!tbody) return;
+    if (incidents.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No incidents yet. Fire a test send above to verify the path.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = '';
+    incidents.forEach(i => {
+        const tr = document.createElement('tr');
+        const statusColor = i.status === 'open' ? '#ef4444' : '#16a34a';
+        const statusLabel = i.status === 'open' ? 'OPEN' : 'Resolved';
+        const firstSeen = i.first_seen_at ? new Date(i.first_seen_at).toLocaleString() : '';
+        const lastSeen = i.last_seen_at ? new Date(i.last_seen_at).toLocaleString() : '';
+        const emailedCount = (i.emailed_recipients || []).length;
+        tr.innerHTML = `
+            <td><span style="color:${statusColor}; font-weight:600;">${statusLabel}</span></td>
+            <td style="font-family:var(--font-mono); font-size:0.85rem;">${escapeHtml(i.category)}</td>
+            <td>${escapeHtml(i.subject)}</td>
+            <td style="color:var(--text-muted); font-size:0.85rem;">${firstSeen}</td>
+            <td style="color:var(--text-muted); font-size:0.85rem;">${lastSeen}</td>
+            <td style="text-align:center;">${i.trigger_count}</td>
+            <td style="text-align:center;">${emailedCount}</td>
+        `;
+        tbody.appendChild(tr);
+    });
+}
+
+function escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
