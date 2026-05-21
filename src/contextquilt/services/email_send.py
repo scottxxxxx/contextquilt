@@ -6,12 +6,23 @@ no batching, no template rendering. Used today by the alerting service
 for critical-failure notifications; if other surfaces ever need email
 they can call this same function.
 
-Configuration via env:
+Configuration:
 
-    RESEND_API_KEY      Resend account API key (shared with SS/GP).
-    CQ_ALERT_EMAIL_FROM Default from-address. Must be on a Resend
-                        verified sender domain (mail.contextquilt.com
-                        on the shared account) or the send is refused.
+  * API key — resolved by `_resolve_api_key()`, which tries GCP Secret
+    Manager first (the cloudzap project's `resend-api-key` secret, the
+    shared key already in use by SS marketing + GP alerts) and falls
+    back to the `RESEND_API_KEY` env var. The SM grant lives on CQ's
+    VM service account so rotation in cloudzap propagates without a
+    deploy.
+  * `CQ_ALERT_EMAIL_FROM` — default from-address. Must be on a Resend
+    verified sender domain or the send is refused. Today CQ sends from
+    `cq-alerts@mail.shouldersurf.com` (mail.shouldersurf.com is verified
+    on the shared account; CQ can verify mail.contextquilt.com later
+    with no code change beyond the env var).
+  * Tags — every CQ-side send includes `purpose=critical-alert`,
+    `category=<category>`, and `stack=cq` so the shared Resend account's
+    analytics can cleanly partition CQ traffic from GP/SS marketing
+    traffic. GP adds `stack=gp` on their side.
 
 Errors are never raised. A failing send returns `SendResult(sent=False,
 error=...)` and the caller decides how loud to be about it. This is a
@@ -28,11 +39,35 @@ from typing import Any
 
 import httpx
 
+from .gcp_secret import get_secret
+
 logger = logging.getLogger(__name__)
 
 
 RESEND_API_URL = "https://api.resend.com/emails"
 DEFAULT_TIMEOUT_S = 10.0
+
+# Where the shared Resend API key lives. The cloudzap GCP project owns
+# the secret; CQ's VM service account has been granted
+# secretAccessor on this one specific secret name. Overridable for
+# tests via env, and we fall back to the RESEND_API_KEY env var
+# when SM isn't reachable (local dev, CI).
+RESEND_KEY_GCP_PROJECT = os.getenv("CQ_RESEND_KEY_PROJECT", "cloudzap")
+RESEND_KEY_SECRET_NAME = os.getenv("CQ_RESEND_KEY_SECRET_NAME", "resend-api-key")
+
+
+async def _resolve_api_key(explicit: str | None) -> str:
+    """Resolve the Resend API key. Order: explicit arg, then SM, then
+    RESEND_API_KEY env var. Empty string if none of these worked,
+    `send_email` then returns sent=False with reason no_api_key."""
+    if explicit:
+        return explicit
+    fetched = await get_secret(
+        project=RESEND_KEY_GCP_PROJECT,
+        secret_name=RESEND_KEY_SECRET_NAME,
+        env_fallback="RESEND_API_KEY",
+    )
+    return fetched or ""
 
 
 @dataclass
@@ -59,9 +94,12 @@ async def send_email(
     a `SendResult`. Never raises out of band, even on network errors,
     Resend 5xx, or misconfiguration. Callers should check `.sent`.
     """
-    key = api_key or os.getenv("RESEND_API_KEY", "")
+    key = await _resolve_api_key(api_key)
     if not key:
-        logger.warning("email_send.no_api_key — set RESEND_API_KEY")
+        logger.warning(
+            "email_send.no_api_key — neither SM (%s/%s) nor RESEND_API_KEY env produced a value",
+            RESEND_KEY_GCP_PROJECT, RESEND_KEY_SECRET_NAME,
+        )
         return SendResult(sent=False, error="no_api_key")
 
     sender = from_addr or os.getenv("CQ_ALERT_EMAIL_FROM", "")

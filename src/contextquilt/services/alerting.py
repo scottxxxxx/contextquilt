@@ -394,6 +394,10 @@ async def report_incident(
                 tags=[
                     {"name": "purpose", "value": "critical-alert"},
                     {"name": "category", "value": category},
+                    # Lets the shared Resend account's analytics
+                    # partition CQ traffic from GP/SS streams. GP adds
+                    # stack=gp on their side.
+                    {"name": "stack", "value": "cq"},
                 ],
             )
             if result.sent:
