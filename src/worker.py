@@ -1492,6 +1492,12 @@ class ColdPathWorker:
         else:
             user_context = ""
 
+        # Inject the user's open commitments so the LLM can detect
+        # completion mentions in this transcript and report them back
+        # in the resolved_commitments output. See _fetch_open_commitments
+        # for the lookback window + cap.
+        open_commits_block = await self._build_open_commitments_block(user_id)
+
         try:
             app_id = payload.get("app_id")
             llm = await self._get_llm_for_app(app_id)
@@ -1503,7 +1509,7 @@ class ColdPathWorker:
 
             response = await llm.extract(
                 system_prompt=resolved_prompt,
-                user_content=user_context + effective_summary,
+                user_content=user_context + open_commits_block + effective_summary,
                 json_schema=resolved_schema,
             )
 
@@ -1684,6 +1690,14 @@ class ColdPathWorker:
                 self.db, user_id, relationships, metadata
             )
 
+            # Apply commitment resolutions reported by the LLM. Validates
+            # patch ownership and that the patch is actually an open
+            # commitment before marking completed. Unknown or cross-user
+            # patch_ids are dropped with a warning.
+            commitments_resolved = await self._apply_resolved_commitments(
+                user_id, response.content.get("resolved_commitments") or [],
+            )
+
             logger.info(
                 "meeting_summary_complete",
                 user_id=user_id,
@@ -1691,6 +1705,7 @@ class ColdPathWorker:
                 actions_stored=actions_stored,
                 entities_stored=entities_stored,
                 relationships_stored=relationships_stored,
+                commitments_resolved=commitments_resolved,
                 cost_usd=response.cost_usd,
                 model=response.model,
             )
@@ -1782,6 +1797,146 @@ class ColdPathWorker:
             except Exception as e:
                 logger.error("backup_failure_watch_error", error=str(e))
             await asyncio.sleep(check_interval_s)
+
+    # ============================================================
+    # Commitment resolution (pipeline closes commitments by detecting
+    # completion mentions in later transcripts).
+    # ============================================================
+
+    # Lookback window for fetching user's open commitments to inject
+    # into the extraction prompt. Past the 30-day decay TTL anyway,
+    # so older opens have already been archived by the decay worker.
+    OPEN_COMMITS_LOOKBACK_DAYS = 30
+    # Cap on how many opens we shove into the prompt. The model can
+    # only resolve what it sees, but unbounded injection bloats every
+    # extraction call. Heaviest-user prior commits over the 30-day
+    # window will stay well under this on real traffic.
+    OPEN_COMMITS_MAX_INJECTED = 20
+
+    async def _fetch_open_commitments(self, user_id: str) -> list[dict[str, Any]]:
+        """Return list of {patch_id, text, created_at} for this user's
+        recent open commitment patches. Recent = within the lookback
+        window. Open = status='active' AND completed_at IS NULL."""
+        if not user_id:
+            return []
+        try:
+            subject_key = f"user:{user_id}"
+            rows = await self.db.fetch(
+                f"""
+                SELECT cp.patch_id::text AS patch_id,
+                       cp.value->>'text' AS text,
+                       cp.created_at
+                  FROM context_patches cp
+                  JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                 WHERE ps.subject_key = $1
+                   AND cp.patch_type = 'commitment'
+                   AND COALESCE(cp.status, 'active') = 'active'
+                   AND cp.completed_at IS NULL
+                   AND cp.created_at >= NOW() - INTERVAL '{int(self.OPEN_COMMITS_LOOKBACK_DAYS)} days'
+                 ORDER BY cp.created_at DESC
+                 LIMIT $2
+                """,
+                subject_key, self.OPEN_COMMITS_MAX_INJECTED,
+            )
+            return [{"patch_id": r["patch_id"], "text": r["text"], "created_at": r["created_at"]} for r in rows]
+        except Exception as exc:
+            logger.warning("open_commitments_fetch_failed", reason=str(exc)[:200], user_id=user_id)
+            return []
+
+    async def _build_open_commitments_block(self, user_id: str) -> str:
+        """Format the open commitments into the prompt-ready block that
+        prefixes user_content. Returns empty string when there are none,
+        so callers can prepend unconditionally."""
+        commits = await self._fetch_open_commitments(user_id)
+        if not commits:
+            return ""
+        now = datetime.utcnow()
+        lines = ["Open commitments from your prior meetings (still tracked as not yet done):"]
+        for c in commits:
+            text = (c["text"] or "").strip().replace("\n", " ")
+            if len(text) > 200:
+                text = text[:197] + "..."
+            created = c["created_at"]
+            # created may be timezone-aware; strip tzinfo for the diff
+            age_days = (now - created.replace(tzinfo=None)).days if created else None
+            age_str = f"committed {age_days}d ago" if age_days is not None else "committed recently"
+            lines.append(f"  - [{c['patch_id']}] {text} ({age_str})")
+        lines.append("")
+        lines.append("If this transcript indicates any are now done, include the patch_id in resolved_commitments.")
+        lines.append("")
+        return "\n".join(lines) + "\n"
+
+    async def _apply_resolved_commitments(
+        self, user_id: str, resolutions: list[dict[str, Any]],
+    ) -> int:
+        """Mark resolved commitments as completed. Returns count actually
+        resolved. Validates ownership before UPDATE so a hallucinated or
+        cross-user patch_id can't accidentally close another user's
+        commitment."""
+        if not resolutions or not user_id:
+            return 0
+        subject_key = f"user:{user_id}"
+        resolved_count = 0
+        for item in resolutions:
+            patch_id = (item.get("patch_id") or "").strip()
+            evidence = (item.get("evidence") or "").strip()[:300]
+            if not patch_id:
+                continue
+            try:
+                # Ownership gate + open-commitment gate in one query.
+                # Returns the patch_id only if all conditions hold; lets
+                # us avoid two round-trips.
+                gated = await self.db.fetchval(
+                    """
+                    SELECT cp.patch_id::text
+                      FROM context_patches cp
+                      JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                     WHERE cp.patch_id = $1::uuid
+                       AND ps.subject_key = $2
+                       AND cp.patch_type = 'commitment'
+                       AND COALESCE(cp.status, 'active') = 'active'
+                       AND cp.completed_at IS NULL
+                    """,
+                    patch_id, subject_key,
+                )
+            except Exception as exc:
+                # Bad UUID format from the LLM lands here. Log and skip,
+                # don't propagate, this is a defensive layer below the
+                # JSON schema's enforcement of patch_id being a string.
+                logger.warning(
+                    "resolved_commitment_lookup_failed",
+                    patch_id=patch_id, reason=str(exc)[:200], user_id=user_id,
+                )
+                continue
+            if not gated:
+                logger.warning(
+                    "resolved_commitment_rejected",
+                    patch_id=patch_id, user_id=user_id,
+                    reason="not_owned_or_not_open_or_unknown",
+                )
+                continue
+            try:
+                await self.db.execute(
+                    """
+                    UPDATE context_patches
+                       SET completed_at = NOW(),
+                           status = 'archived',
+                           updated_at = NOW()
+                     WHERE patch_id = $1::uuid
+                    """,
+                    patch_id,
+                )
+                resolved_count += 1
+                logger.info(
+                    "commitment_resolved",
+                    patch_id=patch_id, user_id=user_id, evidence=evidence[:120],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "resolved_commitment_update_failed",
+                    patch_id=patch_id, reason=str(exc)[:200], user_id=user_id,
+                )
+        return resolved_count
 
     async def _maybe_alert_llm_failure(self, exc: Exception) -> None:
         """Fire a critical-failure alert when an LLM call fails with an
