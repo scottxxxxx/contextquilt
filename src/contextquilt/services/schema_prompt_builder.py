@@ -48,6 +48,7 @@ def build_prompt(manifest: Dict[str, Any]) -> str:
     sections.append(_priority_order(guidance))
     sections.append(_hard_caps(guidance))
     sections.append(_exclusion_examples(guidance))
+    sections.append(_resolved_commitments_section())
     sections.append(_closing_rules())
 
     # Drop any empty sections before joining
@@ -73,7 +74,7 @@ def build_output_schema(manifest: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["patches", "entities", "relationships"],
+        "required": ["patches", "resolved_commitments", "entities", "relationships"],
         "properties": {
             "_reasoning": {"type": "string"},
             "you_speaker_present": {"type": "boolean"},
@@ -108,6 +109,18 @@ def build_output_schema(manifest: Dict[str, Any]) -> Dict[str, Any]:
                                 },
                             },
                         },
+                    },
+                },
+            },
+            "resolved_commitments": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": ["patch_id", "evidence"],
+                    "properties": {
+                        "patch_id": {"type": "string"},
+                        "evidence": {"type": "string"},
                     },
                 },
             },
@@ -176,6 +189,7 @@ def _output_shape(manifest: Dict[str, Any]) -> str:
         "Return a JSON object with exactly these keys:\n"
         "- `_reasoning`: short scratchpad explaining why you chose the patches you did\n"
         "- `patches`: array of typed patches (see PATCH TYPES below)\n"
+        "- `resolved_commitments`: array of prior open commitments this transcript shows as completed (see RESOLVED COMMITMENTS section)\n"
         "- `entities`: array of named things (for the recall name index)\n"
         "- `relationships`: array of edges between entities\n"
         "\n"
@@ -276,6 +290,46 @@ def _exclusion_examples(guidance: Dict[str, Any]) -> str:
     for item in excl:
         lines.append(f"- {item}")
     return "\n".join(lines)
+
+
+def _resolved_commitments_section() -> str:
+    """Universal section, included for every manifest-generated prompt.
+
+    The worker injects an `Open commitments` block into user_content when
+    the user has any open commitment patches. This section tells the LLM
+    how to use that block and what to emit in the `resolved_commitments`
+    output field.
+    """
+    return (
+        "=== RESOLVED COMMITMENTS ===\n"
+        "If user_content begins with an `Open commitments` block, those are\n"
+        "prior commitments the user already made that are still open in\n"
+        "their memory. Your job is to detect when THIS transcript indicates\n"
+        "any of them are now done, and report those patch_ids back in\n"
+        "`resolved_commitments`.\n"
+        "\n"
+        "Trigger phrases to match generously (not exhaustive):\n"
+        "  - \"I sent the email to <person>\"\n"
+        "  - \"we shipped <thing>\"\n"
+        "  - \"I finished <doc/PR/draft>\"\n"
+        "  - \"scheduled the call with <person>\"\n"
+        "  - \"<thing> is done / live / merged / handed off\"\n"
+        "  - \"got back to <person>\"\n"
+        "  - \"deleted / archived / closed <thing>\"\n"
+        "\n"
+        "Rules:\n"
+        "1. Only include patch_ids that appear in the `Open commitments` block.\n"
+        "   Never invent or guess — the worker rejects unknown patch_ids.\n"
+        "2. Copy patch_id strings verbatim, character for character.\n"
+        "3. The `evidence` field is a short quote or paraphrase from the\n"
+        "   transcript showing the action was completed. Under ~300 chars.\n"
+        "4. If the transcript doesn't reference any open commitment, emit\n"
+        "   an empty array. Do NOT force matches.\n"
+        "5. If no `Open commitments` block is present, always emit an empty array.\n"
+        "6. Match liberally on the substance of the action, not the surface\n"
+        "   wording. \"Got back to Ulster\" resolves \"Email Ulster about the\n"
+        "   contract\" if both clearly refer to the same conversation."
+    )
 
 
 def _closing_rules() -> str:

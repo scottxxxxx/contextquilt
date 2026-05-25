@@ -84,8 +84,9 @@ OUTPUT THE FIELDS IN THIS EXACT ORDER:
   1. "you_speaker_present" (from STEP 0)
   2. "_reasoning"
   3. "patches"
-  4. "entities"
-  5. "relationships"
+  4. "resolved_commitments"
+  5. "entities"
+  6. "relationships"
 
 Do NOT begin the "patches" array until "_reasoning" is fully complete.
 The reasoning is what grounds the patches — generating patches first and
@@ -113,7 +114,7 @@ The transcript uses speaker labels in brackets. The speaker whose label contains
 - Project patches require ownership signals from the (you) speaker
 - All speakers can own commitments, blockers, and decisions
 
-Analyze this meeting transcript and return a JSON object with exactly four keys:
+Analyze this meeting transcript and return a JSON object with exactly six keys:
 
 {
   "you_speaker_present": true,
@@ -127,6 +128,9 @@ Analyze this meeting transcript and return a JSON object with exactly four keys:
       ]
     }
   ],
+  "resolved_commitments": [
+    {"patch_id": "<verbatim id from the Open commitments block in user_content>", "evidence": "<short quote or paraphrase showing completion>"}
+  ],
   "entities": [
     {"name": "<exact name as mentioned in this transcript>", "type": "<person|project|company|feature|artifact|deadline|metric>", "description": "<brief context from this transcript>"}
   ],
@@ -138,6 +142,40 @@ Analyze this meeting transcript and return a JSON object with exactly four keys:
 The angle-bracket placeholders above describe the SHAPE of each field. Do
 NOT copy the placeholder text into your output — every value must be
 grounded in THIS transcript, not in any example.
+
+=== RESOLVED COMMITMENTS ===
+
+If user_content begins with an `Open commitments` block, those are prior
+commitments the user already made that are still marked open in their
+memory. Your job is to detect when THIS transcript indicates any of them
+are now done, and report those patch_ids back in `resolved_commitments`.
+
+Trigger phrases to match generously (not an exhaustive list):
+  - "I sent the email to <person>"
+  - "we shipped <thing>"
+  - "I finished <doc/PR/draft>"
+  - "scheduled the call with <person>"
+  - "<thing> is done / live / merged / handed off"
+  - "got back to <person>"
+  - "deleted / archived / closed <thing>"
+
+Rules:
+  1. Only include patch_ids that appear in the `Open commitments` block.
+     Never invent or guess patch_ids — the worker will reject any that
+     don't match an open commitment for this user.
+  2. Copy patch_id strings verbatim, character for character.
+  3. The `evidence` field is a short quote or paraphrase from the
+     transcript showing the action was completed. Keep it under ~300
+     characters, no need for verbatim if a paraphrase is clearer.
+  4. If the transcript doesn't reference any open commitment, emit an
+     empty array. Do NOT force matches.
+  5. If no `Open commitments` block is present in user_content, always
+     emit an empty array.
+  6. Match liberally on the substance of the action, not the surface
+     wording. "Got back to Ulster" resolves "Email Ulster about the contract"
+     if both clearly refer to the same conversation.
+
+=== END RESOLVED COMMITMENTS ===
 
 PATCH TYPES — use the most specific type that fits. The 13 types cluster into 6 cognitive facets:
 
