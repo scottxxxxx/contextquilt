@@ -53,10 +53,12 @@ EXTRACTION_SCHEMA: dict = {
     # Property order matters under OpenAI strict mode — the model generates
     # fields in the order they appear in `properties`. We exploit this to
     # force:
-    #   1. The (you)-marker decision FIRST  (gating commitment)
-    #   2. Reason-then-extract SECOND       (grounds patches in quotes)
-    #   3. The patches array LAST           (committed to by the prior two)
-    "required": ["you_speaker_present", "_reasoning", "patches", "entities", "relationships"],
+    #   1. The (you)-marker decision FIRST    (gating commitment)
+    #   2. Reason-then-extract SECOND         (grounds patches in quotes)
+    #   3. patches THIRD                       (new patches from this transcript)
+    #   4. resolved_commitments FOURTH         (look back at prior open commits last)
+    #   5. entities + relationships LAST
+    "required": ["you_speaker_present", "_reasoning", "patches", "resolved_commitments", "entities", "relationships"],
     "properties": {
         "you_speaker_present": {
             "type": "boolean",
@@ -121,6 +123,41 @@ EXTRACTION_SCHEMA: dict = {
                                 "label": {"type": "string"},
                             },
                         },
+                    },
+                },
+            },
+        },
+        "resolved_commitments": {
+            "type": "array",
+            "maxItems": 10,
+            "description": (
+                "Open commitments from the user's prior meetings that this "
+                "transcript indicates are now done. Only fill if the user_content "
+                "includes an `Open commitments` block AND the transcript clearly "
+                "shows the action was completed. Match generously: explicit "
+                "phrases like 'I sent the email', 'finished the doc', 'we shipped "
+                "it' all count. If the transcript doesn't reference any of the "
+                "listed commitments, emit an empty array."
+            ),
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["patch_id", "evidence"],
+                "properties": {
+                    "patch_id": {
+                        "type": "string",
+                        "description": (
+                            "The exact patch_id from the `Open commitments` block "
+                            "in user_content. Copy verbatim; do not invent or modify."
+                        ),
+                    },
+                    "evidence": {
+                        "type": "string",
+                        "description": (
+                            "Short quote or paraphrase from the transcript showing "
+                            "the commitment was completed. Used for the audit log "
+                            "and the dashboard, kept under ~300 chars."
+                        ),
                     },
                 },
             },
