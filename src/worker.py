@@ -876,10 +876,25 @@ class ColdPathWorker:
                 # Step 2: Archive patches using their type's default TTL.
                 # Exclude patches with an override (handled in Step 1).
                 for patch_type, ttl_days in DEFAULT_TTLS.items():
-                    # Look up TTL from registry if available, fall back to default
+                    # Registry is keyed (type_key, app_id) — a global row
+                    # (app_id NULL) and zero+ per-app rows can coexist.
+                    # Without an ordering, fetchrow's pick was arbitrary and
+                    # the effective TTL flipped between the global and app
+                    # values. Prefer a non-NULL app-scoped row (smallest TTL
+                    # wins on multi-app tie, conservative), else the non-NULL
+                    # global row, else fall through to the DEFAULT_TTLS
+                    # hardcode. When a second app exists, the right shape is
+                    # per-patch resolution via context_patch_acl, not a single
+                    # global winner.
                     try:
                         row = await self.db.fetchrow(
-                            "SELECT default_ttl_days FROM patch_type_registry WHERE type_key = $1",
+                            """
+                            SELECT default_ttl_days
+                            FROM patch_type_registry
+                            WHERE type_key = $1 AND default_ttl_days IS NOT NULL
+                            ORDER BY (app_id IS NULL) ASC, default_ttl_days ASC
+                            LIMIT 1
+                            """,
                             patch_type
                         )
                         if row and row["default_ttl_days"] is not None:
