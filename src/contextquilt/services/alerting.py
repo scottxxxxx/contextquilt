@@ -118,6 +118,17 @@ KNOWN_CATEGORIES: dict[str, dict[str, str]] = {
             "backup_runs.error_message column for the cause."
         ),
     },
+    "anthropic_fallback_to_or": {
+        "label": "Anthropic extraction fell back to OpenRouter",
+        "description": (
+            "A CQ extraction call against Anthropic's native API "
+            "failed (auth, rate limit, 5xx, timeout, or network) and "
+            "the wrapper transparently retried through OpenRouter. "
+            "The extraction succeeded but the Anthropic-side issue "
+            "needs investigation before our managed key path silently "
+            "rots."
+        ),
+    },
 }
 
 
