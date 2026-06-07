@@ -28,6 +28,12 @@ services:
       - CQ_LLM_API_KEY=${CQ_LLM_API_KEY}
       - CQ_LLM_BASE_URL=${CQ_LLM_BASE_URL:-https://openrouter.ai/api/v1}
       - CQ_LLM_MODEL=${CQ_LLM_MODEL:-mistralai/mistral-small-3.1-24b-instruct}
+      # Anthropic-direct primary with OpenRouter fallback. Set
+      # CQ_LLM_PRIMARY_PROVIDER=openrouter to opt out of the wrapper
+      # and run on OR only (no Anthropic-direct attempt).
+      - CQ_LLM_PRIMARY_PROVIDER=${CQ_LLM_PRIMARY_PROVIDER:-anthropic}
+      - CQ_ANTHROPIC_API_KEY=${CQ_ANTHROPIC_API_KEY}
+      - CQ_ANTHROPIC_MODEL=${CQ_ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
       - CQ_ADMIN_KEY=${CQ_ADMIN_KEY:-admin}
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-change-me-in-production}
     depends_on:
@@ -70,6 +76,12 @@ services:
       - CQ_LLM_API_KEY=${CQ_LLM_API_KEY}
       - CQ_LLM_BASE_URL=${CQ_LLM_BASE_URL:-https://openrouter.ai/api/v1}
       - CQ_LLM_MODEL=${CQ_LLM_MODEL:-mistralai/mistral-small-3.1-24b-instruct}
+      # Anthropic-direct primary with OpenRouter fallback. Set
+      # CQ_LLM_PRIMARY_PROVIDER=openrouter to opt out of the wrapper
+      # and run on OR only (no Anthropic-direct attempt).
+      - CQ_LLM_PRIMARY_PROVIDER=${CQ_LLM_PRIMARY_PROVIDER:-anthropic}
+      - CQ_ANTHROPIC_API_KEY=${CQ_ANTHROPIC_API_KEY}
+      - CQ_ANTHROPIC_MODEL=${CQ_ANTHROPIC_MODEL:-claude-haiku-4-5-20251001}
     depends_on:
       postgres:
         condition: service_healthy
