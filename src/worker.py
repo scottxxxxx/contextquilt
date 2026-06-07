@@ -44,6 +44,11 @@ from contextquilt.services.extraction_schema import (
     strip_prose_from_person_names,
 )
 from contextquilt.services.llm_client import LLMClient
+from contextquilt.services.llm_client_anthropic import AnthropicLLMClient
+from contextquilt.services.llm_client_fallback import (
+    LLMClientWithFallback,
+    primary_provider_from_env,
+)
 from contextquilt.services.schema_prompt_builder import (
     build_output_schema as build_schema_output_schema,
 )
@@ -682,6 +687,45 @@ async def _rebuild_entity_index(db, redis_client, user_id: str):
         logger.error("entity_index_rebuild_failed", user_id=user_id, error=str(e))
 
 
+def _build_default_llm_client(*, alert_db=None):
+    """Construct the default LLM client per CQ_LLM_PRIMARY_PROVIDER.
+
+    - "anthropic" (default): AnthropicLLMClient as primary with the
+      existing OpenAI-compat LLMClient (OpenRouter by default) as the
+      fallback. Saves the OR markup on every successful primary call
+      and emails the operator whenever Anthropic fails.
+    - "openrouter" / anything else: existing LLMClient only, no
+      fallback wrapper. Useful for tests, regression rollback, or any
+      env without an Anthropic key configured.
+
+    The selection runs once at worker startup; callers above this can
+    treat the returned object as opaque since both branches expose the
+    same `extract()` interface.
+    """
+    provider = primary_provider_from_env()
+    if provider == "anthropic" and os.getenv("CQ_ANTHROPIC_API_KEY"):
+        primary = AnthropicLLMClient()
+        fallback = LLMClient()
+        logger.info(
+            "llm_client_default_built",
+            primary_provider="anthropic",
+            primary_model=primary.model,
+            fallback_model=fallback.model,
+            alert_wired=alert_db is not None,
+        )
+        return LLMClientWithFallback(primary, fallback, alert_db=alert_db)
+    # Fall through: no Anthropic key configured, or operator explicitly
+    # opted out. Preserve the previous behavior exactly.
+    client = LLMClient()
+    logger.info(
+        "llm_client_default_built",
+        primary_provider="openrouter",
+        primary_model=client.model,
+        fallback="none",
+    )
+    return client
+
+
 class ColdPathWorker:
     def __init__(self):
         self.redis = None
@@ -707,7 +751,11 @@ class ColdPathWorker:
 
         self.redis = redis.from_url(REDIS_URL, decode_responses=True)
         self.db = await asyncpg.connect(DATABASE_URL)
-        self.llm = LLMClient()  # Default LLM client (server's own key)
+        # Default LLM client (server's own keys). Built from env vars
+        # via `_build_default_llm_client` so the worker can flip
+        # between Anthropic-primary + OR-fallback (production default)
+        # and OR-only (test / fallback off) without code changes.
+        self.llm = _build_default_llm_client(alert_db=self.db)
         self._app_llm_cache: dict[str, LLMClient] = {}  # Per-app BYOK clients
 
         # Get context window for budget calculation
