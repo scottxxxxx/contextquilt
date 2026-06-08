@@ -34,11 +34,12 @@ that triggered it.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
+
+from contextquilt.config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +72,13 @@ async def send_email(
     a `SendResult`. Never raises out of band, even on network errors,
     Resend 5xx, or misconfiguration. Callers should check `.sent`.
     """
-    key = api_key or os.getenv("RESEND_API_KEY", "")
+    settings = get_settings()
+    key = api_key or settings.resend_api_key
     if not key:
         logger.warning("email_send.no_api_key — set RESEND_API_KEY in .env.prod")
         return SendResult(sent=False, error="no_api_key")
 
-    sender = from_addr or os.getenv("CQ_ALERT_EMAIL_FROM", "")
+    sender = from_addr or settings.cq_alert_email_from
     if not sender:
         logger.warning("email_send.no_from_addr — set CQ_ALERT_EMAIL_FROM")
         return SendResult(sent=False, error="no_from_addr")

@@ -23,13 +23,14 @@ moving extraction here saves that margin per call.
 """
 
 import json
-import os
 import time
 from typing import Any
 
 import httpx
 import structlog
 
+from contextquilt.config import get_settings
+from contextquilt.secrets import get_secret
 from contextquilt.services.llm_client import (
     LLMResponse,
     estimate_cost,
@@ -81,8 +82,14 @@ class AnthropicLLMClient:
         timeout: float = 120.0,
         max_tokens: int = 4096,
     ):
-        self.api_key = api_key or os.getenv("CQ_ANTHROPIC_API_KEY", "")
-        self.model = model or os.getenv("CQ_ANTHROPIC_MODEL", DEFAULT_ANTHROPIC_MODEL)
+        # Source the key via the secrets helper so a Secret Manager
+        # value (when CQ_GCP_PROJECT is configured and the env var is
+        # empty) is picked up automatically. Env var still wins for
+        # local dev and operator override.
+        self.api_key = api_key or get_secret(
+            "anthropic-api-key", env_var="CQ_ANTHROPIC_API_KEY"
+        )
+        self.model = model or get_settings().cq_anthropic_model
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.base_url = "https://api.anthropic.com"
