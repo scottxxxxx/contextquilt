@@ -3,8 +3,8 @@
 from typing import Any, Dict, List, Optional
 import structlog
 
-from src.contextquilt.memory.layer import MemoryLayer
-from src.contextquilt.types import ConversationContext, LLMProvider, Message
+from contextquilt.memory.layer import MemoryLayer
+from contextquilt.types import ConversationContext, LLMProvider, Message
 
 logger = structlog.get_logger()
 
