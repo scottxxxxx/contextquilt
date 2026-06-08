@@ -29,7 +29,10 @@ def _clean_secrets_cache():
 
 
 def _wipe_env(monkeypatch):
-    for var in ("CQ_ANTHROPIC_API_KEY", "CQ_GCP_PROJECT"):
+    # Both managed-key env vars + the project pointer. Listed by hand
+    # rather than from _SECRET_MANAGER_MAPPINGS so adding a future
+    # mapping doesn't silently widen test-fixture wipes.
+    for var in ("CQ_ANTHROPIC_API_KEY", "CQ_LLM_API_KEY", "CQ_GCP_PROJECT"):
         monkeypatch.delenv(var, raising=False)
 
 
@@ -141,9 +144,11 @@ def test_ensure_secrets_no_project_is_noop(monkeypatch):
 
 def test_ensure_secrets_skips_when_env_already_set(monkeypatch):
     """If the env var is already populated, the SM round-trip is skipped
-    entirely (local dev / operator override wins)."""
+    entirely (local dev / operator override wins). Both managed keys
+    are set so the loop doesn't fall through to SM for the other one."""
     _wipe_env(monkeypatch)
     monkeypatch.setenv("CQ_ANTHROPIC_API_KEY", "sk-local-dev")
+    monkeypatch.setenv("CQ_LLM_API_KEY", "sk-or-local-dev")
     monkeypatch.setenv("CQ_GCP_PROJECT", "contextquilt")
 
     # Set up a tripwire — if SM is actually hit, the test fails loudly.
