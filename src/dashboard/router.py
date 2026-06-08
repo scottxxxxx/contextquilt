@@ -7,8 +7,8 @@ import uuid
 import json
 import logging
 import aiohttp
-from src.contextquilt.config import get_settings
-from src.contextquilt.gateway.extraction import classify_fact, extract_facts_from_response
+from contextquilt.config import get_settings
+from contextquilt.gateway.extraction import classify_fact, extract_facts_from_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
@@ -1553,7 +1553,7 @@ async def list_alert_categories():
     """Stable category catalog. The dashboard renders the subscription
     picker and the test-send dropdown against this, so a new category
     only needs to be added in alerting.py to surface everywhere."""
-    from src.contextquilt.services.alerting import KNOWN_CATEGORIES
+    from contextquilt.services.alerting import KNOWN_CATEGORIES
     return {
         "categories": [
             {"id": k, "label": v["label"], "description": v["description"]}
@@ -1599,7 +1599,7 @@ async def create_alert_recipient(body: AlertRecipientRequest):
     if not body.email or "@" not in body.email:
         raise HTTPException(status_code=400, detail="valid email required")
 
-    from src.contextquilt.services.alerting import KNOWN_CATEGORIES
+    from contextquilt.services.alerting import KNOWN_CATEGORIES
     if body.categories:
         bad = [c for c in body.categories if c not in KNOWN_CATEGORIES]
         if bad:
@@ -1631,7 +1631,7 @@ async def create_alert_recipient(body: AlertRecipientRequest):
 async def update_alert_recipient(recipient_id: str, body: AlertRecipientRequest):
     """Patch a recipient. Only fields present in the body are updated.
     Toggling `active=false` keeps the row but stops alerts."""
-    from src.contextquilt.services.alerting import KNOWN_CATEGORIES
+    from contextquilt.services.alerting import KNOWN_CATEGORIES
     if body.categories:
         bad = [c for c in body.categories if c not in KNOWN_CATEGORIES]
         if bad:
@@ -1706,7 +1706,7 @@ async def delete_alert_recipient(recipient_id: str):
 async def list_alert_incidents(limit: int = 100):
     """Recent incidents (open + resolved). Newest first. Used by the
     dashboard's history panel."""
-    from src.contextquilt.services.alerting import list_incidents
+    from contextquilt.services.alerting import list_incidents
     conn = await asyncpg.connect(DATABASE_URL)
     try:
         rows = await list_incidents(conn, limit=min(limit, 500))
@@ -1722,7 +1722,7 @@ async def test_send_alert(body: AlertTestSendRequest):
     adding a new address to confirm deliverability + Resend DKIM
     setup. The synthetic incident lands in the history list and
     auto-resolves like any other."""
-    from src.contextquilt.services.alerting import report_incident, KNOWN_CATEGORIES
+    from contextquilt.services.alerting import report_incident, KNOWN_CATEGORIES
     if body.category not in KNOWN_CATEGORIES:
         raise HTTPException(status_code=400, detail=f"unknown category: {body.category}")
 
