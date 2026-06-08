@@ -13,7 +13,6 @@ Run standalone:
 Or mount in the existing FastAPI app via mcp_app().
 """
 
-import os
 import sys
 import json
 import asyncio
@@ -22,14 +21,21 @@ import redis.asyncio as aioredis
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
+# Populate os.environ from Secret Manager before Settings builds.
+# No-op when CQ_GCP_PROJECT is unset (local dev / stdio mode).
+from contextquilt.secrets import ensure_secrets_in_env
+ensure_secrets_in_env()
+from contextquilt.config import get_settings
+
 # ============================================
 # Configuration
 # ============================================
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/context_quilt")
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-MCP_PORT = int(os.getenv("MCP_PORT", "8001"))
-MCP_API_KEY = os.getenv("MCP_API_KEY", "")  # Required for remote transport. Set to a strong random string.
+_settings = get_settings()
+DATABASE_URL = _settings.database_url
+REDIS_URL = _settings.redis_url
+MCP_PORT = _settings.mcp_port
+MCP_API_KEY = _settings.mcp_api_key  # Required for remote transport. Set to a strong random string.
 
 # ============================================
 # MCP Server Definition

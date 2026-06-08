@@ -1,36 +1,40 @@
 from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from typing import List, Dict, Any, Optional
 import asyncpg
-import os
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 import uuid
 import json
 import logging
 import aiohttp
+from src.contextquilt.config import get_settings
 from src.contextquilt.gateway.extraction import classify_fact, extract_facts_from_response
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/dashboard", tags=["Dashboard"])
 
-# Admin key authentication (same pattern as CloudZap)
-CQ_ADMIN_KEY = os.getenv("CQ_ADMIN_KEY", "")
+
+# Module-level config constants. Kept as constants (not inline
+# `get_settings().x` at every call site) to minimize churn against the
+# ~20 existing `asyncpg.connect(DATABASE_URL)` call sites.
+_settings = get_settings()
+DATABASE_URL = _settings.database_url
+OLLAMA_URL = _settings.ollama_url
+
 
 async def verify_admin_key(x_admin_key: str = Header(default="")):
     """Verify the admin key. If CQ_ADMIN_KEY is not set, access is open (dev mode)."""
-    if CQ_ADMIN_KEY and x_admin_key != CQ_ADMIN_KEY:
+    admin_key = get_settings().cq_admin_key
+    if admin_key and x_admin_key != admin_key:
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
 @router.get("/verify-key")
 async def verify_key(x_admin_key: str = Header(default="")):
     """Endpoint for the dashboard login to verify the admin key."""
-    if CQ_ADMIN_KEY and x_admin_key != CQ_ADMIN_KEY:
+    admin_key = get_settings().cq_admin_key
+    if admin_key and x_admin_key != admin_key:
         raise HTTPException(status_code=403, detail="Invalid admin key")
     return {"status": "ok"}
-
-# Database Configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/context_quilt")
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
 
 # Dependency to get DB connection
 async def get_db():
@@ -1113,10 +1117,9 @@ async def get_metrics_recent(limit: int = 50):
 import time
 import redis.asyncio as aioredis
 
-_redis_host = os.getenv("REDIS_HOST", "localhost")
-_redis_port = os.getenv("REDIS_PORT", "6379")
-_redis_password = os.getenv("REDIS_PASSWORD", "")
-REDIS_URL = os.getenv("REDIS_URL", f"redis://:{_redis_password}@{_redis_host}:{_redis_port}" if _redis_password else f"redis://{_redis_host}:{_redis_port}")
+# Composed once via Settings (REDIS_URL wins; else compose from
+# REDIS_HOST/PORT/PASSWORD). Same logic as `src/worker.py`.
+REDIS_URL = _settings.redis_url
 
 @router.get("/health-check", dependencies=[Depends(verify_admin_key)])
 async def health_check():
@@ -1159,19 +1162,23 @@ async def health_check():
         result["redis"] = {"status": "disconnected", "error": str(e)}
         result["worker"] = {"pending_events": -1}
 
-    # LLM config
+    # LLM config (effective Settings values; pre-refactor showed
+    # "not configured" only when env was unset, but Settings' defaults
+    # are the actual production fallbacks, so showing them is more
+    # accurate than masking).
+    s = get_settings()
     result["llm"] = {
-        "model": os.getenv("CQ_LLM_MODEL", "not configured"),
-        "base_url": os.getenv("CQ_LLM_BASE_URL", "not configured"),
+        "model": s.cq_llm_model,
+        "base_url": s.cq_llm_base_url,
     }
 
     # Runtime config
     result["config"] = {
-        "max_patches_per_meeting": int(os.getenv("CQ_MAX_PATCHES", "12")),
-        "max_entities_per_meeting": int(os.getenv("CQ_MAX_ENTITIES", "10")),
-        "max_relationships_per_meeting": int(os.getenv("CQ_MAX_RELATIONSHIPS", "10")),
-        "queue_max_wait_minutes": int(os.getenv("CQ_QUEUE_MAX_WAIT_MINUTES", "60")),
-        "queue_budget_threshold": float(os.getenv("CQ_QUEUE_BUDGET_THRESHOLD", "0.8")),
+        "max_patches_per_meeting": s.cq_max_patches,
+        "max_entities_per_meeting": s.cq_max_entities,
+        "max_relationships_per_meeting": s.cq_max_relationships,
+        "queue_max_wait_minutes": s.cq_queue_max_wait_minutes,
+        "queue_budget_threshold": s.cq_queue_budget_threshold,
     }
 
     return result
@@ -1182,19 +1189,20 @@ async def health_check():
 
 @router.get("/config", dependencies=[Depends(verify_admin_key)])
 async def get_config():
+    s = get_settings()
     return {
         "extraction": {
-            "max_patches_per_meeting": int(os.getenv("CQ_MAX_PATCHES", "12")),
-            "max_entities_per_meeting": int(os.getenv("CQ_MAX_ENTITIES", "10")),
-            "max_relationships_per_meeting": int(os.getenv("CQ_MAX_RELATIONSHIPS", "10")),
+            "max_patches_per_meeting": s.cq_max_patches,
+            "max_entities_per_meeting": s.cq_max_entities,
+            "max_relationships_per_meeting": s.cq_max_relationships,
         },
         "queue": {
-            "max_wait_minutes": int(os.getenv("CQ_QUEUE_MAX_WAIT_MINUTES", "60")),
-            "budget_threshold": float(os.getenv("CQ_QUEUE_BUDGET_THRESHOLD", "0.8")),
+            "max_wait_minutes": s.cq_queue_max_wait_minutes,
+            "budget_threshold": s.cq_queue_budget_threshold,
         },
         "llm": {
-            "model": os.getenv("CQ_LLM_MODEL", "not configured"),
-            "base_url": os.getenv("CQ_LLM_BASE_URL", "not configured"),
+            "model": s.cq_llm_model,
+            "base_url": s.cq_llm_base_url,
         }
     }
 
@@ -1729,7 +1737,7 @@ async def test_send_alert(body: AlertTestSendRequest):
                 "note": body.note or "Manual deliverability check from admin dashboard.",
                 "triggered_at": datetime.utcnow().isoformat(),
             },
-            from_addr=os.getenv("CQ_ALERT_EMAIL_FROM"),
+            from_addr=get_settings().cq_alert_email_from or None,
         )
         return {
             "incident_id": result.incident_id,
