@@ -1183,6 +1183,56 @@ async def health_check():
 
     return result
 
+
+@router.get("/provider-health", dependencies=[Depends(verify_admin_key)])
+async def provider_health():
+    """Return the latest health probe per provider.
+
+    Backs the future "Providers" dashboard tab (Gap 3); also useful as
+    a generic operator probe today. Shape mirrors what GP's Providers
+    tab returns: a per-provider dict carrying status + latency, plus
+    balance/limit/is_free_tier for OpenRouter (Anthropic doesn't
+    expose a usable public balance API).
+
+    Returns an empty dict per provider if the daemon hasn't probed
+    yet (worker still warming up, or has been down).
+    """
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT ON (provider)
+                provider, probed_at, status, latency_ms,
+                balance_usd, limit_usd, is_free_tier, error_message
+              FROM provider_health_probes
+             ORDER BY provider, probed_at DESC
+            """
+        )
+    finally:
+        await conn.close()
+
+    out: Dict[str, Any] = {}
+    for row in rows:
+        entry: Dict[str, Any] = {
+            "status": row["status"],
+            "latency_ms": row["latency_ms"],
+            "last_probed_at": row["probed_at"].isoformat() if row["probed_at"] else None,
+            "error": row["error_message"],
+        }
+        # Balance fields are OpenRouter-only; omit on Anthropic rows so
+        # the response doesn't carry confusing nulls there.
+        if row["provider"] == "openrouter":
+            entry["balance_usd"] = (
+                float(row["balance_usd"]) if row["balance_usd"] is not None else None
+            )
+            entry["limit_usd"] = (
+                float(row["limit_usd"]) if row["limit_usd"] is not None else None
+            )
+            entry["is_free_tier"] = row["is_free_tier"]
+        out[row["provider"]] = entry
+    return out
+
+
 # ============================================================
 # Configuration
 # ============================================================

@@ -788,13 +788,14 @@ class ColdPathWorker:
                      base_url=self.llm.base_url,
                      context_budget=self.context_budget)
 
-        # Run stream consumer, queue checker, decay worker, and backup
-        # failure watcher concurrently.
+        # Run stream consumer, queue checker, decay worker, backup
+        # failure watcher, and provider health daemon concurrently.
         await asyncio.gather(
             self.consume_stream(),
             self.check_queues_loop(),
             self.decay_loop(),
             self.backup_failure_watch_loop(),
+            self.provider_health_loop(),
         )
 
     async def stop(self):
@@ -1874,6 +1875,130 @@ class ColdPathWorker:
                         logger.warning("backup_alert_failed", reason=str(exc)[:200])
             except Exception as e:
                 logger.error("backup_failure_watch_error", error=str(e))
+            await asyncio.sleep(check_interval_s)
+
+    async def provider_health_loop(self):
+        """Probe Anthropic + OpenRouter every 15 minutes, persist each
+        outcome to provider_health_probes, and alert once a provider
+        racks up CONSECUTIVE_FAILURES_TO_ALERT consecutive failures.
+
+        Why 15 minutes:
+            Probes are cheap (count_tokens is $0; OR's /auth/key is
+            metadata only). 15 minutes is fast enough that a dead key
+            gets flagged before the next extraction is likely to hit
+            it on most workloads, and slow enough that we don't grow
+            the probe table at any meaningful rate.
+
+        Why consecutive failures, not "any failure":
+            Either provider can blip on a single probe (network blip,
+            429 rate limit during a usage spike, brief 5xx on the
+            provider side). One failed probe is noise. Three in a row
+            on the 15-minute cadence (45 minutes of continuous failure)
+            is signal.
+
+        Why dedup at the alerting layer, not here:
+            report_incident already dedupes by (category, subject)
+            within a 30 min window. A sustained outage emails once,
+            not once per probe cycle. We pass the provider name as
+            subject so anthropic + openrouter failures alert
+            independently.
+        """
+        check_interval_s = 15 * 60  # 15 minutes
+        consecutive_failures_to_alert = 3
+        # Wait a bit at startup so the worker is fully up before the
+        # first probe — avoids a misleading first-probe failure during
+        # warm-up if Anthropic auth lags behind the LLM client init.
+        await asyncio.sleep(30)
+        while self.running:
+            try:
+                from contextquilt.services.provider_health import (
+                    probe_anthropic,
+                    probe_openrouter,
+                )
+                for probe_fn in (probe_anthropic, probe_openrouter):
+                    try:
+                        result = await probe_fn()
+                    except Exception as exc:
+                        logger.error(
+                            "provider_health_probe_crashed",
+                            probe=probe_fn.__name__,
+                            error_type=type(exc).__name__,
+                            error_message=str(exc)[:200],
+                        )
+                        continue
+                    try:
+                        await self.db.execute(
+                            """
+                            INSERT INTO provider_health_probes (
+                                provider, status, latency_ms,
+                                balance_usd, limit_usd, is_free_tier,
+                                error_message
+                            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                            """,
+                            result.provider,
+                            result.status,
+                            int(result.latency_ms) if result.latency_ms is not None else None,
+                            result.balance_usd,
+                            result.limit_usd,
+                            result.is_free_tier,
+                            result.error,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "provider_health_probe_persist_failed",
+                            provider=result.provider,
+                            error_type=type(exc).__name__,
+                            error_message=str(exc)[:200],
+                        )
+                        # Persisting failed; skip the alert pass for this
+                        # provider since we can't trust the row count.
+                        continue
+                    logger.info(
+                        "provider_health_probe",
+                        provider=result.provider,
+                        status=result.status,
+                        latency_ms=result.latency_ms,
+                        balance_usd=result.balance_usd,
+                        error=result.error,
+                    )
+
+                    # Consecutive-failure alert pass. Read the last N
+                    # rows for this provider; if all are 'failed', fire.
+                    if result.status == "failed":
+                        try:
+                            recent = await self.db.fetch(
+                                """
+                                SELECT status FROM provider_health_probes
+                                 WHERE provider = $1
+                                 ORDER BY probed_at DESC
+                                 LIMIT $2
+                                """,
+                                result.provider,
+                                consecutive_failures_to_alert,
+                            )
+                            if (
+                                len(recent) >= consecutive_failures_to_alert
+                                and all(r["status"] == "failed" for r in recent)
+                            ):
+                                await report_incident(
+                                    self.db,
+                                    category="provider_health_failed",
+                                    subject=result.provider,
+                                    details={
+                                        "provider": result.provider,
+                                        "consecutive_failed_probes": consecutive_failures_to_alert,
+                                        "latest_error": result.error,
+                                    },
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "provider_health_alert_failed",
+                                provider=result.provider,
+                                error_type=type(exc).__name__,
+                                error_message=str(exc)[:200],
+                            )
+            except Exception as e:
+                logger.error("provider_health_loop_error", error=str(e))
             await asyncio.sleep(check_interval_s)
 
     # ============================================================
