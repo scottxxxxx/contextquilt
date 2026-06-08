@@ -1184,6 +1184,206 @@ async def health_check():
     return result
 
 
+# ============================================================
+# Providers tab: managed LLM key surface
+# ============================================================
+
+# Maps the wire-level provider identifier to the (env_var, Settings field,
+# SM secret name) triple. Keeps the API stable even if we rename the
+# underlying env vars or add a third managed provider later.
+_PROVIDER_KEY_MAPPING: Dict[str, Dict[str, str]] = {
+    "anthropic": {
+        "env_var": "CQ_ANTHROPIC_API_KEY",
+        "settings_field": "cq_anthropic_api_key",
+        "sm_secret_name": "anthropic-api-key",
+    },
+    "openrouter": {
+        "env_var": "CQ_LLM_API_KEY",
+        "settings_field": "cq_llm_api_key",
+        "sm_secret_name": "openrouter-api-key",
+    },
+}
+
+
+class UpdateKeyBody(BaseModel):
+    provider: str   # "anthropic" | "openrouter"
+    new_key: str    # the rotated value, sent in cleartext over TLS
+
+
+class TestProviderBody(BaseModel):
+    provider: str   # "anthropic" | "openrouter"
+
+
+def _mask_key(key: str) -> str:
+    """Display-safe masking. Six leading chars + last four — same shape
+    GhostPour's admin dashboard uses, mirrors `mask_key` in
+    `services/key_encryption.py`."""
+    if not key or len(key) < 8:
+        return "***"
+    return key[:6] + "..." + key[-4:]
+
+
+@router.get("/providers", dependencies=[Depends(verify_admin_key)])
+async def list_providers():
+    """Return current managed-key state per provider, masked.
+
+    Pairs with `/api/dashboard/provider-health` (latest probe outcome
+    per provider). The UI combines both: this endpoint gives "what's
+    configured", that one gives "is it actually working right now".
+    """
+    from contextquilt.services.llm_client_anthropic import (
+        DEFAULT_ANTHROPIC_MODEL,
+    )
+
+    s = get_settings()
+    return {
+        "anthropic": {
+            "key_masked": _mask_key(s.cq_anthropic_api_key),
+            "key_configured": bool(s.cq_anthropic_api_key),
+            "model": s.cq_anthropic_model or DEFAULT_ANTHROPIC_MODEL,
+        },
+        "openrouter": {
+            "key_masked": _mask_key(s.cq_llm_api_key),
+            "key_configured": bool(s.cq_llm_api_key),
+            "base_url": s.cq_llm_base_url,
+            "model": s.cq_llm_model,
+        },
+    }
+
+
+@router.post("/update-key", dependencies=[Depends(verify_admin_key)])
+async def update_key(body: UpdateKeyBody):
+    """Rotate a managed provider key. Live-mutates Settings + writes
+    to Secret Manager so the next request uses the new key WITHOUT a
+    container restart.
+
+    Mirrors GhostPour's `app/routers/webhooks.py:update_key` flow
+    exactly. Three steps, in order:
+
+      1. `object.__setattr__` on the frozen Settings — pydantic's
+         standard setattr is blocked, so this is the escape hatch the
+         dashboard depends on. PR #121 deliberately verified this
+         still works.
+      2. `os.environ[env_var]` — keeps any future subprocess Python
+         (e.g. management scripts run via `docker exec`) consistent
+         with the in-process value.
+      3. `persist_to_secret_manager(sm_name, new_key)` — durable copy
+         so the rotation survives a container restart (next boot
+         loads from SM via `ensure_secrets_in_env`).
+
+    Then clear the `get_secret` lru_cache so the next caller resolves
+    the fresh value rather than the previous one.
+
+    SM failure is logged but does NOT roll back the in-memory mutation
+    — the running process IS using the new key, the operator just
+    needs to fix the SM persist failure (or re-paste the key after the
+    next restart). Same trust boundary GP documents.
+    """
+    import os
+    from contextquilt.secrets import get_secret, persist_to_secret_manager
+
+    provider = body.provider.strip().lower()
+    if provider not in _PROVIDER_KEY_MAPPING:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown provider '{body.provider}'. "
+                   f"valid: {sorted(_PROVIDER_KEY_MAPPING.keys())}",
+        )
+    new_key = body.new_key.strip()
+    if not new_key:
+        raise HTTPException(status_code=400, detail="new_key is empty")
+
+    mapping = _PROVIDER_KEY_MAPPING[provider]
+    settings = get_settings()
+
+    # Step 1: live-mutate Settings (frozen, but object.__setattr__
+    # bypasses pydantic's guard — see test_object_setattr_live_mutation_works).
+    object.__setattr__(settings, mapping["settings_field"], new_key)
+
+    # Step 2: keep os.environ aligned with the in-process value so any
+    # subprocess Python sees the same key.
+    os.environ[mapping["env_var"]] = new_key
+
+    # Step 3: durable copy in SM (auto-creates on first write). Failure
+    # here is logged but doesn't fail the request — the running process
+    # is already using the new value.
+    sm_persisted = persist_to_secret_manager(mapping["sm_secret_name"], new_key)
+
+    # Bust the secrets cache so the next get_secret() call returns the
+    # fresh value (otherwise consumers that already pulled the old
+    # value see staleness until process restart).
+    get_secret.cache_clear()
+
+    logger.info(
+        f"provider_key_rotated provider={provider} sm_persisted={sm_persisted}"
+    )
+    return {
+        "provider": provider,
+        "key_masked": _mask_key(new_key),
+        "sm_persisted": sm_persisted,
+    }
+
+
+@router.post("/test-provider", dependencies=[Depends(verify_admin_key)])
+async def test_provider(body: TestProviderBody):
+    """Probe one provider on demand. Same probe function the daemon
+    runs every 15 minutes, but synchronous so the operator can see
+    the result of a rotation immediately rather than waiting for the
+    next scheduled probe.
+
+    Result is persisted to `provider_health_probes` the same way the
+    daemon does — keeps the audit trail complete and the dashboard
+    status indicator updates without a refresh delay.
+    """
+    from contextquilt.services.provider_health import (
+        probe_anthropic,
+        probe_openrouter,
+    )
+
+    provider = body.provider.strip().lower()
+    if provider == "anthropic":
+        result = await probe_anthropic()
+    elif provider == "openrouter":
+        result = await probe_openrouter()
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown provider '{body.provider}'",
+        )
+
+    # Persist so the dashboard status badge reflects the operator's
+    # on-demand check, not just the daemon's 15-min cycle.
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute(
+            """
+            INSERT INTO provider_health_probes (
+                provider, status, latency_ms,
+                balance_usd, limit_usd, is_free_tier, error_message
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            """,
+            result.provider,
+            result.status,
+            int(result.latency_ms) if result.latency_ms is not None else None,
+            result.balance_usd,
+            result.limit_usd,
+            result.is_free_tier,
+            result.error,
+        )
+    finally:
+        await conn.close()
+
+    return {
+        "provider": result.provider,
+        "status": result.status,
+        "latency_ms": result.latency_ms,
+        "balance_usd": result.balance_usd,
+        "limit_usd": result.limit_usd,
+        "is_free_tier": result.is_free_tier,
+        "error": result.error,
+    }
+
+
 @router.get("/provider-health", dependencies=[Depends(verify_admin_key)])
 async def provider_health():
     """Return the latest health probe per provider.
