@@ -51,6 +51,10 @@ logger = structlog.get_logger()
 # consumer for that secret ships.
 _SECRET_MANAGER_MAPPINGS: Final[dict[str, str]] = {
     "CQ_ANTHROPIC_API_KEY": "anthropic-api-key",
+    # OpenRouter fallback path. Both keys flow through SM once the
+    # dashboard Providers tab lands (Gap 3) — operators rotate either
+    # one through `POST /api/dashboard/update-key`.
+    "CQ_LLM_API_KEY": "openrouter-api-key",
 }
 
 
@@ -172,4 +176,101 @@ def ensure_secrets_in_env() -> None:
     )
 
 
-__all__ = ["get_secret", "ensure_secrets_in_env"]
+def persist_to_secret_manager(secret_name: str, value: str) -> bool:
+    """Write `value` as a new version of `secret_name` in the configured
+    GCP project. Auto-creates the secret on first write.
+
+    Used by the dashboard Providers tab to durably store a rotated key
+    after the in-memory Settings mutation has already taken effect.
+    Returns True on success, False on any failure (with a structured
+    warning log). Callers should treat False as "key is live in this
+    process but the next container restart will revert" — same trust
+    boundary GhostPour's `_persist_to_secret_manager` documents.
+
+    The auto-create path mirrors GP's NotFound handling: a freshly
+    provisioned CQ environment doesn't need a one-time SM seed step
+    before the first dashboard rotation will work.
+    """
+    project = _project()
+    if not project:
+        logger.warning(
+            "secret_persist_skipped",
+            secret_name=secret_name,
+            reason="no_gcp_project",
+        )
+        return False
+
+    try:
+        from google.cloud import secretmanager  # type: ignore[import-untyped]
+        from google.api_core.exceptions import NotFound  # type: ignore[import-untyped]
+    except ImportError:
+        logger.warning(
+            "secret_persist_skipped",
+            secret_name=secret_name,
+            reason="google_cloud_secret_manager_not_installed",
+        )
+        return False
+
+    client = secretmanager.SecretManagerServiceClient()
+    parent = f"projects/{project}"
+    secret_path = f"{parent}/secrets/{secret_name}"
+    payload = value.encode("utf-8")
+
+    # Try writing a new version. On NotFound, create the secret first,
+    # then retry. Same shape as GP's create-on-first-write path.
+    try:
+        client.add_secret_version(
+            request={"parent": secret_path, "payload": {"data": payload}}
+        )
+        logger.info(
+            "secret_persisted_to_sm",
+            secret_name=secret_name,
+            project=project,
+            length=len(value),
+            created=False,
+        )
+        return True
+    except NotFound:
+        pass
+    except Exception as exc:
+        logger.warning(
+            "secret_persist_failed",
+            secret_name=secret_name,
+            project=project,
+            error_type=type(exc).__name__,
+            error_message=str(exc)[:200],
+        )
+        return False
+
+    # First-write path: create the secret, then add the initial version.
+    try:
+        client.create_secret(
+            request={
+                "parent": parent,
+                "secret_id": secret_name,
+                "secret": {"replication": {"automatic": {}}},
+            }
+        )
+        client.add_secret_version(
+            request={"parent": secret_path, "payload": {"data": payload}}
+        )
+        logger.info(
+            "secret_persisted_to_sm",
+            secret_name=secret_name,
+            project=project,
+            length=len(value),
+            created=True,
+        )
+        return True
+    except Exception as exc:
+        logger.warning(
+            "secret_persist_failed",
+            secret_name=secret_name,
+            project=project,
+            error_type=type(exc).__name__,
+            error_message=str(exc)[:200],
+        )
+        return False
+
+
+__all__ = ["get_secret", "ensure_secrets_in_env", "persist_to_secret_manager"]
