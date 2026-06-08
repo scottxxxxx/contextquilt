@@ -129,6 +129,17 @@ KNOWN_CATEGORIES: dict[str, dict[str, str]] = {
             "rots."
         ),
     },
+    "provider_health_failed": {
+        "label": "LLM provider health probe failing",
+        "description": (
+            "The provider_health_loop has seen 3 consecutive failed "
+            "probes (45 minutes of continuous failure) against this "
+            "provider. Likely an auth issue (revoked key, lapsed "
+            "billing) since transient outages would alert as "
+            "'degraded' first. Subject is the provider name "
+            "(anthropic | openrouter)."
+        ),
+    },
 }
 
 
