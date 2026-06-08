@@ -55,6 +55,9 @@ function initNavigation() {
             if (item.dataset.view === 'alerts') {
                 initAlertsView();
             }
+            if (item.dataset.view === 'providers') {
+                initProvidersView();
+            }
             if (item.dataset.view === 'settings') {
                 initSettingsView();
             }
@@ -2387,4 +2390,161 @@ function escapeHtml(s) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+// ============================================================
+// Providers tab — managed LLM key surface (Gap 3, mirrors GP's pattern)
+//
+// Joins two endpoints:
+//   GET /api/dashboard/providers       → what's configured (masked keys)
+//   GET /api/dashboard/provider-health → latest probe outcome per provider
+// Plus two mutating ones:
+//   POST /api/dashboard/update-key     → live-mutate Settings + persist SM
+//   POST /api/dashboard/test-provider  → on-demand probe (persists too)
+// ============================================================
+
+async function initProvidersView() {
+    try {
+        const [providersRes, healthRes] = await Promise.all([
+            fetch('/api/dashboard/providers'),
+            fetch('/api/dashboard/provider-health'),
+        ]);
+        const providers = providersRes.ok ? await providersRes.json() : {};
+        const health = healthRes.ok ? await healthRes.json() : {};
+        renderProviderCard('anthropic', providers.anthropic, health.anthropic);
+        renderProviderCard('openrouter', providers.openrouter, health.openrouter);
+    } catch (err) {
+        console.error('initProvidersView failed:', err);
+    }
+}
+
+function renderProviderCard(name, config, health) {
+    config = config || {};
+    health = health || {};
+
+    const setText = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = value;
+    };
+
+    setText(`provider-${name}-model`, config.model || '--');
+    setText(`provider-${name}-key`, config.key_configured ? config.key_masked : 'not configured');
+
+    // Status badge color follows ProbeResult.status:
+    //   active → green, degraded → yellow, failed → red, no probe yet → muted
+    const badge = document.getElementById(`provider-${name}-status-badge`);
+    if (badge) {
+        const status = health.status || 'no probe yet';
+        badge.textContent = status;
+        let bg = 'rgba(148,163,184,0.2)';
+        let color = 'var(--text-muted)';
+        if (health.status === 'active') {
+            bg = 'rgba(34,197,94,0.2)';
+            color = '#22c55e';
+        } else if (health.status === 'degraded') {
+            bg = 'rgba(234,179,8,0.2)';
+            color = '#facc15';
+        } else if (health.status === 'failed') {
+            bg = 'rgba(239,68,68,0.2)';
+            color = '#ef4444';
+        }
+        badge.style.background = bg;
+        badge.style.color = color;
+    }
+
+    setText(`provider-${name}-latency`,
+        health.latency_ms != null ? `${Math.round(health.latency_ms)}ms` : '--');
+    setText(`provider-${name}-probed-at`,
+        health.last_probed_at ? new Date(health.last_probed_at).toLocaleString() : '--');
+
+    const errorRow = document.getElementById(`provider-${name}-error-row`);
+    if (errorRow) {
+        if (health.error) {
+            errorRow.style.display = '';
+            setText(`provider-${name}-error`, health.error);
+        } else {
+            errorRow.style.display = 'none';
+        }
+    }
+
+    // OpenRouter-only fields
+    if (name === 'openrouter') {
+        setText('provider-openrouter-base-url', config.base_url || '--');
+        let balanceStr = '--';
+        if (health.balance_usd != null) {
+            balanceStr = `$${health.balance_usd.toFixed(2)}`;
+            if (health.limit_usd != null) balanceStr += ` / $${health.limit_usd.toFixed(2)}`;
+            else balanceStr += ' (pay-as-you-go)';
+            if (health.is_free_tier) balanceStr += ' [free tier]';
+        }
+        setText('provider-openrouter-balance', balanceStr);
+    }
+}
+
+async function rotateProviderKey(provider) {
+    const input = document.getElementById(`provider-${provider}-new-key`);
+    if (!input) return;
+    const newKey = input.value.trim();
+    if (!newKey) {
+        alert('Enter a key first.');
+        return;
+    }
+    if (!confirm(`Rotate the ${provider} key now? The running process will switch immediately.`)) {
+        return;
+    }
+    try {
+        const res = await fetch('/api/dashboard/update-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider, new_key: newKey }),
+        });
+        if (!res.ok) {
+            const detail = await res.text();
+            alert(`Rotation failed (${res.status}): ${detail}`);
+            return;
+        }
+        const data = await res.json();
+        input.value = '';
+        const sm = data.sm_persisted ? 'persisted to Secret Manager' : 'NOT persisted (Settings updated in-process only — will revert on restart)';
+        alert(`Key rotated. New key: ${data.key_masked}\n${sm}`);
+        // Trigger an on-demand probe so the badge updates to reflect the new key
+        await testProvider(provider, { silent: true });
+        await initProvidersView();
+    } catch (err) {
+        console.error('rotateProviderKey failed:', err);
+        alert(`Rotation request failed: ${err.message}`);
+    }
+}
+
+async function testProvider(provider, opts = {}) {
+    try {
+        const res = await fetch('/api/dashboard/test-provider', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider }),
+        });
+        if (!res.ok) {
+            if (!opts.silent) alert(`Probe failed (${res.status})`);
+            return;
+        }
+        const result = await res.json();
+        if (!opts.silent) {
+            const lines = [
+                `Provider: ${result.provider}`,
+                `Status: ${result.status}`,
+                `Latency: ${result.latency_ms != null ? Math.round(result.latency_ms) + 'ms' : 'n/a'}`,
+            ];
+            if (result.balance_usd != null) {
+                lines.push(`Balance: $${result.balance_usd.toFixed(2)}`);
+            }
+            if (result.error) {
+                lines.push(`Error: ${result.error}`);
+            }
+            alert(lines.join('\n'));
+        }
+        await initProvidersView();
+    } catch (err) {
+        console.error('testProvider failed:', err);
+        if (!opts.silent) alert(`Probe request failed: ${err.message}`);
+    }
 }
