@@ -21,8 +21,8 @@ import asyncpg
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from src.contextquilt.config import get_settings
-from src.contextquilt.services.schema_validator import validate_manifest
+from contextquilt.config import get_settings
+from contextquilt.services.schema_validator import validate_manifest
 
 
 router = APIRouter(prefix="/v1/apps", tags=["App Schemas"])
@@ -93,7 +93,7 @@ async def register_schema(
             detail={"message": "Manifest validation failed", "errors": errors},
         )
 
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(get_settings().database_url)
     try:
         # Confirm the app exists
         app_row = await conn.fetchrow(
@@ -218,7 +218,7 @@ async def register_schema(
 )
 async def get_current_schema(app_id: str):
     """Fetch the current manifest for an app."""
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(get_settings().database_url)
     try:
         row = await conn.fetchrow(
             """
@@ -280,7 +280,7 @@ async def update_schema(
 )
 async def get_schema_history(app_id: str):
     """List all registered versions of an app's manifest (newest first)."""
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(get_settings().database_url)
     try:
         rows = await conn.fetch(
             """
