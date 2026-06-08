@@ -15,32 +15,28 @@ All endpoints require the X-Admin-Key header (per CQ_ADMIN_KEY env).
 """
 
 import json
-import os
 from typing import Any, Dict, List, Optional
 
 import asyncpg
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
-from src.contextquilt.services.schema_validator import validate_manifest
+from contextquilt.config import get_settings
+from contextquilt.services.schema_validator import validate_manifest
 
 
 router = APIRouter(prefix="/v1/apps", tags=["App Schemas"])
 
-CQ_ADMIN_KEY = os.getenv("CQ_ADMIN_KEY", "")
-
 
 async def verify_admin_key(x_admin_key: str = Header(default="")) -> None:
     """Admin-key gate. Matches the dashboard's verification pattern."""
-    if CQ_ADMIN_KEY and x_admin_key != CQ_ADMIN_KEY:
+    admin_key = get_settings().cq_admin_key
+    if admin_key and x_admin_key != admin_key:
         raise HTTPException(status_code=403, detail="Invalid admin key")
 
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/context_quilt")
-
-
 async def _get_conn():
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(get_settings().database_url)
     try:
         yield conn
     finally:
@@ -97,7 +93,7 @@ async def register_schema(
             detail={"message": "Manifest validation failed", "errors": errors},
         )
 
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(get_settings().database_url)
     try:
         # Confirm the app exists
         app_row = await conn.fetchrow(
@@ -222,7 +218,7 @@ async def register_schema(
 )
 async def get_current_schema(app_id: str):
     """Fetch the current manifest for an app."""
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(get_settings().database_url)
     try:
         row = await conn.fetchrow(
             """
@@ -284,7 +280,7 @@ async def update_schema(
 )
 async def get_schema_history(app_id: str):
     """List all registered versions of an app's manifest (newest first)."""
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await asyncpg.connect(get_settings().database_url)
     try:
         rows = await conn.fetch(
             """

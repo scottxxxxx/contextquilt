@@ -1,8 +1,9 @@
 import asyncio
 import asyncpg
-import os
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/context_quilt")
+from contextquilt.config import get_settings
+
+DATABASE_URL = get_settings().database_url
 
 async def test_query():
     conn = await asyncpg.connect(DATABASE_URL)

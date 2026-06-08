@@ -56,19 +56,23 @@ from contextquilt.services.schema_prompt_builder import (
     build_prompt as build_schema_prompt,
 )
 
+# Populate os.environ from Secret Manager before Settings builds.
+# No-op when CQ_GCP_PROJECT is unset (local dev).
+from contextquilt.secrets import ensure_secrets_in_env
+ensure_secrets_in_env()
+from contextquilt.config import get_settings
+
 # Configure Logging
 logger = structlog.get_logger()
 
 # Configuration
-_redis_host = os.getenv("REDIS_HOST", "localhost")
-_redis_port = os.getenv("REDIS_PORT", "6379")
-_redis_password = os.getenv("REDIS_PASSWORD", "")
-REDIS_URL = os.getenv("REDIS_URL", f"redis://:{_redis_password}@{_redis_host}:{_redis_port}" if _redis_password else f"redis://{_redis_host}:{_redis_port}")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/context_quilt")
+_settings = get_settings()
+REDIS_URL = _settings.redis_url
+DATABASE_URL = _settings.database_url
 
 # Queue settings
-QUEUE_MAX_WAIT_MINUTES = int(os.getenv("CQ_QUEUE_MAX_WAIT_MINUTES", "60"))
-QUEUE_BUDGET_THRESHOLD = float(os.getenv("CQ_QUEUE_BUDGET_THRESHOLD", "0.8"))
+QUEUE_MAX_WAIT_MINUTES = _settings.cq_queue_max_wait_minutes
+QUEUE_BUDGET_THRESHOLD = _settings.cq_queue_budget_threshold
 QUEUE_CHECK_INTERVAL_SECONDS = 30  # How often to check queues for processing
 
 # Extraction caps — belt-and-suspenders with prompt limits
@@ -703,7 +707,14 @@ def _build_default_llm_client(*, alert_db=None):
     same `extract()` interface.
     """
     provider = primary_provider_from_env()
-    if provider == "anthropic" and os.getenv("CQ_ANTHROPIC_API_KEY"):
+    # Resolve the Anthropic key through the secrets helper so a Secret
+    # Manager value (CQ_GCP_PROJECT set, env empty) gates the path
+    # correctly. Env still wins over SM for local dev / operator override.
+    from contextquilt.secrets import get_secret
+    anthropic_key_present = bool(
+        get_secret("anthropic-api-key", env_var="CQ_ANTHROPIC_API_KEY")
+    )
+    if provider == "anthropic" and anthropic_key_present:
         primary = AnthropicLLMClient()
         fallback = LLMClient()
         logger.info(
@@ -738,9 +749,9 @@ class ColdPathWorker:
         logger.info("worker_starting")
 
         # Validate LLM config before starting
-        llm_key = os.getenv("CQ_LLM_API_KEY", "")
-        llm_url = os.getenv("CQ_LLM_BASE_URL", "")
-        llm_model = os.getenv("CQ_LLM_MODEL", "")
+        llm_key = _settings.cq_llm_api_key
+        llm_url = _settings.cq_llm_base_url
+        llm_model = _settings.cq_llm_model
         if not llm_key or not llm_url:
             logger.error(
                 "llm_not_configured",
@@ -758,12 +769,16 @@ class ColdPathWorker:
         self.llm = _build_default_llm_client(alert_db=self.db)
         self._app_llm_cache: dict[str, LLMClient] = {}  # Per-app BYOK clients
 
-        # Get context window for budget calculation
+        # Get context window for budget calculation. Explicit override
+        # via CQ_LLM_CONTEXT_WINDOW wins; otherwise fall back to the
+        # model-name registry, then to DEFAULT_CONTEXT_WINDOW.
         model_name = self.llm.model
-        self.context_window = int(os.getenv(
-            "CQ_LLM_CONTEXT_WINDOW",
-            str(KNOWN_CONTEXT_WINDOWS.get(model_name, DEFAULT_CONTEXT_WINDOW))
-        ))
+        override = _settings.cq_llm_context_window
+        self.context_window = (
+            override
+            if override is not None
+            else KNOWN_CONTEXT_WINDOWS.get(model_name, DEFAULT_CONTEXT_WINDOW)
+        )
         # Available budget = window - prompt overhead - output reserve
         self.context_budget = int((self.context_window - 2800) * QUEUE_BUDGET_THRESHOLD)
 
