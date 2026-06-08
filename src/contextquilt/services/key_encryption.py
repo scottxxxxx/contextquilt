@@ -6,22 +6,22 @@ The encryption key is derived from CQ_KEY_ENCRYPTION_KEY env var.
 If not set, keys are stored as plaintext (local dev only).
 """
 
-import os
 import base64
 import hashlib
 from typing import Optional
 
-_ENCRYPTION_KEY = os.getenv("CQ_KEY_ENCRYPTION_KEY", "")
+from contextquilt.config import get_settings
 
 
 def _get_fernet():
-    """Get a Fernet instance from the env var, or None if not configured."""
-    if not _ENCRYPTION_KEY:
+    """Get a Fernet instance from Settings, or None if not configured."""
+    encryption_key = get_settings().cq_key_encryption_key
+    if not encryption_key:
         return None
     try:
         from cryptography.fernet import Fernet
-        # Derive a 32-byte key from the env var via SHA-256, base64-encode for Fernet
-        key_bytes = hashlib.sha256(_ENCRYPTION_KEY.encode()).digest()
+        # Derive a 32-byte key via SHA-256, base64-encode for Fernet
+        key_bytes = hashlib.sha256(encryption_key.encode()).digest()
         fernet_key = base64.urlsafe_b64encode(key_bytes)
         return Fernet(fernet_key)
     except ImportError:

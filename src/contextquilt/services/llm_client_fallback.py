@@ -18,12 +18,12 @@ The wrapper exposes the same `extract()` interface as both underlying
 clients so the worker can drop it in transparently.
 """
 
-import os
 from typing import Any
 
 import httpx
 import structlog
 
+from contextquilt.config import get_settings
 from contextquilt.services.alerting import report_incident
 from contextquilt.services.llm_client import LLMResponse
 
@@ -165,6 +165,9 @@ class LLMClientWithFallback:
 
 def primary_provider_from_env() -> str:
     """Return the configured primary provider id ('anthropic' or
-    'openrouter'). Default is 'anthropic' once this lands; operators
-    can flip back to 'openrouter' via the env var without code change."""
-    return os.getenv("CQ_LLM_PRIMARY_PROVIDER", "anthropic").lower()
+    'openrouter'). Default is 'anthropic'; operators can flip back to
+    'openrouter' via CQ_LLM_PRIMARY_PROVIDER without code change.
+
+    Name kept as `_from_env` for backwards compat with existing callers;
+    actual source is Settings (which itself reads env)."""
+    return get_settings().cq_llm_primary_provider.lower()

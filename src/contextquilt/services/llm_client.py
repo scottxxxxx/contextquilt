@@ -11,13 +11,14 @@ Configuration via environment variables:
 """
 
 import json
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 import structlog
+
+from contextquilt.config import get_settings
 
 logger = structlog.get_logger()
 
@@ -90,11 +91,10 @@ class LLMClient:
         model: str | None = None,
         timeout: float = 120.0,
     ):
-        self.api_key = api_key or os.getenv("CQ_LLM_API_KEY", "")
-        self.base_url = (
-            base_url or os.getenv("CQ_LLM_BASE_URL", "https://openrouter.ai/api/v1")
-        ).rstrip("/")
-        self.model = model or os.getenv("CQ_LLM_MODEL", "anthropic/claude-haiku-4.5")
+        settings = get_settings()
+        self.api_key = api_key or settings.cq_llm_api_key
+        self.base_url = (base_url or settings.cq_llm_base_url).rstrip("/")
+        self.model = model or settings.cq_llm_model
         self.timeout = timeout
 
         self._client = httpx.AsyncClient(

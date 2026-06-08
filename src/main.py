@@ -17,15 +17,29 @@ import re
 import time
 from datetime import datetime, timedelta
 import sys
-import os
 
-# Add src to path to allow imports if running from root
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add src/ to sys.path so `from contextquilt.X` and `from dashboard.X`
+# resolve unambiguously. Mirrors `src/worker.py:23`. Without this,
+# uvicorn (loading us as `src.main`) leaves PYTHONPATH=/app only —
+# any `from contextquilt.X` imports inside auth.py, dashboard/router.py,
+# or the services modules would fail with ModuleNotFoundError. Worse,
+# if both `from src.contextquilt.X` and `from contextquilt.X` resolve,
+# they load as two different modules and the Settings singleton splits
+# (rotation in the dashboard wouldn't propagate to the LLM clients).
+# One canonical bare-prefix path eliminates both issues.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from src.dashboard.router import router as dashboard_router
-from src.contextquilt.routers.app_schemas import router as app_schemas_router
-from src.contextquilt.services.recall_scorer import score_patches
-from src.contextquilt.services.recall_formatter import (
+# Populate os.environ from Secret Manager before Settings builds.
+# No-op when CQ_GCP_PROJECT is unset (local dev), so this is safe at
+# import time on every entry point.
+from contextquilt.secrets import ensure_secrets_in_env
+ensure_secrets_in_env()
+from contextquilt.config import get_settings
+
+from dashboard.router import router as dashboard_router
+from contextquilt.routers.app_schemas import router as app_schemas_router
+from contextquilt.services.recall_scorer import score_patches
+from contextquilt.services.recall_formatter import (
     format_flat_ranked,
     format_category_grouped,
 )
@@ -34,7 +48,9 @@ import asyncpg
 import uuid
 import secrets
 from fastapi.security import OAuth2PasswordRequestForm
-from src import auth
+import auth
+
+_settings = get_settings()
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -51,7 +67,7 @@ db_pool = None
 @app.on_event("startup")
 async def startup():
     global db_pool
-    db_pool = await asyncpg.create_pool(os.getenv("DATABASE_URL"))
+    db_pool = await asyncpg.create_pool(_settings.database_url)
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -83,13 +99,10 @@ app.include_router(app_schemas_router)
 async def root():
     return RedirectResponse(url="/dashboard/")
 
-# Redis Connection (Working Memory)
-redis_client = redis.Redis(
-    host=os.getenv("REDIS_HOST", "localhost"),
-    port=int(os.getenv("REDIS_PORT", 6379)),
-    password=os.getenv("REDIS_PASSWORD", None),
-    decode_responses=True
-)
+# Redis Connection (Working Memory).
+# Use the composed URL from Settings — REDIS_URL wins if set, otherwise
+# host/port/password are composed identically to the previous inline build.
+redis_client = redis.from_url(_settings.redis_url, decode_responses=True)
 
 # ============================================
 # Models
@@ -979,7 +992,7 @@ async def health():
 
 @app.post("/v1/auth/register", response_model=auth.ApplicationResponse, tags=["Authentication"])
 async def register_application(app_data: auth.ApplicationCreate):
-    from src.contextquilt.services.key_encryption import encrypt_key
+    from contextquilt.services.key_encryption import encrypt_key
 
     client_secret = secrets.token_urlsafe(32)
     secret_hash = auth.get_password_hash(client_secret)
@@ -2442,7 +2455,7 @@ class AppUpdate(BaseModel):
 
 @app.patch("/v1/auth/apps/{app_id}", tags=["Authentication"])
 async def update_application(app_id: str, update: AppUpdate):
-    from src.contextquilt.services.key_encryption import encrypt_key, mask_key
+    from contextquilt.services.key_encryption import encrypt_key, mask_key
 
     try:
         if update.enforce_auth is not None:

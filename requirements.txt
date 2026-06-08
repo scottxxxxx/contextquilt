@@ -46,6 +46,15 @@ passlib[bcrypt]>=1.7.4
 python-dotenv>=1.0.0
 
 # >=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=
+# Secret Management
+# >=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=
+# Used by src/contextquilt/secrets.py for the env-first / GCP Secret
+# Manager fallback chain. Import-guarded at the call site, so missing
+# at runtime is graceful for local dev. Required when CQ_GCP_PROJECT
+# is set in the environment.
+google-cloud-secret-manager>=2.20.0
+
+# >=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=
 # Monitoring & Observability
 # >=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=>=
 prometheus-client>=0.19.0
