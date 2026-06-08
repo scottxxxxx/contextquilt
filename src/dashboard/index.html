@@ -74,6 +74,10 @@
                     <i class="fa-solid fa-bell"></i>
                     <span>Alerts</span>
                 </a>
+                <a href="#" class="nav-item" data-view="providers">
+                    <i class="fa-solid fa-plug"></i>
+                    <span>Providers</span>
+                </a>
                 <a href="#" class="nav-item" data-view="developer">
                     <i class="fa-solid fa-key"></i>
                     <span>Application Access</span>
@@ -942,6 +946,74 @@
                         </table>
                     </div>
                 </div>
+            </div>
+
+            <!-- Providers -->
+            <div id="providers-view" class="view-container">
+                <div class="page-header">
+                    <h1>LLM Providers</h1>
+                    <button class="sm-btn" onclick="initProvidersView()"><i class="fa-solid fa-arrows-rotate"></i> Refresh</button>
+                </div>
+                <p style="color: var(--text-muted); margin-bottom: 1.5rem; max-width: 720px;">
+                    Managed API keys for the LLM providers ContextQuilt depends on.
+                    Anthropic is the primary extraction path; OpenRouter is the fallback wrapper.
+                    Rotating a key here live-mutates the running process and persists to Secret Manager &mdash;
+                    no container restart required.
+                </p>
+
+                <div id="providers-cards" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+                    <!-- Anthropic card -->
+                    <div class="card" style="padding: 1.5rem;">
+                        <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+                            <i class="fa-solid fa-brain" style="font-size: 1.5rem; color: #c98c6f;"></i>
+                            <h2 style="margin: 0;">Anthropic <span id="provider-anthropic-status-badge" style="margin-left: 0.5rem; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 0.25rem; vertical-align: middle;">--</span></h2>
+                        </div>
+                        <div style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.5rem;">
+                            <div>Model: <span id="provider-anthropic-model">--</span></div>
+                            <div>Current key: <span id="provider-anthropic-key">--</span></div>
+                            <div>Latency: <span id="provider-anthropic-latency">--</span></div>
+                            <div>Last probed: <span id="provider-anthropic-probed-at">--</span></div>
+                            <div id="provider-anthropic-error-row" style="display: none; color: #ff6b6b;">Error: <span id="provider-anthropic-error">--</span></div>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+                            <input type="password" id="provider-anthropic-new-key" placeholder="sk-ant-..." autocomplete="off"
+                                style="flex: 1; padding: 0.5rem 0.75rem; background: rgba(15,23,42,0.6); border: 1px solid rgba(148,163,184,0.2); color: var(--text-primary); border-radius: 0.375rem; font-family: var(--font-mono); font-size: 0.85rem;">
+                            <button class="sm-btn active" onclick="rotateProviderKey('anthropic')"><i class="fa-solid fa-rotate"></i> Rotate</button>
+                            <button class="sm-btn" onclick="testProvider('anthropic')"><i class="fa-solid fa-stethoscope"></i> Test</button>
+                        </div>
+                    </div>
+
+                    <!-- OpenRouter card -->
+                    <div class="card" style="padding: 1.5rem;">
+                        <div style="display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem;">
+                            <i class="fa-solid fa-shuffle" style="font-size: 1.5rem; color: #6c5ce7;"></i>
+                            <h2 style="margin: 0;">OpenRouter <span id="provider-openrouter-status-badge" style="margin-left: 0.5rem; font-size: 0.7rem; padding: 0.15rem 0.5rem; border-radius: 0.25rem; vertical-align: middle;">--</span></h2>
+                        </div>
+                        <div style="font-family: var(--font-mono); font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.5rem;">
+                            <div>Model: <span id="provider-openrouter-model">--</span></div>
+                            <div>Base URL: <span id="provider-openrouter-base-url">--</span></div>
+                            <div>Current key: <span id="provider-openrouter-key">--</span></div>
+                            <div>Latency: <span id="provider-openrouter-latency">--</span></div>
+                            <div>Balance: <span id="provider-openrouter-balance">--</span></div>
+                            <div>Last probed: <span id="provider-openrouter-probed-at">--</span></div>
+                            <div id="provider-openrouter-error-row" style="display: none; color: #ff6b6b;">Error: <span id="provider-openrouter-error">--</span></div>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem; margin-top: 1rem;">
+                            <input type="password" id="provider-openrouter-new-key" placeholder="sk-or-..." autocomplete="off"
+                                style="flex: 1; padding: 0.5rem 0.75rem; background: rgba(15,23,42,0.6); border: 1px solid rgba(148,163,184,0.2); color: var(--text-primary); border-radius: 0.375rem; font-family: var(--font-mono); font-size: 0.85rem;">
+                            <button class="sm-btn active" onclick="rotateProviderKey('openrouter')"><i class="fa-solid fa-rotate"></i> Rotate</button>
+                            <button class="sm-btn" onclick="testProvider('openrouter')"><i class="fa-solid fa-stethoscope"></i> Test</button>
+                        </div>
+                    </div>
+                </div>
+
+                <p style="color: var(--text-muted); margin-top: 1.5rem; font-size: 0.8rem; max-width: 720px;">
+                    Probe cadence: every 15 minutes in the background.
+                    Status badge reflects the most recent probe (daemon or on-demand).
+                    Auth failures (401/403) classify as <strong>failed</strong>;
+                    timeouts and 5xx as <strong>degraded</strong>;
+                    2xx as <strong>active</strong>.
+                </p>
             </div>
 
             <!-- Settings -->
