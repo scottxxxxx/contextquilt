@@ -9,7 +9,14 @@ that, and `metadata.language` lets apps pin the output language.
 """
 
 from src.contextquilt.services.extraction_prompts import MEETING_SUMMARY_SYSTEM
-from src.contextquilt.services.schema_prompt_builder import build_prompt
+from src.contextquilt.services.extraction_schema import (
+    EXTRACTION_SCHEMA,
+    strip_ephemeral_fields,
+)
+from src.contextquilt.services.schema_prompt_builder import (
+    build_output_schema,
+    build_prompt,
+)
 from src.contextquilt.services.recall_scorer import _keywords
 
 
@@ -62,6 +69,39 @@ def test_prompt_override_bypasses_language_section():
     # Apps with a verbatim prompt override keep full control.
     manifest = dict(MINIMAL_MANIFEST, extraction_prompt_override="CUSTOM PROMPT")
     assert build_prompt(manifest) == "CUSTOM PROMPT"
+
+
+# ============================================================
+# output_language commitment field
+# ============================================================
+
+
+def test_universal_schema_requires_output_language_before_patches():
+    req = EXTRACTION_SCHEMA["required"]
+    assert "output_language" in req
+    # Language commitment must come before reasoning and patches so it
+    # anchors all downstream prose generation.
+    assert req.index("output_language") < req.index("_reasoning")
+    assert req.index("output_language") < req.index("patches")
+    assert "output_language" in EXTRACTION_SCHEMA["properties"]
+
+
+def test_builder_schema_requires_output_language_before_patches():
+    schema = build_output_schema(MINIMAL_MANIFEST)
+    req = schema["required"]
+    assert "output_language" in req
+    assert req.index("output_language") < req.index("patches")
+    # Property order drives generation order under strict mode.
+    props = list(schema["properties"].keys())
+    assert props.index("output_language") < props.index("patches")
+
+
+def test_strip_ephemeral_fields_removes_output_language():
+    content = {"output_language": "es", "_reasoning": "x", "patches": []}
+    strip_ephemeral_fields(content)
+    assert "output_language" not in content
+    assert "_reasoning" not in content
+    assert content["patches"] == []
 
 
 # ============================================================
