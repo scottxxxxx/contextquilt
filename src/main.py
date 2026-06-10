@@ -980,6 +980,48 @@ async def update_memory(
     
     return {"status": "queued", "message": "Memory update received for async processing"}
 
+@app.get("/v1/schema", tags=["App Schemas"])
+async def get_own_schema(app_id: str = Depends(verify_application_access)):
+    """
+    Return the calling app's current registered manifest.
+
+    App-facing counterpart to the admin-gated GET /v1/apps/{app_id}/schema —
+    authenticates via the normal app auth (JWT / X-App-ID) and resolves the
+    manifest for the caller's own app_id. Lets clients refresh their vendored
+    taxonomy (patch types, connection vocabulary, entity types) at launch
+    instead of shipping a stale copy.
+    """
+    try:
+        import uuid as _uuid
+        app_uuid = _uuid.UUID(app_id)
+    except (ValueError, AttributeError):
+        # Legacy string app ids have no registered manifests
+        raise HTTPException(status_code=404, detail="No manifest registered for this app")
+
+    row = await db_pool.fetchrow(
+        """
+        SELECT app_id, version, manifest, registered_at
+          FROM app_schemas
+         WHERE app_id = $1
+         ORDER BY version DESC
+         LIMIT 1
+        """,
+        app_uuid,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No manifest registered for this app")
+
+    manifest = row["manifest"]
+    if isinstance(manifest, str):
+        manifest = json.loads(manifest)
+    return {
+        "app_id": str(row["app_id"]),
+        "version": row["version"],
+        "registered_at": row["registered_at"].isoformat() if row["registered_at"] else None,
+        "manifest": manifest,
+    }
+
+
 @app.post("/v1/prewarm", tags=["Ops"])
 async def prewarm_cache(
     user_id: str,

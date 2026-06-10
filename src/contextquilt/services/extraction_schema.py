@@ -290,6 +290,161 @@ def validate_deadline_date(raw: object, meeting_date: "date | None" = None) -> "
     return parsed.isoformat()
 
 
+def classify_connection(
+    label: object,
+    from_type: object,
+    to_type: object,
+    label_specs: dict,
+) -> "tuple[str, str | None]":
+    """Classify one edge against the manifest connection vocabulary.
+
+    Returns (verdict, spec_role):
+      ("valid", role)     — label exists and (from_type → to_type) is allowed
+      ("reversed", role)  — label exists and the exact reverse
+                            (to_type → from_type) is allowed; the edge was
+                            emitted backwards and can be repaired by flipping
+      ("invalid", None)   — unknown label, or no orientation of this type
+                            pair is allowed for the label
+
+    `label_specs` maps label → {"role": str, "from": set, "to": set} (see
+    build_label_specs). Shared by the live sanitizer and the repair
+    backfill so both apply identical rules.
+    """
+    spec = label_specs.get(label) if isinstance(label, str) else None
+    if not spec:
+        return "invalid", None
+    if from_type in spec["from"] and to_type in spec["to"]:
+        return "valid", spec["role"]
+    if to_type in spec["from"] and from_type in spec["to"]:
+        return "reversed", spec["role"]
+    return "invalid", None
+
+
+def build_label_specs(connection_labels: "list | None") -> dict:
+    """Index a manifest's connection_labels for classify_connection."""
+    specs: dict = {}
+    for cl in connection_labels or []:
+        if not isinstance(cl, dict) or not cl.get("label"):
+            continue
+        specs[cl["label"]] = {
+            "role": cl.get("role") or "informs",
+            "from": set(cl.get("from_types") or []),
+            "to": set(cl.get("to_types") or []),
+        }
+    return specs
+
+
+def enforce_connection_vocabulary(
+    content: dict, connection_labels: "list | None"
+) -> dict:
+    """Validate every connects_to edge against the app manifest's
+    connection vocabulary (label + from/to type combos).
+
+    The schema-driven prompt constrains edge labels to the vocabulary via
+    enum, but nothing constrains WHICH type pairs a label may join, and
+    the model regularly emits reversed edges (blocker blocked_by
+    commitment instead of commitment blocked_by blocker) and off-spec
+    combos (works_with, owns commitment→decision). Client-side validators
+    drop those silently, so real semantic content is lost downstream.
+
+    Behavior per edge:
+      - valid combo      → kept; role normalized to the spec's role
+      - reversed combo   → moved onto the target patch pointing back at
+                           this one, when the target patch exists in this
+                           output; dropped otherwise (a flip onto a
+                           DB-resident patch can't be expressed here)
+      - unknown label or
+        invalid combo    → dropped
+
+    No-op when connection_labels is empty/None (universal-prompt apps
+    have no registered vocabulary to enforce). Audit summary recorded in
+    content["_connection_vocabulary_enforced"].
+    """
+    if not connection_labels:
+        return content
+    patches = content.get("patches") or []
+    if not patches:
+        return content
+
+    label_specs = build_label_specs(connection_labels)
+
+    def _ptext(p: dict) -> str:
+        v = p.get("value")
+        if isinstance(v, dict):
+            return (v.get("text") or "").strip()
+        return ""
+
+    by_key = {
+        (_ptext(p).lower(), p.get("type")): p
+        for p in patches
+        if isinstance(p, dict) and _ptext(p)
+    }
+
+    kept = flipped = dropped = 0
+    dropped_detail: list = []
+    pending_flips: list = []  # (target_patch, new_edge) — applied after the scan
+
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+        connects = patch.get("connects_to")
+        if not isinstance(connects, list) or not connects:
+            continue
+        from_type = patch.get("type")
+        surviving: list = []
+        for edge in connects:
+            if not isinstance(edge, dict):
+                continue
+            label = edge.get("label")
+            to_type = edge.get("target_type")
+            verdict, spec_role = classify_connection(label, from_type, to_type, label_specs)
+            if verdict == "valid":
+                edge["role"] = spec_role
+                surviving.append(edge)
+                kept += 1
+            elif verdict == "reversed":
+                target = by_key.get(((edge.get("target_text") or "").strip().lower(), to_type))
+                if target is not None and target is not patch:
+                    pending_flips.append((
+                        target,
+                        {
+                            "target_text": _ptext(patch),
+                            "target_type": from_type,
+                            "role": spec_role,
+                            "label": label,
+                        },
+                    ))
+                    flipped += 1
+                else:
+                    dropped += 1
+                    dropped_detail.append(f"{label}:{from_type}->{to_type} (reversed, target not in output)")
+            else:
+                dropped += 1
+                dropped_detail.append(f"{label}:{from_type}->{to_type}")
+        patch["connects_to"] = surviving
+
+    for target, new_edge in pending_flips:
+        connects = target.setdefault("connects_to", [])
+        duplicate = any(
+            isinstance(e, dict)
+            and (e.get("target_text") or "").strip().lower() == new_edge["target_text"].lower()
+            and e.get("target_type") == new_edge["target_type"]
+            and e.get("label") == new_edge["label"]
+            for e in connects
+        )
+        if not duplicate:
+            connects.append(new_edge)
+
+    if flipped or dropped:
+        content["_connection_vocabulary_enforced"] = {
+            "kept": kept,
+            "flipped": flipped,
+            "dropped": dropped,
+            "dropped_detail": dropped_detail[:20],
+        }
+    return content
+
+
 def sanitize_deadline_dates(content: dict, meeting_date: "date | None" = None) -> dict:
     """
     Validate LLM-emitted `value.deadline_date` fields on every patch.

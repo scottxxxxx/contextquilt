@@ -35,6 +35,7 @@ from contextquilt.services.extraction_schema import (
     EXTRACTION_SCHEMA,
     drop_placeholder_and_self_person_patches,
     enforce_connection_requirements,
+    enforce_connection_vocabulary,
     enforce_owner_gate,
     enforce_person_ownership,
     normalize_owner_in_transcript,
@@ -1206,16 +1207,20 @@ class ColdPathWorker:
 
     async def _resolve_extraction_prompt(
         self, app_id: str | None
-    ) -> tuple[str, dict[str, Any]]:
+    ) -> tuple[str, dict[str, Any], dict[str, Any] | None]:
         """Pick the system prompt + structured-output schema for this app.
 
         If the app has a registered manifest in `app_schemas`, generate
         the prompt from it (or use `extraction_prompt_override` verbatim
         if present). Otherwise fall back to the universal hardcoded
         MEETING_SUMMARY_SYSTEM + EXTRACTION_SCHEMA.
+
+        Also returns the resolved manifest (None on the universal
+        fallback) so downstream sanitizers can enforce manifest-declared
+        invariants — currently the connection vocabulary.
         """
         if not app_id:
-            return MEETING_SUMMARY_SYSTEM, EXTRACTION_SCHEMA
+            return MEETING_SUMMARY_SYSTEM, EXTRACTION_SCHEMA, None
 
         try:
             row = await self.db.fetchrow(
@@ -1228,20 +1233,20 @@ class ColdPathWorker:
                 app_id,
             )
             if not row:
-                return MEETING_SUMMARY_SYSTEM, EXTRACTION_SCHEMA
+                return MEETING_SUMMARY_SYSTEM, EXTRACTION_SCHEMA, None
             manifest = row["manifest"]
             if isinstance(manifest, str):
                 manifest = json.loads(manifest)
             prompt = build_schema_prompt(manifest)
             schema = build_schema_output_schema(manifest)
-            return prompt, schema
+            return prompt, schema, manifest
         except Exception as e:
             logger.warning(
                 "schema_prompt_resolution_failed",
                 app_id=app_id,
                 error=str(e),
             )
-            return MEETING_SUMMARY_SYSTEM, EXTRACTION_SCHEMA
+            return MEETING_SUMMARY_SYSTEM, EXTRACTION_SCHEMA, None
 
     async def _get_llm_for_app(self, app_id: str | None) -> LLMClient:
         """Get the LLM client for an app. Uses app's BYOK key if available, else server default."""
@@ -1614,7 +1619,7 @@ class ColdPathWorker:
             # Prefer the app's registered schema-driven prompt. Falls back
             # to the universal hardcoded MEETING_SUMMARY_SYSTEM only when
             # the app has no registered manifest.
-            resolved_prompt, resolved_schema = await self._resolve_extraction_prompt(app_id)
+            resolved_prompt, resolved_schema, resolved_manifest = await self._resolve_extraction_prompt(app_id)
 
             response = await llm.extract(
                 system_prompt=resolved_prompt,
@@ -1709,6 +1714,26 @@ class ColdPathWorker:
                         connections_injected=len(injected_edges),
                         model=response.model,
                     )
+
+            # Connection vocabulary enforcement — the LLM regularly emits
+            # reversed edges (blocker blocked_by commitment) and off-spec
+            # combos (works_with) that client-side validators then drop
+            # silently. Flip reversed edges, drop invalid ones, against
+            # the app's registered manifest. No-op for manifest-less apps.
+            enforce_connection_vocabulary(
+                response.content,
+                (resolved_manifest or {}).get("connection_labels"),
+            )
+            if (cv := response.content.get("_connection_vocabulary_enforced")):
+                logger.info(
+                    "connection_vocabulary_enforced",
+                    user_id=user_id,
+                    kept=cv.get("kept", 0),
+                    flipped=cv.get("flipped", 0),
+                    dropped=cv.get("dropped", 0),
+                    dropped_detail=cv.get("dropped_detail", []),
+                    model=response.model,
+                )
 
             patches_after_filters = len(response.content.get("patches") or [])
 
