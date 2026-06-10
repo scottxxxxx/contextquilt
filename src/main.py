@@ -1140,7 +1140,10 @@ class QuiltResponse(BaseModel):
     user_id: str
     facts: List[QuiltPatchResponse]
     action_items: List[QuiltPatchResponse]
-    deleted: List[str] = []        # patch_ids removed since `since` timestamp
+    deleted: List[str] = []        # patch_ids removed since `since` timestamp (all causes)
+    completed: List[str] = []      # subset of `deleted` that was resolved (completed_at set),
+                                   # as opposed to decayed/archived — lets the app show "done"
+                                   # instead of items silently vanishing
     server_time: Optional[str] = None  # use as `since` on next request
 
 class PatchUpdate(BaseModel):
@@ -1150,6 +1153,13 @@ class PatchUpdate(BaseModel):
     project_id: Optional[str] = None
     permanence_override: Optional[str] = None           # one of: permanent | decade | year | quarter | month | week | day | null
     permanence_override_source: Optional[str] = None    # 'user' or 'app'; defaults to 'user' when the API is called without explicit source
+
+class PatchCompletionRequest(BaseModel):
+    evidence: Optional[str] = None  # short free-text note on what completed it (e.g. "user tapped done")
+
+# Patch types that can be marked completed (matches the `completable`
+# flags in the registered app manifests: commitments and blockers).
+COMPLETABLE_PATCH_TYPES = ("commitment", "blocker")
 
 @app.get("/v1/quilt/{user_id}", response_model=QuiltResponse, tags=["Quilt"])
 async def get_user_quilt(
@@ -1216,12 +1226,16 @@ async def get_user_quilt(
 
     rows = await db_pool.fetch(query, *params)
 
-    # Find patches deleted or archived since the timestamp
+    # Find patches deleted or archived since the timestamp. completed_at
+    # separates "resolved" (worker auto-close or app-initiated completion)
+    # from "decayed" (TTL archival) — both land in `deleted` for backward
+    # compat, resolved ones additionally in `completed`.
     deleted_ids = []
+    completed_ids = []
     if since_dt:
         deleted_rows = await db_pool.fetch(
             """
-            SELECT cp.patch_id FROM context_patches cp
+            SELECT cp.patch_id, cp.completed_at FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
               AND cp.status IN ('archived', 'completed')
@@ -1230,6 +1244,7 @@ async def get_user_quilt(
             subject_key, since_dt
         )
         deleted_ids = [str(r["patch_id"]) for r in deleted_rows]
+        completed_ids = [str(r["patch_id"]) for r in deleted_rows if r["completed_at"] is not None]
 
     # Collect all patch IDs to fetch connections in one query
     patch_ids = [row["patch_id"] for row in rows]
@@ -1296,6 +1311,7 @@ async def get_user_quilt(
         facts=facts,
         action_items=action_items,
         deleted=deleted_ids,
+        completed=completed_ids,
         server_time=server_time.isoformat() + "Z",
     )
 
@@ -1703,6 +1719,102 @@ async def update_patch(
     await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
 
     return {"status": "updated", "patch_id": patch_id}
+
+
+@app.post("/v1/quilt/{user_id}/patches/{patch_id}/complete", tags=["Quilt"])
+async def complete_patch(
+    user_id: str,
+    patch_id: str,
+    completion: Optional[PatchCompletionRequest] = None,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Mark a completable patch (commitment, blocker) as done.
+
+    App-initiated counterpart to the worker's LLM-driven auto-close —
+    lets the app build tap-to-complete UI instead of waiting for the
+    user to mention completion in a later meeting. Applies the same
+    gates as the worker's resolver: ownership via patch_subjects,
+    completable type, currently open. Requires write access via ACL.
+
+    The patch is archived with completed_at set, so it leaves recall
+    and the active quilt, and shows up in the quilt delta's `completed`
+    array (distinct from decayed patches in `deleted`).
+    """
+    subject_key = f"user:{user_id}"
+    row = await db_pool.fetchrow(
+        """
+        SELECT cp.patch_id, cp.patch_type, cp.completed_at,
+               COALESCE(cp.status, 'active') AS status
+        FROM context_patches cp
+        JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+        WHERE cp.patch_id = $1 AND ps.subject_key = $2
+        """,
+        patch_id, subject_key
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Patch not found for this user")
+    if row["patch_type"] not in COMPLETABLE_PATCH_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Patch type '{row['patch_type']}' is not completable "
+                   f"(completable types: {', '.join(COMPLETABLE_PATCH_TYPES)})",
+        )
+    if row["completed_at"] is not None or row["status"] != "active":
+        raise HTTPException(status_code=409, detail="Patch is already completed or archived")
+
+    # Check write ACL (skip for legacy non-UUID app IDs — no ACL = open access)
+    import uuid as _uuid
+    try:
+        app_uuid = _uuid.UUID(app_id)
+        acl = await db_pool.fetchrow(
+            "SELECT can_write FROM context_patch_acl WHERE patch_id = $1 AND app_id = $2",
+            patch_id, app_uuid
+        )
+        if acl and not acl["can_write"]:
+            raise HTTPException(status_code=403, detail="Write access denied for this patch")
+    except (ValueError, AttributeError):
+        pass  # Legacy app_id, no ACL enforcement
+
+    evidence = ((completion.evidence if completion else None) or "").strip()[:300]
+
+    # The open-state predicate is repeated in the UPDATE so a concurrent
+    # completion (e.g. worker auto-close racing a user tap) can't double-
+    # apply; the loser of the race gets 409.
+    completed_row = await db_pool.fetchrow(
+        """
+        UPDATE context_patches
+           SET completed_at = NOW(),
+               status = 'archived',
+               updated_at = NOW(),
+               value = CASE WHEN $2::text <> ''
+                       THEN jsonb_set(
+                                jsonb_set(value, '{completion_source}', '"app"'),
+                                '{completion_evidence}', to_jsonb($2::text)
+                            )
+                       ELSE jsonb_set(value, '{completion_source}', '"app"')
+                       END
+         WHERE patch_id = $1
+           AND COALESCE(status, 'active') = 'active'
+           AND completed_at IS NULL
+        RETURNING completed_at
+        """,
+        patch_id, evidence
+    )
+    if not completed_row:
+        raise HTTPException(status_code=409, detail="Patch is already completed or archived")
+
+    # Trigger cache refresh so recall stops surfacing the patch promptly
+    # (the render cache alone would age it out within RECALL_RENDER_CACHE_TTL).
+    stream_key = "memory_updates"
+    payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
+    await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
+
+    return {
+        "status": "completed",
+        "patch_id": patch_id,
+        "completed_at": completed_row["completed_at"].isoformat(),
+    }
 
 
 @app.delete("/v1/quilt/{user_id}/patches/{patch_id}", tags=["Quilt"])
