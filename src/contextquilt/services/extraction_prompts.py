@@ -114,10 +114,11 @@ The transcript uses speaker labels in brackets. The speaker whose label contains
 - Project patches require ownership signals from the (you) speaker
 - All speakers can own commitments, blockers, and decisions
 
-Analyze this meeting transcript and return a JSON object with exactly six keys:
+Analyze this meeting transcript and return a JSON object with exactly seven keys:
 
 {
   "you_speaker_present": true,
+  "output_language": "<language code all output prose must be written in — from the User language: line, else the (you) speaker's dominant language>",
   "_reasoning": "<3-8 verbatim quotes from this transcript, each tagged with the patch type it supports>",
   "patches": [
     {
@@ -157,6 +158,11 @@ relationship `context` — in the user's language:
   - If a `User language:` line is present at the top of the input
     (e.g. "User language: es"), use that language.
   - Otherwise use the dominant language spoken by the (you) speaker.
+
+Commit to this in the `output_language` field BEFORE generating any
+patches, and honor it for every prose field after — even though these
+instructions, the Open commitments block, and other context are in
+English, they do NOT change the output language.
 
 Keep proper names (people, products, companies) verbatim as spoken.
 Structural fields are language-independent and unchanged: patch `type`,

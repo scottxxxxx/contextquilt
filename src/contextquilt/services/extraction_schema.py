@@ -57,11 +57,15 @@ EXTRACTION_SCHEMA: dict = {
     # fields in the order they appear in `properties`. We exploit this to
     # force:
     #   1. The (you)-marker decision FIRST    (gating commitment)
-    #   2. Reason-then-extract SECOND         (grounds patches in quotes)
-    #   3. patches THIRD                       (new patches from this transcript)
-    #   4. resolved_commitments FOURTH         (look back at prior open commits last)
-    #   5. entities + relationships LAST
-    "required": ["you_speaker_present", "_reasoning", "patches", "resolved_commitments", "entities", "relationships"],
+    #   2. output_language SECOND             (language commitment — anchors all
+    #      downstream prose; without it, English context injected into
+    #      user_content (e.g. the open-commitments block) pulls patch text
+    #      back to English even when the user's language is Spanish)
+    #   3. Reason-then-extract THIRD          (grounds patches in quotes)
+    #   4. patches FOURTH                      (new patches from this transcript)
+    #   5. resolved_commitments FIFTH          (look back at prior open commits last)
+    #   6. entities + relationships LAST
+    "required": ["you_speaker_present", "output_language", "_reasoning", "patches", "resolved_commitments", "entities", "relationships"],
     "properties": {
         "you_speaker_present": {
             "type": "boolean",
@@ -70,6 +74,18 @@ EXTRACTION_SCHEMA: dict = {
                 "substring \"(you)\". FALSE otherwise. Set this first, before "
                 "generating any patches. If FALSE, the patches array MUST NOT "
                 "contain any patch of type trait, preference, or identity."
+            ),
+        },
+        "output_language": {
+            "type": "string",
+            "description": (
+                "The language ALL output prose must be written in (patch value "
+                "text, entity descriptions, relationship context). Copy the code "
+                "from the 'User language:' line at the top of the input if "
+                "present; otherwise use the code of the dominant language spoken "
+                "by the (you) speaker (e.g. 'es', 'en', 'pt'). Every prose field "
+                "you generate after this MUST be in this language, regardless of "
+                "the language of any other instructions or context blocks."
             ),
         },
         "_reasoning": {
@@ -226,12 +242,15 @@ SELF_TYPED_PATCH_TYPES = frozenset({"trait", "preference", "identity"})
 def strip_ephemeral_fields(content: dict) -> dict:
     """
     Remove fields that exist only to shape model output and are not meant
-    to be persisted or returned to callers. Currently `_reasoning`.
+    to be persisted or returned to callers. Currently `_reasoning` and
+    `output_language` (the model's language commitment — it has done its
+    job once the patches are generated).
 
     Call after enforce_owner_gate, before handing content to the
     downstream worker pipeline.
     """
     content.pop("_reasoning", None)
+    content.pop("output_language", None)
     return content
 
 
