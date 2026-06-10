@@ -323,18 +323,36 @@ async def test_wrapper_skips_alert_when_no_db_configured():
 
 
 # --- primary_provider_from_env -----------------------------------------
+#
+# primary_provider_from_env reads the lru_cached Settings singleton, not
+# os.environ directly. Any earlier test that touches get_settings() (the
+# AnthropicLLMClient constructor does, for cq_anthropic_model) freezes the
+# singleton with the env as it was THEN — so monkeypatch.setenv alone is
+# invisible and the override test failed whenever the whole file ran.
+# Clear the cache around each test so Settings rebuilds from the patched
+# env, and again afterwards so the frozen-env instance doesn't leak into
+# later tests.
 
 
-def test_primary_provider_defaults_to_anthropic(monkeypatch):
+@pytest.fixture
+def fresh_settings():
+    from contextquilt.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_primary_provider_defaults_to_anthropic(monkeypatch, fresh_settings):
     monkeypatch.delenv("CQ_LLM_PRIMARY_PROVIDER", raising=False)
     assert primary_provider_from_env() == "anthropic"
 
 
-def test_primary_provider_respects_env_override(monkeypatch):
+def test_primary_provider_respects_env_override(monkeypatch, fresh_settings):
     monkeypatch.setenv("CQ_LLM_PRIMARY_PROVIDER", "openrouter")
     assert primary_provider_from_env() == "openrouter"
 
 
-def test_primary_provider_lowercases(monkeypatch):
+def test_primary_provider_lowercases(monkeypatch, fresh_settings):
     monkeypatch.setenv("CQ_LLM_PRIMARY_PROVIDER", "ANTHROPIC")
     assert primary_provider_from_env() == "anthropic"
