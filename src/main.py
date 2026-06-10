@@ -195,6 +195,16 @@ class RecallResponse(BaseModel):
 # calls keeps the cache warm indefinitely. Prewarm uses the same value.
 ENTITY_INDEX_TTL = 7200  # 2 hours
 
+# Entity index contents: canonical names plus recorded aliases, so a
+# query mentioning a surface form ("S. Abrams") still matches the
+# canonical entity ("Lockridge Abrams"). Every entity_index builder must use
+# this — a name-only rebuild silently breaks alias matching.
+ENTITY_INDEX_NAMES_SQL = """
+    SELECT name FROM entities WHERE user_id = $1
+    UNION
+    SELECT alias FROM entity_aliases WHERE user_id = $1
+"""
+
 # Short-TTL cache on the rendered RecallResponse body (context, matched
 # entities, patch ids, comm style). Same (user_id + request shape) within
 # the TTL window returns byte-identical output, which is required for
@@ -575,9 +585,7 @@ async def recall_context(
     # than the TTL stops returning entity matches.
     if not known_entities:
         rehydrate_t = time.monotonic()
-        rows = await db_pool.fetch(
-            "SELECT name FROM entities WHERE user_id = $1", user_id
-        )
+        rows = await db_pool.fetch(ENTITY_INDEX_NAMES_SQL, user_id)
         if rows:
             names = [r["name"] for r in rows]
             await redis_client.delete(entity_index_key)
@@ -629,12 +637,18 @@ async def recall_context(
     rel_rows: list = []
     if matched_names:
         t1 = time.monotonic()
+        # Alias-aware: a matched name may be a recorded surface form
+        # ("S. Abrams") — resolve it to the canonical entity so graph
+        # traversal sees the full relationship neighborhood. DISTINCT
+        # because a canonical name and one of its aliases can both match
+        # the same query.
         entity_rows = await db_pool.fetch(
             """
-            SELECT entity_id, name, entity_type, description
-            FROM entities
-            WHERE user_id = $1 AND name = ANY($2)
-            ORDER BY entity_id
+            SELECT DISTINCT e.entity_id, e.name, e.entity_type, e.description
+            FROM entities e
+            LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
+            WHERE e.user_id = $1 AND (e.name = ANY($2) OR a.alias = ANY($2))
+            ORDER BY e.entity_id
             """,
             user_id, matched_names
         )
@@ -1050,10 +1064,8 @@ async def prewarm_cache(
         }
         await redis_client.set(f"active_context:{user_id}", json.dumps(profile_data), ex=3600)
 
-    # Warm entity index
-    entity_rows = await db_pool.fetch(
-        "SELECT name FROM entities WHERE user_id = $1", user_id
-    )
+    # Warm entity index (canonical names + aliases)
+    entity_rows = await db_pool.fetch(ENTITY_INDEX_NAMES_SQL, user_id)
     entity_key = f"entity_index:{user_id}"
     if entity_rows:
         names = [r["name"] for r in entity_rows]
@@ -2245,9 +2257,7 @@ async def rename_speaker(
 
     # Rebuild Redis entity index so recall matches the new name
     entity_index_key = f"entity_index:{user_id}"
-    all_names = await db_pool.fetch(
-        "SELECT name FROM entities WHERE user_id = $1", user_id
-    )
+    all_names = await db_pool.fetch(ENTITY_INDEX_NAMES_SQL, user_id)
     if all_names:
         await redis_client.delete(entity_index_key)
         await redis_client.sadd(entity_index_key, *[r["name"] for r in all_names])
@@ -2452,9 +2462,7 @@ async def reassign_speaker(
     # ------------------------------------------------------------
     if entities_merged > 0:
         entity_index_key = f"entity_index:{user_id}"
-        all_names = await db_pool.fetch(
-            "SELECT name FROM entities WHERE user_id = $1", user_id,
-        )
+        all_names = await db_pool.fetch(ENTITY_INDEX_NAMES_SQL, user_id)
         await redis_client.delete(entity_index_key)
         if all_names:
             await redis_client.sadd(entity_index_key, *[r["name"] for r in all_names])
