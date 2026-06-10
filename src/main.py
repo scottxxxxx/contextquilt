@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict, Any, Union
+import asyncio
 import hashlib
 import os
 import redis.asyncio as redis
@@ -467,6 +468,36 @@ async def get_own_schema(app_id: str = Depends(verify_application_access)):
     }
 
 
+async def _bump_patch_access(patch_ids: List[str]) -> None:
+    """Record a recall hit on patch_usage_metrics for the returned patches.
+
+    This is the read-side half of the usage feedback loop. The decay
+    worker exempts patches whose last_accessed_at is recent from TTL
+    archival — but until this existed, recall never wrote to the table
+    (only the worker's dedup path did), so a patch recalled daily could
+    still be archived as if nobody used it.
+
+    Scheduled via asyncio.create_task AFTER the response is built —
+    never on the hot path. Best-effort: failures are swallowed, recall
+    must never break on metrics bookkeeping.
+    """
+    if not patch_ids:
+        return
+    try:
+        await db_pool.execute(
+            """
+            UPDATE patch_usage_metrics
+               SET access_count = access_count + 1,
+                   last_accessed_at = NOW()
+             WHERE patch_id = ANY($1::uuid[])
+            """,
+            patch_ids,
+        )
+    except Exception:
+        # Best-effort, matching the render-cache error posture above.
+        pass
+
+
 @app.post("/v1/recall", response_model=RecallResponse, tags=["Hot Path"])
 async def recall_context(
     request: RecallRequest,
@@ -515,6 +546,11 @@ async def recall_context(
             cached = json.loads(cached_blob)
             timings["total"] = round((time.monotonic() - t0) * 1000, 2)
             timings["render_cache_hit"] = 1
+            # A cache hit is still a recall — the patches were served to
+            # the caller, so they count as accessed.
+            asyncio.create_task(
+                _bump_patch_access(cached.get("matched_patch_ids", []))
+            )
             return RecallResponse(
                 context=cached["context"],
                 matched_entities=cached["matched_entities"],
@@ -883,6 +919,9 @@ async def recall_context(
 
     timings["total"] = round((time.monotonic() - t0) * 1000, 2)
     timings["render_cache_hit"] = 0
+
+    # Off-hot-path usage bookkeeping — see _bump_patch_access.
+    asyncio.create_task(_bump_patch_access(matched_patch_ids))
 
     return RecallResponse(
         context=context,
