@@ -14,6 +14,9 @@ Providers that don't support json_schema fall back to json_object mode
 and rely on prompt-described shape instead.
 """
 
+import re
+from datetime import date, timedelta
+
 PATCH_TYPES = [
     "trait",
     "preference",
@@ -97,11 +100,21 @@ EXTRACTION_SCHEMA: dict = {
                     "value": {
                         "type": "object",
                         "additionalProperties": False,
-                        "required": ["text", "owner", "deadline"],
+                        "required": ["text", "owner", "deadline", "deadline_date"],
                         "properties": {
                             "text": {"type": "string"},
                             "owner": {"type": ["string", "null"]},
                             "deadline": {"type": ["string", "null"]},
+                            "deadline_date": {
+                                "type": ["string", "null"],
+                                "description": (
+                                    "The deadline resolved to an absolute calendar date "
+                                    "in YYYY-MM-DD form, anchored to the 'Meeting date:' "
+                                    "line in the input for relative expressions like "
+                                    "'tomorrow' or 'end of week'. Null when the deadline "
+                                    "cannot be resolved to a specific date."
+                                ),
+                            },
                         },
                     },
                     "connects_to": {
@@ -219,6 +232,67 @@ def strip_ephemeral_fields(content: dict) -> dict:
     downstream worker pipeline.
     """
     content.pop("_reasoning", None)
+    return content
+
+
+# Structured deadline dates must be bare ISO calendar dates. Anything the
+# LLM emits that doesn't match (timestamps, prose, partial dates) is nulled
+# rather than stored — `value.deadline` keeps the original free text, so no
+# information is lost when resolution fails.
+_DEADLINE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+# Plausibility window around the meeting date. A deadline can predate the
+# meeting ("that was due yesterday") but a resolution outside this window
+# is far more likely a model error (wrong year) than a real deadline.
+_DEADLINE_PAST_WINDOW = timedelta(days=730)
+_DEADLINE_FUTURE_WINDOW = timedelta(days=3650)
+
+
+def validate_deadline_date(raw: object, meeting_date: "date | None" = None) -> "str | None":
+    """Return the normalized YYYY-MM-DD string, or None if invalid.
+
+    Exposed separately from the sanitizer so backfill scripts can reuse
+    the exact same acceptance rules on stored free-text deadlines.
+    """
+    if not isinstance(raw, str):
+        return None
+    raw = raw.strip()
+    if not _DEADLINE_DATE_RE.match(raw):
+        return None
+    try:
+        parsed = date.fromisoformat(raw)
+    except ValueError:
+        return None
+    if meeting_date is not None:
+        if parsed < meeting_date - _DEADLINE_PAST_WINDOW:
+            return None
+        if parsed > meeting_date + _DEADLINE_FUTURE_WINDOW:
+            return None
+    return parsed.isoformat()
+
+
+def sanitize_deadline_dates(content: dict, meeting_date: "date | None" = None) -> dict:
+    """
+    Validate LLM-emitted `value.deadline_date` fields on every patch.
+
+    The extraction prompt asks the model to resolve free-text deadlines
+    ("tomorrow", "end of week") to an absolute YYYY-MM-DD anchored to the
+    meeting date. Models are unreliable about format and about years, so
+    enforce both here: malformed strings and dates implausibly far from
+    the meeting date are nulled. `value.deadline` (the free text) is
+    never touched.
+    """
+    for patch in content.get("patches") or []:
+        if not isinstance(patch, dict):
+            continue
+        value = patch.get("value")
+        if not isinstance(value, dict):
+            continue
+        if "deadline_date" not in value:
+            continue
+        value["deadline_date"] = validate_deadline_date(
+            value.get("deadline_date"), meeting_date
+        )
     return content
 
 
