@@ -46,6 +46,7 @@ from contextquilt.services.extraction_schema import (
     strip_owner_on_self_typed_patches,
     strip_prose_from_person_names,
 )
+from contextquilt.services.entity_aliasing import find_alias_candidate
 from contextquilt.services.llm_client import LLMClient
 from contextquilt.services.llm_client_anthropic import AnthropicLLMClient
 from contextquilt.services.llm_client_fallback import (
@@ -594,8 +595,23 @@ async def store_entities(
     metadata: dict | None = None,
 ):
     """
-    Store extracted entities to Postgres. Upserts by (user_id, name, entity_type).
-    Updates the Redis entity name index for hot path matching.
+    Store extracted entities to Postgres, resolving alternate surface
+    forms to canonical entities instead of fragmenting the graph.
+
+    Resolution order per extracted name (within the same entity_type):
+      1. case-insensitive exact name match            → re-observe
+      2. recorded alias match (entity_aliases)        → re-observe canonical
+      3. conservative alias heuristic vs existing
+         same-type entities (token subset / initial
+         expansion, UNIQUE candidate only):
+           - new name is the short form  → record alias, re-observe
+           - new name is the fuller form → rename canonical to it,
+                                           keep the old name as alias
+      4. genuinely new                                → insert
+
+    Steps 2-3 degrade gracefully (plain insert) if entity_aliases is
+    missing — the MCP deployment's separate Postgres can lag on
+    migrations.
     """
     if not entities:
         return 0
@@ -608,7 +624,103 @@ async def store_entities(
         if not name or not entity_type:
             continue
 
-        # Upsert: insert or update mention count + last_seen
+        metadata_json = json.dumps(metadata or {})
+
+        async def _reobserve(entity_id) -> None:
+            await db.execute(
+                """
+                UPDATE entities SET
+                    description = COALESCE(NULLIF($1, ''), description),
+                    last_seen_at = NOW(),
+                    mention_count = mention_count + 1,
+                    metadata = metadata || $2::jsonb
+                WHERE entity_id = $3
+                """,
+                description, metadata_json, entity_id,
+            )
+
+        # 1. Exact match, case-insensitive (the old ON CONFLICT only
+        #    caught exact case, so "sarah abrams" vs "Sarah Abrams"
+        #    used to create two rows).
+        row = await db.fetchrow(
+            """
+            SELECT entity_id FROM entities
+            WHERE user_id = $1 AND entity_type = $2 AND LOWER(name) = LOWER($3)
+            LIMIT 1
+            """,
+            user_id, entity_type, name,
+        )
+        if row:
+            await _reobserve(row["entity_id"])
+            stored += 1
+            continue
+
+        try:
+            # 2. Recorded alias
+            row = await db.fetchrow(
+                """
+                SELECT e.entity_id
+                FROM entity_aliases a
+                JOIN entities e ON e.entity_id = a.entity_id
+                WHERE a.user_id = $1 AND LOWER(a.alias) = LOWER($2)
+                  AND e.entity_type = $3
+                LIMIT 1
+                """,
+                user_id, name, entity_type,
+            )
+            if row:
+                await _reobserve(row["entity_id"])
+                stored += 1
+                continue
+
+            # 3. Alias heuristic against existing same-type entities.
+            #    Only acts on a UNIQUE candidate — ambiguity ("Sarah"
+            #    with both "Sarah Abrams" and "Sarah Chen" present)
+            #    falls through to a separate entity, as before.
+            candidate_rows = await db.fetch(
+                "SELECT entity_id, name FROM entities WHERE user_id = $1 AND entity_type = $2",
+                user_id, entity_type,
+            )
+            match = find_alias_candidate(
+                name, [(r["entity_id"], r["name"]) for r in candidate_rows]
+            )
+            if match:
+                entity_id, existing_name, direction = match
+                if direction == "name_is_canonical":
+                    # The fuller form arrived later — promote it to the
+                    # canonical name, keep the old short form as an alias.
+                    await db.execute(
+                        "UPDATE entities SET name = $1 WHERE entity_id = $2",
+                        name, entity_id,
+                    )
+                    alias_to_record = existing_name
+                else:
+                    alias_to_record = name
+                await db.execute(
+                    """
+                    INSERT INTO entity_aliases (user_id, entity_id, alias, source)
+                    VALUES ($1, $2, $3, 'heuristic')
+                    ON CONFLICT (user_id, LOWER(alias)) DO NOTHING
+                    """,
+                    user_id, entity_id, alias_to_record,
+                )
+                await _reobserve(entity_id)
+                logger.info(
+                    "entity_alias_resolved",
+                    user_id=user_id,
+                    entity_type=entity_type,
+                    alias=alias_to_record,
+                    canonical=name if direction == "name_is_canonical" else existing_name,
+                    direction=direction,
+                )
+                stored += 1
+                continue
+        except Exception as e:
+            # entity_aliases missing (MCP DB pre-migration) or any alias
+            # machinery failure — fall through to the plain insert path.
+            logger.debug("entity_alias_resolution_skipped", error=str(e)[:120])
+
+        # 4. New entity. ON CONFLICT retained as a race-safety net.
         await db.execute(
             """
             INSERT INTO entities (user_id, name, entity_type, description, metadata)
@@ -620,7 +732,7 @@ async def store_entities(
                 metadata = entities.metadata || EXCLUDED.metadata
             """,
             user_id, name, entity_type, description,
-            json.dumps(metadata or {}),
+            metadata_json,
         )
         stored += 1
 
@@ -652,15 +764,12 @@ async def store_relationships(
         if not from_name or not to_name or not rel_type:
             continue
 
-        # Resolve entity IDs by name (match any type for this user)
-        from_row = await db.fetchrow(
-            "SELECT entity_id FROM entities WHERE user_id = $1 AND name = $2 LIMIT 1",
-            user_id, from_name
-        )
-        to_row = await db.fetchrow(
-            "SELECT entity_id FROM entities WHERE user_id = $1 AND name = $2 LIMIT 1",
-            user_id, to_name
-        )
+        # Resolve entity IDs by name (match any type for this user).
+        # Alias-aware: a relationship referencing "S. Abrams" must land
+        # on the canonical "Sarah Abrams" entity that store_entities
+        # resolved the surface form to.
+        from_row = await _resolve_entity_id_by_name(db, user_id, from_name)
+        to_row = await _resolve_entity_id_by_name(db, user_id, to_name)
 
         if not from_row or not to_row:
             logger.debug("relationship_skipped", reason="entity_not_found",
@@ -687,19 +796,49 @@ async def store_relationships(
     return stored
 
 
+async def _resolve_entity_id_by_name(db, user_id: str, name: str):
+    """Resolve a surface-form name to an entity row, checking canonical
+    names first, then recorded aliases. Case-insensitive. Returns a row
+    with entity_id or None. Falls back to name-only resolution when the
+    entity_aliases table is unavailable (MCP DB pre-migration)."""
+    row = await db.fetchrow(
+        "SELECT entity_id FROM entities WHERE user_id = $1 AND LOWER(name) = LOWER($2) LIMIT 1",
+        user_id, name,
+    )
+    if row:
+        return row
+    try:
+        return await db.fetchrow(
+            "SELECT entity_id FROM entity_aliases WHERE user_id = $1 AND LOWER(alias) = LOWER($2) LIMIT 1",
+            user_id, name,
+        )
+    except Exception:
+        return None
+
+
 async def _rebuild_entity_index(db, redis_client, user_id: str):
     """
     Rebuild the Redis entity name index for a user.
-    Stores all entity names as a set for fast text matching on the hot path.
+    Stores all entity names — canonical AND aliases — as a set for fast
+    text matching on the hot path. A query mentioning "S. Abrams" must
+    match even though the canonical entity is "Sarah Abrams".
     """
     try:
         rows = await db.fetch(
             "SELECT name FROM entities WHERE user_id = $1",
             user_id
         )
+        names = {row["name"] for row in rows}
+        try:
+            alias_rows = await db.fetch(
+                "SELECT alias FROM entity_aliases WHERE user_id = $1",
+                user_id
+            )
+            names |= {row["alias"] for row in alias_rows}
+        except Exception:
+            pass  # entity_aliases not available (MCP DB pre-migration)
         key = f"entity_index:{user_id}"
-        if rows:
-            names = [row["name"] for row in rows]
+        if names:
             await redis_client.delete(key)
             await redis_client.sadd(key, *names)
             await redis_client.expire(key, 7200)  # 2 hour TTL
