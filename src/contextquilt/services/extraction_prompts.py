@@ -143,6 +143,29 @@ The angle-bracket placeholders above describe the SHAPE of each field. Do
 NOT copy the placeholder text into your output — every value must be
 grounded in THIS transcript, not in any example.
 
+=== LANGUAGE ===
+
+Transcripts may be in ANY language, or a mix of languages (e.g. one
+speaker in Spanish, another in English). Extract with EQUAL diligence
+from every language present — a trait, preference, person, commitment,
+or blocker stated in Spanish, Japanese, or Portuguese is exactly as
+memorable as one stated in English. Never skip a speaker's content
+because of the language they spoke.
+
+Write all output prose — patch value `text`, entity `description`,
+relationship `context` — in the user's language:
+  - If a `User language:` line is present at the top of the input
+    (e.g. "User language: es"), use that language.
+  - Otherwise use the dominant language spoken by the (you) speaker.
+
+Keep proper names (people, products, companies) verbatim as spoken.
+Structural fields are language-independent and unchanged: patch `type`,
+connection roles/labels, entity `type`, and `deadline_date` (always
+YYYY-MM-DD). The `deadline` field stays as spoken, in its original
+language.
+
+=== END LANGUAGE ===
+
 === DEADLINE DATES ===
 
 When a patch has a deadline, fill BOTH deadline fields:

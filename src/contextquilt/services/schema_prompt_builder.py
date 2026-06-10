@@ -41,6 +41,7 @@ def build_prompt(manifest: Dict[str, Any]) -> str:
     sections: List[str] = []
     sections.append(_preamble(manifest, guidance))
     sections.append(_speaker_conventions(guidance))
+    sections.append(_language_section())
     sections.append(_reasoning_requirement(guidance))
     sections.append(_output_shape(manifest))
     sections.append(_patch_types_section(manifest))
@@ -182,6 +183,28 @@ def _reasoning_requirement(guidance: Dict[str, Any]) -> str:
     if not req:
         return ""
     return f"=== REASONING REQUIREMENT ===\n{req}"
+
+
+def _language_section() -> str:
+    return (
+        "=== LANGUAGE ===\n"
+        "Transcripts may be in ANY language, or a mix (e.g. one speaker in "
+        "Spanish, another in English). Extract with EQUAL diligence from "
+        "every language present — a trait, preference, person, commitment, "
+        "or blocker stated in Spanish, Japanese, or Portuguese is exactly "
+        "as memorable as one stated in English. Never skip a speaker's "
+        "content because of the language they spoke.\n"
+        "\n"
+        "Write all output prose — patch value `text`, entity `description`, "
+        "relationship `context` — in the user's language: use the "
+        "`User language:` line at the top of the input if present "
+        "(e.g. \"User language: es\"); otherwise use the dominant language "
+        "spoken by the (you) speaker. Keep proper names verbatim as spoken. "
+        "Structural fields are language-independent and unchanged: patch "
+        "`type`, connection roles/labels, entity `type`, and `deadline_date` "
+        "(always YYYY-MM-DD). The `deadline` field stays as spoken, in its "
+        "original language."
+    )
 
 
 def _output_shape(manifest: Dict[str, Any]) -> str:

@@ -87,10 +87,29 @@ _STOPWORDS = frozenset({
     "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
     "can", "could", "should", "would", "will", "may", "might",
     "not", "no", "yes", "just", "about", "any", "all", "some",
+    # Spanish function words (3+ chars — shorter ones are already dropped
+    # by the length filter in _keywords). Collision-checked against
+    # English: "son", "era", and "todo" are deliberately NOT listed —
+    # they're content words in English ("my son", "the era", "todo list").
+    "los", "las", "una", "unos", "unas", "del", "que", "quien", "quién",
+    "ser", "estar", "esta", "está", "están", "estoy",
+    "por", "para", "con", "sin", "como", "cómo", "más", "menos", "pero",
+    "mis", "tus", "sus", "quill", "ellos", "ellas", "nosotros",
+    "usted", "ustedes", "les",
+    "este", "estos", "estas", "ese", "esa", "eso", "esos", "esas",
+    "aquí", "hay", "muy", "también", "cuando", "cuándo",
+    "donde", "dónde", "qué", "porque", "entonces",
+    "toda", "todos", "todas", "algo", "nada",
+    "hace", "hacer", "tiene", "tener", "tengo",
+    "bueno", "bien", "luego", "ahora",
 })
 
 
-_WORD_RE = re.compile(r"[a-z0-9']+")
+# \w is unicode-aware in Python 3, so accented words tokenize whole
+# ("jardín" stays "jardín" instead of splitting into "jard" + "n").
+# Underscore is excluded to keep snake_case identifiers splitting the
+# way the previous [a-z0-9']+ pattern did.
+_WORD_RE = re.compile(r"[^\W_]+(?:'[^\W_]+)*")
 
 
 def _keywords(text: str) -> List[str]:

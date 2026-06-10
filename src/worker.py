@@ -1596,6 +1596,17 @@ class ColdPathWorker:
             f"Meeting date: {meeting_date.isoformat()}\n\n" if meeting_date else ""
         )
 
+        # Memory language. Apps pass metadata.language (BCP-47, e.g. "es")
+        # so extraction writes patch text in the user's language. Without
+        # it, the prompt's LANGUAGE section falls back to the dominant
+        # language of the (you) speaker — see extraction_prompts.py.
+        memory_language = ""
+        if metadata:
+            memory_language = str(metadata.get("language") or "").strip()
+        language_line = (
+            f"User language: {memory_language}\n\n" if memory_language else ""
+        )
+
         try:
             app_id = payload.get("app_id")
             llm = await self._get_llm_for_app(app_id)
@@ -1607,7 +1618,7 @@ class ColdPathWorker:
 
             response = await llm.extract(
                 system_prompt=resolved_prompt,
-                user_content=meeting_date_line + user_context + open_commits_block + effective_summary,
+                user_content=meeting_date_line + language_line + user_context + open_commits_block + effective_summary,
                 json_schema=resolved_schema,
             )
 
