@@ -122,7 +122,7 @@ Analyze this meeting transcript and return a JSON object with exactly six keys:
   "patches": [
     {
       "type": "<one of the patch types below>",
-      "value": {"text": "<concise statement grounded in this transcript>", "owner": "<speaker name, or null>", "deadline": "<date or null>"},
+      "value": {"text": "<concise statement grounded in this transcript>", "owner": "<speaker name, or null>", "deadline": "<deadline as spoken, or null>", "deadline_date": "<YYYY-MM-DD or null>"},
       "connects_to": [
         {"target_text": "<text of another patch in this output>", "target_type": "<one of the patch types>", "role": "<parent|depends_on|resolves|replaces|informs>", "label": "<belongs_to|blocked_by|unblocks|supersedes|motivated_by|works_on|owns>"}
       ]
@@ -142,6 +142,24 @@ Analyze this meeting transcript and return a JSON object with exactly six keys:
 The angle-bracket placeholders above describe the SHAPE of each field. Do
 NOT copy the placeholder text into your output — every value must be
 grounded in THIS transcript, not in any example.
+
+=== DEADLINE DATES ===
+
+When a patch has a deadline, fill BOTH deadline fields:
+  - `deadline`: the deadline as spoken in the transcript ("tomorrow",
+    "end of week", "June 19th").
+  - `deadline_date`: that deadline resolved to an absolute calendar date
+    in YYYY-MM-DD form. Resolve relative expressions against the
+    `Meeting date:` line at the top of the input — e.g. if the meeting
+    date is 2026-06-10, "tomorrow" → "2026-06-11" and "end of week" →
+    the upcoming Friday.
+
+Set `deadline_date` to null when the deadline cannot be tied to a
+specific date ("after the board meeting", "soon", "before development").
+Never guess a year — if no `Meeting date:` line is present and the
+deadline is relative, set `deadline_date` to null.
+
+=== END DEADLINE DATES ===
 
 === RESOLVED COMMITMENTS ===
 

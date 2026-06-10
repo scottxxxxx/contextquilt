@@ -93,6 +93,7 @@ def build_output_schema(manifest: Dict[str, Any]) -> Dict[str, Any]:
                                 "text": {"type": "string"},
                                 "owner": {"type": ["string", "null"]},
                                 "deadline": {"type": ["string", "null"]},
+                                "deadline_date": {"type": ["string", "null"]},
                             },
                         },
                         "connects_to": {
@@ -194,8 +195,18 @@ def _output_shape(manifest: Dict[str, Any]) -> str:
         "- `relationships`: array of edges between entities\n"
         "\n"
         "Each patch has: `type` (one of the domain types), `value` (object with "
-        "`text` and optional `owner` / `deadline`), and optional `connects_to` "
-        "array of edges to other patches in this same output."
+        "`text` and optional `owner` / `deadline` / `deadline_date`), and optional "
+        "`connects_to` array of edges to other patches in this same output.\n"
+        "\n"
+        "When a patch has a deadline, set `deadline` to the deadline as spoken "
+        "(\"tomorrow\", \"end of week\", \"June 19th\") AND set `deadline_date` to "
+        "that deadline resolved to an absolute calendar date in YYYY-MM-DD form. "
+        "Resolve relative expressions against the `Meeting date:` line at the top "
+        "of the input — e.g. if the meeting date is 2026-06-10, \"tomorrow\" → "
+        "\"2026-06-11\" and \"end of week\" → the upcoming Friday. If the deadline "
+        "cannot be tied to a specific date (\"after the board meeting\", \"soon\"), "
+        "set `deadline_date` to null. Never guess a year — when no Meeting date "
+        "line is present and the deadline is relative, set `deadline_date` to null."
     )
 
 

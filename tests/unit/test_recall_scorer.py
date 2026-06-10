@@ -15,11 +15,14 @@ from src.contextquilt.services.recall_scorer import (
 )
 
 
-def _patch(patch_id, patch_type, text, owner=None, deadline=None, created_at=None, last_observed_at=None):
+def _patch(patch_id, patch_type, text, owner=None, deadline=None, created_at=None, last_observed_at=None, deadline_date=None):
+    value = {"text": text, "owner": owner, "deadline": deadline}
+    if deadline_date is not None:
+        value["deadline_date"] = deadline_date
     return {
         "patch_id": patch_id,
         "patch_type": patch_type,
-        "value": json.dumps({"text": text, "owner": owner, "deadline": deadline}),
+        "value": json.dumps(value),
         "source_prompt": "meeting_summary",
         "created_at": created_at or datetime.utcnow(),
         "last_observed_at": last_observed_at,
@@ -243,3 +246,70 @@ def test_matched_names_sorted_iteration_is_deterministic():
     # All three orderings must produce the same matched_names list.
     assert results[0] == results[1] == results[2]
     assert results[0] == ["alpha", "beta", "gamma"]
+
+
+# ============================================================
+# Deadline urgency boost
+# ============================================================
+
+
+def _iso(days_from_now):
+    from datetime import timezone
+    return (datetime.now(timezone.utc).date() + timedelta(days=days_from_now)).isoformat()
+
+
+def test_overdue_commitment_outranks_far_future_commitment():
+    """Same text/created_at — only the deadline differs, so the +25
+    overdue boost decides the order."""
+    created = datetime.utcnow()
+    patches = [
+        _patch("far", "commitment", "alpha bravo charlie", created_at=created, deadline_date=_iso(60)),
+        _patch("overdue", "commitment", "alpha bravo charlie", created_at=created, deadline_date=_iso(-3)),
+    ]
+    scored = score_patches(patches, query_text="unrelated query", matched_entity_names=[])
+    assert scored[0][1]["patch_id"] == "overdue"
+
+
+def test_due_soon_blocker_outranks_undated_blocker():
+    created = datetime.utcnow()
+    patches = [
+        _patch("undated", "blocker", "alpha bravo charlie", created_at=created),
+        _patch("soon", "blocker", "alpha bravo charlie", created_at=created, deadline_date=_iso(3)),
+    ]
+    scored = score_patches(patches, query_text="unrelated query", matched_entity_names=[])
+    assert scored[0][1]["patch_id"] == "soon"
+
+
+def test_overdue_boost_exceeds_due_soon_boost():
+    created = datetime.utcnow()
+    patches = [
+        _patch("soon", "commitment", "alpha bravo charlie", created_at=created, deadline_date=_iso(3)),
+        _patch("overdue", "commitment", "alpha bravo charlie", created_at=created, deadline_date=_iso(-3)),
+    ]
+    scored = score_patches(patches, query_text="unrelated query", matched_entity_names=[])
+    assert scored[0][1]["patch_id"] == "overdue"
+
+
+def test_deadline_boost_only_applies_to_completable_types():
+    """A takeaway with an overdue deadline_date gets no boost — equal
+    scores mean ordering falls back to input stability, so just assert
+    score equality."""
+    created = datetime.utcnow()
+    patches = [
+        _patch("dated", "takeaway", "alpha bravo charlie", created_at=created, deadline_date=_iso(-3)),
+        _patch("undated", "takeaway", "alpha bravo charlie", created_at=created),
+    ]
+    scored = score_patches(patches, query_text="unrelated query", matched_entity_names=[])
+    scores = {r["patch_id"]: s for s, r in scored}
+    assert scores["dated"] == scores["undated"]
+
+
+def test_malformed_deadline_date_is_ignored():
+    created = datetime.utcnow()
+    patches = [
+        _patch("bad", "commitment", "alpha bravo charlie", created_at=created, deadline_date="not-a-date"),
+        _patch("none", "commitment", "alpha bravo charlie", created_at=created),
+    ]
+    scored = score_patches(patches, query_text="unrelated query", matched_entity_names=[])
+    scores = {r["patch_id"]: s for s, r in scored}
+    assert scores["bad"] == scores["none"]
