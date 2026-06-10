@@ -2139,15 +2139,26 @@ class ColdPathWorker:
                 )
                 continue
             try:
+                # completion_source/evidence stamped into value so apps
+                # can distinguish LLM auto-close ('extraction') from
+                # tap-to-complete ('app', via POST .../complete) from
+                # plain TTL decay (no completed_at at all).
                 await self.db.execute(
                     """
                     UPDATE context_patches
                        SET completed_at = NOW(),
                            status = 'archived',
-                           updated_at = NOW()
+                           updated_at = NOW(),
+                           value = CASE WHEN $2::text <> ''
+                                   THEN jsonb_set(
+                                            jsonb_set(value, '{completion_source}', '"extraction"'),
+                                            '{completion_evidence}', to_jsonb($2::text)
+                                        )
+                                   ELSE jsonb_set(value, '{completion_source}', '"extraction"')
+                                   END
                      WHERE patch_id = $1::uuid
                     """,
-                    patch_id,
+                    patch_id, evidence,
                 )
                 resolved_count += 1
                 logger.info(
