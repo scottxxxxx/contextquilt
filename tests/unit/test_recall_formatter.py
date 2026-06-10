@@ -1,7 +1,7 @@
 """Unit tests for recall_formatter."""
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 
 from src.contextquilt.services.recall_formatter import (
     format_flat_ranked,
@@ -9,11 +9,14 @@ from src.contextquilt.services.recall_formatter import (
 )
 
 
-def _patch(patch_id, patch_type, text, owner=None, deadline=None):
+def _patch(patch_id, patch_type, text, owner=None, deadline=None, deadline_date=None):
+    value = {"text": text, "owner": owner, "deadline": deadline}
+    if deadline_date is not None:
+        value["deadline_date"] = deadline_date
     return {
         "patch_id": patch_id,
         "patch_type": patch_type,
-        "value": json.dumps({"text": text, "owner": owner, "deadline": deadline}),
+        "value": json.dumps(value),
         "created_at": datetime.utcnow(),
     }
 
@@ -136,3 +139,79 @@ def test_grouped_formatter_includes_owner_and_deadline_for_commitments():
     ]
     out = format_category_grouped(scored, entity_rows=[], relationship_rows=[])
     assert "Alex: Ship feature (by 2026-04-25)" in out
+
+
+# ============================================================
+# Deadline status (structured deadline_date)
+# ============================================================
+
+TODAY = date(2026, 6, 10)
+
+
+def test_flat_formatter_marks_overdue_deadline():
+    scored = [
+        (100.0, _patch("c", "commitment", "Send the report", deadline="Monday", deadline_date="2026-06-08")),
+    ]
+    out = format_flat_ranked(scored, entity_rows=[], relationship_rows=[], today=TODAY)
+    assert "by 2026-06-08 (OVERDUE)" in out
+
+
+def test_flat_formatter_marks_due_today():
+    scored = [
+        (100.0, _patch("c", "commitment", "Send the report", deadline="today", deadline_date="2026-06-10")),
+    ]
+    out = format_flat_ranked(scored, entity_rows=[], relationship_rows=[], today=TODAY)
+    assert "by 2026-06-10 (due today)" in out
+
+
+def test_flat_formatter_marks_due_soon_within_week():
+    scored = [
+        (100.0, _patch("c", "commitment", "Send the report", deadline="Friday", deadline_date="2026-06-12")),
+    ]
+    out = format_flat_ranked(scored, entity_rows=[], relationship_rows=[], today=TODAY)
+    assert "by 2026-06-12 (due soon)" in out
+
+
+def test_flat_formatter_far_future_deadline_has_no_marker():
+    scored = [
+        (100.0, _patch("c", "commitment", "Send the report", deadline="in August", deadline_date="2026-08-15")),
+    ]
+    out = format_flat_ranked(scored, entity_rows=[], relationship_rows=[], today=TODAY)
+    assert "by 2026-08-15" in out
+    assert "OVERDUE" not in out
+    assert "due" not in out
+
+
+def test_flat_formatter_prefers_structured_date_over_free_text():
+    scored = [
+        (100.0, _patch("c", "commitment", "Send the report", deadline="end of week", deadline_date="2026-06-12")),
+    ]
+    out = format_flat_ranked(scored, entity_rows=[], relationship_rows=[], today=TODAY)
+    assert "by 2026-06-12" in out
+    assert "end of week" not in out
+
+
+def test_flat_formatter_falls_back_to_free_text_deadline():
+    scored = [
+        (100.0, _patch("c", "commitment", "Send the report", deadline="after the board meeting")),
+    ]
+    out = format_flat_ranked(scored, entity_rows=[], relationship_rows=[], today=TODAY)
+    assert "by after the board meeting" in out
+
+
+def test_flat_formatter_ignores_unparseable_deadline_date():
+    scored = [
+        (100.0, _patch("c", "commitment", "Send the report", deadline="soon", deadline_date="garbage")),
+    ]
+    out = format_flat_ranked(scored, entity_rows=[], relationship_rows=[], today=TODAY)
+    # Unparseable structured date renders bare, never raises
+    assert "by garbage" in out
+    assert "OVERDUE" not in out
+
+
+def test_grouped_formatter_marks_overdue_commitments():
+    scored = [
+        (100.0, _patch("c", "commitment", "Ship feature", owner="Alex", deadline="last Friday", deadline_date="2026-06-05")),
+    ]
+    out = format_category_grouped(scored, entity_rows=[], relationship_rows=[], today=TODAY)
+    assert "Alex: Ship feature (by 2026-06-05 (OVERDUE))" in out

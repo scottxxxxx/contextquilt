@@ -38,6 +38,7 @@ from contextquilt.services.extraction_schema import (
     enforce_owner_gate,
     enforce_person_ownership,
     normalize_owner_in_transcript,
+    sanitize_deadline_dates,
     sanitize_you_marker_from_patches,
     strip_ephemeral_fields,
     strip_owner_on_self_typed_patches,
@@ -1577,6 +1578,24 @@ class ColdPathWorker:
         # for the lookback window + cap.
         open_commits_block = await self._build_open_commitments_block(user_id)
 
+        # Meeting date anchor for deadline resolution. The extraction
+        # prompt asks the model to resolve relative deadlines ("tomorrow",
+        # "end of week") into value.deadline_date, which is only possible
+        # if the model knows when the meeting happened. payload.timestamp
+        # is set at enqueue time, or by the app for backdated imports.
+        meeting_date = None
+        raw_ts = payload.get("timestamp")
+        if raw_ts:
+            try:
+                meeting_date = datetime.fromisoformat(
+                    str(raw_ts).replace("Z", "+00:00")
+                ).date()
+            except ValueError:
+                meeting_date = None
+        meeting_date_line = (
+            f"Meeting date: {meeting_date.isoformat()}\n\n" if meeting_date else ""
+        )
+
         try:
             app_id = payload.get("app_id")
             llm = await self._get_llm_for_app(app_id)
@@ -1588,7 +1607,7 @@ class ColdPathWorker:
 
             response = await llm.extract(
                 system_prompt=resolved_prompt,
-                user_content=user_context + open_commits_block + effective_summary,
+                user_content=meeting_date_line + user_context + open_commits_block + effective_summary,
                 json_schema=resolved_schema,
             )
 
@@ -1695,6 +1714,7 @@ class ColdPathWorker:
             drop_placeholder_and_self_person_patches(
                 response.content, user_label=user_label
             )
+            sanitize_deadline_dates(response.content, meeting_date=meeting_date)
             strip_ephemeral_fields(response.content)
 
             timestamp = payload.get("timestamp")

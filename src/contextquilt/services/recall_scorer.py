@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 
@@ -61,6 +61,18 @@ FRESHNESS_TIME_CONSTANT_DAYS = 365.0
 FRESHNESS_FLOOR = 0.30
 
 
+# Deadline urgency boost — applied to completable actionable types
+# (commitment, blocker) carrying a structured `value.deadline_date`.
+# Overdue / due-today items outrank otherwise-equal patches; imminent
+# ones get a smaller bump. Measured against the same day-bucketed clock
+# as the freshness multiplier, so the boost flips only at UTC midnight
+# (prompt-cache stable).
+DEADLINE_BOOSTED_TYPES = frozenset({"commitment", "blocker"})
+DEADLINE_OVERDUE_BOOST = 25.0
+DEADLINE_DUE_SOON_BOOST = 15.0
+DEADLINE_DUE_SOON_WINDOW_DAYS = 7
+
+
 # Stopwords filtered out of query keyword matching. Kept small — we want
 # moderate filtering, not aggressive NLP. Project names like "app" or
 # "plan" should still count as content words when they appear in a query.
@@ -102,6 +114,25 @@ def _patch_text(row: Any) -> str:
     if isinstance(v, dict):
         return v.get("text", "") or ""
     return ""
+
+
+def _patch_deadline_date(row: Any) -> "date | None":
+    """Parse the structured `value.deadline_date` (YYYY-MM-DD) if present."""
+    v = row["value"] if isinstance(row, dict) else row["value"]
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except Exception:
+            return None
+    if not isinstance(v, dict):
+        return None
+    raw = v.get("deadline_date")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return date.fromisoformat(raw.strip())
+    except ValueError:
+        return None
 
 
 def _patch_owner(row: Any) -> str:
@@ -176,6 +207,8 @@ def score_patches(
       base type priority             5..50
       entity-match boost             +100 per matched entity appearing in text
       query keyword overlap          +15 per overlapping keyword (capped at 60)
+      deadline urgency               +25 overdue/due-today, +15 due within 7d
+                                     (commitment/blocker with deadline_date)
       recency (0..10)                +10 for newest, decaying to 0 as rows age
       freshness multiplier           applied last for trait/preference/goal/
                                      constraint based on last_observed_at —
@@ -203,6 +236,7 @@ def score_patches(
     # by the second would break that. The freshness multiplier itself is
     # measured in days so day-grain is the natural quantization.
     now = float(int(datetime.now(timezone.utc).timestamp() // 86400) * 86400)
+    today = datetime.fromtimestamp(now, tz=timezone.utc).date()
 
     scored: List[Tuple[float, Any]] = []
     for row in patches:
@@ -222,6 +256,18 @@ def score_patches(
             patch_words = set(_keywords(text))
             overlap = len(query_words & patch_words)
             score += min(overlap * 15.0, 60.0)
+
+        # Deadline urgency boost — overdue/due-today actionable items
+        # float above otherwise-equal patches; imminent ones get a
+        # smaller bump. Far-future deadlines get nothing.
+        if patch_type in DEADLINE_BOOSTED_TYPES:
+            deadline_d = _patch_deadline_date(row)
+            if deadline_d is not None:
+                days_until = (deadline_d - today).days
+                if days_until <= 0:
+                    score += DEADLINE_OVERDUE_BOOST
+                elif days_until <= DEADLINE_DUE_SOON_WINDOW_DAYS:
+                    score += DEADLINE_DUE_SOON_BOOST
 
         # Recency — normalized to 0..10 across the current patch batch
         ts = _last_observed_at(row)

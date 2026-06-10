@@ -17,7 +17,47 @@ match + graph traversal rows from the recall endpoint.
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+
+def _today_utc() -> date:
+    """Day-grain 'now' for deadline status. Day granularity keeps the
+    rendered context byte-stable across a UTC day, matching the scorer's
+    day-bucketed freshness clock (required for upstream prompt caching)."""
+    return datetime.now(timezone.utc).date()
+
+
+def _deadline_status(deadline_date: str, today: date) -> Optional[str]:
+    """Urgency marker for a structured deadline. None means no marker
+    (far-future deadline, or unparseable string)."""
+    try:
+        parsed = date.fromisoformat(deadline_date)
+    except (TypeError, ValueError):
+        return None
+    delta_days = (parsed - today).days
+    if delta_days < 0:
+        return "OVERDUE"
+    if delta_days == 0:
+        return "due today"
+    if delta_days <= 7:
+        return "due soon"
+    return None
+
+
+def _render_deadline(v: Dict[str, Any], today: date) -> str:
+    """Deadline fragment for a patch value, preferring the structured
+    `deadline_date` (with urgency marker) over the spoken free text."""
+    deadline_date = (v.get("deadline_date") or "").strip()
+    if deadline_date:
+        status = _deadline_status(deadline_date, today)
+        if status:
+            return f"by {deadline_date} ({status})"
+        return f"by {deadline_date}"
+    deadline = (v.get("deadline") or "").strip()
+    if deadline:
+        return f"by {deadline}"
+    return ""
 
 
 def _parse_value(row: Any) -> Dict[str, Any]:
@@ -40,6 +80,7 @@ def format_flat_ranked(
     entity_rows: Sequence[Any],
     relationship_rows: Sequence[Any],
     max_chars: int = 1600,
+    today: Optional[date] = None,
 ) -> str:
     """Format patches as a flat relevance-ranked list.
 
@@ -80,10 +121,11 @@ def format_flat_ranked(
             sections.append("Relations: " + "; ".join(rel_lines))
 
     # Flat list of patches — one per line, ranked
+    today = today or _today_utc()
     patch_lines: List[str] = []
     remaining = max_chars - sum(len(s) for s in sections) - 20  # small buffer
     for score, row in scored_patches:
-        line = _format_patch_line(row)
+        line = _format_patch_line(row, today)
         if not line:
             continue
         if remaining <= 0:
@@ -107,7 +149,7 @@ def _entity_name_with_desc(row: Any) -> str:
     return name
 
 
-def _format_patch_line(row: Any) -> str:
+def _format_patch_line(row: Any, today: Optional[date] = None) -> str:
     """One-line representation of a patch for flat output."""
     ptype = row["patch_type"] if isinstance(row, dict) else row.get("patch_type")
     v = _parse_value(row)
@@ -116,7 +158,7 @@ def _format_patch_line(row: Any) -> str:
         return ""
 
     owner = (v.get("owner") or "").strip()
-    deadline = (v.get("deadline") or "").strip()
+    deadline_fragment = _render_deadline(v, today or _today_utc())
 
     prefix_map = {
         "trait": "about you",
@@ -138,8 +180,8 @@ def _format_patch_line(row: Any) -> str:
     detail_parts: List[str] = []
     if owner:
         detail_parts.append(f"owner: {owner}")
-    if deadline:
-        detail_parts.append(f"by {deadline}")
+    if deadline_fragment:
+        detail_parts.append(deadline_fragment)
     suffix = f" [{', '.join(detail_parts)}]" if detail_parts else ""
 
     return f"[{prefix}] {text}{suffix}"
@@ -155,6 +197,7 @@ def format_category_grouped(
     entity_rows: Sequence[Any],
     relationship_rows: Sequence[Any],
     labels: Optional[Dict[str, str]] = None,
+    today: Optional[date] = None,
 ) -> str:
     """Format patches in the pre-PR-4 category-grouped structure.
 
@@ -230,11 +273,12 @@ def format_category_grouped(
     # Open commitments — owner/deadline decoration
     commitments = buckets.get("commitment", [])
     if commitments:
+        today = today or _today_utc()
         lines: List[str] = []
         for v in commitments:
             owner = v.get("owner", "")
-            deadline = v.get("deadline", "")
-            dl = f" (by {deadline})" if deadline else ""
+            deadline_fragment = _render_deadline(v, today)
+            dl = f" ({deadline_fragment})" if deadline_fragment else ""
             prefix = f"{owner}: " if owner else ""
             lines.append(f"- {prefix}{v.get('text', '')}{dl}")
         sections.append(f"{labels['commitments']}:\n" + "\n".join(lines))
