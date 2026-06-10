@@ -1085,6 +1085,7 @@ class QuiltPatchResponse(BaseModel):
     participants: List[str] = []
     owner: Optional[str] = None
     deadline: Optional[str] = None
+    deadline_date: Optional[str] = None  # structured YYYY-MM-DD, when the extractor resolved one
     patch_type: str = ""
     source: str = ""
     created_at: Optional[str] = None
@@ -1233,6 +1234,7 @@ async def get_user_quilt(
             participants=value.get("participants", []),
             owner=value.get("owner"),
             deadline=value.get("deadline"),
+            deadline_date=value.get("deadline_date"),
             patch_type=row["patch_type"] or "",
             source=row["source_prompt"] or "",
             created_at=row["created_at"].isoformat() if row["created_at"] else None,
