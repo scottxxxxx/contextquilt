@@ -38,6 +38,7 @@ from contextquilt.services.extraction_schema import (
     enforce_connection_vocabulary,
     enforce_owner_gate,
     enforce_person_ownership,
+    is_placeholder_or_self_person,
     normalize_owner_in_transcript,
     sanitize_deadline_dates,
     sanitize_you_marker_from_patches,
@@ -297,10 +298,14 @@ async def store_connected_patches(
     project_id: str | None = None,
     origin_id: str | None = None,
     origin_type: str | None = None,
+    user_label: str | None = None,
 ):
     """
     Store typed, connected patches (Connected Quilt V2 model).
     Two-pass: create all patches first, then create connections between them.
+
+    `user_label` is the (you) speaker's diarization label — Pass-2 stub
+    synthesis uses it to refuse person stubs for the user themselves.
     """
     if not patches:
         return 0
@@ -489,6 +494,16 @@ async def store_connected_patches(
 
             # If still unresolved, create a stub patch for the target
             if not to_id:
+                # Same gate drop_placeholder_and_self_person_patches applies
+                # to LLM-emitted person patches: never synthesize a person
+                # stub for a diarization placeholder or the (you) speaker.
+                # Without this, a connects_to target like the user's own
+                # label re-creates the self-person patch the sanitizer just
+                # dropped (seen in a prod quilt 2026-06-10).
+                if target_type == "person" and is_placeholder_or_self_person(
+                    conn.get("target_text", ""), user_label
+                ):
+                    continue
                 to_id = str(uuid.uuid4())
                 stub_name = f"{source_prompt}_{to_id[:8]}"
                 stub_value = json.dumps({"text": conn.get("target_text", "")})
@@ -841,6 +856,13 @@ class ColdPathWorker:
                         except Exception as e:
                             logger.error("processing_failed", error=str(e), message_id=message_id)
 
+            except (redis.TimeoutError, TimeoutError) as e:
+                # Idle tick — the blocking XREADGROUP raced the client's
+                # socket timeout with no messages pending. Expected several
+                # times a minute on a quiet stream; logging it at error
+                # level buried real failures (prod was emitting
+                # "stream_error: Timeout reading from cq-redis" every ~6s).
+                logger.debug("stream_idle_timeout", error=str(e))
             except Exception as e:
                 logger.error("stream_error", error=str(e))
                 await asyncio.sleep(1)
@@ -1783,7 +1805,8 @@ class ColdPathWorker:
                 # are exempt from the count.
                 patches_stored = await store_connected_patches(
                     self.db, user_id, patches, "meeting_summary", app_id, timestamp,
-                    project, project_id, origin_id, origin_type
+                    project, project_id, origin_id, origin_type,
+                    user_label=user_label,
                 )
                 facts_stored = patches_stored
                 actions_stored = 0

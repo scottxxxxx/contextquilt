@@ -597,10 +597,6 @@ def drop_placeholder_and_self_person_patches(
 
     drop_names: set[str] = set()
     kept: list[dict] = []
-    user_label_lower = (
-        user_label.strip().lower() if isinstance(user_label, str) and user_label.strip()
-        else None
-    )
 
     for patch in patches:
         if patch.get("type") != "person":
@@ -612,10 +608,7 @@ def drop_placeholder_and_self_person_patches(
             kept.append(patch)
             continue
 
-        low = text.strip().lower()
-        is_placeholder = any(low.startswith(p) for p in _OWNER_PLACEHOLDER_PREFIXES)
-        is_self = user_label_lower is not None and low == user_label_lower
-        if is_placeholder or is_self:
+        if is_placeholder_or_self_person(text, user_label):
             drop_names.add(text.strip().lower())
             continue
         kept.append(patch)
@@ -972,6 +965,26 @@ PERSON_OWNED_ACTION_TYPES = frozenset(
 # - empty / unknown markers
 _OWNER_PLACEHOLDER_PREFIXES = ("speaker ", "speaker_", "unknown", "unidentified")
 _OWNER_YOU_TOKENS = frozenset({"(you)", "you", "self", "me", "i"})
+
+
+def is_placeholder_or_self_person(text: object, user_label: "str | None" = None) -> bool:
+    """True when a person name is a diarization placeholder ("Speaker 3",
+    "Unknown") or the (you) speaker themselves.
+
+    Single source of truth for the self/placeholder person gate — used by
+    drop_placeholder_and_self_person_patches (LLM-emitted person patches)
+    and by store_connected_patches Pass-2 stub synthesis (connects_to
+    targets), which previously bypassed the gate and re-created the very
+    self-person patch the sanitizer had just dropped.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    low = text.strip().lower()
+    if any(low.startswith(p) for p in _OWNER_PLACEHOLDER_PREFIXES):
+        return True
+    if isinstance(user_label, str) and user_label.strip() and low == user_label.strip().lower():
+        return True
+    return False
 
 
 def _split_compound_owner(owner_text: str | None) -> list[str]:
