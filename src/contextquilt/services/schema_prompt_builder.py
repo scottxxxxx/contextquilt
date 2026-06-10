@@ -75,10 +75,14 @@ def build_output_schema(manifest: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "type": "object",
         "additionalProperties": False,
-        "required": ["patches", "resolved_commitments", "entities", "relationships"],
+        "required": ["output_language", "patches", "resolved_commitments", "entities", "relationships"],
         "properties": {
-            "_reasoning": {"type": "string"},
             "you_speaker_present": {"type": "boolean"},
+            # Language commitment — generated before patches (property order
+            # drives generation order under strict mode) so English context
+            # blocks can't pull the output prose back to English.
+            "output_language": {"type": "string"},
+            "_reasoning": {"type": "string"},
             "patches": {
                 "type": "array",
                 "items": {
@@ -199,7 +203,10 @@ def _language_section() -> str:
         "relationship `context` — in the user's language: use the "
         "`User language:` line at the top of the input if present "
         "(e.g. \"User language: es\"); otherwise use the dominant language "
-        "spoken by the (you) speaker. Keep proper names verbatim as spoken. "
+        "spoken by the (you) speaker. Commit to it in the `output_language` "
+        "field BEFORE generating patches, and honor it for every prose field "
+        "after — these instructions and any context blocks being in English "
+        "does NOT change the output language. Keep proper names verbatim as spoken. "
         "Structural fields are language-independent and unchanged: patch "
         "`type`, connection roles/labels, entity `type`, and `deadline_date` "
         "(always YYYY-MM-DD). The `deadline` field stays as spoken, in its "
@@ -211,6 +218,9 @@ def _output_shape(manifest: Dict[str, Any]) -> str:
     return (
         "=== OUTPUT SHAPE ===\n"
         "Return a JSON object with exactly these keys:\n"
+        "- `output_language`: the language code ALL output prose must be written in "
+        "(from the `User language:` line, else the (you) speaker's dominant language) — "
+        "set this before generating patches and honor it for every prose field\n"
         "- `_reasoning`: short scratchpad explaining why you chose the patches you did\n"
         "- `patches`: array of typed patches (see PATCH TYPES below)\n"
         "- `resolved_commitments`: array of prior open commitments this transcript shows as completed (see RESOLVED COMMITMENTS section)\n"
