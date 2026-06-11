@@ -4,8 +4,13 @@ import json
 from datetime import date, datetime
 
 from src.contextquilt.services.recall_formatter import (
+    CHARS_PER_TOKEN,
+    DEFAULT_RECALL_TOKEN_BUDGET,
+    MAX_RECALL_TOKEN_BUDGET,
+    MIN_RECALL_TOKEN_BUDGET,
     format_flat_ranked,
     format_category_grouped,
+    resolve_token_budget,
 )
 
 
@@ -215,3 +220,36 @@ def test_grouped_formatter_marks_overdue_commitments():
     ]
     out = format_category_grouped(scored, entity_rows=[], relationship_rows=[], today=TODAY)
     assert "Alex: Ship feature (by 2026-06-05 (OVERDUE))" in out
+
+
+# ============================================================
+# Token budget resolution (GP contract, 2026-06-11)
+# ============================================================
+
+
+def test_token_budget_default_in_gp_band():
+    # GP asked for a default in the 600-800 band inside their 8k scaffold
+    assert 600 <= DEFAULT_RECALL_TOKEN_BUDGET <= 800
+    assert resolve_token_budget(None) == DEFAULT_RECALL_TOKEN_BUDGET
+    assert resolve_token_budget({}) == DEFAULT_RECALL_TOKEN_BUDGET
+
+
+def test_token_budget_passthrough_and_clamp():
+    assert resolve_token_budget({"token_budget": 400}) == 400
+    assert resolve_token_budget({"token_budget": 5}) == MIN_RECALL_TOKEN_BUDGET
+    assert resolve_token_budget({"token_budget": 99999}) == MAX_RECALL_TOKEN_BUDGET
+    assert resolve_token_budget({"token_budget": "800"}) == 800  # stringly-typed JSON survives
+
+
+def test_token_budget_never_raises_on_garbage():
+    assert resolve_token_budget({"token_budget": "lots"}) == DEFAULT_RECALL_TOKEN_BUDGET
+    assert resolve_token_budget({"token_budget": None}) == DEFAULT_RECALL_TOKEN_BUDGET
+    assert resolve_token_budget({"token_budget": [1]}) == DEFAULT_RECALL_TOKEN_BUDGET
+
+
+def test_budget_shapes_flat_output_size():
+    scored = [(100.0 - i, _patch(str(i), "takeaway", f"unique fact number {i} " + "pad " * 20)) for i in range(40)]
+    small = format_flat_ranked(scored, [], [], max_chars=MIN_RECALL_TOKEN_BUDGET * CHARS_PER_TOKEN)
+    large = format_flat_ranked(scored, [], [], max_chars=MAX_RECALL_TOKEN_BUDGET * CHARS_PER_TOKEN)
+    assert len(small) < len(large)
+    assert len(small) <= MIN_RECALL_TOKEN_BUDGET * CHARS_PER_TOKEN + 100  # patch-boundary slop
