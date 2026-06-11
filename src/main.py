@@ -41,8 +41,10 @@ from dashboard.router import router as dashboard_router
 from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
 from contextquilt.services.recall_formatter import (
+    CHARS_PER_TOKEN,
     format_flat_ranked,
     format_category_grouped,
+    resolve_token_budget,
 )
 
 import asyncpg
@@ -166,7 +168,7 @@ class RecallRequest(BaseModel):
     """Request to recall relevant context from the graph"""
     user_id: str = Field(..., description="User ID")
     text: str = Field(..., description="Query or transcript text to match entities against")
-    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional hints (e.g., project name)")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional hints: project_id/project (scope), locale (grouped-mode labels), token_budget (int, flat-mode context size, default 700, clamped 100-2000)")
     max_hops: Optional[int] = Field(default=2, description="Graph traversal depth")
     output_format: Optional[str] = Field(
         default="flat",
@@ -824,7 +826,16 @@ async def recall_context(
             context = ""
     else:
         try:
-            context = format_flat_ranked(scored_for_output, entity_rows, rel_rows)
+            # Token budget (GP contract): metadata.token_budget, clamped,
+            # default 700 tokens. Converted to the formatter's char cap at
+            # ~4 chars/token. Lives in metadata, so it's automatically part
+            # of the render-cache key above — two budgets never share a
+            # cached body.
+            token_budget = resolve_token_budget(request.metadata)
+            context = format_flat_ranked(
+                scored_for_output, entity_rows, rel_rows,
+                max_chars=token_budget * CHARS_PER_TOKEN,
+            )
         except Exception:
             # Emergency fallback: empty string, the endpoint still returns
             # matched entities and patch ids so callers aren't blocked.
