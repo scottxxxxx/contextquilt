@@ -21,6 +21,32 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
+# Token budget for the rendered context block (GP contract, 2026-06-11):
+# GP's system prompt scaffold reserves 8000 tokens total across
+# instructions, summary, project context, and our block. Default sits in
+# their requested 600-800 band; callers tune per request via
+# metadata.token_budget on /v1/recall (Project Chat on big models wants a
+# richer block than a quick mid-meeting prompt). The formatter works in
+# characters; ~4 chars/token is the repo's standing heuristic (same one
+# the worker's queue budgeting uses).
+DEFAULT_RECALL_TOKEN_BUDGET = 700
+MIN_RECALL_TOKEN_BUDGET = 100
+MAX_RECALL_TOKEN_BUDGET = 2000
+CHARS_PER_TOKEN = 4
+
+
+def resolve_token_budget(metadata: "Optional[Dict[str, Any]]") -> int:
+    """Resolve metadata.token_budget to a clamped int, defaulting on
+    anything missing or malformed. Never raises — recall must not 4xx
+    over a bad tuning knob."""
+    raw = (metadata or {}).get("token_budget")
+    try:
+        budget = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_RECALL_TOKEN_BUDGET
+    return max(MIN_RECALL_TOKEN_BUDGET, min(MAX_RECALL_TOKEN_BUDGET, budget))
+
+
 def _today_utc() -> date:
     """Day-grain 'now' for deadline status. Day granularity keeps the
     rendered context byte-stable across a UTC day, matching the scorer's
