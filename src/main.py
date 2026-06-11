@@ -1190,6 +1190,13 @@ class QuiltPatchResponse(BaseModel):
     permanence_override_source: Optional[str] = None
     connections: List[PatchConnectionResponse] = []
 
+class MeetingGroup(BaseModel):
+    """Patches anchored to one meeting (origin). Groups are ordered
+    newest meeting first; patches inside a group are in capture order."""
+    origin_id: str
+    origin_type: Optional[str] = None
+    patches: List[QuiltPatchResponse] = []
+
 class QuiltResponse(BaseModel):
     user_id: str
     facts: List[QuiltPatchResponse]
@@ -1198,6 +1205,9 @@ class QuiltResponse(BaseModel):
     completed: List[str] = []      # subset of `deleted` that was resolved (completed_at set),
                                    # as opposed to decayed/archived — lets the app show "done"
                                    # instead of items silently vanishing
+    meetings: Optional[List[MeetingGroup]] = None  # present only with ?group_by=origin;
+                                   # originless (user-scoped) patches stay in the flat
+                                   # arrays only
     server_time: Optional[str] = None  # use as `since` on next request
 
 class PatchUpdate(BaseModel):
@@ -1220,6 +1230,8 @@ async def get_user_quilt(
     user_id: str,
     category: Optional[str] = Query(None, description="Filter by patch_type"),
     since: Optional[str] = Query(None, description="ISO 8601 timestamp — return only patches created/updated after this time, plus IDs of patches deleted since then"),
+    origin_id: Optional[str] = Query(None, description="Meeting view: only patches anchored to this meeting (origin), in capture order. Only episodic/project-scoped types carry an origin — user-scoped types (trait, preference, person, project, org) are meeting-free by design and never appear here."),
+    group_by: Optional[str] = Query(None, description="'origin' adds a `meetings` array grouping origin-anchored patches by meeting (newest meeting first, capture order inside). Flat arrays are unchanged."),
     app_id: str = Depends(verify_application_access),
 ):
     """
@@ -1229,6 +1241,13 @@ async def get_user_quilt(
     With `since`: returns only patches created or updated after that timestamp,
     plus a `deleted` array of patch_ids that were removed or archived since then.
     Pass the returned `server_time` as `since` on the next request.
+
+    Meeting views (SS contract, 2026-06-10): `origin_id=<meeting UUID>`
+    returns that meeting's full patch set with no relevance ranking, in
+    deterministic capture order — it's a browse surface. `group_by=origin`
+    adds a server-side grouped-by-meeting shape for project-level views.
+    Both keyed on the meeting UUID, never project_id (SS's call, due to
+    their CloudKit project-id drift).
     """
     subject_key = f"user:{user_id}"
     server_time = datetime.utcnow()
@@ -1276,7 +1295,18 @@ async def get_user_quilt(
         query += f" AND cp.patch_type = ${len(params) + 1}"
         params.append(category)
 
-    query += " ORDER BY cp.created_at DESC"
+    if origin_id:
+        query += f" AND cp.origin_id = ${len(params) + 1}"
+        params.append(origin_id)
+
+    # Meeting view = capture order (oldest first), per the SS contract:
+    # a browse surface wants deterministic ordering, not ranking. The
+    # default full-sync order stays newest-first. patch_id tiebreak in
+    # both modes — microsecond-equal batch inserts gave undefined order.
+    if origin_id:
+        query += " ORDER BY cp.created_at ASC, cp.patch_id ASC"
+    else:
+        query += " ORDER BY cp.created_at DESC, cp.patch_id ASC"
 
     rows = await db_pool.fetch(query, *params)
 
@@ -1360,12 +1390,43 @@ async def get_user_quilt(
         else:
             facts.append(patch)
 
+    # Grouped-by-meeting shape. Originless (user-scoped) patches stay in
+    # the flat arrays only. Groups: newest meeting first; patches inside
+    # each group in capture order. Rows arrive created_at DESC (or ASC in
+    # origin_id mode), so sort explicitly rather than relying on row order.
+    meetings = None
+    if group_by == "origin":
+        by_origin: Dict[str, dict] = {}
+        for row in rows:
+            oid = row.get("origin_id")
+            if not oid:
+                continue
+            pid = str(row["patch_id"])
+            group = by_origin.setdefault(oid, {
+                "origin_type": row.get("origin_type"),
+                "rows": [],
+            })
+            group["rows"].append((row["created_at"], pid))
+
+        patches_by_id = {p.patch_id: p for p in facts + action_items}
+        meetings = []
+        for oid, group in by_origin.items():
+            ordered = sorted(group["rows"], key=lambda t: (t[0], t[1]))
+            meetings.append(MeetingGroup(
+                origin_id=oid,
+                origin_type=group["origin_type"],
+                patches=[patches_by_id[pid] for _, pid in ordered if pid in patches_by_id],
+            ))
+        # Newest meeting first — keyed by the group's latest capture time.
+        meetings.sort(key=lambda m: max(r[0] for r in by_origin[m.origin_id]["rows"]), reverse=True)
+
     return QuiltResponse(
         user_id=user_id,
         facts=facts,
         action_items=action_items,
         deleted=deleted_ids,
         completed=completed_ids,
+        meetings=meetings,
         server_time=server_time.isoformat() + "Z",
     )
 
