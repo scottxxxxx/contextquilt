@@ -107,6 +107,12 @@ class Settings(BaseSettings):
         default=60, alias="CQ_QUEUE_MAX_WAIT_MINUTES"
     )
 
+    # Semantic dedup: LLM judge for trigram gray-zone patch pairs at
+    # write time. Kill switch — off reverts to trigram-only dedup.
+    cq_semantic_dedup_enabled: bool = Field(
+        default=True, alias="CQ_SEMANTIC_DEDUP_ENABLED"
+    )
+
     # --- Alerting / email ---
     cq_alert_email_from: str = Field(default="", alias="CQ_ALERT_EMAIL_FROM")
     resend_api_key: str = Field(default="", alias="RESEND_API_KEY")

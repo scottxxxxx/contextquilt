@@ -48,6 +48,15 @@ from contextquilt.services.extraction_schema import (
 )
 from contextquilt.services.entity_aliasing import find_alias_candidate
 from contextquilt.services.llm_client import LLMClient
+from contextquilt.services.semantic_dedup import (
+    DEDUP_JUDGE_SCHEMA,
+    DEDUP_JUDGE_SYSTEM,
+    MAX_JUDGE_PAIRS,
+    SEMANTIC_DEDUP_FLOOR,
+    TRIGRAM_DEDUP_THRESHOLD,
+    build_dedup_judge_content,
+    parse_dedup_verdicts,
+)
 from contextquilt.services.llm_client_anthropic import AnthropicLLMClient
 from contextquilt.services.llm_client_fallback import (
     LLMClientWithFallback,
@@ -300,6 +309,7 @@ async def store_connected_patches(
     origin_id: str | None = None,
     origin_type: str | None = None,
     user_label: str | None = None,
+    llm=None,
 ):
     """
     Store typed, connected patches (Connected Quilt V2 model).
@@ -307,6 +317,10 @@ async def store_connected_patches(
 
     `user_label` is the (you) speaker's diarization label — Pass-2 stub
     synthesis uses it to refuse person stubs for the user themselves.
+
+    `llm` (optional, duck-typed .extract) enables semantic dedup: trigram
+    gray-zone pairs are judged by one batched LLM call. Omitted/None →
+    trigram-only dedup, exactly the pre-existing behavior.
     """
     if not patches:
         return 0
@@ -323,66 +337,65 @@ async def store_connected_patches(
     patch_lookup = {}  # (text_lower, type) → patch_id
     stored = 0
 
-    for patch in patches:
-        if not isinstance(patch, dict):
-            continue
+    # Project-scoped types get the project tag (per the v1.1 SS schema).
+    # `deliverable` is a Connection-facet type but project-scoped: every
+    # deliverable lives inside a project and should carry the parent's
+    # project/origin metadata alongside the episode types. Function scope —
+    # used by inserts, Pass-2 stub synthesis, AND the gray-zone project
+    # guard below.
+    project_scoped_types = (
+        "decision", "commitment", "blocker", "takeaway",
+        "goal", "constraint", "event", "deliverable",
+    )
 
-        patch_type = patch.get("type", "takeaway")
-        value = patch.get("value", {})
-        if isinstance(value, str):
-            value = {"text": value}
-        text = value.get("text", "")
-        if not text:
-            continue
+    async def _apply_patch_dedup(existing_id: str, value: dict, text: str,
+                                 patch_type: str, tier: str) -> None:
+        """Re-observe an existing patch instead of inserting a duplicate.
 
-        # Deduplication: check if an active patch with same type and similar text already exists
-        # Uses trigram similarity (pg_trgm) to catch near-duplicates like
-        # "Deliver samples in 2 days" vs "Deliver transcription samples within 2 days"
-        existing = await db.fetchrow(
-            """
-            SELECT cp.patch_id FROM context_patches cp
-            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
-            WHERE ps.subject_key = $1 AND cp.patch_type = $2
-              AND SIMILARITY(LOWER(cp.value->>'text'), LOWER($3)) > 0.6
-              AND COALESCE(cp.status, 'active') = 'active'
-            ORDER BY SIMILARITY(LOWER(cp.value->>'text'), LOWER($3)) DESC
-            LIMIT 1
-            """,
-            subject_key, patch_type, text
+        `last_observed_at` is the freshness anchor consumed by the decay
+        worker and recall scorer for self-typed patches — bumping it here
+        is the only path that should ever move it; admin edits move only
+        `updated_at`.
+
+        Also merges deadline detail forward: "I'll ship it" followed a
+        week later by "ship it by Friday" is one fact gaining a date, so
+        when the re-observation carries a deadline_date the existing
+        patch lacks, copy it over.
+        """
+        await db.execute(
+            "UPDATE context_patches SET updated_at = $1, last_observed_at = $1 WHERE patch_id = $2::uuid",
+            created_at, existing_id
         )
-        if existing:
-            # Reuse existing patch — update last_seen timestamp.
-            # `last_observed_at` is the freshness anchor consumed by the
-            # decay worker and recall scorer for self-typed patches
-            # (trait/preference/goal/constraint). Bumping it here is the
-            # only path that should ever move it — admin edits should
-            # only move `updated_at`.
-            patch_id = str(existing["patch_id"])
+        await db.execute(
+            "UPDATE patch_usage_metrics SET access_count = access_count + 1, last_accessed_at = $1 WHERE patch_id = $2::uuid",
+            created_at, existing_id
+        )
+        new_dd = value.get("deadline_date")
+        if new_dd:
             await db.execute(
-                "UPDATE context_patches SET updated_at = $1, last_observed_at = $1 WHERE patch_id = $2::uuid",
-                created_at, patch_id
+                """
+                UPDATE context_patches
+                   SET value = jsonb_set(
+                           jsonb_set(value, '{deadline_date}', to_jsonb($1::text)),
+                           '{deadline}', to_jsonb($2::text)
+                       )
+                 WHERE patch_id = $3::uuid
+                   AND value->>'deadline_date' IS NULL
+                """,
+                new_dd, value.get("deadline") or new_dd, existing_id,
             )
-            await db.execute(
-                "UPDATE patch_usage_metrics SET access_count = access_count + 1, last_accessed_at = $1 WHERE patch_id = $2::uuid",
-                created_at, patch_id
-            )
-            patch_lookup[(text.lower().strip(), patch_type)] = patch_id
-            logger.debug("patch_deduplicated", type=patch_type, text=text[:50], patch_id=patch_id)
-            continue
+        patch_lookup[(text.lower().strip(), patch_type)] = existing_id
+        logger.debug("patch_deduplicated", type=patch_type, text=text[:50],
+                     patch_id=existing_id, tier=tier)
 
+    async def _insert_new_patch(patch: dict, patch_type: str, value: dict, text: str) -> None:
+        """Insert a genuinely new patch (no dedup match)."""
+        nonlocal stored
         patch_id = str(uuid.uuid4())
         patch_name = f"{source_prompt}_{patch_id[:8]}"
         value_json = json.dumps(value)
         persistence = DEFAULT_PERSISTENCE.get(patch_type, "decaying")
 
-        # Project-scoped types get the project tag (per the v1.1 SS schema).
-        # `deliverable` is a Connection-facet type but project-scoped: every
-        # deliverable lives inside a project and should carry the parent's
-        # project/origin metadata alongside the episode types.
-        project_scoped_types = (
-            "decision", "commitment", "blocker", "takeaway",
-            "goal", "constraint", "event", "deliverable",
-        )
         patch_project = project if patch_type in project_scoped_types else None
         # Role patches can also be project-scoped if they have a belongs_to connection
         if patch_type == "role" and project:
@@ -438,6 +451,111 @@ async def store_connected_patches(
 
         patch_lookup[(text.lower().strip(), patch_type)] = patch_id
         stored += 1
+
+    # Gray-zone pairs deferred to one batched LLM judge call after the
+    # loop: (patch, patch_type, value, text, existing_id, existing_text)
+    gray_pending: list[tuple] = []
+    semantic_enabled = (
+        llm is not None and get_settings().cq_semantic_dedup_enabled
+    )
+
+    for patch in patches:
+        if not isinstance(patch, dict):
+            continue
+
+        patch_type = patch.get("type", "takeaway")
+        value = patch.get("value", {})
+        if isinstance(value, str):
+            value = {"text": value}
+        text = value.get("text", "")
+        if not text:
+            continue
+
+        # Deduplication, two tiers against active same-type patches:
+        #   similarity > TRIGRAM_DEDUP_THRESHOLD          → same fact, fast path
+        #   SEMANTIC_DEDUP_FLOOR < similarity <= threshold → gray zone; deferred
+        #     to one batched LLM judge call ("Deploy API by EOW" vs "Ship API
+        #     before end of week" lands here)
+        #   below the floor                                → new patch
+        existing = await db.fetchrow(
+            """
+            SELECT cp.patch_id, cp.value->>'text' AS existing_text, cp.project_id,
+                   SIMILARITY(LOWER(cp.value->>'text'), LOWER($3)) AS sim
+            FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $1 AND cp.patch_type = $2
+              AND SIMILARITY(LOWER(cp.value->>'text'), LOWER($3)) > $4
+              AND COALESCE(cp.status, 'active') = 'active'
+            ORDER BY sim DESC
+            LIMIT 1
+            """,
+            subject_key, patch_type, text, SEMANTIC_DEDUP_FLOOR
+        )
+        if existing and existing["sim"] > TRIGRAM_DEDUP_THRESHOLD:
+            await _apply_patch_dedup(
+                str(existing["patch_id"]), value, text, patch_type, "trigram"
+            )
+            continue
+        # Project guard for the judge: "Send the invoice" in project A and
+        # project B are different facts even with identical wording. The
+        # judge sees text only, so cross-project pairs never reach it.
+        same_project_scope = (
+            patch_type not in project_scoped_types
+            or existing is None
+            or existing["project_id"] == project_id
+        )
+        if (
+            existing and semantic_enabled and same_project_scope
+            and len(gray_pending) < MAX_JUDGE_PAIRS
+        ):
+            gray_pending.append((
+                patch, patch_type, value, text,
+                str(existing["patch_id"]), existing["existing_text"],
+            ))
+            continue
+
+        await _insert_new_patch(patch, patch_type, value, text)
+
+    # Phase B: judge the gray-zone pairs in one batched LLM call.
+    # Verdict TRUE → re-observe the existing patch (semantic dedup);
+    # FALSE or any judge failure → insert as new (today's behavior — a
+    # broken judge must never lose a memory).
+    if gray_pending:
+        verdicts = [False] * len(gray_pending)
+        try:
+            response = await llm.extract(
+                system_prompt=DEDUP_JUDGE_SYSTEM,
+                user_content=build_dedup_judge_content(
+                    [(g[3], g[5]) for g in gray_pending]
+                ),
+                json_schema=DEDUP_JUDGE_SCHEMA,
+            )
+            verdicts = parse_dedup_verdicts(response.content, len(gray_pending))
+        except Exception as exc:
+            logger.warning(
+                "semantic_dedup_judge_failed",
+                user_id=user_id, pairs=len(gray_pending), reason=str(exc)[:200],
+            )
+        merged = 0
+        for (patch, patch_type, value, text, existing_id, existing_text), same in zip(
+            gray_pending, verdicts
+        ):
+            if same:
+                await _apply_patch_dedup(existing_id, value, text, patch_type, "semantic")
+                logger.info(
+                    "semantic_dedup_merged",
+                    user_id=user_id, type=patch_type,
+                    new_text=text[:80], existing_text=(existing_text or "")[:80],
+                    patch_id=existing_id,
+                )
+                merged += 1
+            else:
+                await _insert_new_patch(patch, patch_type, value, text)
+        if merged or verdicts:
+            logger.info(
+                "semantic_dedup_judged",
+                user_id=user_id, pairs=len(gray_pending), merged=merged,
+            )
 
     # Pass 2: Create connections between patches.
     #
@@ -1946,6 +2064,7 @@ class ColdPathWorker:
                     self.db, user_id, patches, "meeting_summary", app_id, timestamp,
                     project, project_id, origin_id, origin_type,
                     user_label=user_label,
+                    llm=llm,
                 )
                 facts_stored = patches_stored
                 actions_stored = 0
