@@ -790,10 +790,40 @@ async def recall_context(
                 project_patch["patch_id"]
             )
 
-    # Merge flat rows + connected rows, deduplicate by value text
+    # Overdue guarantee: an overdue commitment/blocker in this project
+    # must surface even when it's older than the latest-20 window above —
+    # it's the single most "needs attention" item in the quilt, and
+    # before this it could age out of recall entirely while still open.
+    # Day-grain condition (flips at UTC midnight) keeps rendered output
+    # byte-stable within a day, consistent with the scorer's clock.
+    overdue_rows: list = []
+    if recall_project_id or recall_project:
+        proj_col, proj_val = (
+            ("cp.project_id", recall_project_id) if recall_project_id
+            else ("cp.project", recall_project)
+        )
+        overdue_rows = await db_pool.fetch(
+            f"""
+            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
+                   cp.created_at, cp.last_observed_at
+            FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $1 AND {proj_col} = $2
+              AND cp.patch_type IN ('commitment', 'blocker')
+              AND COALESCE(cp.status, 'active') = 'active'
+              AND cp.completed_at IS NULL
+              AND cp.value->>'deadline_date' ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}$'
+              AND (cp.value->>'deadline_date')::date < (NOW() AT TIME ZONE 'utc')::date
+            ORDER BY cp.value->>'deadline_date' ASC, cp.patch_id ASC
+            LIMIT 5
+            """,
+            subject_key, proj_val
+        )
+
+    # Merge flat rows + connected + overdue, deduplicate by value text
     all_patches = list(fact_rows)
     seen_texts = {(row["value"] if isinstance(row["value"], str) else json.dumps(row["value"])) for row in fact_rows}
-    for row in connected_rows:
+    for row in list(connected_rows) + list(overdue_rows):
         key = row["value"] if isinstance(row["value"], str) else json.dumps(row["value"])
         if key not in seen_texts:
             all_patches.append(row)
