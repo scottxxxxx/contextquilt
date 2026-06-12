@@ -1998,3 +1998,138 @@ async def test_send_alert(body: AlertTestSendRequest):
     finally:
         await conn.close()
 
+
+
+# ============================================================
+# Memory Health — lifecycle / recall-usage / overdue observability
+# ============================================================
+# The data all exists as of the June 2026 sprint: patch_usage_metrics is
+# written by recall (#129), overdue_since is stamped by the deadline
+# sweep (#139), completed_at distinguishes resolved from decayed (#130),
+# and entity_aliases tracks canonical merges (#135). This endpoint just
+# aggregates — no new tables, no new writes.
+
+@router.get("/memory-health", dependencies=[Depends(verify_admin_key)])
+async def get_memory_health(days: int = 30):
+    """Aggregate memory-lifecycle observability for the dashboard tab."""
+    days = max(1, min(365, days))
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        totals_row = await conn.fetchrow(
+            """
+            SELECT count(*) FILTER (WHERE COALESCE(status,'active')='active') AS active,
+                   count(*) FILTER (WHERE status='archived' AND completed_at IS NOT NULL) AS resolved_all_time,
+                   count(*) FILTER (WHERE status='archived' AND completed_at IS NULL) AS decayed_all_time
+            FROM context_patches
+            """
+        )
+
+        lifecycle_rows = await conn.fetch(
+            """
+            SELECT updated_at::date AS day,
+                   count(*) FILTER (WHERE completed_at IS NOT NULL) AS resolved,
+                   count(*) FILTER (WHERE completed_at IS NULL) AS decayed
+            FROM context_patches
+            WHERE status = 'archived'
+              AND updated_at >= NOW() - INTERVAL '1 day' * $1
+            GROUP BY 1 ORDER BY 1 DESC
+            """,
+            days,
+        )
+
+        archived_by_type = await conn.fetch(
+            """
+            SELECT patch_type,
+                   count(*) FILTER (WHERE completed_at IS NOT NULL) AS resolved,
+                   count(*) FILTER (WHERE completed_at IS NULL) AS decayed
+            FROM context_patches
+            WHERE status = 'archived'
+              AND updated_at >= NOW() - INTERVAL '1 day' * $1
+            GROUP BY 1 ORDER BY (count(*)) DESC
+            """,
+            days,
+        )
+
+        usage_row = await conn.fetchrow(
+            """
+            SELECT count(*) FILTER (WHERE pum.access_count > 1) AS reaccessed,
+                   count(*) FILTER (WHERE pum.access_count <= 1) AS never_reaccessed
+            FROM patch_usage_metrics pum
+            JOIN context_patches cp ON cp.patch_id = pum.patch_id
+            WHERE COALESCE(cp.status,'active') = 'active'
+            """
+        )
+
+        top_recalled = await conn.fetch(
+            """
+            SELECT pum.access_count,
+                   pum.last_accessed_at,
+                   cp.patch_type,
+                   cp.value->>'text' AS text,
+                   COALESCE(cp.project, '') AS project,
+                   replace(ps.subject_key, 'user:', '') AS user_id
+            FROM patch_usage_metrics pum
+            JOIN context_patches cp ON cp.patch_id = pum.patch_id
+            JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+            WHERE COALESCE(cp.status,'active') = 'active'
+            ORDER BY pum.access_count DESC, pum.last_accessed_at DESC
+            LIMIT 10
+            """
+        )
+
+        overdue_rows = await conn.fetch(
+            r"""
+            SELECT cp.patch_type,
+                   cp.value->>'text' AS text,
+                   cp.value->>'deadline_date' AS deadline_date,
+                   cp.value->>'overdue_since' AS overdue_since,
+                   COALESCE(cp.value->>'owner', '') AS owner,
+                   COALESCE(cp.project, '') AS project,
+                   replace(ps.subject_key, 'user:', '') AS user_id
+            FROM context_patches cp
+            JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+            WHERE cp.patch_type IN ('commitment', 'blocker')
+              AND COALESCE(cp.status,'active') = 'active'
+              AND cp.completed_at IS NULL
+              AND cp.value->>'deadline_date' ~ '^\d{4}-\d{2}-\d{2}$'
+              AND (cp.value->>'deadline_date')::date < (NOW() AT TIME ZONE 'utc')::date
+            ORDER BY cp.value->>'deadline_date' ASC
+            LIMIT 25
+            """
+        )
+
+        alias_count = 0
+        try:
+            alias_count = await conn.fetchval("SELECT count(*) FROM entity_aliases") or 0
+        except Exception:
+            pass  # table may not exist on lagging deployments
+
+        reobserved = await conn.fetchval(
+            """
+            SELECT count(*) FROM context_patches
+            WHERE COALESCE(status,'active') = 'active'
+              AND last_observed_at > created_at
+            """
+        )
+
+        return {
+            "window_days": days,
+            "totals": {
+                "active": totals_row["active"] or 0,
+                "resolved_all_time": totals_row["resolved_all_time"] or 0,
+                "decayed_all_time": totals_row["decayed_all_time"] or 0,
+                "overdue_now": len(overdue_rows),
+                "entity_aliases": alias_count,
+                "reobserved_active": reobserved or 0,
+            },
+            "usage": {
+                "reaccessed": usage_row["reaccessed"] or 0,
+                "never_reaccessed": usage_row["never_reaccessed"] or 0,
+            },
+            "lifecycle_by_day": [dict(r) for r in lifecycle_rows],
+            "archived_by_type": [dict(r) for r in archived_by_type],
+            "top_recalled": [dict(r) for r in top_recalled],
+            "overdue": [dict(r) for r in overdue_rows],
+        }
+    finally:
+        await conn.close()
