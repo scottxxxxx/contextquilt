@@ -1152,7 +1152,10 @@ class ColdPathWorker:
         """
         # The stamp is idempotent (only-where-absent), so decay cadence
         # is fine; a deadline can only flip at UTC midnight anyway.
-        SWEEP_INTERVAL_SECONDS = DECAY_INTERVAL_SECONDS
+        # (Literal, not shared with decay_loop — its interval constant is
+        # local to that coroutine, which crash-looped the worker when
+        # this loop referenced it. Hotfix 2026-06-12.)
+        SWEEP_INTERVAL_SECONDS = 6 * 60 * 60
         iso_date_re = r"'^\d{4}-\d{2}-\d{2}$'"
         overdue_sql = (
             f"value->>'deadline_date' ~ {iso_date_re} "
