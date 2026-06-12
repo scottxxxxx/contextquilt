@@ -520,3 +520,57 @@ EXTRACTION RULES:
 4. Entity names must be exact as mentioned
 5. Keep each fact to one clear sentence
 6. If any section has nothing to extract, return an empty array"""
+
+
+# ============================================================
+# Open-commitments injection block (worker cold path)
+# ============================================================
+
+def format_open_commitments_block(commits, now=None):
+    """Render the `Open commitments` block prepended to extraction input.
+
+    `commits` is a list of dicts with patch_id, text, created_at, and
+    optional deadline_date (YYYY-MM-DD). Overdue items are annotated so
+    the resolution detector targets the items most likely already done,
+    and so the model can mention overdue state when summarizing.
+
+    Pure function (no DB) so it's unit-testable — the worker fetches,
+    this formats. Returns "" when there's nothing to inject, so callers
+    can prepend unconditionally.
+    """
+    from datetime import date, datetime, timezone
+
+    if not commits:
+        return ""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    today = now.date() if isinstance(now, datetime) else now
+
+    lines = ["Open commitments from your prior meetings (still tracked as not yet done):"]
+    for c in commits:
+        text = (c.get("text") or "").strip().replace("\n", " ")
+        if len(text) > 200:
+            text = text[:197] + "..."
+        created = c.get("created_at")
+        if created is not None:
+            created_naive = created.replace(tzinfo=None)
+            now_naive = (now.replace(tzinfo=None) if isinstance(now, datetime) else None)
+            age_days = (now_naive - created_naive).days if now_naive else None
+        else:
+            age_days = None
+        age_str = f"committed {age_days}d ago" if age_days is not None else "committed recently"
+
+        deadline_str = ""
+        dd = c.get("deadline_date")
+        if dd:
+            try:
+                overdue = date.fromisoformat(dd) < today
+            except ValueError:
+                overdue = False
+            deadline_str = f", due {dd} — OVERDUE" if overdue else f", due {dd}"
+
+        lines.append(f"  - [{c['patch_id']}] {text} ({age_str}{deadline_str})")
+    lines.append("")
+    lines.append("If this transcript indicates any are now done, include the patch_id in resolved_commitments.")
+    lines.append("")
+    return "\n".join(lines) + "\n"

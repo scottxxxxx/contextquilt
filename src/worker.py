@@ -30,6 +30,7 @@ from contextquilt.services.extraction_prompts import (
     CONVERSATION_SYSTEM,
     MEETING_SUMMARY_SYSTEM,
     TRACE_SYSTEM,
+    format_open_commitments_block,
 )
 from contextquilt.services.extraction_schema import (
     EXTRACTION_SCHEMA,
@@ -1065,6 +1066,7 @@ class ColdPathWorker:
         # Run stream consumer, queue checker, decay worker, backup
         # failure watcher, and provider health daemon concurrently.
         await asyncio.gather(
+            self.deadline_sweep_loop(),
             self.consume_stream(),
             self.check_queues_loop(),
             self.decay_loop(),
@@ -1133,6 +1135,64 @@ class ColdPathWorker:
             except Exception as e:
                 logger.error("queue_check_error", error=str(e))
 
+    async def deadline_sweep_loop(self):
+        """Scheduled pass over deadline-bearing completables whose due
+        date has passed (the final piece of the deadline-action gap).
+
+        First detection stamps `value.overdue_since` (UTC date) and bumps
+        updated_at, which (a) gives apps a durable overdue flag in quilt
+        responses without doing date math, (b) flows the patch into the
+        SS delta sync, and (c) restarts the decay grace window from the
+        moment we noticed — combined with the deadline-aware staleness
+        anchor, an overdue item lives TTL days past its deadline instead
+        of silently dying mid-flight.
+
+        Also logs per-cycle overdue totals as the observability seed
+        ("how much overdue work is the system carrying").
+        """
+        # The stamp is idempotent (only-where-absent), so decay cadence
+        # is fine; a deadline can only flip at UTC midnight anyway.
+        SWEEP_INTERVAL_SECONDS = DECAY_INTERVAL_SECONDS
+        iso_date_re = r"'^\d{4}-\d{2}-\d{2}$'"
+        overdue_sql = (
+            f"value->>'deadline_date' ~ {iso_date_re} "
+            "AND (value->>'deadline_date')::date < (NOW() AT TIME ZONE 'utc')::date"
+        )
+        while self.running:
+            try:
+                result = await self.db.execute(
+                    f"""
+                    UPDATE context_patches
+                       SET value = jsonb_set(
+                               value, '{{overdue_since}}',
+                               to_jsonb(to_char((NOW() AT TIME ZONE 'utc')::date, 'YYYY-MM-DD'))
+                           ),
+                           updated_at = NOW()
+                     WHERE patch_type IN ('commitment', 'blocker')
+                       AND COALESCE(status, 'active') = 'active'
+                       AND completed_at IS NULL
+                       AND value->>'overdue_since' IS NULL
+                       AND {overdue_sql}
+                    """
+                )
+                stamped = int(result.split()[-1]) if result else 0
+                total = await self.db.fetchval(
+                    f"""
+                    SELECT count(*) FROM context_patches
+                     WHERE patch_type IN ('commitment', 'blocker')
+                       AND COALESCE(status, 'active') = 'active'
+                       AND completed_at IS NULL
+                       AND {overdue_sql}
+                    """
+                )
+                if stamped:
+                    logger.info("deadline_sweep_stamped", newly_overdue=stamped, total_overdue=total)
+                else:
+                    logger.debug("deadline_sweep_complete", total_overdue=total)
+            except Exception as e:
+                logger.error("deadline_sweep_error", error=str(e))
+            await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+
     async def decay_loop(self):
         """Periodically archive stale patches based on effective TTL.
 
@@ -1171,6 +1231,9 @@ class ColdPathWorker:
         # rather than `updated_at`. Matches the partial index in
         # init-db/20_preference_freshness.sql.
         FRESHNESS_TRACKED_TYPES = {"trait", "preference", "goal", "constraint"}
+        # Deadline-bearing completables anchor on GREATEST(updated_at,
+        # deadline_date) so they never archive before their due date.
+        DEADLINE_ANCHORED_TYPES = {"commitment", "blocker"}
         # Maps the 7 permanence classes → days. None = never expires.
         PERMANENCE_CLASS_DAYS = {
             "permanent": None,
@@ -1254,6 +1317,21 @@ class ColdPathWorker:
                     # NULL last_observed_at before the backfill runs.
                     if patch_type in FRESHNESS_TRACKED_TYPES:
                         staleness_anchor_sql = "COALESCE(last_observed_at, created_at)"
+                    elif patch_type in DEADLINE_ANCHORED_TYPES:
+                        # Deadline-bearing completables must not archive
+                        # before their own due date: a commitment created
+                        # June 1 due Aug 15 used to decay July 1 (30d from
+                        # updated_at). Anchor on whichever is later —
+                        # last touch or the deadline itself — so TTL counts
+                        # as grace AFTER the due date for future-dated
+                        # items. Regex-guarded cast: only sanitizer-valid
+                        # ISO dates participate.
+                        staleness_anchor_sql = (
+                            "GREATEST(updated_at, "
+                            "CASE WHEN value->>'deadline_date' ~ '^\\d{4}-\\d{2}-\\d{2}$' "
+                            "THEN (value->>'deadline_date')::date::timestamptz "
+                            "ELSE updated_at END)"
+                        )
                     else:
                         staleness_anchor_sql = "updated_at"
 
@@ -1282,7 +1360,11 @@ class ColdPathWorker:
                             patch_type=patch_type,
                             count=count,
                             ttl_days=ttl_days,
-                            anchor="last_observed_at" if patch_type in FRESHNESS_TRACKED_TYPES else "updated_at",
+                            anchor=(
+                                "last_observed_at" if patch_type in FRESHNESS_TRACKED_TYPES
+                                else "max(updated_at, deadline)" if patch_type in DEADLINE_ANCHORED_TYPES
+                                else "updated_at"
+                            ),
                         )
 
                 if total_archived > 0:
@@ -2354,17 +2436,27 @@ class ColdPathWorker:
     OPEN_COMMITS_MAX_INJECTED = 20
 
     async def _fetch_open_commitments(self, user_id: str) -> list[dict[str, Any]]:
-        """Return list of {patch_id, text, created_at} for this user's
-        recent open commitment patches. Recent = within the lookback
-        window. Open = status='active' AND completed_at IS NULL."""
+        """Return list of {patch_id, text, created_at, deadline_date} for
+        this user's open commitment patches. Open = status='active' AND
+        completed_at IS NULL. Window: within the lookback OR overdue —
+        an overdue commitment outlives the lookback (the deadline-aware
+        decay anchor keeps it alive past 30 days), and it's exactly the
+        item most worth asking the model about. Overdue items sort first
+        so the injection cap never crowds them out."""
         if not user_id:
             return []
         try:
             subject_key = f"user:{user_id}"
+            iso_date_re = r"'^\d{4}-\d{2}-\d{2}$'"
+            overdue_sql = (
+                f"(cp.value->>'deadline_date' ~ {iso_date_re} "
+                "AND (cp.value->>'deadline_date')::date < (NOW() AT TIME ZONE 'utc')::date)"
+            )
             rows = await self.db.fetch(
                 f"""
                 SELECT cp.patch_id::text AS patch_id,
                        cp.value->>'text' AS text,
+                       cp.value->>'deadline_date' AS deadline_date,
                        cp.created_at
                   FROM context_patches cp
                   JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
@@ -2372,13 +2464,21 @@ class ColdPathWorker:
                    AND cp.patch_type = 'commitment'
                    AND COALESCE(cp.status, 'active') = 'active'
                    AND cp.completed_at IS NULL
-                   AND cp.created_at >= NOW() - INTERVAL '{int(self.OPEN_COMMITS_LOOKBACK_DAYS)} days'
-                 ORDER BY cp.created_at DESC
+                   AND (cp.created_at >= NOW() - INTERVAL '{int(self.OPEN_COMMITS_LOOKBACK_DAYS)} days'
+                        OR {overdue_sql})
+                 ORDER BY CASE WHEN {overdue_sql} THEN 0 ELSE 1 END,
+                          cp.created_at DESC
                  LIMIT $2
                 """,
                 subject_key, self.OPEN_COMMITS_MAX_INJECTED,
             )
-            return [{"patch_id": r["patch_id"], "text": r["text"], "created_at": r["created_at"]} for r in rows]
+            return [
+                {
+                    "patch_id": r["patch_id"], "text": r["text"],
+                    "created_at": r["created_at"], "deadline_date": r["deadline_date"],
+                }
+                for r in rows
+            ]
         except Exception as exc:
             logger.warning("open_commitments_fetch_failed", reason=str(exc)[:200], user_id=user_id)
             return []
@@ -2386,25 +2486,11 @@ class ColdPathWorker:
     async def _build_open_commitments_block(self, user_id: str) -> str:
         """Format the open commitments into the prompt-ready block that
         prefixes user_content. Returns empty string when there are none,
-        so callers can prepend unconditionally."""
+        so callers can prepend unconditionally. Rendering lives in
+        extraction_prompts.format_open_commitments_block (pure,
+        unit-tested); this method just fetches and delegates."""
         commits = await self._fetch_open_commitments(user_id)
-        if not commits:
-            return ""
-        now = datetime.utcnow()
-        lines = ["Open commitments from your prior meetings (still tracked as not yet done):"]
-        for c in commits:
-            text = (c["text"] or "").strip().replace("\n", " ")
-            if len(text) > 200:
-                text = text[:197] + "..."
-            created = c["created_at"]
-            # created may be timezone-aware; strip tzinfo for the diff
-            age_days = (now - created.replace(tzinfo=None)).days if created else None
-            age_str = f"committed {age_days}d ago" if age_days is not None else "committed recently"
-            lines.append(f"  - [{c['patch_id']}] {text} ({age_str})")
-        lines.append("")
-        lines.append("If this transcript indicates any are now done, include the patch_id in resolved_commitments.")
-        lines.append("")
-        return "\n".join(lines) + "\n"
+        return format_open_commitments_block(commits, now=datetime.utcnow())
 
     async def _apply_resolved_commitments(
         self, user_id: str, resolutions: list[dict[str, Any]],
