@@ -4,178 +4,91 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**ContextQuilt** is a persistent cognitive memory layer for AI applications. It solves the "goldfish memory" problem (stateless LLMs) and "memory fragmentation" problem (siloed AI platforms) by acting as a slide-in-place layer between applications and LLM providers.
+**ContextQuilt** is a persistent cognitive memory layer for AI applications — a slide-in-place layer between applications and LLM providers that fixes stateless-LLM "goldfish memory" and cross-platform memory fragmentation.
 
 ## Core Architecture Principles
 
 ### The "Zero-Latency" Asynchronous Architecture
 
-The system uses a decoupled read/write path design:
+- **Read Path (Synchronous)**: live LLM calls query Redis "Working Memory" + fast Postgres lookups for instant context injection. No LLM call on the read path. Never block it with expensive operations.
+- **Write Path (Asynchronous)**: background worker does cognitive consolidation (extraction, dedup, lifecycle) after the user already has their response.
 
-- **Read Path (Synchronous)**: Live LLM calls query an ultra-fast in-memory "Working Memory" cache (Redis) for instant context injection with zero added latency
-- **Write Path (Asynchronous)**: Background workers perform expensive cognitive consolidation (summarizing, extracting facts) after the user receives their response
+### The Connected Quilt Data Model
 
-**Critical**: Any implementation must maintain this separation. Never block the synchronous read path with expensive operations.
-
-### The "Hybrid Cognitive" Data Model ("The Quilt")
-
-The system mimics human cognition through three memory types:
-
-1. **Factual Memory** (PostgreSQL): Explicit user preferences and facts stored as typed "patches"
-2. **Episodic Memory** (Graph Layer): Relationships between entities, events, and users. Stores "threads" that connect context across conversations
-3. **Working Memory** (Redis Cache): Short-TTL, in-session scratchpad context
-
-### Connected Quilt Model
-
-Memory is organized as typed **patches** (facts about users) connected by **stitching** (relationships):
-
-**Patch types**: trait, preference, identity, role, person, project, decision, commitment, blocker, takeaway
-
-**Connection roles**: parent, depends_on, resolves, replaces, informs
-
-**Lifecycle**: Patches have type-specific TTLs. The decay worker archives stale patches. Connections drive cascading behavior (archiving a project cascades to children).
+Three memory tiers: **Factual** (Postgres `context_patches` — typed patches), **Episodic** (entities + relationships graph), **Working** (Redis, short TTL). Patches are typed (trait, preference, identity, role, person, org, project, deliverable, decision, commitment, blocker, takeaway, goal, constraint, event) and connected by stitching (roles: parent, depends_on, resolves, replaces, informs). Per-app taxonomy lives in registered manifests (`app_schemas`, see `init-db/11_shouldersurf_schema.json`); the schema-driven prompt builder generates extraction prompts from them.
 
 ## Key Technical Concepts
 
-### Extraction Pipeline (Cold Path)
+### Extraction Pipeline (Cold Path, src/worker.py)
 
-The worker processes transcripts/conversations through a single LLM call that extracts:
-- Typed patches with connections
-- Named entities (person, project, company, feature, etc.)
-- Relationships between entities
+One LLM call per meeting extracts typed patches + entities + relationships + `resolved_commitments` (open commitments are injected into the prompt, overdue-first with deadline annotations). The `(you)` speaker marker identifies the app user. Input is prefixed with `Meeting date:` (anchors relative-deadline resolution) and `User language:` (from `metadata.language`, BCP-47; absent → auto-detect — output prose is written in the user's language, anchored by a required `output_language` schema field).
 
-The extraction prompt uses the `(you)` speaker marker convention to identify the app user in diarized transcripts, enabling accurate trait attribution and project ownership.
+After the LLM call a fixed sanitizer chain (`src/contextquilt/services/extraction_schema.py`) enforces invariants the LLM is unreliable about, in order: `enforce_owner_gate`, `enforce_connection_requirements`, `enforce_person_ownership`, `enforce_connection_vocabulary` (manifest label from/to combos — flips reversed edges, drops invalid), `sanitize_you_marker_from_patches`, `strip_owner_on_self_typed_patches`, `strip_prose_from_person_names`, `drop_placeholder_and_self_person_patches`, `sanitize_deadline_dates` (validates LLM-resolved `value.deadline_date` ISO dates), `strip_ephemeral_fields`. New sanitizers slot into this chain; each is unit-tested under `tests/unit/`. Backfill scripts in `scripts/backfill_*.py` reuse the live sanitizers — write new ones the same way (dry-run default, `--apply` writes).
 
-After the LLM call, the worker runs a fixed chain of sanitizers (`src/contextquilt/services/extraction_schema.py`, invoked from `src/worker.py`) that enforce post-extraction invariants the LLM is unreliable about:
+**Storage dedup is two-tier** (`store_connected_patches`): trigram similarity > 0.6 → same fact (fast path); 0.35–0.6 gray zone → one batched LLM judge call per extraction (`services/semantic_dedup.py`, kill switch `CQ_SEMANTIC_DEDUP_ENABLED`); judge failure → insert, never lose a memory. Dedup hits merge deadline detail forward and bump `last_observed_at`. **Entity aliasing** (`services/entity_aliasing.py`, `entity_aliases` table): extracted entity names resolve exact → recorded alias → conservative unique-candidate heuristic before creating new entities; recall matches aliases and resolves to canonical.
 
-1. `enforce_owner_gate`, `enforce_connection_requirements`, `enforce_person_ownership` — structural enforcers (drop ungated patches, require parent connections, synthesize missing `person + owns` edges for named action owners)
-2. `sanitize_you_marker_from_patches` — strip the literal `(you)` token from `value.text` / `value.owner`
-3. `strip_owner_on_self_typed_patches` — force `owner=null` on trait/preference/goal/constraint
-4. `strip_prose_from_person_names` — `person.value.text` must be a name, not a sentence
-5. `drop_placeholder_and_self_person_patches` — drop diarization placeholders (`"Speaker N"`) and (you)-speaker self-references
-6. `strip_ephemeral_fields` — final cleanup
+**LLM client gotcha**: `AnthropicLLMClient.extract()` accepts `json_schema` for interface parity but does NOT enforce it on the wire — any prompt used with it must embed the exact raw-JSON output shape, or the model answers in prose and parsing silently fails.
 
-If you add a new sanitizer, slot it in by editing this chain. Each sanitizer mutates `content` in place and is independently unit-tested under `tests/unit/`. The corresponding backfill scripts in `scripts/backfill_*.py` reuse the live sanitizer rather than duplicating logic — write new ones the same way.
+### Deadline & Freshness Lifecycle
 
-### Freshness Model (Self-Typed Patches)
-
-The four (you)-speaker self-disclosed types — `trait`, `preference`, `goal`, `constraint` — carry a dedicated `last_observed_at` timestamp on `context_patches`. It is bumped **only** in the worker's pg_trgm dedup path (`src/worker.py` ~335) when a fresh extraction matches an existing patch — a true "user re-affirmed this in a transcript" signal, distinct from `updated_at` (any UPDATE, including admin edits) and `patch_usage_metrics.last_accessed_at` (recall hits).
-
-Consumers:
-
-1. **Decay worker** (`src/worker.py:decay_loop`) — for these four types the staleness anchor is `COALESCE(last_observed_at, created_at)`, not `updated_at`. TTL is 540 days, configurable per type via `patch_type_registry.default_ttl_days`.
-
-2. **Recall scorer** (`src/contextquilt/services/recall_scorer.py`) — applies a multiplicative penalty `max(0.30, exp(-days_stale / 365))` as the final scoring step. `now` is bucketed to the UTC day so back-to-back recall calls remain byte-identical (required for upstream prompt caching).
-
-If you add a new self-disclosed type that should follow the same lifecycle, add it to (a) `FRESHNESS_TRACKED_TYPES` in `recall_scorer.py`, (b) `FRESHNESS_TRACKED_TYPES` + `DEFAULT_TTLS` in `worker.decay_loop`, and (c) the partial index `WHERE` clause in `init-db/20_preference_freshness.sql`. The three must stay in sync.
+- `value.deadline` (as spoken) + `value.deadline_date` (LLM-resolved ISO). Recall renders `(OVERDUE | due today | due soon)` markers; scorer boosts overdue/imminent commitment/blocker.
+- Decay (`worker.decay_loop`, type TTLs via `patch_type_registry` + defaults): self-typed types (trait/preference/goal/constraint) anchor on `COALESCE(last_observed_at, created_at)` (540d TTL); commitment/blocker anchor on `GREATEST(updated_at, deadline_date)` — never archived before their due date; others on `updated_at`. Recall bumps `patch_usage_metrics.last_accessed_at`, which exempts actively-recalled patches from decay.
+- `deadline_sweep_loop` stamps `value.overdue_since` on open completables past deadline (app-visible, flows into delta sync). Project-scoped recall guarantees up to 5 overdue completables surface regardless of recency windows.
+- `last_observed_at` moves ONLY via the worker dedup re-observation path; admin edits move only `updated_at`. Recall scorer applies freshness penalty `max(0.30, exp(-days_stale/365))` to self-typed types, with `now` bucketed to the UTC day — **all recall output must stay byte-stable within a UTC day** (upstream prompt caching depends on it).
+- Adding a self-disclosed type to the freshness model: update `FRESHNESS_TRACKED_TYPES` in `recall_scorer.py` AND `worker.decay_loop` AND the partial index in `init-db/20_preference_freshness.sql`.
+- **Worker gotcha**: "constants" like `DECAY_INTERVAL_SECONDS` are local to their coroutine bodies, not module scope — verify before referencing from another loop (a NameError in any gathered loop crash-loops the whole worker).
 
 ### Database Migrations
 
-Migrations live in `init-db/*.sql` and are tracked in a `schema_migrations` table by filename + sha256. The runner is `scripts/run_migrations.py`, invoked by `.github/workflows/deploy.yml` from a one-shot container built from the new image. Already-applied files are skipped; editing an applied file is detected as drift and aborts the deploy. To change behavior, add a new file — never rewrite history.
+`init-db/*.sql`, tracked by filename + sha256 in `schema_migrations`, applied by `scripts/run_migrations.py` from the deploy workflow. Editing an applied file aborts the deploy as drift — always add a new file.
 
-### Recall (Hot Path)
+### Recall (Hot Path, POST /v1/recall)
 
-`POST /v1/recall` performs entity matching + graph traversal to return relevant context:
-1. Redis entity index lookup (~1ms)
-2. Postgres graph traversal via recursive CTE (~5-50ms)
-3. Formatted context block grouped by type
+Redis entity index (names ∪ aliases, self-healing) → entity match in text → recursive-CTE graph traversal → patch fetch (project-scoped + universal + overdue guarantee) → heuristic scoring → formatted block. `metadata`: `project_id`/`project` (scope), `locale` (grouped-mode labels), `token_budget` (flat-mode size, default 700, clamped 100–2000; ~4 chars/token). 30s render cache keyed on the full request shape. Flat mode markers are deliberately English (LLM-facing).
 
-No LLM call on the read path.
+### Quilt API (app-facing, JWT or X-App-ID)
 
-### App Integration Pattern
+- `GET /v1/quilt/{user_id}` — full sync or `since=` delta (`deleted` + `completed` arrays distinguish decayed from resolved); `origin_id=<meeting UUID>` meeting view (capture order, no ranking); `group_by=origin` adds a `meetings` array. Patches carry `deadline_date`, `origin_id/type`, connections.
+- `POST /v1/quilt/{user_id}/patches/{patch_id}/complete` — app-initiated completion (commitment/blocker; 409 on race with worker auto-close). Both close paths stamp `value.completion_source` + `completion_evidence`.
+- `GET /v1/schema` — caller's own latest registered manifest (launch refresh). Admin-gated variant: `GET /v1/apps/{app_id}/schema`.
+- CQ authenticates apps, not end users; apps vouch for `user_id`. See `docs/architecture/10-security-and-authentication.md`.
 
-```
-Your App ←→ Your LLM Gateway ←→ LLM Provider
-                    ↓
-              Context Quilt
-```
+### Cross-team note
 
-Apps authenticate via JWT (required). CQ authenticates apps, not end users — apps are responsible for their own user auth and pass `user_id` to CQ. See [Security & Authentication](docs/architecture/10-security-and-authentication.md) for the full threat model.
+ContextQuilt is consumed by ShoulderSurf (iOS) through the GhostPour gateway. **Verify additive API changes through GP's proxied path, not just CQ's socket** — GP middleboxes have eaten metadata keys and query params before. Coordination details live in the private ops dossier (see global CLAUDE.md pointer).
 
 ## Documentation
 
-### Architecture (docs/architecture/)
-- `00-overview.md` — Core concepts
-- `01-memory-model.md` — Three tiers, graph layer, entities/relationships
-- `02-pipeline.md` — Extraction pipeline, model selection
-- `03-queue-and-lifecycle.md` — Meeting queue, batching, context budgeting
-- `04-recall.md` — Intelligent recall, entity matching, hot path
-- `05-integration.md` — Integration flow, capture points, metadata
-- `06-configuration.md` — All settings and env vars
-- `07-api-reference.md` — API endpoint documentation
-- `08-connected-quilt-model.md` — Patch types, connections, lifecycle
-- `09-domain-mapping.md` — How to map CQ concepts to your domain (health, CRM, etc.)
-- `10-security-and-authentication.md` — Auth model, threat model, GDPR, defense in depth
-- `11-model-selection.md` — Why Claude Haiku 4.5, benchmark results, alternatives
-
-### API Reference
-- `docs/openapi.yaml` — OpenAPI 3.0 specification
-- FastAPI auto-docs available at `/docs` when running locally
+`docs/architecture/00–11` (overview, memory model, pipeline, queue, recall, integration, configuration, API reference, connected quilt, domain mapping, security, model selection) and `docs/openapi.yaml`. FastAPI auto-docs at `/docs`. NOTE: docs/openapi.yaml lags the June 2026 surface (meeting views, complete endpoint, token_budget, language) — update when touched.
 
 ## Development
 
-### Running Locally
-
 ```bash
-cp .env.example .env  # Edit with your API keys
-docker-compose up -d  # Starts API, worker, Postgres, Redis
-# API at http://localhost:8000
-# Docs at http://localhost:8000/docs
+cp .env.example .env && docker-compose up -d   # API :8000, docs at /docs
+.venv/bin/python -m pytest tests/unit/ -q      # unit suite (asyncpg/fastapi absent locally:
+#   ignore test_run_migrations, test_split_compound_person_patches, test_update_key)
 ```
 
-### Project Structure
-
 ```
-src/
-  main.py                           # FastAPI app — all API endpoints
-  worker.py                         # Cold path worker — extraction pipeline
-  auth.py                           # JWT + app authentication
-  dashboard/                        # Admin dashboard (router, HTML, JS)
-  contextquilt/
-    services/
-      extraction_prompts.py         # LLM extraction prompts
-      llm_client.py                 # OpenAI-compatible LLM client
-init-db/                            # PostgreSQL migration scripts
-tests/benchmark/                    # Extraction quality benchmarks
-docs/architecture/                  # Architecture documentation
+src/main.py        # FastAPI hot path — all API endpoints, recall
+src/worker.py      # cold path — extraction, dedup, decay, deadline sweep
+src/contextquilt/services/   # extraction_prompts, extraction_schema (sanitizers),
+                             # schema_prompt_builder, recall_scorer/formatter,
+                             # semantic_dedup, entity_aliasing, llm_client*
+src/dashboard/     # admin dashboard (router + HTML/JS tabs incl. Memory Health)
+init-db/           # migrations; scripts/ backfills + ops tools
 ```
 
-### Environment Variables
+Required env: `DATABASE_URL`, `REDIS_URL` (or host/port/password), `CQ_LLM_API_KEY`, `CQ_LLM_BASE_URL`, `CQ_LLM_MODEL`, `CQ_ADMIN_KEY`, `JWT_SECRET_KEY`. Anthropic-direct primary uses `CQ_ANTHROPIC_API_KEY` / Secret Manager (`CQ_GCP_PROJECT`); `CQ_LLM_PRIMARY_PROVIDER` flips anthropic↔openrouter. `CQ_SEMANTIC_DEDUP_ENABLED` kills the dedup judge.
 
-Required:
-- `DATABASE_URL` — PostgreSQL connection string
-- `REDIS_URL` or `REDIS_HOST`/`REDIS_PORT`/`REDIS_PASSWORD`
-- `CQ_LLM_API_KEY` — API key for LLM extraction (any OpenAI-compatible provider)
-- `CQ_LLM_BASE_URL` — LLM endpoint (default: OpenRouter)
-- `CQ_LLM_MODEL` — Model for extraction (default: anthropic/claude-haiku-4.5)
-- `CQ_ADMIN_KEY` — Admin dashboard access key
-- `JWT_SECRET_KEY` — JWT signing secret
+Extraction quality: `CQ_LLM_API_KEY=... python tests/benchmark/test_extraction_dryrun.py [transcript] [--user "Name"]`.
 
-### Testing Extraction Quality
-
-```bash
-# Dry-run extraction on a transcript (no database writes)
-CQ_LLM_API_KEY=... python tests/benchmark/test_extraction_dryrun.py [transcript_file] [--user "Name"]
-
-# Run full benchmark across models and test cases
-CQ_LLM_API_KEY=... python tests/benchmark/run_benchmark.py
-```
-
-### Performance Targets
-- **Hot path (recall)**: <10ms on cache hit, <50ms on cache miss
-- **Cold path (extraction)**: 2-10s per meeting (async, non-blocking)
-- **Pre-warm**: <50ms to hydrate Redis cache
+Performance targets: recall <10ms cache-hit / <50ms miss; extraction 2–10s async; prewarm <50ms.
 
 ## Patent Notice
 
-This project includes innovations protected by provisional patent application. When modifying core architectural components, preserve the novel aspects of the asynchronous zero-latency architecture, hybrid cognitive data model, and active enrichment methods.
+Provisional patent covers the asynchronous zero-latency architecture, hybrid cognitive data model, and active enrichment methods — preserve these when modifying core components.
 
-## License
+## License & Contact
 
-Apache 2.0 — See [LICENSE](LICENSE) for details.
-
-## Contact
-
-- **Website**: [contextquilt.com](https://contextquilt.com)
-- **Email**: scott@contextquilt.com
-- **Issues**: [GitHub Issues](https://github.com/scottxxxxx/contextquilt/issues)
+Apache 2.0. [contextquilt.com](https://contextquilt.com) · scott@contextquilt.com · [GitHub Issues](https://github.com/scottxxxxx/contextquilt/issues)
