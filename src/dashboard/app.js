@@ -58,6 +58,9 @@ function initNavigation() {
             if (item.dataset.view === 'providers') {
                 initProvidersView();
             }
+            if (item.dataset.view === 'memory') {
+                initMemoryHealthView();
+            }
             if (item.dataset.view === 'settings') {
                 initSettingsView();
             }
@@ -2546,5 +2549,80 @@ async function testProvider(provider, opts = {}) {
     } catch (err) {
         console.error('testProvider failed:', err);
         if (!opts.silent) alert(`Probe request failed: ${err.message}`);
+    }
+}
+
+// ============================================================
+// Memory Health view — lifecycle / recall-usage / overdue board
+// ============================================================
+
+function mhEscape(s) {
+    const div = document.createElement('div');
+    div.textContent = s == null ? '' : String(s);
+    return div.innerHTML;
+}
+
+async function initMemoryHealthView() {
+    try {
+        const res = await fetch('/api/dashboard/memory-health?days=30');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const d = await res.json();
+
+        document.getElementById('mh-active').textContent = d.totals.active.toLocaleString();
+        document.getElementById('mh-reobserved').textContent = `${d.totals.reobserved_active.toLocaleString()} re-observed at least once`;
+        document.getElementById('mh-resolved').textContent = d.totals.resolved_all_time.toLocaleString();
+        document.getElementById('mh-decayed').textContent = d.totals.decayed_all_time.toLocaleString();
+        document.getElementById('mh-overdue').textContent = d.totals.overdue_now.toLocaleString();
+        document.getElementById('mh-aliases').textContent = d.totals.entity_aliases.toLocaleString();
+        document.getElementById('mh-usage').textContent =
+            `recall: ${d.usage.reaccessed.toLocaleString()} re-hit / ${d.usage.never_reaccessed.toLocaleString()} once`;
+        document.getElementById('mh-window-label').textContent = `(last ${d.window_days} days)`;
+
+        const emptyRow = (cols, msg) =>
+            `<tr><td colspan="${cols}" style="text-align:center; padding:1rem; color:var(--text-muted);">${msg}</td></tr>`;
+
+        const overdueBody = document.getElementById('mh-overdue-body');
+        overdueBody.innerHTML = d.overdue.length
+            ? d.overdue.map(o => `<tr>
+                <td>${mhEscape(o.patch_type)}</td>
+                <td title="${mhEscape(o.text)}">${mhEscape((o.text || '').slice(0, 90))}</td>
+                <td>${mhEscape(o.owner)}</td>
+                <td>${mhEscape(o.project)}</td>
+                <td>${mhEscape(o.deadline_date)}</td>
+                <td>${mhEscape(o.overdue_since || '—')}</td>
+                <td title="${mhEscape(o.user_id)}">${mhEscape((o.user_id || '').slice(0, 12))}</td>
+              </tr>`).join('')
+            : emptyRow(7, 'Nothing overdue — clean board.');
+
+        const lifecycleBody = document.getElementById('mh-lifecycle-body');
+        lifecycleBody.innerHTML = d.lifecycle_by_day.length
+            ? d.lifecycle_by_day.map(r => `<tr>
+                <td>${mhEscape(r.day)}</td><td>${r.resolved}</td><td>${r.decayed}</td>
+              </tr>`).join('')
+            : emptyRow(3, 'No archival activity in the window.');
+
+        const byTypeBody = document.getElementById('mh-bytype-body');
+        byTypeBody.innerHTML = d.archived_by_type.length
+            ? d.archived_by_type.map(r => `<tr>
+                <td>${mhEscape(r.patch_type)}</td><td>${r.resolved}</td><td>${r.decayed}</td>
+              </tr>`).join('')
+            : emptyRow(3, 'No archival activity in the window.');
+
+        const recalledBody = document.getElementById('mh-recalled-body');
+        recalledBody.innerHTML = d.top_recalled.length
+            ? d.top_recalled.map(r => `<tr>
+                <td>${r.access_count}</td>
+                <td>${mhEscape(r.patch_type)}</td>
+                <td title="${mhEscape(r.text)}">${mhEscape((r.text || '').slice(0, 90))}</td>
+                <td>${mhEscape(r.project)}</td>
+                <td>${mhEscape(r.last_accessed_at ? String(r.last_accessed_at).slice(0, 16).replace('T', ' ') : '—')}</td>
+                <td title="${mhEscape(r.user_id)}">${mhEscape((r.user_id || '').slice(0, 12))}</td>
+              </tr>`).join('')
+            : emptyRow(6, 'No recall activity yet.');
+    } catch (err) {
+        console.error('Memory health load failed:', err);
+        const overdueBody = document.getElementById('mh-overdue-body');
+        if (overdueBody) overdueBody.innerHTML =
+            `<tr><td colspan="7" style="text-align:center; padding:1rem; color:var(--danger, #f87171);">Failed to load: ${mhEscape(err.message)}</td></tr>`;
     }
 }

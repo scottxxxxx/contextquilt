@@ -78,6 +78,10 @@
                     <i class="fa-solid fa-plug"></i>
                     <span>Providers</span>
                 </a>
+                <a href="#" class="nav-item" data-view="memory">
+                    <i class="fa-solid fa-heart-pulse"></i>
+                    <span>Memory Health</span>
+                </a>
                 <a href="#" class="nav-item" data-view="developer">
                     <i class="fa-solid fa-key"></i>
                     <span>Application Access</span>
@@ -1017,6 +1021,58 @@
             </div>
 
             <!-- Settings -->
+            <!-- Memory Health -->
+            <div id="memory-view" class="view-container">
+                <div class="page-header">
+                    <h1>Memory Health</h1>
+                    <button class="sm-btn" onclick="initMemoryHealthView()"><i class="fa-solid fa-arrows-rotate"></i> Refresh</button>
+                </div>
+                <div class="kpi-grid">
+                    <div class="card kpi-card"><div class="kpi-icon green"><i class="fa-solid fa-layer-group"></i></div><div class="kpi-content"><h3>Active Patches</h3><div class="value" id="mh-active">--</div><div class="trend" id="mh-reobserved">--</div></div></div>
+                    <div class="card kpi-card"><div class="kpi-icon blue"><i class="fa-solid fa-circle-check"></i></div><div class="kpi-content"><h3>Resolved (all time)</h3><div class="value" id="mh-resolved">--</div><div class="trend">auto-close + tap-to-complete</div></div></div>
+                    <div class="card kpi-card"><div class="kpi-icon purple"><i class="fa-solid fa-hourglass-end"></i></div><div class="kpi-content"><h3>Decayed (all time)</h3><div class="value" id="mh-decayed">--</div><div class="trend">TTL archives</div></div></div>
+                    <div class="card kpi-card"><div class="kpi-icon orange"><i class="fa-solid fa-triangle-exclamation"></i></div><div class="kpi-content"><h3>Overdue Now</h3><div class="value" id="mh-overdue">--</div><div class="trend">open past deadline</div></div></div>
+                    <div class="card kpi-card"><div class="kpi-icon blue"><i class="fa-solid fa-tags"></i></div><div class="kpi-content"><h3>Entity Aliases</h3><div class="value" id="mh-aliases">--</div><div class="trend" id="mh-usage">--</div></div></div>
+                </div>
+
+                <div class="card" style="padding: 1.5rem; margin-top: 2rem;">
+                    <h2 style="margin-bottom: 1rem;"><i class="fa-solid fa-triangle-exclamation"></i> Overdue Board <span style="font-size:0.8rem; color:var(--text-muted);">(open commitments &amp; blockers past their deadline)</span></h2>
+                    <div class="table-responsive">
+                        <table class="data-table">
+                            <thead><tr><th>Type</th><th>Item</th><th>Owner</th><th>Project</th><th>Due</th><th>Overdue since</th><th>User</th></tr></thead>
+                            <tbody id="mh-overdue-body"><tr><td colspan="7" style="text-align:center; padding:1rem; color:var(--text-muted);">Loading…</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="card" style="padding: 1.5rem; margin-top: 2rem;">
+                    <h2 style="margin-bottom: 1rem;"><i class="fa-solid fa-clock-rotate-left"></i> Archival Activity <span style="font-size:0.8rem; color:var(--text-muted);" id="mh-window-label">(last 30 days)</span></h2>
+                    <div class="table-responsive" style="max-height: 320px; overflow-y:auto;">
+                        <table class="data-table">
+                            <thead><tr><th>Day</th><th>Resolved</th><th>Decayed</th></tr></thead>
+                            <tbody id="mh-lifecycle-body"><tr><td colspan="3" style="text-align:center; padding:1rem; color:var(--text-muted);">Loading…</td></tr></tbody>
+                        </table>
+                    </div>
+                    <h3 style="margin:1rem 0 0.5rem; font-size:1rem; color:var(--text-muted);">By patch type (same window)</h3>
+                    <div class="table-responsive">
+                        <table class="data-table">
+                            <thead><tr><th>Type</th><th>Resolved</th><th>Decayed</th></tr></thead>
+                            <tbody id="mh-bytype-body"><tr><td colspan="3" style="text-align:center; padding:1rem; color:var(--text-muted);">Loading…</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <div class="card" style="padding: 1.5rem; margin-top: 2rem;">
+                    <h2 style="margin-bottom: 1rem;"><i class="fa-solid fa-fire"></i> Most Recalled Patches</h2>
+                    <div class="table-responsive">
+                        <table class="data-table">
+                            <thead><tr><th>Hits</th><th>Type</th><th>Item</th><th>Project</th><th>Last accessed</th><th>User</th></tr></thead>
+                            <tbody id="mh-recalled-body"><tr><td colspan="6" style="text-align:center; padding:1rem; color:var(--text-muted);">Loading…</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
             <div id="settings-view" class="view-container">
                 <div class="page-header"><h1>Configuration</h1></div>
                 <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-bottom: 2rem;">
