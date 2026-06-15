@@ -1036,7 +1036,17 @@ class ColdPathWorker:
             raise SystemExit("CQ_LLM_API_KEY and CQ_LLM_BASE_URL are required. See env.example.")
 
         self.redis = redis.from_url(REDIS_URL, decode_responses=True)
-        self.db = await asyncpg.connect(DATABASE_URL)
+        # Connection POOL, not a single connection. The cold-path loops
+        # (deadline sweep, decay, backup watch, provider health) plus the
+        # main extraction path all run concurrently off self.db. A single
+        # asyncpg connection can't service concurrent operations — when two
+        # coroutines issue a query at the same moment (most visibly when all
+        # loops fire together at startup) asyncpg raises "another operation
+        # is in progress". A pool hands each concurrent caller its own
+        # connection. The worker uses no explicit transactions on self.db
+        # (every call is a standalone .execute/.fetch/.fetchrow/.fetchval),
+        # so per-statement autocommit semantics are identical to before.
+        self.db = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
         # Default LLM client (server's own keys). Built from env vars
         # via `_build_default_llm_client` so the worker can flip
         # between Anthropic-primary + OR-fallback (production default)
