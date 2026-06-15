@@ -23,7 +23,7 @@ import structlog
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from contextquilt.gateway.extraction import classify_fact
-from contextquilt.services.alerting import report_incident
+from contextquilt.services.alerting import report_incident, sweep_stale_incidents
 from contextquilt.services.attribution import validate_user_attribution_hint
 from contextquilt.services.extraction_prompts import (
     COMMUNICATION_PROFILE_SYSTEM,
@@ -2270,6 +2270,19 @@ class ColdPathWorker:
         Reads from backup_runs are bounded by the 1h lookback."""
         check_interval_s = 300  # 5 minutes
         while self.running:
+            # Resolve incidents that have gone quiet past the auto-resolve
+            # window. report_incident only sweeps when a NEW failure fires,
+            # so a healthy system would never close its last open incident
+            # without this periodic call (it would sit open indefinitely and
+            # misrepresent system health). Co-located here because this loop
+            # already runs unconditionally on a tight cadence. Wrapped so a
+            # sweep error can never crash-loop the worker.
+            try:
+                resolved = await sweep_stale_incidents(self.db)
+                if resolved:
+                    logger.info("incident_auto_resolved", count=resolved)
+            except Exception as e:
+                logger.warning("incident_sweep_error", error=str(e))
             try:
                 rows = await self.db.fetch(
                     """

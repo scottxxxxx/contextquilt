@@ -14,6 +14,7 @@ small transcript through /v1/memory, confirm the alert email lands.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 
 import pytest
@@ -24,6 +25,7 @@ from src.contextquilt.services.alerting import (
     IncidentReport,
     _fingerprint,
     _render_email_html,
+    sweep_stale_incidents,
 )
 
 
@@ -161,3 +163,50 @@ class TestIncidentReportDataclass:
             suppressed_reason="incident_already_open",
         )
         assert r.suppressed_reason == "incident_already_open"
+
+
+class _FakeConn:
+    """Minimal asyncpg-connection stand-in: records the execute call and
+    returns a canned status string, the way asyncpg's .execute does
+    ("UPDATE N"). Lets us unit-test the resolver query shape and the
+    count-parsing without a live Postgres."""
+
+    def __init__(self, status: str = "UPDATE 0"):
+        self._status = status
+        self.calls: list[tuple[str, tuple]] = []
+
+    async def execute(self, sql: str, *args):
+        self.calls.append((sql, args))
+        return self._status
+
+
+class TestSweepStaleIncidents:
+    """The periodic resolver. Its query shape and count-parsing are pure
+    enough to test with a fake conn; the actual row resolution is covered
+    by the e2e suite against live Postgres."""
+
+    def test_returns_parsed_resolved_count(self):
+        conn = _FakeConn("UPDATE 3")
+        assert asyncio.run(sweep_stale_incidents(conn)) == 3
+
+    def test_updates_open_incidents_filtered_by_quiet_window(self):
+        conn = _FakeConn("UPDATE 1")
+        asyncio.run(sweep_stale_incidents(conn))
+        sql, args = conn.calls[0]
+        assert "UPDATE alert_incidents" in sql
+        assert "resolved_at IS NULL" in sql
+        assert "last_seen_at <" in sql
+        # (resolved_at value, cutoff)
+        assert len(args) == 2
+
+    def test_cutoff_is_now_minus_auto_resolve_window(self):
+        conn = _FakeConn("UPDATE 0")
+        asyncio.run(sweep_stale_incidents(conn))
+        resolved_at_arg, cutoff_arg = conn.calls[0][1]
+        delta_min = (resolved_at_arg - cutoff_arg).total_seconds() / 60
+        assert round(delta_min) == INCIDENT_AUTO_RESOLVE_MINUTES
+
+    def test_unparseable_status_string_returns_zero(self):
+        # Defensive: a non-"UPDATE N" status must not raise into the loop.
+        conn = _FakeConn("WEIRD")
+        assert asyncio.run(sweep_stale_incidents(conn)) == 0
