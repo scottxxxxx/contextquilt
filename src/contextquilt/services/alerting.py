@@ -161,13 +161,21 @@ def _fingerprint(category: str, subject: str) -> str:
     return f"{category}:{subject}"
 
 
-async def _sweep_stale_incidents(conn: Any) -> int:
+async def sweep_stale_incidents(conn: Any) -> int:
     """Mark any open incident as resolved when its last_seen is older
     than INCIDENT_AUTO_RESOLVE_MINUTES. Returns count resolved.
 
-    Called at the top of report_incident so a re-fire after a quiet
-    window starts a fresh row (and re-emails). Cheap because the
-    partial unique index covers WHERE resolved_at IS NULL."""
+    Two callers:
+      1. report_incident, at the top, so a re-fire after a quiet
+         window starts a fresh row (and re-emails).
+      2. The worker's periodic resolver (backup_failure_watch_loop),
+         so a HEALTHY system still closes its last open incident.
+         report_incident only runs on failure, so without the periodic
+         call the most recent incident never resolves once the system
+         goes quiet — it just sits open forever, misrepresenting health.
+
+    Cheap because the partial unique index covers WHERE resolved_at IS
+    NULL."""
     cutoff = _utcnow() - timedelta(minutes=INCIDENT_AUTO_RESOLVE_MINUTES)
     result = await conn.execute(
         """
@@ -306,7 +314,7 @@ async def report_incident(
 
     # 1) Auto-resolve stale opens so a re-fire after quiet starts fresh.
     try:
-        await _sweep_stale_incidents(conn)
+        await sweep_stale_incidents(conn)
     except Exception as exc:
         logger.warning("alerting.sweep_failed reason=%s", exc)
 
