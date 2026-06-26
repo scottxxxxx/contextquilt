@@ -128,7 +128,7 @@ class EnrichResponse(BaseModel):
 class MemoryUpdate(BaseModel):
     """Memory update request (MCP Tool / Trace Log)"""
     user_id: str
-    interaction_type: str = Field(..., description="'chat_log', 'tool_call', or 'trace'")
+    interaction_type: str = Field(..., description="'chat_log', 'tool_call', 'trace', 'meeting_summary', or 'structured_patches'")
     agent_id: Optional[str] = None
     
     # For 'tool_call' (Active Learning)
@@ -151,6 +151,15 @@ class MemoryUpdate(BaseModel):
     # For 'query' (user query + optional LLM response)
     content: Optional[str] = None
     response: Optional[str] = None
+
+    # For 'structured_patches' (apps that already emit typed signals, e.g.
+    # Tech Rehearsal). Pre-typed patches go straight to the store, skipping
+    # LLM extraction; validated against the app's registered manifest. Raw
+    # transcript fields above (summary/content/messages) are rejected on this
+    # path — structured ingest carries only distilled, typed signals.
+    patches: Optional[List[Dict[str, Any]]] = None
+    entities: Optional[List[Dict[str, Any]]] = None
+    relationships: Optional[List[Dict[str, Any]]] = None
 
     # Optional timestamp for backdating (e.g. historical import)
     timestamp: Optional[str] = None
