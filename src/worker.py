@@ -96,6 +96,15 @@ MAX_PATCHES_PER_MEETING = 12  # Connected quilt model (replaces facts+actions fo
 MAX_ENTITIES_PER_MEETING = 10
 MAX_RELATIONSHIPS_PER_MEETING = 10
 
+# Longitudinal (time-series) patches: an incoming observation joins an
+# existing series when its descriptor field trigram-matches an active
+# same-type series for this subject (and rehearsal) above this bar — the
+# CQ-derived identity model (doc §12 Decision 1). Set at the "same fact"
+# trigram bar and biased high on purpose: on a near-miss we open a NEW
+# series rather than risk a wrong merge that would corrupt a trend line.
+# Embedding match supersedes trigram when pgvector lands.
+LONGITUDINAL_SERIES_MATCH_THRESHOLD = 0.6
+
 # Default persistence by patch type (used when registry lookup unavailable).
 # identity and experience have been retired per the v1 taxonomy decision —
 # see docs/memos/patch-taxonomy-simplification.md.
@@ -298,6 +307,12 @@ async def store_action_items(
     return stored
 
 
+def normalize_series_descriptor(text: str) -> str:
+    """Canonicalize a longitudinal series descriptor (the skill/metric name)
+    for identity matching: lowercase and collapse internal whitespace."""
+    return " ".join((text or "").lower().split())
+
+
 async def store_connected_patches(
     db,
     user_id: str,
@@ -311,6 +326,7 @@ async def store_connected_patches(
     origin_type: str | None = None,
     user_label: str | None = None,
     llm=None,
+    longitudinal_types: dict[str, str] | None = None,
 ):
     """
     Store typed, connected patches (Connected Quilt V2 model).
@@ -322,9 +338,17 @@ async def store_connected_patches(
     `llm` (optional, duck-typed .extract) enables semantic dedup: trigram
     gray-zone pairs are judged by one batched LLM call. Omitted/None →
     trigram-only dedup, exactly the pre-existing behavior.
+
+    `longitudinal_types` maps a patch_type → the value field naming its
+    series descriptor (e.g. {"skill_rating": "skill"}). For those types an
+    incoming patch is APPENDED as an observation to its matching series
+    instead of being dedup-collapsed, so a trajectory (Weak→Meets→Strong) is
+    preserved rather than overwritten. Empty/None (the SS path) → no type is
+    longitudinal and behavior is exactly as before.
     """
     if not patches:
         return 0
+    longitudinal_types = longitudinal_types or {}
 
     await db.execute(
         "INSERT INTO profiles (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
@@ -453,6 +477,130 @@ async def store_connected_patches(
         patch_lookup[(text.lower().strip(), patch_type)] = patch_id
         stored += 1
 
+    async def _append_observation(patch_id: str, value: dict) -> None:
+        """Append one point to a longitudinal series' history table.
+
+        The context_patches row keeps only the latest snapshot (for the
+        byte-stable recall hot path); patch_observations holds the full
+        trajectory that Review / trend queries read.
+        """
+        try:
+            src_app = str(uuid.UUID(app_id)) if app_id else None
+        except (ValueError, TypeError):
+            src_app = None  # legacy non-UUID app_id → no source_app FK
+        await db.execute(
+            """
+            INSERT INTO patch_observations
+                (patch_id, observed_at, value, origin_id, origin_type, source_app)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6::uuid)
+            """,
+            patch_id, created_at, json.dumps(value), origin_id, origin_type, src_app,
+        )
+
+    async def _insert_series_identity(patch_type: str, value: dict, text: str,
+                                      descriptor: str) -> str:
+        """Create the identity row for a NEW longitudinal series; return its
+        patch_id. Unlike _insert_new_patch, longitudinal rows always carry
+        their rehearsal (project/origin) context so a series is scoped to one
+        rehearsal. The worker's hardcoded `project_scoped_types` set is
+        SS-shaped and excludes app-specific longitudinal types; attaching the
+        context explicitly here is a contained workaround until project
+        scoping becomes manifest-driven (tracked as a follow-up).
+        """
+        nonlocal stored
+        patch_id = str(uuid.uuid4())
+        patch_name = f"series:{patch_type}:{descriptor}"[:255]
+        await db.execute(
+            """
+            INSERT INTO context_patches (
+                patch_id, patch_name, patch_type, value,
+                origin_mode, source_prompt, confidence, persistence,
+                project, project_id, origin_id, origin_type,
+                status, created_at, updated_at, last_observed_at
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            """,
+            patch_id, patch_name, patch_type, json.dumps(value),
+            "inferred", source_prompt, 0.8, DEFAULT_PERSISTENCE.get(patch_type, "sticky"),
+            project, project_id, origin_id, origin_type,
+            "active", created_at, created_at, created_at,
+        )
+        await db.execute(
+            "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
+            patch_id, subject_key,
+        )
+        await db.execute(
+            """
+            INSERT INTO patch_usage_metrics (patch_id, access_count, last_accessed_at, current_decay_score)
+            VALUES ($1, 1, $2, 1.0)
+            """,
+            patch_id, created_at,
+        )
+        if app_id:
+            try:
+                await db.execute(
+                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read, can_write, can_delete) VALUES ($1, $2::uuid, TRUE, TRUE, TRUE)",
+                    patch_id, app_id,
+                )
+            except Exception:
+                pass
+        patch_lookup[(text.lower().strip(), patch_type)] = patch_id
+        stored += 1
+        return patch_id
+
+    async def _store_longitudinal(patch: dict, patch_type: str, value: dict,
+                                  text: str, descriptor_field: str) -> None:
+        """Route one longitudinal patch: match it to an existing series and
+        APPEND the observation (never collapse), else open a new series.
+        Series identity is CQ-derived (doc §12 Decision 1): trigram match on
+        the descriptor field, scoped to this (subject, type, rehearsal).
+        """
+        descriptor = normalize_series_descriptor(str(value.get(descriptor_field, "")))
+        if not descriptor:
+            # No descriptor to key the series on — never drop the signal;
+            # store it as a plain patch so it is at least retained.
+            await _insert_new_patch(patch, patch_type, value, text)
+            return
+
+        match = await db.fetchrow(
+            """
+            SELECT cp.patch_id,
+                   SIMILARITY(LOWER(cp.value->>$2), LOWER($4)) AS sim
+            FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $1 AND cp.patch_type = $3
+              AND COALESCE(cp.status, 'active') = 'active'
+              AND cp.project_id IS NOT DISTINCT FROM $6
+              AND SIMILARITY(LOWER(cp.value->>$2), LOWER($4)) > $5
+            ORDER BY sim DESC
+            LIMIT 1
+            """,
+            subject_key, descriptor_field, patch_type, descriptor,
+            LONGITUDINAL_SERIES_MATCH_THRESHOLD, project_id,
+        )
+
+        if match:
+            identity_id = str(match["patch_id"])
+            await _append_observation(identity_id, value)
+            # Refresh the hot-path snapshot to the latest point; bump the
+            # freshness + usage anchors exactly as the dedup re-observe path.
+            await db.execute(
+                "UPDATE context_patches SET value = $1, updated_at = $2, last_observed_at = $2 WHERE patch_id = $3::uuid",
+                json.dumps(value), created_at, identity_id,
+            )
+            await db.execute(
+                "UPDATE patch_usage_metrics SET access_count = access_count + 1, last_accessed_at = $1 WHERE patch_id = $2::uuid",
+                created_at, identity_id,
+            )
+            patch_lookup[(text.lower().strip(), patch_type)] = identity_id
+            logger.debug("longitudinal_observation_appended", type=patch_type,
+                         descriptor=descriptor[:50], patch_id=identity_id,
+                         sim=float(match["sim"]))
+        else:
+            identity_id = await _insert_series_identity(patch_type, value, text, descriptor)
+            await _append_observation(identity_id, value)
+            logger.debug("longitudinal_series_created", type=patch_type,
+                         descriptor=descriptor[:50], patch_id=identity_id)
+
     # Gray-zone pairs deferred to one batched LLM judge call after the
     # loop: (patch, patch_type, value, text, existing_id, existing_text)
     gray_pending: list[tuple] = []
@@ -470,6 +618,14 @@ async def store_connected_patches(
             value = {"text": value}
         text = value.get("text", "")
         if not text:
+            continue
+
+        # Longitudinal (time-series) types append an observation instead of
+        # dedup-collapsing — a rating's history IS the value (doc §12 §3).
+        if patch_type in longitudinal_types:
+            await _store_longitudinal(
+                patch, patch_type, value, text, longitudinal_types[patch_type]
+            )
             continue
 
         # Deduplication, two tiers against active same-type patches:
@@ -1528,6 +1684,12 @@ class ColdPathWorker:
         if task_type == "tool_call":
             await self.handle_active_learning(payload)
             return
+        # Structured ingest (doc §12): pre-typed patches from apps that emit
+        # their own signals (e.g. Tech Rehearsal). Already final — never
+        # buffered for LLM consolidation like meeting_summary events are.
+        if task_type == "structured_patches":
+            await self.handle_structured_ingest(payload)
+            return
 
         # End-of-meeting full transcript — process immediately, never buffer.
         # (this IS the complete meeting, sent by ShoulderSurf at session end)
@@ -1844,6 +2006,171 @@ class ColdPathWorker:
             return
 
         await self.hydrate_cache(user_id)
+
+    async def handle_structured_ingest(self, payload: dict[str, Any]):
+        """Structured-ingest adapter (doc §12): store pre-typed patches from
+        apps that already emit typed signals (e.g. Tech Rehearsal), skipping
+        the LLM extraction path entirely. This is the sibling of the
+        extraction adapter (handle_meeting_summary) over the same sink.
+
+        Locked contract (doc §6):
+          - Privacy (D4): reject any transcript-shaped field; only
+            patches / entities / relationships are accepted.
+          - Validation (D3): validate the WHOLE batch against the app's
+            registered manifest pre-write; any violation rejects the batch
+            and writes nothing (atomic transaction).
+          - Longitudinal (D1): patch types flagged `longitudinal` in the
+            manifest append observations to a CQ-derived series instead of
+            dedup-collapsing.
+        """
+        user_id = payload.get("user_id")
+        app_id = payload.get("app_id")
+        if not user_id:
+            logger.warning("structured_ingest_no_user", app_id=app_id)
+            return
+
+        # D4 — privacy gate: structured mode never carries free-form capture.
+        forbidden = [k for k in ("summary", "content", "messages", "transcript")
+                     if payload.get(k)]
+        if forbidden:
+            logger.warning("structured_ingest_rejected_transcript_field",
+                           user_id=user_id, app_id=app_id, fields=forbidden)
+            return
+
+        patches = payload.get("patches") or []
+        if not patches:
+            logger.info("structured_ingest_empty", user_id=user_id, app_id=app_id)
+            return
+
+        # Manifest is mandatory — validation against it is the whole point of
+        # this path, so no manifest means we cannot accept the batch.
+        manifest = None
+        if app_id:
+            try:
+                row = await self.db.fetchrow(
+                    "SELECT manifest FROM app_schemas WHERE app_id = $1::uuid ORDER BY version DESC LIMIT 1",
+                    app_id,
+                )
+                if row:
+                    manifest = row["manifest"]
+                    if isinstance(manifest, str):
+                        manifest = json.loads(manifest)
+            except Exception as e:
+                logger.warning("structured_ingest_manifest_failed",
+                               user_id=user_id, app_id=app_id, error=str(e))
+        if not manifest:
+            logger.warning("structured_ingest_no_manifest", user_id=user_id, app_id=app_id)
+            return
+
+        patch_type_specs = {
+            pt["domain_type"]: pt
+            for pt in (manifest.get("patch_types") or [])
+            if isinstance(pt, dict) and pt.get("domain_type")
+        }
+        longitudinal_types = {
+            pt["domain_type"]: (pt.get("series_descriptor_field") or "text")
+            for pt in patch_type_specs.values()
+            if pt.get("longitudinal")
+        }
+        connection_labels = manifest.get("connection_labels")
+
+        # D3 — validate the whole batch pre-write; collect every problem so
+        # the client sees all of them at once, then reject if any exist.
+        errors: list[str] = []
+        for i, patch in enumerate(patches):
+            if not isinstance(patch, dict):
+                errors.append(f"patch[{i}]: not an object")
+                continue
+            ptype = patch.get("type")
+            spec = patch_type_specs.get(ptype)
+            if spec is None:
+                errors.append(f"patch[{i}]: unknown type {ptype!r}")
+                continue
+            value = patch.get("value")
+            if isinstance(value, str):
+                value = {"text": value}
+            if not isinstance(value, dict):
+                errors.append(f"patch[{i}] ({ptype}): value must be an object or string")
+                continue
+            required = (
+                spec.get("required_fields")
+                or (spec.get("extraction_rules") or {}).get("required_fields")
+                or []
+            )
+            for field in required:
+                if not value.get(field):
+                    errors.append(f"patch[{i}] ({ptype}): missing required field {field!r}")
+            # A longitudinal patch must carry its series descriptor — without
+            # it there is no trajectory to join.
+            if ptype in longitudinal_types and not value.get(longitudinal_types[ptype]):
+                errors.append(
+                    f"patch[{i}] ({ptype}): missing series descriptor field "
+                    f"{longitudinal_types[ptype]!r}"
+                )
+
+        # Connection vocabulary: reuse the extraction enforcer. It flips
+        # reversed edges in place (a convenience we keep), but any DROP is an
+        # invalid edge — and for an authoritative client that is a batch
+        # error, not a silent loss.
+        content = {"patches": patches}
+        enforce_connection_vocabulary(content, connection_labels)
+        cv = content.get("_connection_vocabulary_enforced") or {}
+        if cv.get("dropped"):
+            errors.append(
+                f"connections: {cv['dropped']} invalid edge(s) {cv.get('dropped_detail', [])}"
+            )
+
+        if errors:
+            logger.warning("structured_ingest_rejected",
+                           user_id=user_id, app_id=app_id,
+                           patch_count=len(patches), errors=errors[:20])
+            return
+
+        # Passed validation — assemble write context and commit atomically.
+        metadata = payload.get("metadata") or {}
+        timestamp = payload.get("timestamp")
+        project = metadata.get("project")
+        project_id = metadata.get("project_id")
+        origin_id = metadata.get("origin_id")
+        origin_type = metadata.get("origin_type")
+        entities = payload.get("entities") or []
+        relationships = payload.get("relationships") or []
+
+        # D3 — atomic: one connection + transaction so a failure mid-write
+        # leaves no partial graph or half-written trajectory. self.db is a
+        # pool, so acquire a single connection and pass IT to every store
+        # call (passing the pool would spread writes across connections,
+        # defeating the transaction).
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                if project_id and project:
+                    try:
+                        await conn.execute(
+                            """INSERT INTO projects (project_id, user_id, name)
+                            VALUES ($1, $2, $3)
+                            ON CONFLICT (project_id) DO UPDATE SET updated_at = NOW()""",
+                            project_id, user_id, project,
+                        )
+                    except Exception:
+                        pass  # projects table may not exist yet
+                patches_stored = await store_connected_patches(
+                    conn, user_id, patches, "structured_ingest", app_id, timestamp,
+                    project, project_id, origin_id, origin_type,
+                    longitudinal_types=longitudinal_types,
+                )
+                entities_stored = await store_entities(
+                    conn, self.redis, user_id, entities, metadata
+                )
+                relationships_stored = await store_relationships(
+                    conn, user_id, relationships, metadata
+                )
+
+        logger.info("structured_ingest_complete",
+                    user_id=user_id, app_id=app_id,
+                    patches_stored=patches_stored,
+                    entities_stored=entities_stored,
+                    relationships_stored=relationships_stored,
+                    longitudinal_types=list(longitudinal_types.keys()))
 
     async def handle_meeting_summary(self, payload: dict[str, Any]):
         """

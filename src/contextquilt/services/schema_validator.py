@@ -27,15 +27,28 @@ VALID_CONNECTION_ROLES = {
 
 SUPPORTED_FACET_ENUM_VERSIONS = {1}
 
+# Adapter that turns app input into patch dicts. "extraction" (default) runs
+# the LLM extraction pipeline over a transcript; "structured" accepts
+# pre-typed patches directly (doc §12). Absent → extraction, for SS parity.
+VALID_INGEST_MODES = {"extraction", "structured"}
+
 TOP_LEVEL_REQUIRED = {"app_id", "version", "facet_enum_version", "patch_types", "connection_labels"}
 TOP_LEVEL_OPTIONAL = {
     "display_name", "description", "design_principles",
     "origin_types", "entity_types",
     "extraction_prompt_guidance", "extraction_prompt_override",
+    # Structured-ingest manifest capabilities (doc §12). Absent → SS-shaped.
+    "ingest_mode", "success_signal",
 }
 
 PATCH_TYPE_REQUIRED = {"domain_type", "facet", "permanence", "display_name", "description", "value_shape"}
-PATCH_TYPE_OPTIONAL = {"completable", "project_scoped", "self_only", "extraction_rules"}
+PATCH_TYPE_OPTIONAL = {
+    "completable", "project_scoped", "self_only", "extraction_rules",
+    # Longitudinal (time-series) structured types declare their series
+    # descriptor and required value fields at the patch-type level — there is
+    # no extraction_rules block in a structured manifest (doc §2, §3.2).
+    "longitudinal", "series_descriptor_field", "required_fields",
+}
 
 LABEL_REQUIRED = {"label", "role", "from_types", "to_types", "description"}
 
@@ -71,6 +84,12 @@ def validate_manifest(manifest: Dict[str, Any], app_id: str) -> Tuple[bool, List
     if facet_v not in SUPPORTED_FACET_ENUM_VERSIONS:
         errors.append(
             f"Manifest facet_enum_version must be one of {sorted(SUPPORTED_FACET_ENUM_VERSIONS)}; got {facet_v!r}."
+        )
+
+    ingest_mode = manifest.get("ingest_mode")
+    if ingest_mode is not None and ingest_mode not in VALID_INGEST_MODES:
+        errors.append(
+            f"Manifest ingest_mode must be one of {sorted(VALID_INGEST_MODES)}; got {ingest_mode!r}."
         )
 
     # Patch types
@@ -164,9 +183,41 @@ def _validate_patch_type(pt: Any, idx: int) -> List[str]:
         errors.append(f"{prefix}.value_shape must be a non-empty object.")
 
     # Optional typed fields
-    for bool_field in ("completable", "project_scoped", "self_only"):
+    for bool_field in ("completable", "project_scoped", "self_only", "longitudinal"):
         if bool_field in pt and not isinstance(pt[bool_field], bool):
             errors.append(f"{prefix}.{bool_field} must be a boolean.")
+
+    # Structured-mode integrity: required_fields and series_descriptor_field
+    # must name keys that actually exist in value_shape, or ingest validation
+    # would reference a field the manifest never declared.
+    shape_keys = set(value_shape.keys()) if isinstance(value_shape, dict) else set()
+
+    required_fields = pt.get("required_fields")
+    if required_fields is not None:
+        if not isinstance(required_fields, list) or not all(isinstance(f, str) for f in required_fields):
+            errors.append(f"{prefix}.required_fields must be an array of strings.")
+        else:
+            missing = [f for f in required_fields if f not in shape_keys]
+            if missing:
+                errors.append(
+                    f"{prefix}.required_fields references fields not in value_shape: {missing}."
+                )
+
+    descriptor = pt.get("series_descriptor_field")
+    if descriptor is not None:
+        if not isinstance(descriptor, str) or not descriptor.strip():
+            errors.append(f"{prefix}.series_descriptor_field must be a non-empty string.")
+        elif descriptor not in shape_keys:
+            errors.append(
+                f"{prefix}.series_descriptor_field {descriptor!r} is not a value_shape field."
+            )
+
+    # A longitudinal type groups observations into a trajectory by its series
+    # descriptor — without one there is nothing to group on.
+    if pt.get("longitudinal") is True and not pt.get("series_descriptor_field"):
+        errors.append(
+            f"{prefix}.longitudinal types must declare a series_descriptor_field."
+        )
 
     return errors
 

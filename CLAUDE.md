@@ -66,7 +66,9 @@ ContextQuilt is consumed by ShoulderSurf (iOS) through the GhostPour gateway. **
 ```bash
 cp .env.example .env && docker-compose up -d   # API :8000, docs at /docs
 .venv/bin/python -m pytest tests/unit/ -q      # unit suite (asyncpg/fastapi absent locally:
-#   ignore test_run_migrations, test_split_compound_person_patches, test_update_key)
+#   ignore test_run_migrations, test_split_compound_person_patches, test_update_key,
+#   test_structured_ingest_db — the last needs TEST_DATABASE_URL + a live PG; run it in
+#   docker/CI: TEST_DATABASE_URL=... pytest tests/unit/test_structured_ingest_db.py)
 ```
 
 ```
