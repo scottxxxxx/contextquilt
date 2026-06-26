@@ -264,6 +264,77 @@ def test_extraction_prompt_override_must_be_string(minimal_valid_manifest):
 
 
 # ============================================================
+# Structured-ingest manifest capabilities (doc §12)
+# ============================================================
+
+
+def test_ingest_mode_structured_accepted(minimal_valid_manifest):
+    minimal_valid_manifest["ingest_mode"] = "structured"
+    ok, errors = validate_manifest(minimal_valid_manifest, "test-app")
+    assert ok, errors
+
+
+def test_ingest_mode_invalid_rejected(minimal_valid_manifest):
+    minimal_valid_manifest["ingest_mode"] = "telepathy"
+    ok, errors = validate_manifest(minimal_valid_manifest, "test-app")
+    assert not ok
+    assert any("ingest_mode" in e for e in errors)
+
+
+def test_success_signal_accepted(minimal_valid_manifest):
+    minimal_valid_manifest["success_signal"] = {"events": ["gap_closed"]}
+    ok, errors = validate_manifest(minimal_valid_manifest, "test-app")
+    assert ok, errors
+
+
+def test_longitudinal_type_with_descriptor_validates(minimal_valid_manifest):
+    pt = minimal_valid_manifest["patch_types"][0]
+    pt["value_shape"] = {"text": "string", "skill": "string"}
+    pt["longitudinal"] = True
+    pt["series_descriptor_field"] = "skill"
+    pt["required_fields"] = ["text", "skill"]
+    ok, errors = validate_manifest(minimal_valid_manifest, "test-app")
+    assert ok, errors
+
+
+def test_longitudinal_requires_series_descriptor(minimal_valid_manifest):
+    minimal_valid_manifest["patch_types"][0]["longitudinal"] = True
+    ok, errors = validate_manifest(minimal_valid_manifest, "test-app")
+    assert not ok
+    assert any("series_descriptor_field" in e for e in errors)
+
+
+def test_longitudinal_must_be_bool(minimal_valid_manifest):
+    minimal_valid_manifest["patch_types"][0]["longitudinal"] = "yes"
+    ok, errors = validate_manifest(minimal_valid_manifest, "test-app")
+    assert not ok
+    assert any("longitudinal" in e for e in errors)
+
+
+def test_series_descriptor_must_be_value_shape_field(minimal_valid_manifest):
+    pt = minimal_valid_manifest["patch_types"][0]
+    pt["longitudinal"] = True
+    pt["series_descriptor_field"] = "skill"  # not in value_shape {text}
+    ok, errors = validate_manifest(minimal_valid_manifest, "test-app")
+    assert not ok
+    assert any("series_descriptor_field" in e and "value_shape" in e for e in errors)
+
+
+def test_required_fields_must_be_value_shape_fields(minimal_valid_manifest):
+    minimal_valid_manifest["patch_types"][0]["required_fields"] = ["text", "nope"]
+    ok, errors = validate_manifest(minimal_valid_manifest, "test-app")
+    assert not ok
+    assert any("required_fields" in e and "nope" in e for e in errors)
+
+
+def test_required_fields_must_be_array(minimal_valid_manifest):
+    minimal_valid_manifest["patch_types"][0]["required_fields"] = "text"
+    ok, errors = validate_manifest(minimal_valid_manifest, "test-app")
+    assert not ok
+    assert any("required_fields" in e for e in errors)
+
+
+# ============================================================
 # Real-world smoke — validate the SS manifest fixture
 # ============================================================
 
@@ -285,3 +356,22 @@ def test_shouldersurf_manifest_validates():
 
     ok, errors = validate_manifest(manifest, manifest["app_id"])
     assert ok, f"ShoulderSurf manifest failed validation: {errors}"
+
+
+def test_techrehearsal_manifest_validates():
+    """The structured-ingest TR manifest fixture must register cleanly."""
+    import json
+    from pathlib import Path
+
+    fixture_path = (
+        Path(__file__).resolve().parent.parent.parent
+        / "init-db"
+        / "25_techrehearsal_schema.json"
+    )
+    if not fixture_path.exists():
+        pytest.skip(f"TR manifest fixture not found at {fixture_path}")
+    with open(fixture_path) as f:
+        manifest = json.load(f)
+
+    ok, errors = validate_manifest(manifest, manifest["app_id"])
+    assert ok, f"Tech Rehearsal manifest failed validation: {errors}"

@@ -229,6 +229,15 @@ Non-longitudinal structured patches (`gap`, `story`, `coaching_note`) go through
 ## 4. Step-1 deliverables (checklist)
 
 > **Status (2026-06-23):** items 1–5 implemented in the working tree (uncommitted). #1 `init-db/24_patch_observations.sql`; #5 the `longitudinal_types` branch in `store_connected_patches`; #2 `MemoryUpdate` carrier fields (`patches`/`entities`/`relationships`) + `structured_patches` interaction type; #3 `process_task` dispatch branch (immediate, never buffered); #4 `handle_structured_ingest()` — privacy gate, mandatory-manifest load, whole-batch pre-write validation (type ∈ manifest, required fields, longitudinal descriptor present, `enforce_connection_vocabulary` drop = reject), atomic write via one acquired connection + transaction. Both files compile; unit suite green (380 passed). Remaining: #6 TR manifest + `register_tr_schema.py`, #7 DB-harness tests.
+>
+> **Status (2026-06-25):** item #6 done. `init-db/25_techrehearsal_schema.json` (6 patch types, 2 longitudinal, 3 entities, `ingest_mode: structured`) + `scripts/register_tr_schema.py` (clone of the SS register script, `TR_APP_ID` env). Three corrections surfaced while wiring TR as the second manifest — exactly the SS-overfit checks this manifest was meant to flush out:
+> 1. **Validator gap (had to fix).** `schema_validator.py` does strict unknown-key rejection, so `ingest_mode` / `success_signal` (top-level) and `longitudinal` / `series_descriptor_field` / `required_fields` (patch-type) were never in its allow-lists — registration would have 400'd. Extended the validator to accept and structurally check them (`ingest_mode ∈ {extraction,structured}`; longitudinal ⇒ `series_descriptor_field`; descriptor + required_fields must name real `value_shape` keys). 11 new tests; SS manifest still validates.
+> 2. **`text` is mandatory on every type.** The shared sink (`store_connected_patches`, worker.py:619-621) does `if not text: continue` *before* the longitudinal branch — a rating with no `value.text` would pass `handle_structured_ingest` validation and then silently vanish. So `skill_rating`/`behavioral_baseline` list `text` in `required_fields`, not just the descriptor. Per §2's illustrative manifest this was missing.
+> 3. **`about → job_role` dropped.** Connection from/to types must be declared *patch* types; `job_role` is an entity, so that edge fails the validator's referential check. Dropped it (consistent with §5's "TR entity index is intentionally thin in Step 1"); signal↔role ties wait for the relationships graph / semantic retrieval.
+>
+> Also note: `handle_structured_ingest` rejects falsy required values (`if not value.get(field)`), so `rating_ordinal` must be **1-indexed** (Weak=1) — a 0 ordinal would be refused. Documented in the manifest. Unit suite green (390 passed). Remaining: #7 DB-harness tests.
+>
+> **Status (2026-06-25, #7):** `tests/unit/test_structured_ingest_db.py` authored — 5 `TEST_DATABASE_URL`-gated integration tests: longitudinal append (2 same-skill ratings → 1 identity + 2 `patch_observations`, latest snapshot), distinct-skill series stay separate, privacy-gate reject (transcript field → 0 written), invalid-patch whole-batch reject (0 written), and a happy-path `handle_structured_ingest` (rehearsal + 2 ratings + gap → 3 patches, 2 observations). Applies the real `init-db` schema via `run_migrations` into a throwaway DB; each test provisions its own app + registers the TR manifest. **Not yet executed** — local box has no Docker/asyncpg/PG; needs a CI/docker run (`TEST_DATABASE_URL=… pytest tests/unit/test_structured_ingest_db.py`). Added to the CLAUDE.md local-ignore list (imports asyncpg at module load → collection error in the bare suite). With that, **Step 1 is code-complete pending the CI DB run.**
 
 
 1. `init-db/24_patch_observations.sql` — table + index (§3.3).
@@ -236,8 +245,8 @@ Non-longitudinal structured patches (`gap`, `story`, `coaching_note`) go through
 3. `process_task`: add `structured_patches` dispatch branch (§1.2).
 4. `handle_structured_ingest()`: privacy gate + manifest load + pre-write structural validation (reusing `enforce_connection_vocabulary`) + atomic batch write to the sink (§1.4).
 5. `store_connected_patches(..., longitudinal_types=None)`: add the series identity + observation-append branch (§3.4).
-6. `init-db/`-registered TR manifest + a `register_tr_schema.py` (clone of `register_ss_schema.py`).
-7. Tests: unit for the structural validator and the longitudinal append (assert two ratings → one identity row + two observation rows, not a collapsed merge); one end-to-end TR ingest test (safe — sole user is the dev).
+6. `init-db/`-registered TR manifest + a `register_tr_schema.py` (clone of `register_ss_schema.py`). **DONE** — also required extending `schema_validator.py` to allow the structured-mode manifest keys (see 2026-06-25 status note).
+7. Tests: unit for the structural validator and the longitudinal append (assert two ratings → one identity row + two observation rows, not a collapsed merge); one end-to-end TR ingest test (safe — sole user is the dev). **AUTHORED** — `tests/unit/test_structured_ingest_db.py` (5 `TEST_DATABASE_URL`-gated tests). Pending a CI/docker DB run (no local PG); see 2026-06-25 status note.
 
 ## 5. Non-goals / follow-ons
 
