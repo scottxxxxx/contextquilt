@@ -1,0 +1,148 @@
+{
+  "app_id": "techrehearsal",
+  "version": 1,
+  "facet_enum_version": 1,
+  "display_name": "Tech Rehearsal",
+  "description": "Practice for high-stakes conversations (interview flagship; negotiation, hard personal talks, pitches). Emits already-structured coaching signals and ingests them directly via the structured-ingest adapter — no transcript extraction, no LLM on the write path. This is CQ's deliberate second manifest: the first real test that the platform isn't secretly ShoulderSurf-shaped.",
+
+  "ingest_mode": "structured",
+
+  "design_principles": [
+    "Structured mode: TR sends pre-typed patches; CQ validates and stores them losslessly. The LLM extraction pipeline and its sanitizer chain are never invoked.",
+    "Trajectory over snapshot: a skill rating's value is its history (Weak -> Meets -> Strong). Longitudinal types append observations instead of dedup-collapsing.",
+    "Privacy by contract: only patches / entities / relationships are accepted. No audio, video, or transcript ever reaches CQ — only distilled, app-authored signals inside declared value_shapes.",
+    "Every value carries `text`: the shared patch sink keys dedup and display on `value.text`, so every TR patch type requires it (a patch with no text is silently dropped at the sink)."
+  ],
+
+  "origin_types": [
+    "mock_run",
+    "live_run",
+    "clarify_session"
+  ],
+
+  "entity_types": [
+    {
+      "entity_type": "person",
+      "display_name": "Counterpart",
+      "description": "The other party in the rehearsed conversation — interviewer, hiring manager, negotiation counterpart, or the person on the far side of a hard personal talk. A recall anchor.",
+      "indexed": true
+    },
+    {
+      "entity_type": "company",
+      "display_name": "Organization",
+      "description": "A named organization tied to the rehearsal — the company being interviewed with, the counterparty's employer.",
+      "indexed": true
+    },
+    {
+      "entity_type": "job_role",
+      "display_name": "Role",
+      "description": "The role or position being rehearsed for (e.g. 'Staff Backend Engineer'). A recall anchor for prep context. Note: TR's entity index is intentionally thin in Step 1 — semantic retrieval lands later.",
+      "indexed": true
+    }
+  ],
+
+  "patch_types": [
+    {
+      "domain_type": "rehearsal",
+      "facet": "Connection",
+      "permanence": "quarter",
+      "display_name": "Rehearsal",
+      "description": "Top-level container: one job or conversation being rehearsed across successive runs. Plays the CQ 'project' role — skill ratings, gaps, and coaching notes belong inside a rehearsal.",
+      "value_shape": { "text": "string", "scenario": "string?", "status": "string?" },
+      "completable": false,
+      "project_scoped": false,
+      "self_only": false,
+      "required_fields": ["text"]
+    },
+    {
+      "domain_type": "skill_rating",
+      "facet": "Episode",
+      "permanence": "year",
+      "display_name": "Skill Rating",
+      "description": "A QuestionRating captured on a single run, tracked over time. The series IS the value: 'conflict question: Weak' on run 1 and 'conflict question: Strong' on run 5 are two points on a trajectory, not a fact to overwrite. CQ groups observations into a series by semantically matching `skill` (the descriptor), not the changing rating word. `rating_ordinal` must be 1-indexed (Weak=1, Meets=2, Strong=3); the sink rejects falsy required values, so a 0 ordinal would be refused.",
+      "value_shape": {
+        "text": "string",
+        "skill": "string",
+        "rating": "string",
+        "rating_ordinal": "number",
+        "scale": "string?",
+        "run_id": "string?"
+      },
+      "completable": false,
+      "project_scoped": true,
+      "self_only": true,
+      "longitudinal": true,
+      "series_descriptor_field": "skill",
+      "required_fields": ["text", "skill", "rating", "rating_ordinal"]
+    },
+    {
+      "domain_type": "gap",
+      "facet": "Episode",
+      "permanence": "quarter",
+      "display_name": "Gap",
+      "description": "A GapAnalysis result — a missing capability the user has not yet demonstrated ('no failure story yet'). An open item with a flagged/closed lifecycle that reuses the commitment/blocker `complete` + overdue machinery. User-scoped by default so a gap surfaces across jobs; may optionally `belongs_to` a rehearsal when it is job-specific.",
+      "value_shape": { "text": "string", "gap_kind": "string?", "first_flagged": "string?" },
+      "completable": true,
+      "project_scoped": false,
+      "self_only": true,
+      "required_fields": ["text"]
+    },
+    {
+      "domain_type": "story",
+      "facet": "Affinity",
+      "permanence": "decade",
+      "display_name": "Story",
+      "description": "A StoryEntry from the user's story bank — a reusable anecdote (e.g. a STAR story). User-scoped: spans jobs and surfaces in both prep and live rehearsal.",
+      "value_shape": { "text": "string", "name": "string?", "works_for": "string?", "missing": "string?" },
+      "completable": false,
+      "project_scoped": false,
+      "self_only": true,
+      "required_fields": ["text"]
+    },
+    {
+      "domain_type": "behavioral_baseline",
+      "facet": "Attribute",
+      "permanence": "year",
+      "display_name": "Behavioral Baseline",
+      "description": "A BehavioralAnalysis metric (filler density, response latency variance, delivery flags) tracked over runs to surface drift or improvement. Structured metadata only — no audio or video ever leaves the device. Longitudinal, keyed on `metric`. `value` must be non-zero where it is the required numeric (the sink rejects falsy required fields).",
+      "value_shape": { "text": "string", "metric": "string", "value": "number", "unit": "string?" },
+      "completable": false,
+      "project_scoped": false,
+      "self_only": true,
+      "longitudinal": true,
+      "series_descriptor_field": "metric",
+      "required_fields": ["text", "metric", "value"]
+    },
+    {
+      "domain_type": "coaching_note",
+      "facet": "Episode",
+      "permanence": "month",
+      "display_name": "Coaching Note",
+      "description": "The single highest-leverage change for the next run. Belongs to a rehearsal and may `addresses` the specific weak skill or open gap it targets, so recall can pair 'what to fix' with 'the fix'.",
+      "value_shape": { "text": "string", "run_id": "string?" },
+      "completable": false,
+      "project_scoped": true,
+      "self_only": true,
+      "required_fields": ["text"]
+    }
+  ],
+
+  "connection_labels": [
+    {
+      "label": "belongs_to",
+      "role": "parent",
+      "from_types": ["skill_rating", "gap", "coaching_note"],
+      "to_types": ["rehearsal"],
+      "description": "Signal belongs to a specific rehearsal (job). Archival cascades to children. `gap` is user-scoped by default and uses this only when the gap is job-specific."
+    },
+    {
+      "label": "addresses",
+      "role": "informs",
+      "from_types": ["coaching_note"],
+      "to_types": ["skill_rating", "gap"],
+      "description": "A coaching note targets a specific weak skill rating or open gap — lets recall pair the diagnosis with the prescribed fix."
+    }
+  ],
+
+  "success_signal": { "events": ["gap_closed", "rating_improved"] }
+}
