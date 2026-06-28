@@ -48,7 +48,7 @@ def _load_by_path(mod_name: str, path: Path):
 
 run_migrations = _load_by_path("run_migrations", REPO_ROOT / "scripts" / "run_migrations.py")
 worker_mod = _load_by_path("worker", REPO_ROOT / "src" / "worker.py")
-Worker = worker_mod.Worker
+Worker = worker_mod.ColdPathWorker
 store_connected_patches = worker_mod.store_connected_patches
 
 
