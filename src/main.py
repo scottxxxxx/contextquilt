@@ -46,6 +46,11 @@ from contextquilt.services.recall_formatter import (
     format_category_grouped,
     resolve_token_budget,
 )
+from contextquilt.services.recall_signals import (
+    build_signal_lines,
+    extract_unmatched_mentions,
+    memory_signals_enabled,
+)
 
 import asyncpg
 import uuid
@@ -177,7 +182,7 @@ class RecallRequest(BaseModel):
     """Request to recall relevant context from the graph"""
     user_id: str = Field(..., description="User ID")
     text: str = Field(..., description="Query or transcript text to match entities against")
-    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional hints: project_id/project (scope), locale (grouped-mode labels), token_budget (int, flat-mode context size, default 700, clamped 100-2000)")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional hints: project_id/project (scope), locale (grouped-mode labels), token_budget (int, flat-mode context size, default 700, clamped 100-2000), memory_signals (truthy: append explicit metamemory gap lines to the context block)")
     max_hops: Optional[int] = Field(default=2, description="Graph traversal depth")
     output_format: Optional[str] = Field(
         default="flat",
@@ -638,7 +643,27 @@ async def recall_context(
     recall_project = request.metadata.get("project") if request.metadata else None
     has_project_scope = bool(recall_project_id or recall_project)
 
+    signals_enabled = memory_signals_enabled(request.metadata)
+
     if not matched_names and not has_project_scope:
+        # Metamemory (opt-in): an empty result is the most dangerous
+        # place to stay silent — the downstream LLM fills the silence
+        # with confabulated context. Say "checked, nothing there"
+        # explicitly instead. Not render-cached, same as the other
+        # empty-ish bodies: cheap to recompute, and we don't want a
+        # transient gap pinned for the cache TTL.
+        if signals_enabled:
+            signal_lines = build_signal_lines(
+                extract_unmatched_mentions(request.text, set(known_entities or ())),
+                nothing_matched=True,
+            )
+            timings["total"] = round((time.monotonic() - t0) * 1000, 2)
+            return RecallResponse(
+                context="\n".join(signal_lines),
+                matched_entities=[],
+                patch_count=0,
+                timing_ms=timings,
+            )
         return RecallResponse(context="", matched_entities=[], patch_count=0, timing_ms=timings)
 
     # Step 2 & 3: entity rows + graph traversal — only meaningful when we
@@ -711,7 +736,7 @@ async def recall_context(
         fact_rows = await db_pool.fetch(
             """
             SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
-                   cp.created_at, cp.last_observed_at
+                   cp.created_at, cp.last_observed_at, cp.project_id
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
@@ -727,7 +752,7 @@ async def recall_context(
         fact_rows = await db_pool.fetch(
             """
             SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
-                   cp.created_at, cp.last_observed_at
+                   cp.created_at, cp.last_observed_at, cp.project
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
@@ -759,6 +784,7 @@ async def recall_context(
 
     # Step 4b: Traverse patch connections from project patches (Connected Quilt V2)
     connected_rows = []
+    project_patch = None
     if recall_project_id or recall_project:
         if recall_project_id:
             project_patch = await db_pool.fetchrow(
@@ -851,6 +877,34 @@ async def recall_context(
     # Rank all patches against the query first.
     scored = score_patches(all_patches, request.text, matched_names)
 
+    # Metamemory signals (opt-in): explicit gap lines appended below the
+    # block. Deterministic from (text, entity index, scope), so they are
+    # as byte-stable as the rest of the render; metadata.memory_signals
+    # is part of the render-cache key, so flagged and unflagged callers
+    # never share a cached body.
+    signal_lines: List[str] = []
+    if signals_enabled:
+        # "No stored project memory" must mean exactly that: no project
+        # patch, no project-scoped rows, no overdue completables. A
+        # project can hold commitments without a project-type patch, so
+        # project_patch alone is not evidence of absence.
+        project_scope_missing = False
+        if has_project_scope and project_patch is None and not overdue_rows and not connected_rows:
+            if recall_project_id:
+                scoped_hit = any(
+                    r["project_id"] is not None and str(r["project_id"]) == str(recall_project_id)
+                    for r in fact_rows
+                )
+            else:
+                scoped_hit = any(r["project"] == recall_project for r in fact_rows)
+            project_scope_missing = not scoped_hit
+        signal_lines = build_signal_lines(
+            extract_unmatched_mentions(request.text, set(known_entities or ())),
+            project_scope_label=recall_project or recall_project_id,
+            project_scope_missing=project_scope_missing,
+        )
+    signal_block = "\n".join(signal_lines)
+
     # Cap for flat output — avoids runaway context blocks for users
     # with large quilts.
     flat_cap = request.max_patches or 15
@@ -871,14 +925,20 @@ async def recall_context(
             # of the render-cache key above — two budgets never share a
             # cached body.
             token_budget = resolve_token_budget(request.metadata)
+            # Signal lines ride inside the same token budget — reserve
+            # their length so patches + signals together stay under it.
+            signal_reserve = len(signal_block) + 2 if signal_block else 0
             context = format_flat_ranked(
                 scored_for_output, entity_rows, rel_rows,
-                max_chars=token_budget * CHARS_PER_TOKEN,
+                max_chars=token_budget * CHARS_PER_TOKEN - signal_reserve,
             )
         except Exception:
             # Emergency fallback: empty string, the endpoint still returns
             # matched entities and patch ids so callers aren't blocked.
             context = ""
+
+    if signal_block:
+        context = f"{context}\n\n{signal_block}" if context else signal_block
 
     # Look up communication profile and format as a natural language hint.
     # The calling gateway decides whether to inject this (e.g., only for chat modes).
