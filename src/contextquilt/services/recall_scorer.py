@@ -18,7 +18,7 @@ import json
 import math
 import re
 from datetime import date, datetime, timezone
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 # Type priority — higher means "more likely to be relevant at recall time".
@@ -68,6 +68,12 @@ FRESHNESS_FLOOR = 0.30
 # as the freshness multiplier, so the boost flips only at UTC midnight
 # (prompt-cache stable).
 DEADLINE_BOOSTED_TYPES = frozenset({"commitment", "blocker"})
+# Cue-fetched patches: below the +100 entity-match boost (an explicit
+# name is a stronger signal than a topic association) but above the
+# 60-point keyword-overlap cap, so an associatively-recalled patch can't
+# be stranded below generic keyword matches.
+CUE_MATCH_BOOST = 75.0
+
 DEADLINE_OVERDUE_BOOST = 25.0
 DEADLINE_DUE_SOON_BOOST = 15.0
 DEADLINE_DUE_SOON_WINDOW_DAYS = 7
@@ -217,6 +223,7 @@ def score_patches(
     patches: Sequence[Any],
     query_text: str,
     matched_entity_names: Iterable[str],
+    cue_matched_patch_ids: "Optional[set]" = None,
 ) -> List[Tuple[float, Any]]:
     """Score each patch against the query.
 
@@ -225,6 +232,11 @@ def score_patches(
     Scoring components (higher = more relevant):
       base type priority             5..50
       entity-match boost             +100 per matched entity appearing in text
+      cue-match boost                +CUE_MATCH_BOOST when the patch was
+                                     fetched via a matched cue — cue-recalled
+                                     patches often share no words with the
+                                     query (that's what cues are for), so
+                                     keyword overlap can't rank them
       query keyword overlap          +15 per overlapping keyword (capped at 60)
       deadline urgency               +25 overdue/due-today, +15 due within 7d
                                      (commitment/blocker with deadline_date)
@@ -269,6 +281,13 @@ def score_patches(
         for name in entity_names_lower:
             if name and name in text_lower:
                 score += 100.0
+
+        # Cue-match boost — patch was fetched because a cue attached to it
+        # appeared in the query text
+        if cue_matched_patch_ids:
+            pid = row["patch_id"] if isinstance(row, dict) else row.get("patch_id")
+            if pid is not None and str(pid) in cue_matched_patch_ids:
+                score += CUE_MATCH_BOOST
 
         # Query keyword overlap
         if query_words:

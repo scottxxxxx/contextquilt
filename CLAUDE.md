@@ -46,7 +46,7 @@ After the LLM call a fixed sanitizer chain (`src/contextquilt/services/extractio
 
 ### Recall (Hot Path, POST /v1/recall)
 
-Redis entity index (names ∪ aliases, self-healing) → entity match in text → recursive-CTE graph traversal → patch fetch (project-scoped + universal + overdue guarantee) → heuristic scoring → formatted block. `metadata`: `project_id`/`project` (scope), `locale` (grouped-mode labels), `token_budget` (flat-mode size, default 700, clamped 100–2000; ~4 chars/token). 30s render cache keyed on the full request shape. Flat mode markers are deliberately English (LLM-facing).
+Redis entity index (names ∪ aliases, self-healing) + cue index (`cue_index:{user}`, patch_cues topics, degrades if table absent) → entity/cue match in text → recursive-CTE graph traversal → patch fetch (project-scoped + universal + overdue guarantee + cue-matched leg) → heuristic scoring (cue-fetched +75) → formatted block. Matched cues gate recall alongside entities and suppress metamemory gap claims. `metadata`: `project_id`/`project` (scope), `locale` (grouped-mode labels), `token_budget` (flat-mode size, default 700, clamped 100–2000; ~4 chars/token). 30s render cache keyed on the full request shape. Flat mode markers are deliberately English (LLM-facing).
 
 ### Quilt API (app-facing, JWT or X-App-ID)
 
