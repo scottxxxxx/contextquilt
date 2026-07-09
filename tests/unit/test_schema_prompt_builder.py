@@ -210,3 +210,39 @@ def test_shouldersurf_manifest_generates_coherent_prompt():
         schema["properties"]["patches"]["items"]["properties"]["type"]["enum"]
     )
     assert len(patch_type_enum) == len(manifest["patch_types"])
+
+
+# ============================================================
+# Cues section (associative retrieval)
+# ============================================================
+
+
+def test_cues_section_present_by_default(minimal_manifest):
+    prompt = build_prompt(minimal_manifest)
+    assert "=== CUES — associative retrieval hooks ===" in prompt
+    assert "`value.cues`" in prompt
+
+
+def test_cues_schema_field_in_output_schema(minimal_manifest):
+    schema = build_output_schema(minimal_manifest)
+    value_props = schema["properties"]["patches"]["items"]["properties"]["value"]["properties"]
+    assert value_props["cues"]["type"] == "array"
+    assert value_props["cues"]["maxItems"] == 5
+
+
+def test_cues_disabled_via_manifest(minimal_manifest):
+    m = copy.deepcopy(minimal_manifest)
+    m["extraction_prompt_guidance"] = {"cues_enabled": False}
+    prompt = build_prompt(m)
+    assert "CUES — associative retrieval hooks" not in prompt
+
+
+def test_cue_guidance_override_and_per_type_lines(minimal_manifest):
+    m = copy.deepcopy(minimal_manifest)
+    m["extraction_prompt_guidance"] = {"cue_guidance": "Emit rehearsal skill topics only."}
+    m["patch_types"][0]["cue_guidance"] = "Use the skill name being coached."
+    prompt = build_prompt(m)
+    assert "Emit rehearsal skill topics only." in prompt
+    assert "- **note**: Use the skill name being coached." in prompt
+    # Default guidance body replaced, section header retained
+    assert "`value.cues` is how a patch gets FOUND" not in prompt

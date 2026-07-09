@@ -116,7 +116,7 @@ EXTRACTION_SCHEMA: dict = {
                     "value": {
                         "type": "object",
                         "additionalProperties": False,
-                        "required": ["text", "owner", "deadline", "deadline_date"],
+                        "required": ["text", "owner", "deadline", "deadline_date", "cues"],
                         "properties": {
                             "text": {"type": "string"},
                             "owner": {"type": ["string", "null"]},
@@ -129,6 +129,21 @@ EXTRACTION_SCHEMA: dict = {
                                     "line in the input for relative expressions like "
                                     "'tomorrow' or 'end of week'. Null when the deadline "
                                     "cannot be resolved to a specific date."
+                                ),
+                            },
+                            "cues": {
+                                "type": "array",
+                                "maxItems": 5,
+                                "items": {"type": "string"},
+                                "description": (
+                                    "0-5 short lowercase topic phrases naming what this "
+                                    "patch is ABOUT — the concepts someone would mention "
+                                    "in a later conversation when this memory should "
+                                    "surface (e.g. 'pricing model', 'visa paperwork', "
+                                    "'q3 roadmap'). NOT names of people/projects/companies "
+                                    "(those belong in entities), NOT generic words like "
+                                    "'meeting' or 'update', NOT sentences. Empty array "
+                                    "when nothing beyond the entities applies."
                                 ),
                             },
                         },
@@ -442,6 +457,79 @@ def enforce_connection_vocabulary(
             "dropped": dropped,
             "dropped_detail": dropped_detail[:20],
         }
+    return content
+
+
+# --- Cue sanitation (associative retrieval index) -------------------------
+#
+# Cues are matched against raw request text on the recall hot path, so bad
+# cues are worse than no cues: an ultra-generic cue ("meeting") matches
+# nearly every request and floods recall with noise. Precision over recall,
+# same posture as the metamemory signals.
+
+MAX_CUES_PER_PATCH = 5
+CUE_MIN_LEN = 3
+CUE_MAX_LEN = 60
+
+# Words that describe the medium, not the topic. A cue equal to one of
+# these carries no associative signal.
+_GENERIC_CUES = frozenset({
+    "meeting", "call", "chat", "discussion", "conversation", "sync",
+    "standup", "update", "updates", "status", "work", "team", "project",
+    "task", "tasks", "plan", "plans", "notes", "agenda", "todo", "to do",
+    "action item", "action items", "follow up", "follow-up", "followup",
+    "next steps", "deadline", "general", "misc", "other", "stuff",
+})
+
+
+def normalize_cue_list(raw: object, cap: int = MAX_CUES_PER_PATCH) -> list:
+    """Coerce a raw cues value into a clean, deduplicated, capped list of
+    lowercase phrases. Never raises — junk in, empty-or-smaller list out.
+    Shared by the sanitizer and the worker's defensive re-check."""
+    if not isinstance(raw, list):
+        return []
+    out: list = []
+    seen: set = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        cue = " ".join(item.lower().split())
+        if not (CUE_MIN_LEN <= len(cue) <= CUE_MAX_LEN):
+            continue
+        if cue in _GENERIC_CUES or cue in seen:
+            continue
+        seen.add(cue)
+        out.append(cue)
+        if len(out) >= cap:
+            break
+    return out
+
+
+def sanitize_cues(content: dict) -> dict:
+    """Normalize value.cues on every patch: lowercase, dedupe, cap, drop
+    generic/junk cues, and drop cues that duplicate an extracted entity
+    name (the entity index already covers those — keeping them would
+    double-index the same surface and bloat patch_cues)."""
+    entity_names = {
+        " ".join(str(e.get("name", "")).lower().split())
+        for e in (content.get("entities") or [])
+        if isinstance(e, dict)
+    }
+    entity_names.discard("")
+    for patch in content.get("patches") or []:
+        if not isinstance(patch, dict):
+            continue
+        value = patch.get("value")
+        if not isinstance(value, dict):
+            continue
+        cues = [
+            c for c in normalize_cue_list(value.get("cues"))
+            if c not in entity_names
+        ]
+        if cues:
+            value["cues"] = cues
+        else:
+            value.pop("cues", None)
     return content
 
 

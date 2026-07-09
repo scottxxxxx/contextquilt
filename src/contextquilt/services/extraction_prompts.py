@@ -123,7 +123,7 @@ Analyze this meeting transcript and return a JSON object with exactly seven keys
   "patches": [
     {
       "type": "<one of the patch types below>",
-      "value": {"text": "<concise statement grounded in this transcript>", "owner": "<speaker name, or null>", "deadline": "<deadline as spoken, or null>", "deadline_date": "<YYYY-MM-DD or null>"},
+      "value": {"text": "<concise statement grounded in this transcript>", "owner": "<speaker name, or null>", "deadline": "<deadline as spoken, or null>", "deadline_date": "<YYYY-MM-DD or null>", "cues": ["<0-5 short lowercase topic phrases>"]},
       "connects_to": [
         {"target_text": "<text of another patch in this output>", "target_type": "<one of the patch types>", "role": "<parent|depends_on|resolves|replaces|informs>", "label": "<belongs_to|blocked_by|unblocks|supersedes|motivated_by|works_on|owns>"}
       ]
@@ -143,6 +143,21 @@ Analyze this meeting transcript and return a JSON object with exactly seven keys
 The angle-bracket placeholders above describe the SHAPE of each field. Do
 NOT copy the placeholder text into your output — every value must be
 grounded in THIS transcript, not in any example.
+
+=== CUES — associative retrieval hooks ===
+
+`value.cues` is how this memory gets FOUND later when nobody says an
+entity name. Ask: "in a future conversation, what topic words would
+someone use when this patch should surface?" Emit those, 0-5 per patch:
+- short lowercase phrases, 1-4 words ("pricing model", "visa paperwork",
+  "hero section redesign") — topics, NOT sentences
+- do NOT repeat names of people/projects/companies (the entities array
+  already indexes those)
+- do NOT emit medium words ("meeting", "update", "discussion") or
+  anything so generic it would match every conversation
+- an empty array is correct when the entities already cover it
+
+=== END CUES ===
 
 === LANGUAGE ===
 
