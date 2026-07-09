@@ -313,3 +313,49 @@ def test_malformed_deadline_date_is_ignored():
     scored = score_patches(patches, query_text="unrelated query", matched_entity_names=[])
     scores = {r["patch_id"]: s for s, r in scored}
     assert scores["bad"] == scores["none"]
+
+
+# ============================================================
+# Cue-match boost (associative retrieval)
+# ============================================================
+
+from src.contextquilt.services.recall_scorer import CUE_MATCH_BOOST
+
+
+def test_cue_boost_lifts_cue_fetched_patch_over_keyword_matches():
+    now = datetime.utcnow()
+    patches = [
+        # Shares words with the query but wasn't cue-fetched
+        _patch("kw", "takeaway", "discussed the launch timeline at length", created_at=now),
+        # Shares NO words with the query — recalled purely via cue
+        _patch("cue", "takeaway", "tier restructure draft is with finance", created_at=now),
+    ]
+    scored = score_patches(
+        patches, query_text="where did we land on pricing for the launch",
+        matched_entity_names=[], cue_matched_patch_ids={"cue"},
+    )
+    assert scored[0][1]["patch_id"] == "cue"
+
+
+def test_cue_boost_value_between_keyword_cap_and_entity_boost():
+    assert 60.0 < CUE_MATCH_BOOST < 100.0
+
+
+def test_entity_match_still_outranks_cue_match():
+    now = datetime.utcnow()
+    patches = [
+        _patch("ent", "takeaway", "ProjectX hero section is behind", created_at=now),
+        _patch("cue", "takeaway", "tier restructure draft is with finance", created_at=now),
+    ]
+    scored = score_patches(
+        patches, query_text="ProjectX status?",
+        matched_entity_names=["ProjectX"], cue_matched_patch_ids={"cue"},
+    )
+    assert scored[0][1]["patch_id"] == "ent"
+
+
+def test_no_cue_ids_param_is_backward_compatible():
+    patches = [_patch("1", "takeaway", "anything")]
+    a = score_patches(patches, "query", [])
+    b = score_patches(patches, "query", [], cue_matched_patch_ids=None)
+    assert a[0][0] == b[0][0]
