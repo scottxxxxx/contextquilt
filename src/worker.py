@@ -1148,6 +1148,31 @@ async def _rebuild_entity_index(db, redis_client, user_id: str):
     except Exception as e:
         logger.error("entity_index_rebuild_failed", user_id=user_id, error=str(e))
 
+    # Sibling rebuild for the cue index — fresh cues from this extraction
+    # become matchable immediately instead of waiting out the 2h TTL.
+    try:
+        cue_rows = await db.fetch(
+            """
+            SELECT DISTINCT pc.cue
+            FROM patch_cues pc
+            JOIN patch_subjects ps ON ps.patch_id = pc.patch_id
+            JOIN context_patches cp ON cp.patch_id = pc.patch_id
+            WHERE ps.subject_key = 'user:' || $1
+              AND COALESCE(cp.status, 'active') = 'active'
+            """,
+            user_id
+        )
+        cues = {row["cue"] for row in cue_rows}
+        cue_key = f"cue_index:{user_id}"
+        if cues:
+            await redis_client.delete(cue_key)
+            await redis_client.sadd(cue_key, *cues)
+            await redis_client.expire(cue_key, 7200)
+            logger.info("cue_index_rebuilt", user_id=user_id, count=len(cues))
+    except Exception as e:
+        # patch_cues may not exist yet on a lagging DB (MCP) — degrade quietly.
+        logger.warning("cue_index_rebuild_failed", user_id=user_id, error=str(e))
+
 
 def _build_default_llm_client(*, alert_db=None):
     """Construct the default LLM client per CQ_LLM_PRIMARY_PROVIDER.
