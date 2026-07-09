@@ -110,6 +110,22 @@ If the app provides metadata hints (e.g., `"project": "Widget 2.0"`), CQ uses th
 
 Without the hint, "What's the status?" has no entity names to match. With the hint, CQ knows to start from Widget 2.0.
 
+## Metamemory Signals (opt-in)
+
+By default recall stays silent about what it *doesn't* have — an empty or partial result is indistinguishable, to the downstream LLM, from memory never having been consulted, and the model fills that silence with confabulated context. Passing `"memory_signals": true` in `metadata` appends explicit gap lines to the context block:
+
+```
+(no stored memory about: Kinsley, Orion Initiative)
+(no stored project memory for "Falcon")
+(memory checked: nothing stored matched this request)
+```
+
+- **Unmatched mentions** — name-shaped mentions in the request text with zero word-level overlap against the entity index (names ∪ aliases). Overlap suppresses the claim: "Lockridge" is never reported missing while "Lockridge Abrams" is known. Conservative Latin-script heuristic, capped at 3 mentions.
+- **Missing project scope** — emitted only when the scope has no project patch, no project-scoped rows, and no overdue completables.
+- **Nothing matched** — replaces the silent-empty response when no entities matched and no scope was given.
+
+Signal lines are deterministic functions of (text, entity index, scope) — byte-stable within a UTC day like the rest of the block — and ride inside the same `token_budget`. Like the flat-mode markers, they are deliberately English (LLM-facing). Implementation: `src/contextquilt/services/recall_signals.py`.
+
 ## Scoring
 
 After patches are pulled for the recall set, they're ranked by `score_patches` in `src/contextquilt/services/recall_scorer.py` and trimmed to `max_patches` (default 15). The composite score per patch:
