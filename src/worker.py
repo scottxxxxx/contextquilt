@@ -40,7 +40,9 @@ from contextquilt.services.extraction_schema import (
     enforce_owner_gate,
     enforce_person_ownership,
     is_placeholder_or_self_person,
+    normalize_cue_list,
     normalize_owner_in_transcript,
+    sanitize_cues,
     sanitize_deadline_dates,
     sanitize_you_marker_from_patches,
     strip_ephemeral_fields,
@@ -373,8 +375,22 @@ async def store_connected_patches(
         "goal", "constraint", "event", "deliverable",
     )
 
+    async def _store_cues(patch_id: str, cues: list) -> None:
+        """Attach associative-retrieval cues to a patch. Idempotent (PK on
+        (patch_id, cue)); the dedup/re-observe paths UNION new cues into
+        the surviving patch the same way deadline detail merges forward."""
+        for cue in cues or []:
+            await db.execute(
+                """
+                INSERT INTO patch_cues (patch_id, cue) VALUES ($1::uuid, $2)
+                ON CONFLICT (patch_id, cue) DO NOTHING
+                """,
+                patch_id, cue,
+            )
+
     async def _apply_patch_dedup(existing_id: str, value: dict, text: str,
-                                 patch_type: str, tier: str) -> None:
+                                 patch_type: str, tier: str,
+                                 cues: list | None = None) -> None:
         """Re-observe an existing patch instead of inserting a duplicate.
 
         `last_observed_at` is the freshness anchor consumed by the decay
@@ -409,6 +425,7 @@ async def store_connected_patches(
                 """,
                 new_dd, value.get("deadline") or new_dd, existing_id,
             )
+        await _store_cues(existing_id, cues or [])
         patch_lookup[(text.lower().strip(), patch_type)] = existing_id
         logger.debug("patch_deduplicated", type=patch_type, text=text[:50],
                      patch_id=existing_id, tier=tier)
@@ -474,6 +491,7 @@ async def store_connected_patches(
             except Exception:
                 pass
 
+        await _store_cues(patch_id, patch.get("_cues") or [])
         patch_lookup[(text.lower().strip(), patch_type)] = patch_id
         stored += 1
 
@@ -600,6 +618,7 @@ async def store_connected_patches(
             await _append_observation(identity_id, value)
             logger.debug("longitudinal_series_created", type=patch_type,
                          descriptor=descriptor[:50], patch_id=identity_id)
+        await _store_cues(identity_id, patch.get("_cues") or [])
 
     # Gray-zone pairs deferred to one batched LLM judge call after the
     # loop: (patch, patch_type, value, text, existing_id, existing_text)
@@ -619,6 +638,12 @@ async def store_connected_patches(
         text = value.get("text", "")
         if not text:
             continue
+
+        # Cues live in patch_cues, not in the value JSONB — pop them off
+        # before any path serializes the value. normalize_cue_list is a
+        # defensive re-check: the sanitizer chain covers LLM extraction,
+        # but structured-ingest payloads reach here without it.
+        patch["_cues"] = normalize_cue_list(value.pop("cues", None))
 
         # Longitudinal (time-series) types append an observation instead of
         # dedup-collapsing — a rating's history IS the value (doc §12 §3).
@@ -650,7 +675,8 @@ async def store_connected_patches(
         )
         if existing and existing["sim"] > TRIGRAM_DEDUP_THRESHOLD:
             await _apply_patch_dedup(
-                str(existing["patch_id"]), value, text, patch_type, "trigram"
+                str(existing["patch_id"]), value, text, patch_type, "trigram",
+                cues=patch.get("_cues"),
             )
             continue
         # Project guard for the judge: "Send the invoice" in project A and
@@ -698,7 +724,8 @@ async def store_connected_patches(
             gray_pending, verdicts
         ):
             if same:
-                await _apply_patch_dedup(existing_id, value, text, patch_type, "semantic")
+                await _apply_patch_dedup(existing_id, value, text, patch_type, "semantic",
+                                         cues=patch.get("_cues"))
                 logger.info(
                     "semantic_dedup_merged",
                     user_id=user_id, type=patch_type,
@@ -2451,6 +2478,7 @@ class ColdPathWorker:
             drop_placeholder_and_self_person_patches(
                 response.content, user_label=user_label
             )
+            sanitize_cues(response.content)
             sanitize_deadline_dates(response.content, meeting_date=meeting_date)
             strip_ephemeral_fields(response.content)
 
