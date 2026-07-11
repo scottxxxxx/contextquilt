@@ -40,6 +40,10 @@ Entity names for each user are indexed in Redis as a sorted set. When text arriv
 
 For fuzzy matching (e.g., "Bob" matching "Bob Martinez"), CQ stores both the full name and common short forms in the index.
 
+**Cue matching (associative retrieval):**
+
+Beside the entity index lives a per-user cue index (`cue_index:{user_id}`) of topic phrases attached to patches at extraction time ("pricing model", "visa paperwork" — see `patch_cues`). Request text that names a topic but no entity still recalls the right patches: matched cues gate recall (no more empty result for entity-less topical queries), drive a direct cue→patch fetch leg (up to 10 patches, any scope), and add a `+75` scoring boost (below the +100 entity boost, above the 60-point keyword-overlap cap — cue-recalled patches often share no words with the query, which is precisely their value). Matched cues also count as index coverage for metamemory signals: a mention covered by a cue is not reported as a memory gap. The response lists them in `matched_cues`. Same lazy-rehydrate + sliding-TTL + worker-rebuild lifecycle as the entity index; degrades to entity-only matching on a DB that lacks `patch_cues` (MCP lag).
+
 ### Template Enrichment (POST /v1/enrich)
 
 The app sends a prompt template with explicit placeholders. CQ fills them from the user's profile.

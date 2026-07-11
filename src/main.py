@@ -198,6 +198,7 @@ class RecallResponse(BaseModel):
     context: str
     matched_entities: List[str]
     matched_patch_ids: List[str] = []
+    matched_cues: List[str] = []
     patch_count: int
     communication_style: Optional[str] = None
     timing_ms: Optional[Dict[str, float]] = None
@@ -219,6 +220,21 @@ ENTITY_INDEX_NAMES_SQL = """
     SELECT name FROM entities WHERE user_id = $1
     UNION
     SELECT alias FROM entity_aliases WHERE user_id = $1
+"""
+
+# Cue index contents: distinct active-patch cues (associative-retrieval
+# topic phrases from patch_cues, written by the extraction pipeline).
+# Lives in its own Redis set (cue_index:{user_id}) rather than inside
+# entity_index — entity members also drive the formatter header and
+# graph traversal, which cues must never do. Cues are stored lowercase
+# by sanitize_cues, so matching against lowered request text is direct.
+CUE_INDEX_NAMES_SQL = """
+    SELECT DISTINCT pc.cue
+    FROM patch_cues pc
+    JOIN patch_subjects ps ON ps.patch_id = pc.patch_id
+    JOIN context_patches cp ON cp.patch_id = pc.patch_id
+    WHERE ps.subject_key = 'user:' || $1
+      AND COALESCE(cp.status, 'active') = 'active'
 """
 
 # Short-TTL cache on the rendered RecallResponse body (context, matched
@@ -581,6 +597,7 @@ async def recall_context(
                 context=cached["context"],
                 matched_entities=cached["matched_entities"],
                 matched_patch_ids=cached.get("matched_patch_ids", []),
+                matched_cues=cached.get("matched_cues", []),
                 patch_count=cached["patch_count"],
                 communication_style=cached.get("communication_style"),
                 timing_ms=timings,
@@ -635,6 +652,36 @@ async def recall_context(
                 if known_entities and val in known_entities:
                     matched_names.append(val)
 
+    # Cue index — associative retrieval. Cues are topic phrases attached
+    # to patches at extraction time ("pricing model"), so text that names
+    # a topic but no entity still recalls the right patches. Same lazy
+    # rehydrate + sliding TTL as the entity index; sorted iteration for
+    # byte-stable output (same gotcha as matched_names above).
+    cue_index_key = f"cue_index:{user_id}"
+    known_cues = await redis_client.smembers(cue_index_key)
+    if not known_cues:
+        try:
+            cue_rows_idx = await db_pool.fetch(CUE_INDEX_NAMES_SQL, user_id)
+        except Exception:
+            # patch_cues may not exist on a lagging DB (MCP runs the same
+            # code against its own Postgres) — recall degrades to
+            # entity-only matching, never errors.
+            cue_rows_idx = []
+        if cue_rows_idx:
+            cue_values = [r["cue"] for r in cue_rows_idx]
+            await redis_client.delete(cue_index_key)
+            await redis_client.sadd(cue_index_key, *cue_values)
+            await redis_client.expire(cue_index_key, ENTITY_INDEX_TTL)
+            known_cues = set(cue_values)
+    else:
+        await redis_client.expire(cue_index_key, ENTITY_INDEX_TTL)
+
+    matched_cues = []
+    if known_cues:
+        for cue in sorted(known_cues):
+            if cue in text_lower:
+                matched_cues.append(cue)
+
     # Project scope decides whether an entity-less query is still answerable.
     # A scope-shaped question ("anyone have any commitments?") has no entity
     # names but, given a project_id, can still pull the right patches via
@@ -645,7 +692,12 @@ async def recall_context(
 
     signals_enabled = memory_signals_enabled(request.metadata)
 
-    if not matched_names and not has_project_scope:
+    # Everything the store indexes under — entity names, aliases, cues.
+    # Metamemory suppression checks against this: a mention covered by a
+    # cue is not a memory gap.
+    known_index_terms = set(known_entities or ()) | set(known_cues or ())
+
+    if not matched_names and not has_project_scope and not matched_cues:
         # Metamemory (opt-in): an empty result is the most dangerous
         # place to stay silent — the downstream LLM fills the silence
         # with confabulated context. Say "checked, nothing there"
@@ -654,7 +706,7 @@ async def recall_context(
         # transient gap pinned for the cache TTL.
         if signals_enabled:
             signal_lines = build_signal_lines(
-                extract_unmatched_mentions(request.text, set(known_entities or ())),
+                extract_unmatched_mentions(request.text, known_index_terms),
                 nothing_matched=True,
             )
             timings["total"] = round((time.monotonic() - t0) * 1000, 2)
@@ -855,10 +907,34 @@ async def recall_context(
             subject_key, proj_val
         )
 
-    # Merge flat rows + connected + overdue, deduplicate by value text
+    # Cue fetch leg: patches indexed under a matched cue surface directly,
+    # regardless of project scope or the latest-20 window — this is the
+    # associative-recall path ("the pricing model" pulls the pricing
+    # commitments even when no entity name was spoken).
+    cue_rows: list = []
+    if matched_cues:
+        try:
+            cue_rows = await db_pool.fetch(
+                """
+                SELECT DISTINCT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
+                       cp.created_at, cp.last_observed_at
+                FROM patch_cues pc
+                JOIN context_patches cp ON cp.patch_id = pc.patch_id
+                JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                WHERE ps.subject_key = $1 AND pc.cue = ANY($2)
+                  AND COALESCE(cp.status, 'active') = 'active'
+                ORDER BY cp.created_at DESC, cp.patch_id ASC
+                LIMIT 10
+                """,
+                subject_key, matched_cues
+            )
+        except Exception:
+            cue_rows = []  # lagging DB — see cue-index rehydrate above
+
+    # Merge flat rows + connected + overdue + cue-matched, deduplicate by value text
     all_patches = list(fact_rows)
     seen_texts = {(row["value"] if isinstance(row["value"], str) else json.dumps(row["value"])) for row in fact_rows}
-    for row in list(connected_rows) + list(overdue_rows):
+    for row in list(connected_rows) + list(overdue_rows) + list(cue_rows):
         key = row["value"] if isinstance(row["value"], str) else json.dumps(row["value"])
         if key not in seen_texts:
             all_patches.append(row)
@@ -874,8 +950,14 @@ async def recall_context(
     #   - "grouped": category-grouped block with section headers, the
     #     pre-PR-4 shape. Retained for apps that want it.
 
-    # Rank all patches against the query first.
-    scored = score_patches(all_patches, request.text, matched_names)
+    # Rank all patches against the query first. Cue-fetched patches get an
+    # explicit boost — their text may share no words with the query (that
+    # is the point of a cue), so keyword overlap alone would strand them
+    # below the flat-mode cap.
+    scored = score_patches(
+        all_patches, request.text, matched_names,
+        cue_matched_patch_ids={str(r["patch_id"]) for r in cue_rows},
+    )
 
     # Metamemory signals (opt-in): explicit gap lines appended below the
     # block. Deterministic from (text, entity index, scope), so they are
@@ -899,7 +981,7 @@ async def recall_context(
                 scoped_hit = any(r["project"] == recall_project for r in fact_rows)
             project_scope_missing = not scoped_hit
         signal_lines = build_signal_lines(
-            extract_unmatched_mentions(request.text, set(known_entities or ())),
+            extract_unmatched_mentions(request.text, known_index_terms),
             project_scope_label=recall_project or recall_project_id,
             project_scope_missing=project_scope_missing,
         )
@@ -1033,6 +1115,7 @@ async def recall_context(
                     "context": context,
                     "matched_entities": matched_names,
                     "matched_patch_ids": matched_patch_ids,
+                    "matched_cues": matched_cues,
                     "patch_count": patch_count,
                     "communication_style": comm_style,
                 }),
@@ -1051,6 +1134,7 @@ async def recall_context(
         context=context,
         matched_entities=matched_names,
         matched_patch_ids=matched_patch_ids,
+        matched_cues=matched_cues,
         patch_count=patch_count,
         communication_style=comm_style,
         timing_ms=timings,
@@ -1183,10 +1267,23 @@ async def prewarm_cache(
         await redis_client.sadd(entity_key, *names)
         await redis_client.expire(entity_key, ENTITY_INDEX_TTL)
 
+    # Warm cue index (associative-retrieval topic phrases)
+    try:
+        cue_rows = await db_pool.fetch(CUE_INDEX_NAMES_SQL, user_id)
+    except Exception:
+        cue_rows = []  # patch_cues absent on a lagging DB (MCP) — degrade
+    cue_key = f"cue_index:{user_id}"
+    if cue_rows:
+        cue_values = [r["cue"] for r in cue_rows]
+        await redis_client.delete(cue_key)
+        await redis_client.sadd(cue_key, *cue_values)
+        await redis_client.expire(cue_key, ENTITY_INDEX_TTL)
+
     return {
         "status": "warm",
         "profile": row is not None,
         "entities": len(entity_rows) if entity_rows else 0,
+        "cues": len(cue_rows) if cue_rows else 0,
     }
 
 @app.get("/health", tags=["Ops"])
