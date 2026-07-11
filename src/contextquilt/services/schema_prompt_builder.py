@@ -44,6 +44,7 @@ def build_prompt(manifest: Dict[str, Any]) -> str:
     sections.append(_language_section())
     sections.append(_reasoning_requirement(guidance))
     sections.append(_output_shape(manifest))
+    sections.append(_cues_section(manifest, guidance))
     sections.append(_patch_types_section(manifest))
     sections.append(_connection_labels_section(manifest))
     sections.append(_priority_order(guidance))
@@ -99,6 +100,11 @@ def build_output_schema(manifest: Dict[str, Any]) -> Dict[str, Any]:
                                 "owner": {"type": ["string", "null"]},
                                 "deadline": {"type": ["string", "null"]},
                                 "deadline_date": {"type": ["string", "null"]},
+                                "cues": {
+                                    "type": "array",
+                                    "maxItems": 5,
+                                    "items": {"type": "string"},
+                                },
                             },
                         },
                         "connects_to": {
@@ -228,7 +234,7 @@ def _output_shape(manifest: Dict[str, Any]) -> str:
         "- `relationships`: array of edges between entities\n"
         "\n"
         "Each patch has: `type` (one of the domain types), `value` (object with "
-        "`text` and optional `owner` / `deadline` / `deadline_date`), and optional "
+        "`text` and optional `owner` / `deadline` / `deadline_date` / `cues`), and optional "
         "`connects_to` array of edges to other patches in this same output.\n"
         "\n"
         "When a patch has a deadline, set `deadline` to the deadline as spoken "
@@ -241,6 +247,41 @@ def _output_shape(manifest: Dict[str, Any]) -> str:
         "set `deadline_date` to null. Never guess a year — when no Meeting date "
         "line is present and the deadline is relative, set `deadline_date` to null."
     )
+
+
+def _cues_section(manifest: Dict[str, Any], guidance: Dict[str, Any]) -> str:
+    """Associative-retrieval cue instruction.
+
+    Generic by default; apps tune it from the manifest without CQ code
+    changes: `guidance.cue_guidance` replaces the default guidance prose,
+    and a patch_types entry may carry its own `cue_guidance` line
+    (rendered per type). `guidance.cues_enabled: false` drops the
+    section entirely (and with it, cue emission).
+    """
+    if guidance.get("cues_enabled") is False:
+        return ""
+    body = guidance.get("cue_guidance") or (
+        "`value.cues` is how a patch gets FOUND later when nobody says an "
+        "entity name. Ask: \"in a future conversation, what topic words "
+        "would someone use when this patch should surface?\" Emit those, "
+        "0-5 per patch: short lowercase phrases of 1-4 words "
+        "(\"pricing model\", \"visa paperwork\") — topics, not sentences. "
+        "Do NOT repeat entity names (the entities array indexes those), "
+        "and do NOT emit medium words (\"meeting\", \"update\") or "
+        "anything generic enough to match every conversation. An empty "
+        "array is correct when the entities already cover it."
+    )
+    lines = ["=== CUES — associative retrieval hooks ===", body]
+    per_type = [
+        f"- **{pt.get('domain_type')}**: {pt['cue_guidance']}"
+        for pt in (manifest.get("patch_types") or [])
+        if isinstance(pt, dict) and pt.get("cue_guidance")
+    ]
+    if per_type:
+        lines.append("")
+        lines.append("Type-specific cue guidance:")
+        lines.extend(per_type)
+    return "\n".join(lines)
 
 
 def _patch_types_section(manifest: Dict[str, Any]) -> str:
