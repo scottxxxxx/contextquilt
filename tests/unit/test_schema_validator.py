@@ -375,3 +375,23 @@ def test_techrehearsal_manifest_validates():
 
     ok, errors = validate_manifest(manifest, manifest["app_id"])
     assert ok, f"Tech Rehearsal manifest failed validation: {errors}"
+
+
+# ============================================================
+# cue_guidance (per-type, #149 manifest hook)
+# ============================================================
+
+
+def test_cue_guidance_accepted_on_patch_type(minimal_valid_manifest):
+    m = copy.deepcopy(minimal_valid_manifest)
+    m["patch_types"][0]["cue_guidance"] = "Name the topic, not the meeting."
+    ok, errors = validate_manifest(m, m["app_id"])
+    assert ok, errors
+
+
+def test_cue_guidance_must_be_nonempty_string(minimal_valid_manifest):
+    m = copy.deepcopy(minimal_valid_manifest)
+    m["patch_types"][0]["cue_guidance"] = "   "
+    ok, errors = validate_manifest(m, m["app_id"])
+    assert not ok
+    assert any("cue_guidance" in e for e in errors)

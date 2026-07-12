@@ -69,6 +69,8 @@ COPY --chown=contextquilt:contextquilt src/ ./src/
 # needing the source tree mounted in.
 COPY --chown=contextquilt:contextquilt scripts/ ./scripts/
 COPY --chown=contextquilt:contextquilt init-db/ ./init-db/
+# Starter manifest templates, served by GET /v1/schema/templates
+COPY --chown=contextquilt:contextquilt templates/ ./templates/
 COPY --chown=contextquilt:contextquilt README.md .
 
 # Switch to non-root user

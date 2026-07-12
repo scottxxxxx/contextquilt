@@ -1,0 +1,136 @@
+{
+  "app_id": "REPLACE-WITH-YOUR-APP-ID",
+  "version": 1,
+  "facet_enum_version": 1,
+  "display_name": "Meeting Capture Starter",
+  "description": "Starter manifest for apps that capture spoken conversations (meetings, calls, interviews) and want CQ's LLM extraction to turn transcripts into typed memory. Send interaction_type=meeting_transcript with the transcript as content; prefix speaker labels per line and mark the app user's label with '(you)'.",
+  "ingest_mode": "extraction",
+  "design_principles": [
+    "Domain-agnostic: works for any meeting type without vertical-specific branching.",
+    "Every CQ facet is represented so recall has all six cognitive roles to draw from.",
+    "Adapt by renaming domain types and tightening descriptions — not by adding code."
+  ],
+  "origin_types": ["meeting"],
+  "patch_types": [
+    {
+      "domain_type": "trait",
+      "facet": "Attribute",
+      "permanence": "year",
+      "display_name": "Trait",
+      "description": "A stable behavioral pattern the app user self-discloses. Only ever about the (you) speaker.",
+      "self_only": true,
+      "value_shape": {"text": "string"}
+    },
+    {
+      "domain_type": "preference",
+      "facet": "Affinity",
+      "permanence": "year",
+      "display_name": "Preference",
+      "description": "Something the app user prefers or avoids, stated in their own words.",
+      "self_only": true,
+      "value_shape": {"text": "string"}
+    },
+    {
+      "domain_type": "commitment",
+      "facet": "Intention",
+      "permanence": "month",
+      "display_name": "Commitment",
+      "description": "A concrete action someone agreed to take. Carry the owner and any spoken deadline.",
+      "completable": true,
+      "project_scoped": true,
+      "cue_guidance": "Name the deliverable or workstream the commitment advances, not the meeting it was made in.",
+      "value_shape": {"text": "string", "owner": "string", "deadline": "string", "deadline_date": "string"}
+    },
+    {
+      "domain_type": "blocker",
+      "facet": "Constraint",
+      "permanence": "month",
+      "display_name": "Blocker",
+      "description": "Something preventing progress. Resolves when the obstruction clears.",
+      "completable": true,
+      "project_scoped": true,
+      "value_shape": {"text": "string", "owner": "string", "deadline": "string", "deadline_date": "string"}
+    },
+    {
+      "domain_type": "decision",
+      "facet": "Episode",
+      "permanence": "quarter",
+      "display_name": "Decision",
+      "description": "Something the group agreed or ruled out. Capture what was decided, not the debate.",
+      "project_scoped": true,
+      "value_shape": {"text": "string"}
+    },
+    {
+      "domain_type": "takeaway",
+      "facet": "Episode",
+      "permanence": "week",
+      "display_name": "Takeaway",
+      "description": "A noteworthy fact or insight from the conversation that fits no stronger type.",
+      "project_scoped": true,
+      "value_shape": {"text": "string"}
+    },
+    {
+      "domain_type": "person",
+      "facet": "Connection",
+      "permanence": "year",
+      "display_name": "Person",
+      "description": "A named participant or mentioned individual. value.text is the NAME ONLY.",
+      "value_shape": {"text": "string"}
+    },
+    {
+      "domain_type": "project",
+      "facet": "Connection",
+      "permanence": "year",
+      "display_name": "Project",
+      "description": "A named unit of ongoing work that meetings and commitments attach to.",
+      "value_shape": {"text": "string"}
+    }
+  ],
+  "connection_labels": [
+    {
+      "label": "belongs_to",
+      "role": "parent",
+      "from_types": ["commitment", "blocker", "decision", "takeaway"],
+      "to_types": ["project"],
+      "description": "Scopes an episode-type patch to the project it belongs to."
+    },
+    {
+      "label": "owns",
+      "role": "informs",
+      "from_types": ["person"],
+      "to_types": ["commitment", "blocker"],
+      "description": "The named person is responsible for the action item."
+    },
+    {
+      "label": "blocked_by",
+      "role": "depends_on",
+      "from_types": ["commitment"],
+      "to_types": ["blocker"],
+      "description": "The commitment cannot proceed until the blocker resolves."
+    }
+  ],
+  "entity_types": [
+    {
+      "entity_type": "person",
+      "display_name": "Person",
+      "description": "Named individuals, indexed for recall matching.",
+      "indexed": true,
+      "extraction_rules": {"guidance": "Only specifically named individuals. Unnamed speakers (Speaker 4) must NOT become entities."}
+    },
+    {
+      "entity_type": "project",
+      "display_name": "Project",
+      "description": "Named workstreams, indexed for recall matching.",
+      "indexed": true
+    },
+    {
+      "entity_type": "company",
+      "display_name": "Company",
+      "description": "Named organizations mentioned in conversation.",
+      "indexed": true
+    }
+  ],
+  "extraction_prompt_guidance": {
+    "role_context": "You are a structured data extraction engine turning meeting transcripts into typed memory patches. Extract only what was actually said; never infer facts the transcript does not support."
+  }
+}

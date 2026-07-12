@@ -459,6 +459,99 @@ async def enrich_context(
         missing_variables=missing_vars
     )
 
+from pathlib import Path as _Path
+
+from contextquilt.services.schema_validator import validate_manifest
+
+# Starter manifests per app archetype, baked into the image. Served to
+# developers so a new app starts from a linted, working example instead
+# of reverse-engineering another app's manifest.
+MANIFEST_TEMPLATES_DIR = _Path(__file__).resolve().parent.parent / "templates" / "manifests"
+
+
+def _load_manifest_template(name: str) -> Optional[Dict[str, Any]]:
+    # Resolve against the directory listing — never join raw user input
+    # into a filesystem path.
+    for path in sorted(MANIFEST_TEMPLATES_DIR.glob("*.json")):
+        if path.stem == name:
+            try:
+                return json.loads(path.read_text())
+            except (OSError, json.JSONDecodeError):
+                return None
+    return None
+
+
+@app.post("/v1/schema/validate", tags=["App Schemas"])
+async def validate_own_schema(
+    manifest: Dict[str, Any],
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Lint a manifest WITHOUT registering it.
+
+    Runs the exact validator the registration endpoint uses, against the
+    calling app's identity, and returns every error at once. Nothing is
+    written — iterate here until `valid` is true, then have the operator
+    register it via the admin-gated POST /v1/apps/{app_id}/schema.
+
+    Note: the manifest's app_id field must equal YOUR app id (templates
+    ship with a REPLACE-WITH-YOUR-APP-ID placeholder).
+    """
+    is_valid, errors = validate_manifest(manifest, app_id)
+    return {
+        "valid": is_valid,
+        "errors": errors,
+        "app_id": app_id,
+        "summary": {
+            "ingest_mode": manifest.get("ingest_mode") or "extraction (default)",
+            "patch_types": len(manifest.get("patch_types") or []),
+            "connection_labels": len(manifest.get("connection_labels") or []),
+            "entity_types": len(manifest.get("entity_types") or []),
+            "longitudinal_types": [
+                pt.get("domain_type")
+                for pt in (manifest.get("patch_types") or [])
+                if isinstance(pt, dict) and pt.get("longitudinal") is True
+            ],
+        },
+    }
+
+
+@app.get("/v1/schema/templates", tags=["App Schemas"])
+async def list_manifest_templates(app_id: str = Depends(verify_application_access)):
+    """
+    List the starter manifest templates (one per app archetype).
+
+    Fetch a full template via GET /v1/schema/templates/{name}, replace
+    the app_id placeholder and adapt the domain types, lint it via
+    POST /v1/schema/validate, then have the operator register it.
+    """
+    out = []
+    for path in sorted(MANIFEST_TEMPLATES_DIR.glob("*.json")):
+        try:
+            m = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        out.append({
+            "name": path.stem,
+            "display_name": m.get("display_name"),
+            "ingest_mode": m.get("ingest_mode") or "extraction (default)",
+            "description": m.get("description"),
+        })
+    return {"templates": out}
+
+
+@app.get("/v1/schema/templates/{name}", tags=["App Schemas"])
+async def get_manifest_template(
+    name: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """Return one starter manifest template verbatim."""
+    template = _load_manifest_template(name)
+    if template is None:
+        raise HTTPException(status_code=404, detail=f"No manifest template named {name!r}.")
+    return template
+
+
 @app.get("/v1/schema", tags=["App Schemas"])
 async def get_own_schema(app_id: str = Depends(verify_application_access)):
     """
@@ -1187,48 +1280,6 @@ async def update_memory(
     await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
     
     return {"status": "queued", "message": "Memory update received for async processing"}
-
-@app.get("/v1/schema", tags=["App Schemas"])
-async def get_own_schema(app_id: str = Depends(verify_application_access)):
-    """
-    Return the calling app's current registered manifest.
-
-    App-facing counterpart to the admin-gated GET /v1/apps/{app_id}/schema —
-    authenticates via the normal app auth (JWT / X-App-ID) and resolves the
-    manifest for the caller's own app_id. Lets clients refresh their vendored
-    taxonomy (patch types, connection vocabulary, entity types) at launch
-    instead of shipping a stale copy.
-    """
-    try:
-        import uuid as _uuid
-        app_uuid = _uuid.UUID(app_id)
-    except (ValueError, AttributeError):
-        # Legacy string app ids have no registered manifests
-        raise HTTPException(status_code=404, detail="No manifest registered for this app")
-
-    row = await db_pool.fetchrow(
-        """
-        SELECT app_id, version, manifest, registered_at
-          FROM app_schemas
-         WHERE app_id = $1
-         ORDER BY version DESC
-         LIMIT 1
-        """,
-        app_uuid,
-    )
-    if not row:
-        raise HTTPException(status_code=404, detail="No manifest registered for this app")
-
-    manifest = row["manifest"]
-    if isinstance(manifest, str):
-        manifest = json.loads(manifest)
-    return {
-        "app_id": str(row["app_id"]),
-        "version": row["version"],
-        "registered_at": row["registered_at"].isoformat() if row["registered_at"] else None,
-        "manifest": manifest,
-    }
-
 
 @app.post("/v1/prewarm", tags=["Ops"])
 async def prewarm_cache(
