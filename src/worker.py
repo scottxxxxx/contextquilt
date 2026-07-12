@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 import uuid
 from datetime import datetime
 from typing import Any
@@ -50,6 +51,7 @@ from contextquilt.services.extraction_schema import (
     strip_prose_from_person_names,
 )
 from contextquilt.services.entity_aliasing import find_alias_candidate
+from contextquilt.services.ingest_modes import is_interaction_allowed
 from contextquilt.services.llm_client import LLMClient
 from contextquilt.services.semantic_dedup import (
     DEDUP_JUDGE_SCHEMA,
@@ -1261,6 +1263,7 @@ class ColdPathWorker:
         # and OR-only (test / fallback off) without code changes.
         self.llm = _build_default_llm_client(alert_db=self.db)
         self._app_llm_cache: dict[str, LLMClient] = {}  # Per-app BYOK clients
+        self._ingest_mode_cache: dict[str, tuple] = {}  # app_id -> (mode|None, monotonic_ts)
 
         # Get context window for budget calculation. Explicit override
         # via CQ_LLM_CONTEXT_WINDOW wins; otherwise fall back to the
@@ -1736,6 +1739,22 @@ class ColdPathWorker:
         if task_type == "tool_call":
             await self.handle_active_learning(payload)
             return
+        # Ingest-mode gate (transformer contract): when the app's manifest
+        # explicitly declares ingest_mode, its payloads may only reach the
+        # matching adapter. Without this, a structured-mode app sending a
+        # transcript-shaped payload silently flows through LLM extraction
+        # with a generic prompt — plausible garbage in the quilt, no error
+        # anywhere. Undeclared mode (SS) → legacy routing, unchanged.
+        declared_mode = await self._resolve_ingest_mode(payload.get("app_id"))
+        if not is_interaction_allowed(declared_mode, task_type):
+            logger.warning(
+                "ingest_mode_rejected",
+                app_id=payload.get("app_id"), user_id=user_id,
+                declared_mode=declared_mode, interaction_type=task_type,
+                origin_id=origin_id,
+            )
+            return
+
         # Structured ingest (doc §12): pre-typed patches from apps that emit
         # their own signals (e.g. Tech Rehearsal). Already final — never
         # buffered for LLM consolidation like meeting_summary events are.
@@ -1792,6 +1811,38 @@ class ColdPathWorker:
     # ============================================
     # Handlers
     # ============================================
+
+    async def _resolve_ingest_mode(self, app_id: str | None) -> str | None:
+        """The app's manifest-declared ingest_mode, or None when the app has
+        no manifest / the manifest predates the key (legacy routing).
+
+        Cached ~5 min per app — this runs on every queued event, and a
+        manifest re-registration taking a few minutes to affect routing is
+        acceptable (same order as the entity-index TTL). Any lookup failure
+        degrades to None: the gate must never take down ingestion.
+        """
+        if not app_id:
+            return None
+        cached = self._ingest_mode_cache.get(app_id)
+        now = time.monotonic()
+        if cached and now - cached[1] < 300:
+            return cached[0]
+        mode: str | None = None
+        try:
+            raw = await self.db.fetchval(
+                """
+                SELECT manifest->>'ingest_mode' FROM app_schemas
+                WHERE app_id = $1::uuid
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                app_id,
+            )
+            mode = raw or None
+        except Exception:
+            mode = None
+        self._ingest_mode_cache[app_id] = (mode, now)
+        return mode
 
     async def _resolve_extraction_prompt(
         self, app_id: str | None
