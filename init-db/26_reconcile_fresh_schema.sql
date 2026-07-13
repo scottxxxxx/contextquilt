@@ -8,13 +8,10 @@
 -- a from-scratch apply of init-db does not. Every statement below is idempotent,
 -- which makes this file a pure no-op on prod and the real fix only on a clean DB.
 --
--- NOTE: this does NOT address the 04_connected_quilt.sql ON CONFLICT drift. That
--- file aborts a fresh apply (its vocab seed infers `ON CONFLICT (label, app_id)`
--- but uniqueness is an expression index on (label, COALESCE(app_id, ...))), and
--- it runs long before this file, so a later migration can't rescue it. 04 is
--- already applied + sha-seeded on prod, so correcting it needs a prod
--- schema_migrations re-stamp (tracked as a separate, operator-run change). Until
--- then, fresh builds use scripts/seed_test_schema.py to work around 04.
+-- (The 04_connected_quilt.sql ON CONFLICT drift — the other fresh-apply blocker —
+-- is corrected directly in 04 + a prod schema_migrations re-stamp via
+-- scripts/restamp_migration_sha.py. With both fixes, run_migrations.py builds a
+-- fresh schema end to end with no shim.)
 
 -- (gap b) Subject index: the subject_key -> patch association. Created on prod by
 -- scripts/migrate_normalization.py; the core write path inserts into it.

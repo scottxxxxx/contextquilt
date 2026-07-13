@@ -86,7 +86,10 @@ INSERT INTO connection_vocabulary (label, app_id, role, from_types, to_types, de
     ('unblocks',     NULL, 'resolves',   ARRAY['blocker'], ARRAY['commitment'], 'Clearing this blocker frees the commitment'),
     ('motivated_by', NULL, 'informs',    ARRAY['decision'], ARRAY['preference','takeaway'], 'Decision driven by preference or insight'),
     ('supersedes',   NULL, 'replaces',   ARRAY['decision'], ARRAY['decision'], 'New decision replaces old one')
-ON CONFLICT (label, app_id) DO NOTHING;
+-- Conflict target must match idx_connection_vocab_unique above: Postgres can't
+-- infer a bare-column target from the COALESCE(app_id, ...) expression index, so
+-- `ON CONFLICT (label, app_id)` aborts a fresh apply. Same effect, inferable.
+ON CONFLICT (label, COALESCE(app_id, '00000000-0000-0000-0000-000000000000'::uuid)) DO NOTHING;
 
 -- ============================================================
 -- 4. Extend existing tables
