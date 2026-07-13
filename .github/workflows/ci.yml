@@ -50,8 +50,8 @@ jobs:
 
       - name: Build fresh schema for integration tests
         env:
-          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cq_test
-        run: python scripts/seed_test_schema.py
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cq_test
+        run: python scripts/run_migrations.py
 
       - name: DB integration tests (structured ingest + patch cues)
         env:
