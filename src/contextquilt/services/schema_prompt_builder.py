@@ -45,6 +45,7 @@ def build_prompt(manifest: Dict[str, Any]) -> str:
     sections.append(_reasoning_requirement(guidance))
     sections.append(_output_shape(manifest))
     sections.append(_cues_section(manifest, guidance))
+    sections.append(_salience_section(guidance))
     sections.append(_patch_types_section(manifest))
     sections.append(_connection_labels_section(manifest))
     sections.append(_priority_order(guidance))
@@ -105,6 +106,7 @@ def build_output_schema(manifest: Dict[str, Any]) -> Dict[str, Any]:
                                     "maxItems": 5,
                                     "items": {"type": "string"},
                                 },
+                                "salience": {"type": ["string", "null"]},
                             },
                         },
                         "connects_to": {
@@ -282,6 +284,26 @@ def _cues_section(manifest: Dict[str, Any], guidance: Dict[str, Any]) -> str:
         lines.append("Type-specific cue guidance:")
         lines.extend(per_type)
     return "\n".join(lines)
+
+
+def _salience_section(guidance: Dict[str, Any]) -> str:
+    """Judgment-weighted encoding instruction.
+
+    Manifest hooks (no CQ code): `guidance.salience_guidance` replaces the
+    default prose; `guidance.salience_enabled: false` drops the section
+    (and with it, salience emission).
+    """
+    if guidance.get("salience_enabled") is False:
+        return ""
+    body = guidance.get("salience_guidance") or (
+        "`value.salience` weights how long a memory lives and how eagerly "
+        "it resurfaces. Set it from what the SPEAKER signaled: \"high\" "
+        "ONLY for unusual weight (emotional emphasis, surprise, explicit "
+        "stakes, a reversal of something previously believed, repetition); "
+        "\"low\" for passing remarks unlikely to matter later; null for "
+        "everything else — MOST patches are null."
+    )
+    return "=== SALIENCE — how strongly to remember ===\n" + body
 
 
 def _patch_types_section(manifest: Dict[str, Any]) -> str:
