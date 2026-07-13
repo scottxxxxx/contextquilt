@@ -1,0 +1,86 @@
+{
+  "app_id": "REPLACE-WITH-YOUR-APP-ID",
+  "version": 1,
+  "facet_enum_version": 1,
+  "display_name": "Structured Coaching Starter",
+  "description": "Starter manifest for apps that already produce typed signals (coaching scores, assessments, tracked metrics) and need no LLM extraction. Send interaction_type=structured_patches with pre-typed patches[]; CQ validates against this manifest and stores atomically (whole batch accepted or rejected). Raw media/transcript fields (summary, content, messages, transcript) are rejected by the privacy gate — send structured signals only.",
+  "ingest_mode": "structured",
+  "design_principles": [
+    "The app owns signal quality; CQ owns memory lifecycle, series grouping, and recall.",
+    "Longitudinal types keep every observation (a trajectory), not just the latest value.",
+    "rating_ordinal-style scale fields are 1-indexed — validation rejects falsy required values."
+  ],
+  "origin_types": ["session"],
+  "patch_types": [
+    {
+      "domain_type": "session",
+      "facet": "Episode",
+      "permanence": "quarter",
+      "display_name": "Session",
+      "description": "One practice/coaching session. Parent container other signals connect to.",
+      "value_shape": {"text": "string", "scenario": "string"},
+      "required_fields": ["text"]
+    },
+    {
+      "domain_type": "skill_rating",
+      "facet": "Attribute",
+      "permanence": "quarter",
+      "display_name": "Skill Rating",
+      "description": "A scored assessment of one skill. Longitudinal: repeat ratings of the same skill append to one series (trend), scoped per project_id when provided.",
+      "longitudinal": true,
+      "series_descriptor_field": "skill",
+      "required_fields": ["text", "skill", "rating"],
+      "value_shape": {"text": "string", "skill": "string", "rating": "string", "rating_ordinal": "number"}
+    },
+    {
+      "domain_type": "improvement_area",
+      "facet": "Constraint",
+      "permanence": "month",
+      "display_name": "Improvement Area",
+      "description": "A gap the coaching surfaced. Completable — close it when a later session shows the gap addressed.",
+      "completable": true,
+      "cue_guidance": "Name the skill or behavior with the gap, so later sessions about that topic recall it.",
+      "value_shape": {"text": "string", "skill": "string"},
+      "required_fields": ["text"]
+    },
+    {
+      "domain_type": "strength",
+      "facet": "Attribute",
+      "permanence": "year",
+      "display_name": "Strength",
+      "description": "A demonstrated strength worth reinforcing and building narratives around.",
+      "value_shape": {"text": "string", "skill": "string"},
+      "required_fields": ["text"]
+    }
+  ],
+  "connection_labels": [
+    {
+      "label": "observed_in",
+      "role": "informs",
+      "from_types": ["skill_rating", "improvement_area", "strength"],
+      "to_types": ["session"],
+      "description": "The signal was produced by this session."
+    },
+    {
+      "label": "addresses",
+      "role": "depends_on",
+      "from_types": ["session"],
+      "to_types": ["improvement_area"],
+      "description": "The session deliberately practiced a previously flagged gap."
+    }
+  ],
+  "entity_types": [
+    {
+      "entity_type": "skill",
+      "display_name": "Skill",
+      "description": "Named skills under assessment, indexed for recall matching.",
+      "indexed": true
+    },
+    {
+      "entity_type": "scenario",
+      "display_name": "Scenario",
+      "description": "Named practice scenarios or target situations.",
+      "indexed": true
+    }
+  ]
+}

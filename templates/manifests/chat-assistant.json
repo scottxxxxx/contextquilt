@@ -1,0 +1,94 @@
+{
+  "app_id": "REPLACE-WITH-YOUR-APP-ID",
+  "version": 1,
+  "facet_enum_version": 1,
+  "display_name": "Chat Assistant Starter",
+  "description": "Starter manifest for conversational assistants that want durable user memory across sessions. Send interaction_type=analysis with the conversation text as content (runs the manifest-driven extraction pipeline), or interaction_type=chat_log with a messages[] array (universal conversation extractor). Recall the memory back per turn via POST /v1/recall.",
+  "ingest_mode": "extraction",
+  "design_principles": [
+    "Memory is about the user, not the conversation: prefer durable facts over chit-chat.",
+    "Extract only self-disclosed information; never store assistant-inferred conclusions as user facts.",
+    "Every commitment carries its spoken deadline so recall can surface overdue items."
+  ],
+  "origin_types": ["conversation"],
+  "patch_types": [
+    {
+      "domain_type": "personal_fact",
+      "facet": "Attribute",
+      "permanence": "year",
+      "display_name": "Personal Fact",
+      "description": "A durable fact the user disclosed about themselves (role, family, circumstances).",
+      "self_only": true,
+      "value_shape": {"text": "string"}
+    },
+    {
+      "domain_type": "preference",
+      "facet": "Affinity",
+      "permanence": "year",
+      "display_name": "Preference",
+      "description": "Likes, dislikes, and how the user wants the assistant to behave.",
+      "self_only": true,
+      "cue_guidance": "Name the subject of the preference (a food, a workflow, a communication style), not the conversation.",
+      "value_shape": {"text": "string"}
+    },
+    {
+      "domain_type": "goal",
+      "facet": "Intention",
+      "permanence": "quarter",
+      "display_name": "Goal",
+      "description": "An explicit aim the user is working toward.",
+      "self_only": true,
+      "value_shape": {"text": "string"}
+    },
+    {
+      "domain_type": "commitment",
+      "facet": "Intention",
+      "permanence": "month",
+      "display_name": "Commitment",
+      "description": "Something the user said they will do, with any deadline as spoken.",
+      "completable": true,
+      "value_shape": {"text": "string", "owner": "string", "deadline": "string", "deadline_date": "string"}
+    },
+    {
+      "domain_type": "person",
+      "facet": "Connection",
+      "permanence": "year",
+      "display_name": "Person",
+      "description": "A named person in the user's life. value.text is the NAME ONLY.",
+      "value_shape": {"text": "string"}
+    }
+  ],
+  "connection_labels": [
+    {
+      "label": "motivated_by",
+      "role": "informs",
+      "from_types": ["commitment"],
+      "to_types": ["goal"],
+      "description": "The commitment advances this goal."
+    },
+    {
+      "label": "involves",
+      "role": "informs",
+      "from_types": ["commitment", "goal"],
+      "to_types": ["person"],
+      "description": "The named person is part of this commitment or goal."
+    }
+  ],
+  "entity_types": [
+    {
+      "entity_type": "person",
+      "display_name": "Person",
+      "description": "Named people in the user's life, indexed for recall matching.",
+      "indexed": true
+    },
+    {
+      "entity_type": "topic",
+      "display_name": "Topic",
+      "description": "Named recurring subjects (a hobby, a project, a place).",
+      "indexed": true
+    }
+  ],
+  "extraction_prompt_guidance": {
+    "role_context": "You are a structured data extraction engine building long-term memory for a conversational assistant. Extract durable, user-disclosed facts — never transient conversation mechanics, never assistant inferences presented as user facts."
+  }
+}
