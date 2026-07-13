@@ -45,6 +45,7 @@ from contextquilt.services.extraction_schema import (
     normalize_owner_in_transcript,
     sanitize_cues,
     sanitize_deadline_dates,
+    sanitize_salience,
     sanitize_you_marker_from_patches,
     strip_ephemeral_fields,
     strip_owner_on_self_typed_patches,
@@ -426,6 +427,19 @@ async def store_connected_patches(
                    AND value->>'deadline_date' IS NULL
                 """,
                 new_dd, value.get("deadline") or new_dd, existing_id,
+            )
+        # Salience merges forward like deadline detail: a re-observation
+        # flagged high UPGRADES the surviving patch; nothing ever
+        # auto-downgrades (a fact stated urgently once stays weighted).
+        if value.get("salience") == "high":
+            await db.execute(
+                """
+                UPDATE context_patches
+                   SET value = jsonb_set(value, '{salience}', '"high"')
+                 WHERE patch_id = $1::uuid
+                   AND COALESCE(value->>'salience', '') <> 'high'
+                """,
+                existing_id,
             )
         await _store_cues(existing_id, cues or [])
         patch_lookup[(text.lower().strip(), patch_type)] = existing_id
@@ -1560,14 +1574,23 @@ class ColdPathWorker:
                         staleness_anchor_sql = "updated_at"
 
                     # Archive patches older than TTL that haven't been accessed recently
-                    # and have no explicit override.
+                    # and have no explicit override. Salience stretches or
+                    # shrinks the effective TTL per patch (high ×1.5, low
+                    # ×0.5, absent = ×1.0) — judgment-weighted encoding's
+                    # lifecycle half; the recall scorer holds the other.
+                    # The access-exemption window stays at the unmodified
+                    # TTL: usage refresh is orthogonal to salience.
+                    salience_ttl_sql = (
+                        "(CASE value->>'salience' "
+                        "WHEN 'high' THEN 1.5 WHEN 'low' THEN 0.5 ELSE 1.0 END)"
+                    )
                     result = await self.db.execute(
                         f"""
                         UPDATE context_patches SET status = 'archived', updated_at = NOW()
                         WHERE patch_type = $1
                           AND permanence_override IS NULL
                           AND COALESCE(status, 'active') = 'active'
-                          AND {staleness_anchor_sql} < NOW() - INTERVAL '1 day' * $2
+                          AND {staleness_anchor_sql} < NOW() - INTERVAL '1 day' * $2 * {salience_ttl_sql}
                           AND patch_id NOT IN (
                               SELECT patch_id FROM patch_usage_metrics
                               WHERE last_accessed_at > NOW() - INTERVAL '1 day' * $2
@@ -2555,6 +2578,7 @@ class ColdPathWorker:
                 response.content, user_label=user_label
             )
             sanitize_cues(response.content)
+            sanitize_salience(response.content)
             sanitize_deadline_dates(response.content, meeting_date=meeting_date)
             strip_ephemeral_fields(response.content)
 

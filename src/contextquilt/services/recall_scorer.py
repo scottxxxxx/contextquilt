@@ -78,6 +78,12 @@ DEADLINE_OVERDUE_BOOST = 25.0
 DEADLINE_DUE_SOON_BOOST = 15.0
 DEADLINE_DUE_SOON_WINDOW_DAYS = 7
 
+# Salience (value.salience, set at extraction from speaker signals):
+# same magnitude band as deadline urgency — a weight modifier, never a
+# relevance signal strong enough to beat an entity or cue match.
+SALIENCE_HIGH_BOOST = 20.0
+SALIENCE_LOW_PENALTY = -10.0
+
 
 # Stopwords filtered out of query keyword matching. Kept small — we want
 # moderate filtering, not aggressive NLP. Project names like "app" or
@@ -139,6 +145,20 @@ def _patch_text(row: Any) -> str:
     if isinstance(v, dict):
         return v.get("text", "") or ""
     return ""
+
+
+def _patch_salience(row: Any) -> "str | None":
+    """The stored `value.salience` level ('low'/'high'), None otherwise."""
+    v = row["value"] if isinstance(row, dict) else row["value"]
+    if isinstance(v, str):
+        try:
+            v = json.loads(v)
+        except Exception:
+            return None
+    if not isinstance(v, dict):
+        return None
+    raw = v.get("salience")
+    return raw if raw in ("low", "high") else None
 
 
 def _patch_deadline_date(row: Any) -> "date | None":
@@ -306,6 +326,15 @@ def score_patches(
                     score += DEADLINE_OVERDUE_BOOST
                 elif days_until <= DEADLINE_DUE_SOON_WINDOW_DAYS:
                     score += DEADLINE_DUE_SOON_BOOST
+
+        # Salience weight — extraction-time judgment of how strongly the
+        # speaker signaled this. A modifier, deliberately weaker than any
+        # relevance signal (entity/cue match).
+        salience = _patch_salience(row)
+        if salience == "high":
+            score += SALIENCE_HIGH_BOOST
+        elif salience == "low":
+            score += SALIENCE_LOW_PENALTY
 
         # Recency — normalized to 0..10 across the current patch batch
         ts = _last_observed_at(row)

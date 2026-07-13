@@ -123,7 +123,7 @@ Analyze this meeting transcript and return a JSON object with exactly seven keys
   "patches": [
     {
       "type": "<one of the patch types below>",
-      "value": {"text": "<concise statement grounded in this transcript>", "owner": "<speaker name, or null>", "deadline": "<deadline as spoken, or null>", "deadline_date": "<YYYY-MM-DD or null>", "cues": ["<0-5 short lowercase topic phrases>"]},
+      "value": {"text": "<concise statement grounded in this transcript>", "owner": "<speaker name, or null>", "deadline": "<deadline as spoken, or null>", "deadline_date": "<YYYY-MM-DD or null>", "cues": ["<0-5 short lowercase topic phrases>"], "salience": "<high|low|null>"},
       "connects_to": [
         {"target_text": "<text of another patch in this output>", "target_type": "<one of the patch types>", "role": "<parent|depends_on|resolves|replaces|informs>", "label": "<belongs_to|blocked_by|unblocks|supersedes|motivated_by|works_on|owns>"}
       ]
@@ -158,6 +158,20 @@ someone use when this patch should surface?" Emit those, 0-5 per patch:
 - an empty array is correct when the entities already cover it
 
 === END CUES ===
+
+=== SALIENCE — how strongly to remember ===
+
+`value.salience` weights how long a memory lives and how eagerly it
+resurfaces. Set it from what the SPEAKER signaled, not your own judgment
+of importance:
+- "high" ONLY for unusual weight: emotional emphasis, surprise, explicit
+  stakes ("this is critical", "don't forget"), a reversal of something
+  previously believed, or a point repeated across the conversation
+- "low" for passing remarks unlikely to matter later
+- null for everything else — MOST patches are null. If more than one or
+  two patches per meeting are "high", you are over-flagging.
+
+=== END SALIENCE ===
 
 === LANGUAGE ===
 
