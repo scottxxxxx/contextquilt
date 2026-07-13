@@ -116,7 +116,7 @@ EXTRACTION_SCHEMA: dict = {
                     "value": {
                         "type": "object",
                         "additionalProperties": False,
-                        "required": ["text", "owner", "deadline", "deadline_date", "cues"],
+                        "required": ["text", "owner", "deadline", "deadline_date", "cues", "salience"],
                         "properties": {
                             "text": {"type": "string"},
                             "owner": {"type": ["string", "null"]},
@@ -144,6 +144,19 @@ EXTRACTION_SCHEMA: dict = {
                                     "(those belong in entities), NOT generic words like "
                                     "'meeting' or 'update', NOT sentences. Empty array "
                                     "when nothing beyond the entities applies."
+                                ),
+                            },
+                            "salience": {
+                                "type": ["string", "null"],
+                                "description": (
+                                    "How strongly this should be remembered. 'high' ONLY "
+                                    "when the speaker signals unusual weight: emotional "
+                                    "emphasis, surprise, explicit stakes ('this is "
+                                    "critical', 'do not forget'), a reversal of something "
+                                    "previously believed, or repetition across the "
+                                    "conversation. 'low' for passing remarks unlikely to "
+                                    "matter later. null for everything else — MOST "
+                                    "patches are null."
                                 ),
                             },
                         },
@@ -530,6 +543,35 @@ def sanitize_cues(content: dict) -> dict:
             value["cues"] = cues
         else:
             value.pop("cues", None)
+    return content
+
+
+# --- Salience sanitation (judgment-weighted encoding) ----------------------
+#
+# Only the two non-default levels are ever stored; "normal" is the implied
+# baseline and keeping it would bloat every value JSONB for zero signal.
+# The scorer boosts/penalizes on the stored levels and the decay loop
+# stretches/shrinks TTL — a hallucinated level is a mis-weighted memory,
+# so anything outside the vocabulary is dropped, never guessed.
+
+VALID_SALIENCE_LEVELS = frozenset({"low", "high"})
+
+
+def sanitize_salience(content: dict) -> dict:
+    """Normalize value.salience on every patch: lowercase, keep only
+    'low'/'high', drop 'normal'/null/junk (absent key == normal)."""
+    for patch in content.get("patches") or []:
+        if not isinstance(patch, dict):
+            continue
+        value = patch.get("value")
+        if not isinstance(value, dict):
+            continue
+        raw = value.get("salience")
+        level = raw.strip().lower() if isinstance(raw, str) else None
+        if level in VALID_SALIENCE_LEVELS:
+            value["salience"] = level
+        else:
+            value.pop("salience", None)
     return content
 
 
