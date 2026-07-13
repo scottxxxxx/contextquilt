@@ -15,7 +15,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ### The Connected Quilt Data Model
 
-Three memory tiers: **Factual** (Postgres `context_patches` — typed patches), **Episodic** (entities + relationships graph), **Working** (Redis, short TTL). Patches are typed (trait, preference, identity, role, person, org, project, deliverable, decision, commitment, blocker, takeaway, goal, constraint, event) and connected by stitching (roles: parent, depends_on, resolves, replaces, informs). Per-app taxonomy lives in registered manifests (`app_schemas`, see `init-db/11_shouldersurf_schema.json`); the schema-driven prompt builder generates extraction prompts from them.
+Three memory tiers: **Factual** (Postgres `context_patches` — typed patches), **Episodic** (entities + relationships graph), **Working** (Redis, short TTL). Patches are typed (trait, preference, identity, role, person, org, project, deliverable, decision, commitment, blocker, takeaway, goal, constraint, event) and connected by stitching (roles: parent, depends_on, resolves, replaces, informs). Per-app taxonomy lives in registered manifests (`app_schemas`, see `init-db/11_shouldersurf_schema.json`); the schema-driven prompt builder generates extraction prompts from them. Manifest `ingest_mode` (extraction|structured) picks the ingest transformer and is ENFORCED by the worker when explicitly declared (undeclared → legacy routing; SS predates the key). Onboarding a new app = starter template (`templates/manifests/`, served at `GET /v1/schema/templates`) → lint via `POST /v1/schema/validate` → admin registration; see `docs/architecture/13-app-onboarding.md`.
 
 ## Key Technical Concepts
 
@@ -61,7 +61,7 @@ ContextQuilt is consumed by ShoulderSurf (iOS) through the GhostPour gateway. **
 
 ## Documentation
 
-`docs/architecture/00–11` (overview, memory model, pipeline, queue, recall, integration, configuration, API reference, connected quilt, domain mapping, security, model selection) and `docs/openapi.yaml`. FastAPI auto-docs at `/docs`. NOTE: docs/openapi.yaml lags the June 2026 surface (meeting views, complete endpoint, token_budget, language) — update when touched.
+`docs/architecture/00–13` (overview, memory model, pipeline, queue, recall, integration, configuration, API reference, connected quilt, domain mapping, security, model selection, structured ingest, app onboarding/templates) and `docs/openapi.yaml`. FastAPI auto-docs at `/docs`. NOTE: docs/openapi.yaml lags the June 2026 surface (meeting views, complete endpoint, token_budget, language) — update when touched.
 
 ## Development
 
