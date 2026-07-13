@@ -48,6 +48,9 @@ PATCH_TYPE_OPTIONAL = {
     # descriptor and required value fields at the patch-type level — there is
     # no extraction_rules block in a structured manifest (doc §2, §3.2).
     "longitudinal", "series_descriptor_field", "required_fields",
+    # Per-type associative-retrieval cue instruction (rendered by the
+    # schema prompt builder's CUES section).
+    "cue_guidance",
 }
 
 LABEL_REQUIRED = {"label", "role", "from_types", "to_types", "description"}
@@ -218,6 +221,10 @@ def _validate_patch_type(pt: Any, idx: int) -> List[str]:
         errors.append(
             f"{prefix}.longitudinal types must declare a series_descriptor_field."
         )
+
+    cue_guidance = pt.get("cue_guidance")
+    if cue_guidance is not None and (not isinstance(cue_guidance, str) or not cue_guidance.strip()):
+        errors.append(f"{prefix}.cue_guidance must be a non-empty string when provided.")
 
     return errors
 
