@@ -137,6 +137,7 @@ After patches are pulled for the recall set, they're ranked by `score_patches` i
 | Component | Range | Description |
 | --- | --- | --- |
 | Type priority | 5..50 | Actionable types (commitment, blocker) float above passive (preference, takeaway) |
+| Salience | +20 / −10 | `value.salience` high/low, set at extraction from speaker signals (emphasis, surprise, stakes). A weight modifier — deliberately weaker than any relevance signal |
 | Entity-match boost | +100 per match | A matched entity name appears in the patch text |
 | Keyword overlap | +0..60 | Shared content words with the query (capped) |
 | Recency | +0..10 | Newest patch in the batch gets +10, oldest gets +0 — anchored on `last_observed_at` for self-typed patches, `created_at` otherwise |
