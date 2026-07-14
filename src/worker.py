@@ -51,6 +51,16 @@ from contextquilt.services.extraction_schema import (
     strip_owner_on_self_typed_patches,
     strip_prose_from_person_names,
 )
+from contextquilt.services.consolidation import (
+    CONSOLIDATION_SYSTEM,
+    CLUSTER_WINDOW_DAYS,
+    MAX_CLUSTERS_PER_USER_PER_CYCLE,
+    MAX_SOURCE_TEXTS,
+    MAX_USERS_PER_APP_PER_CYCLE,
+    build_synthesis_content,
+    parse_consolidation_rules,
+    parse_synthesis_response,
+)
 from contextquilt.services.entity_aliasing import find_alias_candidate
 from contextquilt.services.ingest_modes import is_interaction_allowed
 from contextquilt.services.llm_client import LLMClient
@@ -1305,6 +1315,7 @@ class ColdPathWorker:
             self.consume_stream(),
             self.check_queues_loop(),
             self.decay_loop(),
+            self.consolidation_loop(),
             self.backup_failure_watch_loop(),
             self.provider_health_loop(),
         )
@@ -1623,6 +1634,205 @@ class ColdPathWorker:
                 logger.error("decay_error", error=str(e))
 
             await asyncio.sleep(DECAY_INTERVAL_SECONDS)
+
+    async def consolidation_loop(self):
+        """The "sleep" pass (doc 14): synthesize higher-order patches from
+        cue-clustered sources, per manifest-declared consolidation_rules.
+
+        Inert unless (a) CQ_CONSOLIDATION_ENABLED and (b) at least one
+        registered manifest declares consolidation_rules. Derived patches
+        carry origin_mode='derived', source_patch_ids, value.source_cue
+        (the idempotency stamp — one consolidation per user/app/type/cue)
+        and `informs` connections from every source.
+        """
+        # Coroutine-local on purpose — see the worker constants gotcha.
+        CONSOLIDATION_INTERVAL_SECONDS = 24 * 60 * 60
+        await asyncio.sleep(120)
+
+        while self.running:
+            try:
+                if not get_settings().cq_consolidation_enabled:
+                    await asyncio.sleep(CONSOLIDATION_INTERVAL_SECONDS)
+                    continue
+
+                app_rows = await self.db.fetch(
+                    """
+                    SELECT DISTINCT ON (app_id) app_id, manifest
+                    FROM app_schemas
+                    WHERE manifest ? 'consolidation_rules'
+                    ORDER BY app_id, version DESC
+                    """
+                )
+                total_created = 0
+                for app_row in app_rows:
+                    manifest = app_row["manifest"]
+                    if isinstance(manifest, str):
+                        manifest = json.loads(manifest)
+                    rules = parse_consolidation_rules(manifest)
+                    if not rules:
+                        continue
+                    app_id = str(app_row["app_id"])
+
+                    user_rows = await self.db.fetch(
+                        """
+                        SELECT DISTINCT ps.subject_key
+                        FROM context_patch_acl acl
+                        JOIN patch_subjects ps ON ps.patch_id = acl.patch_id
+                        WHERE acl.app_id = $1::uuid
+                        ORDER BY ps.subject_key
+                        LIMIT $2
+                        """,
+                        app_id, MAX_USERS_PER_APP_PER_CYCLE,
+                    )
+                    for user_row in user_rows:
+                        subject_key = user_row["subject_key"]
+                        created = await self._consolidate_user(
+                            subject_key, app_id, rules
+                        )
+                        total_created += created
+                if total_created:
+                    logger.info("consolidation_cycle_complete", created=total_created)
+                else:
+                    logger.debug("consolidation_cycle_complete", created=0)
+            except Exception as e:
+                logger.error("consolidation_error", error=str(e))
+
+            await asyncio.sleep(CONSOLIDATION_INTERVAL_SECONDS)
+
+    async def _consolidate_user(
+        self, subject_key: str, app_id: str, rules: list
+    ) -> int:
+        """Run every rule's cluster detection for one user; synthesize and
+        store up to MAX_CLUSTERS_PER_USER_PER_CYCLE new derived patches."""
+        created = 0
+        for rule in rules:
+            if created >= MAX_CLUSTERS_PER_USER_PER_CYCLE:
+                break
+            clusters = await self.db.fetch(
+                f"""
+                SELECT pc.cue,
+                       array_agg(DISTINCT cp.patch_id) AS patch_ids
+                FROM patch_cues pc
+                JOIN context_patches cp ON cp.patch_id = pc.patch_id
+                JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                JOIN context_patch_acl acl ON acl.patch_id = cp.patch_id
+                WHERE ps.subject_key = $1
+                  AND acl.app_id = $2::uuid
+                  AND cp.patch_type = ANY($3::text[])
+                  AND COALESCE(cp.status, 'active') = 'active'
+                  AND cp.created_at > NOW() - INTERVAL '{CLUSTER_WINDOW_DAYS} days'
+                  -- idempotency: skip cues already consolidated for this user+type
+                  AND NOT EXISTS (
+                      SELECT 1 FROM context_patches d
+                      JOIN patch_subjects dps ON dps.patch_id = d.patch_id
+                      WHERE dps.subject_key = $1
+                        AND d.patch_type = $4
+                        AND d.origin_mode = 'derived'
+                        AND d.value->>'source_cue' = pc.cue
+                        AND COALESCE(d.status, 'active') = 'active'
+                  )
+                GROUP BY pc.cue
+                HAVING count(DISTINCT cp.patch_id) >= $5
+                ORDER BY count(DISTINCT cp.patch_id) DESC, pc.cue ASC
+                LIMIT $6
+                """,
+                subject_key, app_id, rule["from_types"], rule["produce_type"],
+                rule["min_patches"], MAX_CLUSTERS_PER_USER_PER_CYCLE,
+            )
+            for cluster in clusters:
+                if created >= MAX_CLUSTERS_PER_USER_PER_CYCLE:
+                    break
+                made = await self._synthesize_cluster(
+                    subject_key, app_id, rule, cluster["cue"],
+                    [str(p) for p in cluster["patch_ids"]],
+                )
+                if made:
+                    created += 1
+        return created
+
+    async def _synthesize_cluster(
+        self, subject_key: str, app_id: str, rule: dict,
+        cue: str, source_patch_ids: list,
+    ) -> bool:
+        """One synthesis call + provenance-carrying write for one cluster.
+        Returns True when a derived patch was created. Any failure skips
+        the cluster — consolidation must never lose or corrupt sources."""
+        rows = await self.db.fetch(
+            """
+            SELECT value->>'text' AS text FROM context_patches
+            WHERE patch_id = ANY($1::uuid[])
+            ORDER BY created_at ASC
+            """,
+            source_patch_ids,
+        )
+        texts = [r["text"] for r in rows if r["text"]][:MAX_SOURCE_TEXTS]
+        if len(texts) < rule["min_patches"]:
+            return False
+        try:
+            response = await self.llm.extract(
+                system_prompt=CONSOLIDATION_SYSTEM,
+                user_content=build_synthesis_content(
+                    cue, rule["produce_type"], texts, rule.get("guidance")
+                ),
+            )
+            statement = parse_synthesis_response(response.content)
+        except Exception as exc:
+            logger.warning("consolidation_synthesis_failed",
+                           subject=subject_key, cue=cue, reason=str(exc)[:200])
+            return False
+        if not statement:
+            logger.debug("consolidation_declined", subject=subject_key, cue=cue)
+            return False
+
+        patch_id = str(uuid.uuid4())
+        now = datetime.utcnow()
+        value_json = json.dumps({"text": statement, "source_cue": cue})
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO context_patches (
+                        patch_id, patch_name, patch_type, value,
+                        origin_mode, source_prompt, confidence, persistence,
+                        status, created_at, updated_at, last_observed_at,
+                        source_patch_ids
+                    ) VALUES ($1, $2, $3, $4, 'derived', 'consolidation', 0.7,
+                              $5, 'active', $6, $6, $6, $7)
+                    """,
+                    patch_id, f"consolidation_{patch_id[:8]}",
+                    rule["produce_type"], value_json,
+                    DEFAULT_PERSISTENCE.get(rule["produce_type"], "sticky"),
+                    now, source_patch_ids,
+                )
+                await conn.execute(
+                    "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
+                    patch_id, subject_key,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO patch_usage_metrics (patch_id, access_count, last_accessed_at, current_decay_score)
+                    VALUES ($1, 1, $2, 1.0)
+                    """,
+                    patch_id, now,
+                )
+                await conn.execute(
+                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read, can_write, can_delete) VALUES ($1, $2::uuid, TRUE, TRUE, TRUE)",
+                    patch_id, app_id,
+                )
+                for src in source_patch_ids:
+                    await conn.execute(
+                        """
+                        INSERT INTO patch_connections
+                            (from_patch_id, to_patch_id, connection_role, connection_label, context)
+                        VALUES ($1::uuid, $2::uuid, 'informs', 'consolidated_into', 'consolidation source')
+                        ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO NOTHING
+                        """,
+                        src, patch_id,
+                    )
+        logger.info("consolidation_created", subject=subject_key, app_id=app_id,
+                    cue=cue, produce_type=rule["produce_type"],
+                    sources=len(source_patch_ids), patch_id=patch_id)
+        return True
 
     async def _process_ready_queues(self):
         """Find queues that have exceeded the time window and process them."""
