@@ -35,6 +35,7 @@ After the LLM call a fixed sanitizer chain (`src/contextquilt/services/extractio
 
 - `value.deadline` (as spoken) + `value.deadline_date` (LLM-resolved ISO). Recall renders `(OVERDUE | due today | due soon)` markers; scorer boosts overdue/imminent commitment/blocker.
 - Decay (`worker.decay_loop`, type TTLs via `patch_type_registry` + defaults; per-patch `value.salience` stretches/shrinks effective TTL ×1.5/×0.5 — access-exemption window unmodified): self-typed types (trait/preference/goal/constraint) anchor on `COALESCE(last_observed_at, created_at)` (540d TTL); commitment/blocker anchor on `GREATEST(updated_at, deadline_date)` — never archived before their due date; others on `updated_at`. Recall bumps `patch_usage_metrics.last_accessed_at`, which exempts actively-recalled patches from decay.
+- Consolidation (`worker.consolidation_loop`, 24h, kill switch `CQ_CONSOLIDATION_ENABLED`): synthesizes higher-order patches from cue-clustered sources per manifest `consolidation_rules` (no rules → inert). Derived patches: `origin_mode='derived'`, `source_patch_ids`, `value.source_cue` idempotency stamp, `informs` connections from sources. See docs/architecture/14-consolidation.md.
 - `deadline_sweep_loop` stamps `value.overdue_since` on open completables past deadline (app-visible, flows into delta sync). Project-scoped recall guarantees up to 5 overdue completables surface regardless of recency windows.
 - `last_observed_at` moves ONLY via the worker dedup re-observation path; admin edits move only `updated_at`. Recall scorer applies freshness penalty `max(0.30, exp(-days_stale/365))` to self-typed types, with `now` bucketed to the UTC day — **all recall output must stay byte-stable within a UTC day** (upstream prompt caching depends on it).
 - Adding a self-disclosed type to the freshness model: update `FRESHNESS_TRACKED_TYPES` in `recall_scorer.py` AND `worker.decay_loop` AND the partial index in `init-db/20_preference_freshness.sql`.
@@ -61,7 +62,7 @@ ContextQuilt is consumed by ShoulderSurf (iOS) through the GhostPour gateway. **
 
 ## Documentation
 
-`docs/architecture/00–13` (overview, memory model, pipeline, queue, recall, integration, configuration, API reference, connected quilt, domain mapping, security, model selection, structured ingest, app onboarding/templates) and `docs/openapi.yaml`. FastAPI auto-docs at `/docs`. NOTE: docs/openapi.yaml lags the June 2026 surface (meeting views, complete endpoint, token_budget, language) — update when touched.
+`docs/architecture/00–13` (overview, memory model, pipeline, queue, recall, integration, configuration, API reference, connected quilt, domain mapping, security, model selection, structured ingest, app onboarding/templates, consolidation) and `docs/openapi.yaml`. (00–14.) FastAPI auto-docs at `/docs`. NOTE: docs/openapi.yaml lags the June 2026 surface (meeting views, complete endpoint, token_budget, language) — update when touched.
 
 ## Development
 

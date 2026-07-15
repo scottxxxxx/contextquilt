@@ -113,6 +113,13 @@ class Settings(BaseSettings):
         default=True, alias="CQ_SEMANTIC_DEDUP_ENABLED"
     )
 
+    # Consolidation ("sleep" pass): periodic synthesis of higher-order
+    # patches from cue-clustered sources. Kill switch — inert anyway
+    # unless a registered manifest declares consolidation_rules.
+    cq_consolidation_enabled: bool = Field(
+        default=True, alias="CQ_CONSOLIDATION_ENABLED"
+    )
+
     # --- Alerting / email ---
     cq_alert_email_from: str = Field(default="", alias="CQ_ALERT_EMAIL_FROM")
     resend_api_key: str = Field(default="", alias="RESEND_API_KEY")
