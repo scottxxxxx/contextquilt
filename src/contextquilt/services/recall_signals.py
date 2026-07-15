@@ -143,6 +143,18 @@ def extract_unmatched_mentions(
     return out
 
 
+def build_coverage_line(rendered: int, total: int) -> Optional[str]:
+    """Contract commitment E (context-flow summit, 2026-07): when a
+    project-scoped recall renders fewer patches than the project holds,
+    say so — a correctly scoped block that silently omits most of a
+    project's memory reads as complete, which is worse than absence.
+    Always-on for scoped recalls (not gated by memory_signals): the
+    downstream teams treat coverage lines as part of the block."""
+    if total <= 0 or rendered >= total:
+        return None
+    return f"(showing {rendered} of {total} stored patches for this project)"
+
+
 def build_signal_lines(
     unmatched_mentions: List[str],
     project_scope_label: Optional[str] = None,

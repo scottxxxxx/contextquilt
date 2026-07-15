@@ -42,11 +42,12 @@ from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
 from contextquilt.services.recall_formatter import (
     CHARS_PER_TOKEN,
-    format_flat_ranked,
     format_category_grouped,
+    format_flat_ranked_with_stats,
     resolve_token_budget,
 )
 from contextquilt.services.recall_signals import (
+    build_coverage_line,
     build_signal_lines,
     extract_unmatched_mentions,
     memory_signals_enabled,
@@ -1080,6 +1081,35 @@ async def recall_context(
         )
     signal_block = "\n".join(signal_lines)
 
+    # Coverage denominator (contract commitment E): how many active
+    # patches this project scope actually holds. One indexed COUNT, only
+    # on scoped requests; failure degrades to no coverage line.
+    scoped_total = 0
+    if has_project_scope:
+        try:
+            if recall_project_id:
+                scoped_total = await db_pool.fetchval(
+                    """
+                    SELECT count(*) FROM context_patches cp
+                    JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                    WHERE ps.subject_key = $1 AND cp.project_id = $2
+                      AND COALESCE(cp.status, 'active') = 'active'
+                    """,
+                    subject_key, recall_project_id,
+                ) or 0
+            elif recall_project:
+                scoped_total = await db_pool.fetchval(
+                    """
+                    SELECT count(*) FROM context_patches cp
+                    JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                    WHERE ps.subject_key = $1 AND cp.project = $2
+                      AND COALESCE(cp.status, 'active') = 'active'
+                    """,
+                    subject_key, recall_project,
+                ) or 0
+        except Exception:
+            scoped_total = 0
+
     # Cap for flat output — avoids runaway context blocks for users
     # with large quilts.
     flat_cap = request.max_patches or 15
@@ -1100,13 +1130,19 @@ async def recall_context(
             # of the render-cache key above — two budgets never share a
             # cached body.
             token_budget = resolve_token_budget(request.metadata)
-            # Signal lines ride inside the same token budget — reserve
-            # their length so patches + signals together stay under it.
-            signal_reserve = len(signal_block) + 2 if signal_block else 0
-            context = format_flat_ranked(
+            # Signal + coverage lines ride inside the same token budget —
+            # reserve their length so everything stays under it. Coverage
+            # length isn't known until after formatting; reserve a fixed
+            # 64 chars whenever a scoped total exists.
+            trailing_reserve = (len(signal_block) + 2 if signal_block else 0) + (64 if scoped_total else 0)
+            context, rendered_count = format_flat_ranked_with_stats(
                 scored_for_output, entity_rows, rel_rows,
-                max_chars=token_budget * CHARS_PER_TOKEN - signal_reserve,
+                max_chars=token_budget * CHARS_PER_TOKEN - trailing_reserve,
             )
+            # Contract commitment E — truncation must be visible.
+            coverage = build_coverage_line(rendered_count, scoped_total)
+            if coverage:
+                signal_block = f"{coverage}\n{signal_block}" if signal_block else coverage
         except Exception:
             # Emergency fallback: empty string, the endpoint still returns
             # matched entities and patch ids so callers aren't blocked.
@@ -1490,6 +1526,8 @@ async def get_user_quilt(
     since: Optional[str] = Query(None, description="ISO 8601 timestamp — return only patches created/updated after this time, plus IDs of patches deleted since then"),
     origin_id: Optional[str] = Query(None, description="Meeting view: only patches anchored to this meeting (origin), in capture order. Only episodic/project-scoped types carry an origin — user-scoped types (trait, preference, person, project, org) are meeting-free by design and never appear here."),
     group_by: Optional[str] = Query(None, description="'origin' adds a `meetings` array grouping origin-anchored patches by meeting (newest meeting first, capture order inside). Flat arrays are unchanged."),
+    project_id: Optional[str] = Query(None, description="Project rundown view (context-flow contract, 2026-07): only patches carrying this stable project id. Combine with group_by=origin for a complete per-meeting project dossier. NOTE: meeting views stay keyed on origin_id per the SS contract; this filter serves the gateway's rundown route and only works when ingest stamped project_id (see docs/architecture/13)."),
+    limit: Optional[int] = Query(None, ge=1, le=500, description="Cap the patches array (applied after ordering). For prompt injection use — a large project must not blow the caller's prompt budget."),
     app_id: str = Depends(verify_application_access),
 ):
     """
@@ -1557,6 +1595,10 @@ async def get_user_quilt(
         query += f" AND cp.origin_id = ${len(params) + 1}"
         params.append(origin_id)
 
+    if project_id:
+        query += f" AND cp.project_id = ${len(params) + 1}"
+        params.append(project_id)
+
     # Meeting view = capture order (oldest first), per the SS contract:
     # a browse surface wants deterministic ordering, not ranking. The
     # default full-sync order stays newest-first. patch_id tiebreak in
@@ -1565,6 +1607,10 @@ async def get_user_quilt(
         query += " ORDER BY cp.created_at ASC, cp.patch_id ASC"
     else:
         query += " ORDER BY cp.created_at DESC, cp.patch_id ASC"
+
+    if limit:
+        query += f" LIMIT ${len(params) + 1}"
+        params.append(limit)
 
     rows = await db_pool.fetch(query, *params)
 

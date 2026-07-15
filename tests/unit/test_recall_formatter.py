@@ -253,3 +253,30 @@ def test_budget_shapes_flat_output_size():
     large = format_flat_ranked(scored, [], [], max_chars=MAX_RECALL_TOKEN_BUDGET * CHARS_PER_TOKEN)
     assert len(small) < len(large)
     assert len(small) <= MIN_RECALL_TOKEN_BUDGET * CHARS_PER_TOKEN + 100  # patch-boundary slop
+
+
+# ------------------------------------------------------------------
+# format_flat_ranked_with_stats — rendered-line count (commitment E)
+# ------------------------------------------------------------------
+
+from src.contextquilt.services.recall_formatter import format_flat_ranked_with_stats
+
+
+def test_stats_count_matches_rendered_patch_lines():
+    patches = [(10.0 - i, _patch(str(i), "takeaway", f"observation number {i} about topic")) for i in range(8)]
+    ctx, n = format_flat_ranked_with_stats(patches, [], [], max_chars=5000)
+    assert n == 8
+    assert ctx.count("[note]") == 8
+
+
+def test_stats_count_reflects_budget_truncation():
+    patches = [(10.0 - i, _patch(str(i), "takeaway", f"observation number {i} about a fairly long topic sentence")) for i in range(20)]
+    ctx, n = format_flat_ranked_with_stats(patches, [], [], max_chars=300)
+    assert 0 < n < 20
+    assert ctx.count("[note]") == n
+
+
+def test_wrapper_back_compat_same_string():
+    patches = [(1.0, _patch("1", "takeaway", "just one thing"))]
+    ctx, _ = format_flat_ranked_with_stats(patches, [], [], max_chars=1600)
+    assert format_flat_ranked(patches, [], [], max_chars=1600) == ctx
