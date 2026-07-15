@@ -39,6 +39,8 @@ TOP_LEVEL_OPTIONAL = {
     "extraction_prompt_guidance", "extraction_prompt_override",
     # Structured-ingest manifest capabilities (doc §12). Absent → SS-shaped.
     "ingest_mode", "success_signal",
+    # Consolidation ("sleep" pass, doc 14). Absent → no consolidation.
+    "consolidation_rules",
 }
 
 PATCH_TYPE_REQUIRED = {"domain_type", "facet", "permanence", "display_name", "description", "value_shape"}
@@ -146,6 +148,40 @@ def validate_manifest(manifest: Dict[str, Any], app_id: str) -> Tuple[bool, List
                             f"Duplicate entity_types.entity_type: {et['entity_type']!r}."
                         )
                     declared_entities.add(et["entity_type"])
+
+    # Consolidation rules (optional; doc 14). Referential integrity against
+    # the declared patch types — a rule naming a type the manifest doesn't
+    # declare would synthesize patches recall can't classify.
+    rules = manifest.get("consolidation_rules")
+    if rules is not None:
+        if not isinstance(rules, list):
+            errors.append("Manifest consolidation_rules must be an array when provided.")
+        else:
+            for idx, r in enumerate(rules):
+                prefix = f"consolidation_rules[{idx}]"
+                if not isinstance(r, dict):
+                    errors.append(f"{prefix} must be an object.")
+                    continue
+                errors.extend(_check_required_keys(prefix, r, {"from_types", "produce_type"}))
+                errors.extend(_check_unknown_keys(
+                    prefix, r, {"from_types", "produce_type", "min_patches", "guidance"}
+                ))
+                ft = r.get("from_types")
+                if not (isinstance(ft, list) and ft and all(isinstance(t, str) for t in ft)):
+                    errors.append(f"{prefix}.from_types must be a non-empty array of strings.")
+                else:
+                    unknown = [t for t in ft if t not in declared_types]
+                    if unknown:
+                        errors.append(f"{prefix}.from_types references undeclared patch types: {unknown}.")
+                produce = r.get("produce_type")
+                if not isinstance(produce, str) or produce not in declared_types:
+                    errors.append(f"{prefix}.produce_type must be a declared patch type.")
+                mp = r.get("min_patches")
+                if mp is not None and (not isinstance(mp, int) or isinstance(mp, bool) or mp < 2):
+                    errors.append(f"{prefix}.min_patches must be an integer >= 2.")
+                g = r.get("guidance")
+                if g is not None and not isinstance(g, str):
+                    errors.append(f"{prefix}.guidance must be a string.")
 
     # Extraction prompt override (optional, exclusive with guidance-based generation)
     override = manifest.get("extraction_prompt_override")
