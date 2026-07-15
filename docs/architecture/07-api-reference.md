@@ -119,36 +119,30 @@ Retrieve the user's hydrated profile from cache.
 
 ### GET /v1/quilt/{user_id}
 
-View all facts and action items CQ knows about a user.
+View all facts and action items CQ knows about a user. This is the sync + dossier surface (the recall endpoint is the ranked prompt-injection surface — different tools for different jobs).
 
-**Query params:** `?category=identity|preference|trait|experience` — filter by category
+**Query params:**
+- `category=<patch_type>` — filter by patch type
+- `since=<ISO 8601>` — delta sync: only patches created/updated after this time, plus `deleted` (all removals) and `completed` (resolved subset) id arrays. Use the returned `server_time` as the next `since`.
+- `origin_id=<meeting UUID>` — meeting view: that meeting's patches in capture order (no ranking)
+- `group_by=origin` — adds a `meetings` array grouping origin-anchored patches by meeting (newest meeting first, capture order inside). Flat arrays unchanged.
+- `project_id=<stable project id>` — project rundown view (context-flow contract): only patches carrying this id. Combine with `group_by=origin` for a complete per-meeting project dossier. Only returns what ingest stamped — meetings ingested without project metadata won't appear.
+- `limit=<1..500>` — cap the patch set after ordering, for prompt-injection callers
 
-**Response:**
+**Response shape (stable — the gateway builds its injection formatter against this):**
 ```json
 {
   "user_id": "string",
-  "facts": [
-    {
-      "patch_id": "uuid",
-      "fact": "Bob Martinez committed to WebSocket prototype by April 5",
-      "category": "experience",
-      "participants": ["Bob Martinez"],
-      "source": "meeting_summary",
-      "created_at": "2026-03-22T19:33:02Z"
-    }
-  ],
-  "action_items": [
-    {
-      "patch_id": "uuid",
-      "fact": "Have WebSocket prototype ready",
-      "owner": "Bob Martinez",
-      "deadline": "April 5",
-      "source": "meeting_summary",
-      "created_at": "2026-03-22T19:33:02Z"
-    }
-  ]
+  "facts":        [ /* QuiltPatch — non-actionable patches */ ],
+  "action_items": [ /* QuiltPatch — commitments/blockers */ ],
+  "deleted":   ["patch_id"],
+  "completed": ["patch_id"],
+  "meetings":  [ { "origin_id": "uuid", "origin_type": "meeting", "patches": [ /* QuiltPatch */ ] } ],
+  "server_time": "ISO 8601"
 }
 ```
+
+**QuiltPatch fields:** `patch_id`, `fact` (the text), `category`, `patch_type`, `participants[]`, `owner`, `deadline` (as spoken), `deadline_date` (YYYY-MM-DD when resolved), `source`, `created_at`, `project`, `project_id`, `origin_id`, `origin_type`, `permanence_override`, `permanence_override_source`, `connections[]` (`{to_patch_id, role, label, context}`).
 
 ### POST /v1/quilt/{user_id}/patches
 
