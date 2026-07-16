@@ -179,6 +179,14 @@ Remove a fact or action item.
 
 **Response:** `{"status": "deleted", "patch_id": "uuid"}`
 
+### POST /v1/origins/{user_id}/{origin_type}/{origin_id}/unassign-project
+
+Clear project scope from one origin's patches — the mirror of assign-project (context-flow contract item 2). Optional body `{"project_id": "..."}` clears only patches currently scoped to that project (recommended: protects a meeting that was since reassigned). Returns `patches_updated`.
+
+### POST /v1/projects/{user_id}/{project_id}/unscope
+
+Project-deletion form: clears project scope from ALL of a user's patches carrying this project_id. Patches survive as unscoped memory — deleting a project container never deletes what was learned. Returns `patches_updated`.
+
 ### GET /v1/quilt/{user_id}/graph
 
 Render a visual graph of a user's entire quilt — all patches and connections displayed as a colorful, quilt-like diagram. Returns an image directly.

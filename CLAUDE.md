@@ -53,6 +53,7 @@ Redis entity index (names ∪ aliases, self-healing) + cue index (`cue_index:{us
 
 - `GET /v1/quilt/{user_id}` — full sync or `since=` delta (`deleted` + `completed` arrays distinguish decayed from resolved); `origin_id=<meeting UUID>` meeting view (capture order, no ranking); `group_by=origin` adds a `meetings` array; `project_id=` project rundown filter + `limit=` cap (context-flow contract — GP's rundown route). Patches carry `deadline_date`, `origin_id/type`, connections.
 - `POST /v1/quilt/{user_id}/patches/{patch_id}/complete` — app-initiated completion (commitment/blocker; 409 on race with worker auto-close). Both close paths stamp `value.completion_source` + `completion_evidence`.
+- Project scope lifecycle: `POST /v1/origins/{u}/{ot}/{oid}/assign-project` (rescope) and its mirrors `.../unassign-project` (optional project_id guard) + `POST /v1/projects/{u}/{pid}/unscope` (project-deletion form; patches survive unscoped). Cleanups archive, never hard-delete (delta-sync tombstone lesson); `scripts/cleanup_orphan_memory.py` (dry-run default).
 - `GET /v1/schema` — caller's own latest registered manifest (launch refresh). Admin-gated variant: `GET /v1/apps/{app_id}/schema`.
 - CQ authenticates apps, not end users; apps vouch for `user_id`. See `docs/architecture/10-security-and-authentication.md`.
 

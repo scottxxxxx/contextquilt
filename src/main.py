@@ -3015,6 +3015,113 @@ async def assign_origin_to_project(
     }
 
 
+class OriginProjectUnassignment(BaseModel):
+    # Optional guard: only clear patches currently scoped to this project.
+    # Protects a meeting that was since reassigned elsewhere — the removal
+    # of an OLD association must not strip the NEW one.
+    project_id: Optional[str] = None
+
+
+@app.post("/v1/origins/{user_id}/{origin_type}/{origin_id}/unassign-project", tags=["Projects"])
+async def unassign_origin_from_project(
+    user_id: str,
+    origin_type: str,
+    origin_id: str,
+    unassignment: OriginProjectUnassignment = OriginProjectUnassignment(),
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Clear project scope from one origin's patches (context-flow contract
+    item 2). The mirror of assign-project: when the app removes a meeting
+    from a project, its patches must not stay scoped to a project they no
+    longer belong to — wrong scope poisons project recall and the rundown
+    view.
+
+    Pass body {"project_id": ...} to clear only patches currently scoped
+    to that project (recommended); an empty body clears unconditionally.
+    """
+    subject_key = f"user:{user_id}"
+    guard_sql = ""
+    params = [subject_key, origin_type, origin_id]
+    if unassignment.project_id:
+        guard_sql = "AND cp.project_id = $4"
+        params.append(unassignment.project_id)
+
+    updated = await db_pool.execute(
+        f"""
+        UPDATE context_patches SET
+            project_id = NULL,
+            project = NULL,
+            updated_at = NOW()
+        WHERE patch_id IN (
+            SELECT cp.patch_id FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $1
+              AND cp.origin_type = $2
+              AND cp.origin_id = $3
+              {guard_sql}
+        )
+        """,
+        *params,
+    )
+    patches_updated = int(updated.split()[-1]) if updated else 0
+
+    stream_key = "memory_updates"
+    payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
+    await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
+
+    return {
+        "status": "unassigned",
+        "origin_type": origin_type,
+        "origin_id": origin_id,
+        "project_id_guard": unassignment.project_id,
+        "patches_updated": patches_updated,
+    }
+
+
+@app.post("/v1/projects/{user_id}/{project_id}/unscope", tags=["Projects"])
+async def unscope_project(
+    user_id: str,
+    project_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Clear project scope from ALL of a user's patches carrying this
+    project_id (context-flow contract item 2, the project-deletion form).
+    Patches survive as unscoped memory — deleting a project container
+    must never delete what was learned in its meetings. The projects
+    registry row is left in place (harmless, and its name remains useful
+    for display-name fallback matching on historical data).
+    """
+    subject_key = f"user:{user_id}"
+    updated = await db_pool.execute(
+        """
+        UPDATE context_patches SET
+            project_id = NULL,
+            project = NULL,
+            updated_at = NOW()
+        WHERE patch_id IN (
+            SELECT cp.patch_id FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE ps.subject_key = $1
+              AND cp.project_id = $2
+        )
+        """,
+        subject_key, project_id,
+    )
+    patches_updated = int(updated.split()[-1]) if updated else 0
+
+    stream_key = "memory_updates"
+    payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
+    await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
+
+    return {
+        "status": "unscoped",
+        "project_id": project_id,
+        "patches_updated": patches_updated,
+    }
+
+
 class AppUpdate(BaseModel):
     enforce_auth: Optional[bool] = None
     llm_api_key: Optional[str] = None  # Update/rotate LLM API key
