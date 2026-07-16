@@ -2513,6 +2513,21 @@ class ColdPathWorker:
                         """,
                         new_patch_id, old["patch_id"],
                     )
+                    # The corrected fact inherits the superseded patch's
+                    # cues — the topics a fact is ABOUT survive its
+                    # correction. Without this, the archived patch drops
+                    # out of the cue-matched fetch leg and the corrected
+                    # version never enters it: the correction would make
+                    # the fact invisible to the very topic query that
+                    # surfaced it (caught live by the item-9 prod smoke).
+                    await conn.execute(
+                        """
+                        INSERT INTO patch_cues (patch_id, cue)
+                        SELECT $1::uuid, cue FROM patch_cues WHERE patch_id = $2::uuid
+                        ON CONFLICT (patch_id, cue) DO NOTHING
+                        """,
+                        new_patch_id, old["patch_id"],
+                    )
         if old is not None:
             logger.info("correction_applied", user_id=user_id,
                         superseded=str(old["patch_id"]), new_patch=new_patch_id,
