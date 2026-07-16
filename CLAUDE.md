@@ -65,7 +65,7 @@ ContextQuilt is consumed by ShoulderSurf (iOS) through the GhostPour gateway. **
 
 ## Documentation
 
-`docs/architecture/00–13` (overview, memory model, pipeline, queue, recall, integration, configuration, API reference, connected quilt, domain mapping, security, model selection, structured ingest, app onboarding/templates, consolidation) and `docs/openapi.yaml`. (00–14.) FastAPI auto-docs at `/docs`. NOTE: docs/openapi.yaml lags the June 2026 surface (meeting views, complete endpoint, token_budget, language) — update when touched.
+`docs/architecture/00–13` (overview, memory model, pipeline, queue, recall, integration, configuration, API reference, connected quilt, domain mapping, security, model selection, structured ingest, app onboarding/templates, consolidation, context-flow contract) and `docs/openapi.yaml`. (00–15; 15 is the LOCKED three-team contract — changes to the project-chat context flow require the three-way test per its item 8.) FastAPI auto-docs at `/docs`. NOTE: docs/openapi.yaml lags the June 2026 surface (meeting views, complete endpoint, token_budget, language) — update when touched.
 
 ## Development
 
