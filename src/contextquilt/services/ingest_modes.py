@@ -30,6 +30,8 @@ INGEST_MODE_TYPES = {
     "extraction": {
         "meeting_transcript", "meeting_summary", "summary",
         "query", "analysis", "sentiment", "trace", "chat_log",
+        # Contract item 9: prose corrections ride the extraction adapter.
+        "correction",
     },
     "structured": {"structured_patches"},
 }
