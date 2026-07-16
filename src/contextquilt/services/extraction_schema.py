@@ -473,6 +473,55 @@ def enforce_connection_vocabulary(
     return content
 
 
+def drop_placeholder_entities(content: dict) -> dict:
+    """Drop diarization-label entities ("Speaker 4", "Unknown") and any
+    relationships referencing them.
+
+    The prompt bars unnamed speakers from the entities array, but the
+    rule leaks (nine Speaker-N entities reached prod, two of them well
+    after the rule shipped — a live lane, not just legacy). Placeholder
+    entities poison the recall index: "speaker 2" as an indexed name can
+    substring-match conversational text and drag in meaningless graph
+    context. Uses the same predicate as the person-patch gate
+    (is_placeholder_or_self_person) with no user_label, so only the
+    placeholder half applies — a user's own name is a separate question
+    this guard deliberately does not touch."""
+    entities = content.get("entities")
+    if not isinstance(entities, list):
+        return content
+    dropped_names = set()
+    kept = []
+    for ent in entities:
+        name = ent.get("name") if isinstance(ent, dict) else None
+        if is_placeholder_or_self_person(name):
+            dropped_names.add(str(name).strip().lower())
+        else:
+            kept.append(ent)
+    if not dropped_names:
+        return content
+    content["entities"] = kept
+
+    rels = content.get("relationships")
+    rels_dropped = 0
+    if isinstance(rels, list):
+        kept_rels = []
+        for rel in rels:
+            if isinstance(rel, dict) and (
+                str(rel.get("from", "")).strip().lower() in dropped_names
+                or str(rel.get("to", "")).strip().lower() in dropped_names
+            ):
+                rels_dropped += 1
+            else:
+                kept_rels.append(rel)
+        content["relationships"] = kept_rels
+
+    content["_placeholder_entities_enforced"] = {
+        "entities_dropped": sorted(dropped_names),
+        "relationships_dropped": rels_dropped,
+    }
+    return content
+
+
 # --- Cue sanitation (associative retrieval index) -------------------------
 #
 # Cues are matched against raw request text on the recall hot path, so bad
