@@ -36,6 +36,7 @@ from contextquilt.services.extraction_prompts import (
 from contextquilt.services.extraction_schema import (
     EXTRACTION_SCHEMA,
     drop_placeholder_and_self_person_patches,
+    drop_placeholder_entities,
     enforce_connection_requirements,
     enforce_connection_vocabulary,
     enforce_owner_gate,
@@ -950,6 +951,12 @@ async def store_entities(
         entity_type = ent.get("type", "").strip()
         description = ent.get("description", "")
         if not name or not entity_type:
+            continue
+        # Defensive sink guard (same dual-layer pattern as cues): the
+        # sanitizer chain covers LLM extraction, but chat/structured
+        # lanes reach this sink without it — and this is exactly the
+        # lane the 2026-06-30 Speaker-N leak came through.
+        if is_placeholder_or_self_person(name):
             continue
 
         metadata_json = json.dumps(metadata or {})
@@ -2787,6 +2794,15 @@ class ColdPathWorker:
             drop_placeholder_and_self_person_patches(
                 response.content, user_label=user_label
             )
+            drop_placeholder_entities(response.content)
+            if (pe := response.content.get("_placeholder_entities_enforced")):
+                logger.info(
+                    "placeholder_entities_dropped",
+                    user_id=user_id,
+                    entities=pe["entities_dropped"],
+                    relationships_dropped=pe["relationships_dropped"],
+                    model=response.model,
+                )
             sanitize_cues(response.content)
             sanitize_salience(response.content)
             sanitize_deadline_dates(response.content, meeting_date=meeting_date)
