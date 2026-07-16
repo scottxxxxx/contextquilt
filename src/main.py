@@ -134,7 +134,7 @@ class EnrichResponse(BaseModel):
 class MemoryUpdate(BaseModel):
     """Memory update request (MCP Tool / Trace Log)"""
     user_id: str
-    interaction_type: str = Field(..., description="'chat_log', 'tool_call', 'trace', 'meeting_summary', 'structured_patches', or 'correction'")
+    interaction_type: str = Field(..., description="'chat_log', 'tool_call', 'trace', 'meeting_summary', 'structured_patches', 'correction', or 'completion'")
     agent_id: Optional[str] = None
     
     # For 'tool_call' (Active Learning)

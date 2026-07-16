@@ -32,6 +32,8 @@ INGEST_MODE_TYPES = {
         "query", "analysis", "sentiment", "trace", "chat_log",
         # Contract item 9: prose corrections ride the extraction adapter.
         "correction",
+        # Contract item 10: chat completions close open completables.
+        "completion",
     },
     "structured": {"structured_patches"},
 }
