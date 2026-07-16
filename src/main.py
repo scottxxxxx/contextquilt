@@ -134,7 +134,7 @@ class EnrichResponse(BaseModel):
 class MemoryUpdate(BaseModel):
     """Memory update request (MCP Tool / Trace Log)"""
     user_id: str
-    interaction_type: str = Field(..., description="'chat_log', 'tool_call', 'trace', 'meeting_summary', or 'structured_patches'")
+    interaction_type: str = Field(..., description="'chat_log', 'tool_call', 'trace', 'meeting_summary', 'structured_patches', or 'correction'")
     agent_id: Optional[str] = None
     
     # For 'tool_call' (Active Learning)
@@ -166,6 +166,13 @@ class MemoryUpdate(BaseModel):
     patches: Optional[List[Dict[str, Any]]] = None
     entities: Optional[List[Dict[str, Any]]] = None
     relationships: Optional[List[Dict[str, Any]]] = None
+
+    # For 'correction' (context-flow contract item 9): the user's
+    # correction text rides in `content`; context_block optionally carries
+    # the recall block that was injected when the user corrected it —
+    # candidate matching prefers what the user was actually looking at.
+    # Never persisted; never the model's response.
+    context_block: Optional[str] = None
 
     # Optional timestamp for backdating (e.g. historical import)
     timestamp: Optional[str] = None
