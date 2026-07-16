@@ -128,6 +128,8 @@ By default recall stays silent about what it *doesn't* have — an empty or part
 - **Missing project scope** — emitted only when the scope has no project patch, no project-scoped rows, and no overdue completables.
 - **Nothing matched** — replaces the silent-empty response when no entities matched and no scope was given.
 
+**Coverage line (always on for scoped recalls — contract commitment E):** when a project-scoped recall renders fewer patches than the project holds, the block ends with `(showing N of M stored patches for this project)`. A correctly scoped block that silently omits most of a project's memory reads as complete, which is worse than absence; the coverage line tells the model (and teaches the user) that a full rundown exists via the quilt endpoint. Not gated by `memory_signals`.
+
 Signal lines are deterministic functions of (text, entity index, scope) — byte-stable within a UTC day like the rest of the block — and ride inside the same `token_budget`. Like the flat-mode markers, they are deliberately English (LLM-facing). Implementation: `src/contextquilt/services/recall_signals.py`.
 
 ## Scoring
