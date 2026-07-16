@@ -95,3 +95,45 @@ def test_bad_deadline_date_dropped_not_fatal():
     assert matched == "aaaa"
     assert "deadline_date" not in value
     assert value["deadline"] == "by the offsite"
+
+
+# ------------------------------------------------------------------
+# Completions from chat (contract item 10)
+# ------------------------------------------------------------------
+
+from src.contextquilt.services.corrections import (
+    build_completion_content,
+    parse_completion_response,
+)
+
+
+def test_completion_content_carries_ids_and_statement():
+    c = build_completion_content(
+        "we closed the vendor escalation yesterday",
+        [{"patch_id": "aaaa", "patch_type": "blocker", "text": "Vendor escalation pending"}],
+        TODAY.isoformat(), scope_label="Kore",
+    )
+    assert "patch_id=aaaa" in c and "vendor escalation yesterday" in c
+    assert "Open items (candidates):" in c
+    assert "(none" in build_completion_content("done", [], TODAY.isoformat())
+
+
+def test_completion_parse_valid_match_and_evidence_cap():
+    out = parse_completion_response(
+        {"completed_patch_id": "aaaa", "evidence": "  we closed it  yesterday ", "reason": "r"}, IDS)
+    assert out == ("aaaa", "we closed it yesterday")
+    long_ev = {"completed_patch_id": "bbbb", "evidence": "x" * 500, "reason": "r"}
+    pid, ev = parse_completion_response(long_ev, IDS)
+    assert pid == "bbbb" and len(ev) == 300
+
+
+def test_completion_parse_drops_null_hallucinated_and_garbage():
+    assert parse_completion_response({"completed_patch_id": None, "evidence": "e"}, IDS) is None
+    assert parse_completion_response({"completed_patch_id": "zzzz", "evidence": "e"}, IDS) is None
+    assert parse_completion_response("no json", IDS) is None
+    assert parse_completion_response(None, IDS) is None
+
+
+def test_completion_parse_embedded_json():
+    raw = 'ok {"completed_patch_id": "aaaa", "evidence": "user said done", "reason": "r"}'
+    assert parse_completion_response(raw, IDS) == ("aaaa", "user said done")

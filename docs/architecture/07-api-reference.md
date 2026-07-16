@@ -121,6 +121,10 @@ Retrieve the user's hydrated profile from cache.
 
 User corrections from chat (context-flow contract item 9). Body: `user_id`, `interaction_type: "correction"`, `content` (the user's correction text, question portion only — never the model's response), `metadata` with project scope, and optional `context_block` (the recall block that was injected when the user corrected it; candidate matching prefers what the user was looking at; never persisted). Async like all captures: returns queued; the worker supersedes the contradicted patch (archived + `replaces` connection from the new `declared` patch) seconds later, and delta sync converges devices. Acknowledgment wording for clients: "noted, updating the record" — queued is not applied.
 
+### POST /v1/memory — interaction_type "completion"
+
+Chat completions (contract item 10, the sibling of corrections): the user says something is done. Body mirrors corrections: `content` (the user's statement), `metadata` scope, optional `context_block`. The worker matches OPEN completables only and closes via the standard machinery (`completed_at`, `completion_source: "user_chat"`, the statement as evidence) — the patch flows the delta `completed` array like tap-to-complete. Unmatched completions are dropped, never stored. Same acknowledgment wording: "noted, updating the record".
+
 ### GET /v1/quilt/{user_id}
 
 View all facts and action items CQ knows about a user. This is the sync + dossier surface (the recall endpoint is the ranked prompt-injection surface — different tools for different jobs).
