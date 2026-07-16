@@ -63,11 +63,14 @@ from contextquilt.services.consolidation import (
     parse_synthesis_response,
 )
 from contextquilt.services.corrections import (
+    COMPLETION_SYSTEM,
     CORRECTION_SYSTEM,
     FALLBACK_PATCH_TYPE,
     MAX_CANDIDATES,
     MAX_CORRECTION_CHARS,
+    build_completion_content,
     build_correction_content,
+    parse_completion_response,
     parse_correction_response,
 )
 from contextquilt.services.entity_aliasing import find_alias_candidate
@@ -2017,6 +2020,12 @@ class ColdPathWorker:
             await self.handle_correction(payload)
             return
 
+        # Chat completion (contract item 10): close an open completable.
+        # Immediate, same reasoning.
+        if task_type == "completion":
+            await self.handle_completion(payload)
+            return
+
         # End-of-meeting full transcript — process immediately, never buffer.
         # (this IS the complete meeting, sent by ShoulderSurf at session end)
         # Flush any orphaned buffered events for this origin — the transcript supersedes them.
@@ -2536,6 +2545,102 @@ class ColdPathWorker:
             logger.info("correction_unmatched_stored", user_id=user_id,
                         new_patch=new_patch_id, patch_type=new_type,
                         correction=correction_text[:100])
+
+    async def handle_completion(self, payload: dict[str, Any]):
+        """Chat completion (contract item 10): the user said something is
+        done. Match against OPEN completables (in-block first, same
+        candidates-with-ids pattern as corrections), then close via the
+        EXISTING machinery — completed_at + completion_source='user_chat'
+        + the user's sentence as evidence — so the patch flows the delta
+        `completed` array exactly like tap-to-complete. Unmatched
+        completions are dropped, never stored: inventing a patch to
+        close would manufacture memory.
+        """
+        user_id = payload.get("user_id")
+        statement = (payload.get("content") or "").strip()[:MAX_CORRECTION_CHARS]
+        if not user_id or not statement:
+            logger.warning("completion_missing_fields", user_id=user_id)
+            return
+        metadata = payload.get("metadata") or {}
+        context_block = payload.get("context_block") or ""
+        project_id = metadata.get("project_id")
+        project = metadata.get("project")
+        subject_key = f"user:{user_id}"
+
+        scope_sql = ""
+        params: list = [subject_key]
+        if project_id:
+            scope_sql = "AND (cp.project_id = $2 OR cp.project_id IS NULL)"
+            params.append(project_id)
+        elif project:
+            scope_sql = "AND (cp.project = $2 OR cp.project IS NULL)"
+            params.append(project)
+        rows = await self.db.fetch(
+            f"""
+            SELECT cp.patch_id, cp.patch_type, cp.value->>'text' AS text
+            FROM context_patches cp
+            JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+            WHERE ps.subject_key = $1
+              AND cp.patch_type IN ('commitment', 'blocker')
+              AND COALESCE(cp.status, 'active') = 'active'
+              AND cp.completed_at IS NULL
+              {scope_sql}
+            ORDER BY cp.created_at DESC, cp.patch_id ASC
+            LIMIT 40
+            """,
+            *params,
+        )
+        in_block = [r for r in rows if r["text"] and r["text"] in context_block]
+        others = [r for r in rows if r not in in_block]
+        candidates = (in_block + others)[:MAX_CANDIDATES]
+        by_id = {str(r["patch_id"]): r for r in candidates}
+        if not candidates:
+            logger.info("completion_no_candidates", user_id=user_id,
+                        statement=statement[:100])
+            return
+
+        try:
+            response = await self.llm.extract(
+                system_prompt=COMPLETION_SYSTEM,
+                user_content=build_completion_content(
+                    statement,
+                    [{"patch_id": str(r["patch_id"]), "patch_type": r["patch_type"], "text": r["text"]}
+                     for r in candidates],
+                    datetime.utcnow().date().isoformat(),
+                    scope_label=project or project_id,
+                ),
+            )
+            parsed = parse_completion_response(response.content, set(by_id.keys()))
+        except Exception as exc:
+            logger.error("completion_failed", user_id=user_id, reason=str(exc)[:200])
+            return
+        if not parsed:
+            logger.info("completion_unmatched", user_id=user_id,
+                        statement=statement[:100], candidates=len(candidates))
+            return
+        patch_id, evidence = parsed
+        evidence = evidence or statement[:300]
+
+        # Identical close semantics to the extraction auto-close and the
+        # app complete endpoint — only the source differs.
+        await self.db.execute(
+            """
+            UPDATE context_patches
+               SET completed_at = NOW(),
+                   status = 'archived',
+                   updated_at = NOW(),
+                   value = jsonb_set(
+                               jsonb_set(value, '{completion_source}', '"user_chat"'),
+                               '{completion_evidence}', to_jsonb($2::text)
+                           )
+             WHERE patch_id = $1::uuid
+               AND completed_at IS NULL
+            """,
+            patch_id, evidence,
+        )
+        logger.info("completion_applied", user_id=user_id, patch_id=patch_id,
+                    patch_type=by_id[patch_id]["patch_type"],
+                    in_block=by_id[patch_id] in in_block, evidence=evidence[:120])
 
     async def handle_structured_ingest(self, payload: dict[str, Any]):
         """Structured-ingest adapter (doc §12): store pre-typed patches from

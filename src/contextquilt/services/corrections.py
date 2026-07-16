@@ -126,3 +126,68 @@ def parse_correction_response(
     value["_new_type"] = new_type  # popped by the caller; not persisted
 
     return matched, value
+
+
+# ============================================================
+# Completions from chat (contract item 10) — the sibling flow.
+# A completion is NOT a correction: the fact was true and is now
+# finished. Matching works identically (candidates with ids, in-block
+# first) but the write path is the existing close machinery
+# (completed_at + completion_source='user_chat' + evidence), so the
+# patch flows the delta `completed` array and clients show "done".
+# Unmatched completions are DROPPED, not stored — there is nothing to
+# complete, and inventing a patch to close would manufacture memory.
+# ============================================================
+
+COMPLETION_SYSTEM = """You are the completion stage of ContextQuilt, a persistent memory system. A user has just told their assistant that something is done, closed, resolved, or finished. You are shown the user's statement and a numbered list of OPEN commitments and blockers, each with its patch_id. Your job: decide which open item (if any) the statement completes. Only pick an item the statement actually says is finished — topical similarity is not completion. If none qualifies, use null.
+
+Respond with EXACTLY this raw JSON shape and nothing else:
+{"completed_patch_id": "<patch_id copied verbatim from the list, or null>", "evidence": "<short quote or paraphrase of the user's statement showing completion, under 300 chars>", "reason": "<one short sentence>"}"""
+
+
+def build_completion_content(
+    statement: str,
+    candidates: List[Dict[str, Any]],
+    today_iso: str,
+    scope_label: Optional[str] = None,
+) -> str:
+    """User-content block for one completion call. Candidates are dicts
+    with patch_id, patch_type, text (open completables only, ordered
+    in-block first)."""
+    lines = [f"Current date: {today_iso}"]
+    if scope_label:
+        lines.append(f"Project scope: {scope_label}")
+    lines.append("")
+    lines.append(f"User's statement: {statement}")
+    lines.append("")
+    lines.append("Open items (candidates):")
+    for i, c in enumerate(candidates[:MAX_CANDIDATES], 1):
+        lines.append(f"{i}. [{c['patch_type']}] patch_id={c['patch_id']} :: {c['text']}")
+    if not candidates:
+        lines.append("(none — no open completables in this scope)")
+    return "\n".join(lines)
+
+
+def parse_completion_response(content: Any, valid_patch_ids: set) -> Optional[Tuple[str, str]]:
+    """Returns (completed_patch_id, evidence) or None for no-match /
+    hallucinated id / garbage. Unlike corrections, there is no unmatched
+    fallback — None always means drop."""
+    obj = content
+    if isinstance(obj, str):
+        import json as _json
+        import re as _re
+        m = _re.search(r"\{.*\}", obj, _re.DOTALL)
+        if not m:
+            return None
+        try:
+            obj = _json.loads(m.group())
+        except _json.JSONDecodeError:
+            return None
+    if not isinstance(obj, dict):
+        return None
+    pid = obj.get("completed_patch_id")
+    if not isinstance(pid, str) or pid not in valid_patch_ids:
+        return None
+    evidence = obj.get("evidence")
+    evidence = " ".join(evidence.split())[:300] if isinstance(evidence, str) else ""
+    return pid, evidence
