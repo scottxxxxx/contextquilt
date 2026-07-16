@@ -131,3 +131,22 @@ def test_no_lines_when_nothing_to_say():
 
 def test_scope_line_requires_label():
     assert build_signal_lines([], project_scope_label=None, project_scope_missing=True) == []
+
+
+# ------------------------------------------------------------------
+# build_coverage_line — contract commitment E
+# ------------------------------------------------------------------
+
+from src.contextquilt.services.recall_signals import build_coverage_line
+
+
+def test_coverage_line_when_truncated():
+    assert build_coverage_line(15, 98) == "(showing 15 of 98 stored patches for this project)"
+    assert build_coverage_line(0, 7) == "(showing 0 of 7 stored patches for this project)"
+
+
+def test_no_coverage_line_when_complete_or_unscoped():
+    assert build_coverage_line(98, 98) is None
+    assert build_coverage_line(100, 98) is None
+    assert build_coverage_line(0, 0) is None
+    assert build_coverage_line(5, 0) is None

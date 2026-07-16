@@ -108,6 +108,20 @@ def format_flat_ranked(
     max_chars: int = 1600,
     today: Optional[date] = None,
 ) -> str:
+    """Back-compat wrapper — see format_flat_ranked_with_stats."""
+    context, _ = format_flat_ranked_with_stats(
+        scored_patches, entity_rows, relationship_rows, max_chars=max_chars, today=today
+    )
+    return context
+
+
+def format_flat_ranked_with_stats(
+    scored_patches: Sequence[Tuple[float, Any]],
+    entity_rows: Sequence[Any],
+    relationship_rows: Sequence[Any],
+    max_chars: int = 1600,
+    today: Optional[date] = None,
+) -> Tuple[str, int]:
     """Format patches as a flat relevance-ranked list.
 
     Targets roughly 150-300 tokens in total. Includes a compact
@@ -117,6 +131,10 @@ def format_flat_ranked(
     max_chars is a soft cap — output is truncated at the next
     patch boundary once the budget is reached. Default 1600 chars
     ≈ 400 tokens, enough for ~10-15 patches.
+
+    Returns (context, rendered_patch_lines) — the count feeds the
+    coverage line (contract commitment E): truncation must be visible,
+    a window must never read as the whole memory.
     """
     sections: List[str] = []
 
@@ -164,7 +182,7 @@ def format_flat_ranked(
     if patch_lines:
         sections.append("\n".join(patch_lines))
 
-    return "\n\n".join(sections)
+    return "\n\n".join(sections), len(patch_lines)
 
 
 def _entity_name_with_desc(row: Any) -> str:
