@@ -62,6 +62,14 @@ from contextquilt.services.consolidation import (
     parse_consolidation_rules,
     parse_synthesis_response,
 )
+from contextquilt.services.corrections import (
+    CORRECTION_SYSTEM,
+    FALLBACK_PATCH_TYPE,
+    MAX_CANDIDATES,
+    MAX_CORRECTION_CHARS,
+    build_correction_content,
+    parse_correction_response,
+)
 from contextquilt.services.entity_aliasing import find_alias_candidate
 from contextquilt.services.ingest_modes import is_interaction_allowed
 from contextquilt.services.llm_client import LLMClient
@@ -2002,6 +2010,13 @@ class ColdPathWorker:
             await self.handle_structured_ingest(payload)
             return
 
+        # User correction from chat (contract item 9): supersede the
+        # contradicted patch. Immediate, never buffered — the user is
+        # watching for the record to change.
+        if task_type == "correction":
+            await self.handle_correction(payload)
+            return
+
         # End-of-meeting full transcript — process immediately, never buffer.
         # (this IS the complete meeting, sent by ShoulderSurf at session end)
         # Flush any orphaned buffered events for this origin — the transcript supersedes them.
@@ -2349,6 +2364,163 @@ class ColdPathWorker:
             return
 
         await self.hydrate_cache(user_id)
+
+    async def handle_correction(self, payload: dict[str, Any]):
+        """User correction from chat (contract item 9).
+
+        Candidate set = patches whose text appears in the passed
+        context_block first (what the user was looking at), then scoped
+        recent patches. One LLM call picks the contradicted patch by id
+        (resolved_commitments pattern) and writes the corrected fact.
+        Supersede uses only existing vocabulary: new patch is
+        origin_mode='declared', stale patch is archived (delta sync
+        converges devices), connected with role 'replaces'. Unmatched
+        corrections still land — never lose a user-stated fact.
+        """
+        user_id = payload.get("user_id")
+        correction_text = (payload.get("content") or "").strip()[:MAX_CORRECTION_CHARS]
+        if not user_id or not correction_text:
+            logger.warning("correction_missing_fields", user_id=user_id)
+            return
+        metadata = payload.get("metadata") or {}
+        app_id = payload.get("app_id")
+        context_block = payload.get("context_block") or ""
+        project_id = metadata.get("project_id")
+        project = metadata.get("project")
+        subject_key = f"user:{user_id}"
+
+        # Candidate set: scoped active patches, newest first. In-block
+        # candidates rank first — those lines were on the user's screen.
+        scope_sql = ""
+        params: list = [subject_key]
+        if project_id:
+            scope_sql = "AND (cp.project_id = $2 OR cp.project_id IS NULL)"
+            params.append(project_id)
+        elif project:
+            scope_sql = "AND (cp.project = $2 OR cp.project IS NULL)"
+            params.append(project)
+        rows = await self.db.fetch(
+            f"""
+            SELECT cp.patch_id, cp.patch_type, cp.value->>'text' AS text,
+                   cp.project, cp.project_id, cp.origin_id, cp.origin_type
+            FROM context_patches cp
+            JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+            WHERE ps.subject_key = $1
+              AND COALESCE(cp.status, 'active') = 'active'
+              {scope_sql}
+            ORDER BY cp.created_at DESC, cp.patch_id ASC
+            LIMIT 60
+            """,
+            *params,
+        )
+        in_block = [r for r in rows if r["text"] and r["text"] in context_block]
+        others = [r for r in rows if r not in in_block]
+        candidates = (in_block + others)[:MAX_CANDIDATES]
+        by_id = {str(r["patch_id"]): r for r in candidates}
+
+        today = datetime.utcnow().date()
+        try:
+            response = await self.llm.extract(
+                system_prompt=CORRECTION_SYSTEM,
+                user_content=build_correction_content(
+                    correction_text,
+                    [{"patch_id": str(r["patch_id"]), "patch_type": r["patch_type"], "text": r["text"]}
+                     for r in candidates],
+                    today.isoformat(),
+                    scope_label=project or project_id,
+                ),
+            )
+            parsed = parse_correction_response(
+                response.content, set(by_id.keys()), meeting_date=today
+            )
+        except Exception as exc:
+            logger.error("correction_failed", user_id=user_id, reason=str(exc)[:200])
+            return
+        if not parsed:
+            logger.warning("correction_unparseable", user_id=user_id,
+                           correction=correction_text[:100])
+            return
+        matched_id, value = parsed
+        new_type = value.pop("_new_type", FALLBACK_PATCH_TYPE)
+
+        old = by_id.get(matched_id) if matched_id else None
+        if old is not None:
+            new_type = old["patch_type"]
+
+        now = datetime.utcnow()
+        new_patch_id = str(uuid.uuid4())
+        # Scope: inherit from the corrected patch; unmatched falls back to
+        # the request scope for project-shaped types. Origin stays NULL —
+        # the correction came from chat, not a meeting.
+        new_project = old["project"] if old else (project if new_type != "trait" else None)
+        new_project_id = old["project_id"] if old else (project_id if new_type != "trait" else None)
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO context_patches (
+                        patch_id, patch_name, patch_type, value,
+                        origin_mode, source_prompt, confidence, persistence,
+                        project, project_id,
+                        status, created_at, updated_at, last_observed_at
+                    ) VALUES ($1, $2, $3, $4, 'declared', 'correction', 0.95,
+                              $5, $6, $7, 'active', $8, $8, $8)
+                    """,
+                    new_patch_id, f"correction_{new_patch_id[:8]}", new_type,
+                    json.dumps(value),
+                    DEFAULT_PERSISTENCE.get(new_type, "sticky"),
+                    new_project, new_project_id, now,
+                )
+                await conn.execute(
+                    "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
+                    new_patch_id, subject_key,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO patch_usage_metrics (patch_id, access_count, last_accessed_at, current_decay_score)
+                    VALUES ($1, 1, $2, 1.0)
+                    """,
+                    new_patch_id, now,
+                )
+                if app_id:
+                    try:
+                        await conn.execute(
+                            "INSERT INTO context_patch_acl (patch_id, app_id, can_read, can_write, can_delete) VALUES ($1, $2::uuid, TRUE, TRUE, TRUE)",
+                            new_patch_id, app_id,
+                        )
+                    except Exception:
+                        pass
+                if old is not None:
+                    await conn.execute(
+                        """
+                        UPDATE context_patches SET
+                            status = 'archived',
+                            updated_at = $1,
+                            value = jsonb_set(
+                                jsonb_set(value, '{corrected_by}', to_jsonb($2::text)),
+                                '{correction_source}', '"user_chat"'
+                            )
+                        WHERE patch_id = $3::uuid
+                        """,
+                        now, new_patch_id, old["patch_id"],
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO patch_connections
+                            (from_patch_id, to_patch_id, connection_role, connection_label, context)
+                        VALUES ($1::uuid, $2::uuid, 'replaces', 'corrects', 'user correction from chat')
+                        ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO NOTHING
+                        """,
+                        new_patch_id, old["patch_id"],
+                    )
+        if old is not None:
+            logger.info("correction_applied", user_id=user_id,
+                        superseded=str(old["patch_id"]), new_patch=new_patch_id,
+                        patch_type=new_type, in_block=old in in_block)
+        else:
+            logger.info("correction_unmatched_stored", user_id=user_id,
+                        new_patch=new_patch_id, patch_type=new_type,
+                        correction=correction_text[:100])
 
     async def handle_structured_ingest(self, payload: dict[str, Any]):
         """Structured-ingest adapter (doc §12): store pre-typed patches from
