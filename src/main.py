@@ -1696,7 +1696,7 @@ async def get_user_quilt(
             connections=connections_by_patch.get(pid, []),
         )
 
-        if value.get("type") == "action_item":
+        if row["patch_type"] in COMPLETABLE_PATCH_TYPES:
             action_items.append(patch)
         else:
             facts.append(patch)
