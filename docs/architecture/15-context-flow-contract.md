@@ -89,10 +89,10 @@ flip would have silently dropped all completables from field builds);
 two relay drops (fixed by the shared status ledger practice); one
 wrong straggler theory (resolved by stream replay).
 
-**Open observation from the amendment live fires** (non-gating,
-SS/GP seat): chat turns fired from a freshly created project chat on a
-second device (latest build) produced recalls but no correction/
-completion capture sends, while the established chat on the primary
-device captured correctly minutes later — GP flag state ruled out.
-Suspects: phrasing vs the fail-closed detectors, or new-chat plumbing
-(composer vs pinned-session path). Tracked in the status ledger.
+**Resolved observation from the amendment live fires** (was: recalls
+but no capture sends from a fresh chat on a second device): working as
+designed. Ordinary ProjectChat turns are on GP's capture skip list
+(echo-loop prevention, agreed design) — no device sends captures for
+ordinary turns. The correction/completion lanes fire only on explicit
+amendment phrasing against the fail-closed detectors; the distinguishing
+axis was phrasing, never device, build, or chat age.
