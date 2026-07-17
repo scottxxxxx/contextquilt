@@ -49,7 +49,7 @@ this flow gets the same test before it ships (item 8).**
 8. **Verification and lock.** The standing three-way test on both
    shapes gates any future change to this flow.
 
-**Amendment 1 (item 9, corrections — active, locks on live fire):**
+**Amendment 1 (item 9, corrections — LOCKED 2026-07-17):**
 GP detects correction intent (deterministic, fail closed) and sends
 interaction_type=correction with the user's correction text, scope, and
 the in-context recall block (context_block; never the model response).
@@ -59,10 +59,40 @@ patch inheriting the superseded patch's cues, archives the stale patch
 (corrected_by/correction_source stamps), and connects them with role
 'replaces'. Unmatched corrections land as declared patches. Client
 acknowledgment wording: "noted, updating the record" — queued is not
-applied. Locks on one green live correction from the device.
+applied. Locked on a green live correction from the user's device
+(2026-07-17): both lanes exercised on real traffic — first fire landed
+unmatched-but-stored because no target existed in the chat's project
+scope (scope gating working as designed), re-fire matched and
+superseded it with every stamp verified at the socket.
+
+**Amendment 2 (item 10, completions — LOCKED 2026-07-17):**
+GP detects declarative completion statements (deterministic, the
+tightest fail-closed detector — a false positive closes a real
+commitment) and sends interaction_type=completion with the user's
+words, scope, and context_block. CQ matches against OPEN completables
+only (in-block first) and closes through the standard machinery:
+completed_at, completion_source='user_chat', completion_evidence (the
+user's words). The closed patch id rides BOTH delta arrays — completed
+is a strict subset of deleted by construction — so clients that only
+decode deleted stay correct (the item leaves the list). Deliberate
+asymmetry with corrections: unmatched completions are DROPPED
+(log-and-no-op) — closing needs a real target, and inventing one
+manufactures memory. SS ships nothing. Locked on a green live
+completion from the user's device (2026-07-17): open commitment
+matched and closed, all stamps verified at the socket.
 
 **Defect ledger from the road to lock** (why item 8 exists): GP output
 budget + dossier timeout; CQ correction cue inheritance + action_items
-bucketing (fix pending SS ack); two relay drops (fixed by the shared
-status ledger practice); one wrong straggler theory (resolved by
-stream replay).
+bucketing (fix staged in PR #163, gated on SS's decoder release
+reaching users — their decoder never read action_items, so an early
+flip would have silently dropped all completables from field builds);
+two relay drops (fixed by the shared status ledger practice); one
+wrong straggler theory (resolved by stream replay).
+
+**Open observation from the amendment live fires** (non-gating,
+SS/GP seat): chat turns fired from a freshly created project chat on a
+second device (latest build) produced recalls but no correction/
+completion capture sends, while the established chat on the primary
+device captured correctly minutes later — GP flag state ruled out.
+Suspects: phrasing vs the fail-closed detectors, or new-chat plumbing
+(composer vs pinned-session path). Tracked in the status ledger.
