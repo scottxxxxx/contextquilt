@@ -150,3 +150,56 @@ def test_no_coverage_line_when_complete_or_unscoped():
     assert build_coverage_line(100, 98) is None
     assert build_coverage_line(0, 0) is None
     assert build_coverage_line(5, 0) is None
+
+
+# ------------------------------------------------------------------
+# Wire-text fixes (2026-07-18 build-749 test findings): CamelCase
+# fragments, markdown bullet casing, and conversation-history focus.
+# ------------------------------------------------------------------
+
+WIRE_KNOWN = {"HubSpot", "Brightbeam Academy", "Artemis", "CBE"}
+
+
+def test_camelcase_word_is_swallowed_whole_and_suppressed():
+    # "HubSpot" must not shed a "Hub" fragment that dodges suppression.
+    assert extract_unmatched_mentions("Check the HubSpot pipeline today.", WIRE_KNOWN) == []
+
+
+def test_fragment_prefix_of_known_word_is_suppressed():
+    # Even when a fragment arrives on its own, precision-first: "Hub"
+    # prefixes known "hubspot", so no gap claim.
+    assert extract_unmatched_mentions("Did we discuss Hub with anyone?", WIRE_KNOWN) == []
+
+
+def test_single_word_opening_a_markdown_bullet_is_ignored():
+    text = "Priorities:\n- Engage with relevant opportunities\n- Complete the course\n* Review docs"
+    assert extract_unmatched_mentions(text, WIRE_KNOWN) == []
+
+
+def test_history_framing_scopes_gap_claims_to_current_question():
+    # The production fingerprint from the 749 test: artifacts in the
+    # prior answer must not starve the real gap in the live question.
+    text = (
+        "User question: What are the current priorities on this project? "
+        "Assistant: Priorities are:\n"
+        "- Engage with opportunities via the HubSpot pipeline\n"
+        "- Complete the Brightbeam Academy course\n"
+        "Alpha Omega Consulting and Bravo Dynamics were also mentioned.\n"
+        "Current question: What are the current priorities on this project, "
+        "and where did we land with Zephyrline?"
+    )
+    assert extract_unmatched_mentions(text, WIRE_KNOWN) == ["Zephyrline"]
+
+
+def test_no_framing_scans_whole_text():
+    out = extract_unmatched_mentions("Where did we land with Zephyrline?", WIRE_KNOWN)
+    assert out == ["Zephyrline"]
+
+
+def test_unknown_names_in_current_question_still_reported_and_capped():
+    text = (
+        "User question: Earlier stuff. Assistant: An answer.\n"
+        "Current question: What's the status of Zephyrline, Kestrelmark, Ospreygate and Falconworks?"
+    )
+    out = extract_unmatched_mentions(text, WIRE_KNOWN)
+    assert out == ["Zephyrline", "Kestrelmark", "Ospreygate"]
