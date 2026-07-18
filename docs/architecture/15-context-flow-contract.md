@@ -106,9 +106,10 @@ missing feature.
 
 **Defect ledger from the road to lock** (why item 8 exists): GP output
 budget + dossier timeout; CQ correction cue inheritance + action_items
-bucketing (fix staged in PR #163, gated on SS's decoder release
-reaching users — their decoder never read action_items, so an early
-flip would have silently dropped all completables from field builds);
+bucketing (shipped #163 after the hold-for-ack round revealed SS's
+decoder never read action_items — an unannounced flip would have
+silently dropped all completables from field builds; hold lifted by
+the owner, sole-real-user rationale);
 two relay drops (fixed by the shared status ledger practice); one
 wrong straggler theory (resolved by stream replay). From the build-749
 validation: CQ signal-line candidate selection flagged CamelCase and
