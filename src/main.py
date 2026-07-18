@@ -19,6 +19,10 @@ import time
 from datetime import datetime, timedelta
 import sys
 
+import structlog
+
+logger = structlog.get_logger()
+
 # Add src/ to sys.path so `from contextquilt.X` and `from dashboard.X`
 # resolve unambiguously. Mirrors `src/worker.py:23`. Without this,
 # uvicorn (loading us as `src.main`) leaves PYTHONPATH=/app only —
@@ -255,6 +259,13 @@ CUE_INDEX_NAMES_SQL = """
 # problem before this is merged, swap to a per-user version-bump key
 # that the worker invalidates on patch insert/update.
 RECALL_RENDER_CACHE_TTL = 30  # seconds
+
+# Recall renders slower than this (ms, server-side) log a warning with
+# the full phase breakdown. GP's recall budget is 500ms (ratified
+# 2026-07-18 after a 200ms timeout silently cost a turn its block);
+# this threshold surfaces the tail while it is still well inside that
+# budget, so degradation is visible before it costs anything.
+RECALL_SLOW_RENDER_MS = int(os.getenv("CQ_RECALL_SLOW_MS", "150"))
 
 # ============================================
 # i18n — Recall section labels by locale
@@ -1042,6 +1053,7 @@ async def recall_context(
             seen_texts.add(key)
 
     timings["postgres_patches"] = round((time.monotonic() - t2) * 1000, 2)
+    t3 = time.monotonic()
 
     # Step 5: Score and format the context block.
     #
@@ -1157,6 +1169,8 @@ async def recall_context(
 
     if signal_block:
         context = f"{context}\n\n{signal_block}" if context else signal_block
+    timings["score_and_format_ms"] = round((time.monotonic() - t3) * 1000, 2)
+    t4 = time.monotonic()
 
     # Look up communication profile and format as a natural language hint.
     # The calling gateway decides whether to inject this (e.g., only for chat modes).
@@ -1184,6 +1198,7 @@ async def recall_context(
                 style_parts.append("warm and friendly" if w > 0.6 else "businesslike" if w < 0.4 else "professional")
             if style_parts:
                 comm_style = f"This user communicates in a {', '.join(style_parts)} style."
+    timings["working_memory_ms"] = round((time.monotonic() - t4) * 1000, 2)
 
     # Collect matched patch IDs from all_patches, ranked by "relevance-ish" order.
     #
@@ -1243,6 +1258,7 @@ async def recall_context(
     # Best-effort write to the render cache. Skip the empty-context case
     # (cheap to recompute and we don't want to cache "the user has no
     # entities yet" through transient prewarm gaps).
+    t5 = time.monotonic()
     if context:
         try:
             await redis_client.set(
@@ -1260,8 +1276,22 @@ async def recall_context(
         except Exception:
             pass
 
+    timings["render_cache_write_ms"] = round((time.monotonic() - t5) * 1000, 2)
     timings["total"] = round((time.monotonic() - t0) * 1000, 2)
     timings["render_cache_hit"] = 0
+
+    # Tail visibility: the 2026-07-18 timeout was only discovered
+    # forensically. Anything slow logs its full phase breakdown so the
+    # tail names itself in real time.
+    if timings["total"] >= RECALL_SLOW_RENDER_MS:
+        logger.warning(
+            "recall_slow_render",
+            user_id=user_id,
+            text_len=len(request.text),
+            matched_entities=len(matched_names),
+            scoped=has_project_scope,
+            timings=timings,
+        )
 
     # Off-hot-path usage bookkeeping — see _bump_patch_access.
     asyncio.create_task(_bump_patch_access(matched_patch_ids))
