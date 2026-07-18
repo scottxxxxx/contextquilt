@@ -36,9 +36,18 @@ from typing import Any, Dict, List, Optional, Set
 
 MAX_UNMATCHED_MENTIONS = 3
 
-# Capitalized-word runs: each word starts uppercase and continues
-# lowercase, so ALLCAPS shouting and mid-word acronyms don't trigger.
-_MENTION_RUN = re.compile(r"\b[A-Z][a-z0-9'’\-]+(?:[ \t]+[A-Z][a-z0-9'’\-]+)*")
+# Capitalized-word runs. A "word" swallows interior CamelCase segments
+# ("HubSpot" is one word, not a "Hub" fragment), while ALLCAPS shouting
+# still doesn't trigger (second char must be lowercase).
+_WORD = r"[A-Z][a-z0-9'’\-]+(?:[A-Z][a-z0-9'’\-]+)*"
+_MENTION_RUN = re.compile(rf"\b{_WORD}(?:[ \t]+{_WORD})*")
+
+# GP's wire text for follow-up turns is the whole conversation history,
+# with the live turn introduced by a fixed marker. Gap claims must be
+# about what the user is asking NOW — candidates harvested from prior
+# answers are echo artifacts (that is how "Engage" and "Complete" from
+# a bulleted answer once starved out the real gap in the question).
+_WIRE_MARKERS = ("Current question:", "User question:")
 
 # Words that start sentences/phrases without naming anything. A run's
 # leading stopwords are stripped ("The Falcon Redesign" → "Falcon
@@ -65,7 +74,10 @@ _STOPWORDS = {
     "august", "september", "october", "november", "december",
 }
 
-_SENTENCE_BOUNDARY = ".!?\n:;\"'“”‘’()[]"
+# Includes markdown list/heading leaders: a single capitalized word
+# opening a bullet ("- Engage with…") is ordinary sentence casing, not
+# a name signal.
+_SENTENCE_BOUNDARY = ".!?\n:;\"'“”‘’()[]-–—•*·#+>"
 
 
 def memory_signals_enabled(metadata: Optional[Dict[str, Any]]) -> bool:
@@ -102,6 +114,14 @@ def _known_words(known_entities: Set[str]) -> Set[str]:
     return words
 
 
+def _focus_segment(text: str) -> str:
+    """The portion of wire text the gap claim should be about: after
+    the last question marker when GP's history framing is present,
+    the whole text otherwise."""
+    cut = max(text.rfind(m) + len(m) if text.rfind(m) >= 0 else -1 for m in _WIRE_MARKERS)
+    return text[cut:] if cut > 0 else text
+
+
 def extract_unmatched_mentions(
     text: str,
     known_entities: Set[str],
@@ -112,8 +132,11 @@ def extract_unmatched_mentions(
 
     Conservative by design — see module docstring. Single capitalized
     words at a sentence start are ignored (ordinary sentence casing);
-    multi-word runs count anywhere. Returned in order of first
-    appearance, case-insensitively deduplicated, capped."""
+    multi-word runs count anywhere. When the text carries GP's
+    conversation-history framing, only the current question is
+    scanned. Returned in order of first appearance, case-insensitively
+    deduplicated, capped."""
+    text = _focus_segment(text)
     known_word_set = _known_words(known_entities)
 
     out: List[str] = []
@@ -135,6 +158,13 @@ def extract_unmatched_mentions(
         # Suppress on any word-level overlap with the index: "Lockridge"
         # must not be reported missing when "Lockridge Abrams" is known.
         if any(w.lower() in known_word_set for w, _ in words):
+            continue
+        # Same precision rule for truncated fragments: "Hub" must not
+        # be reported missing when "HubSpot" is known.
+        if any(
+            len(wl) >= 3 and any(k.startswith(wl) for k in known_word_set)
+            for wl in (w.lower() for w, _ in words)
+        ):
             continue
         seen_lower.add(cl)
         out.append(candidate)
