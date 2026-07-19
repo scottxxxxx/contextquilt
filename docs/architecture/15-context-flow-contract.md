@@ -81,13 +81,45 @@ manufactures memory. SS ships nothing. Locked on a green live
 completion from the user's device (2026-07-17): open commitment
 matched and closed, all stamps verified at the socket.
 
+**Operational validation — v1 lit end to end (2026-07-18):** the
+build-749 three-way byte test lit the last lane, memory_signals from a
+real device through GP's passthrough to CQ's renderer and back. Flag
+confirmed on GP's outbound, scoped block returned with signal lines
+and coverage line intact, each hop proven by byte capture against
+frozen CQ reference renders. Procedural rule earned three times over:
+**reference renders must use wire-true text** — GP's machinery
+prefixes "User question: " on first turns and sends the entire
+conversation history ending "Current question: …" on follow-ups, so a
+reference rendered from the bare question never matches the wire.
+
+**Known edges** (accepted, not defects): completed or corrected state
+in the quilt does not annotate meeting content that rides inline, so
+recent summaries can resurrect closed items until the summaries age
+out of the inline window (observed live: a completed commitment
+presented as a current priority from a summary). If this ever earns a
+fix, the shape is item 11: "completed state annotates recent content"
+— the quilt telling the renderer which inline facts it knows to be
+stale — general enough to cover corrections too. Signal-line gap
+claims are gap-gated: a question naming only covered topics produces
+no signal lines with the flag on; that is correct behavior, not a
+missing feature.
+
 **Defect ledger from the road to lock** (why item 8 exists): GP output
 budget + dossier timeout; CQ correction cue inheritance + action_items
-bucketing (fix staged in PR #163, gated on SS's decoder release
-reaching users — their decoder never read action_items, so an early
-flip would have silently dropped all completables from field builds);
+bucketing (shipped #163 after the hold-for-ack round revealed SS's
+decoder never read action_items — an unannounced flip would have
+silently dropped all completables from field builds; hold lifted by
+the owner, sole-real-user rationale);
 two relay drops (fixed by the shared status ledger practice); one
-wrong straggler theory (resolved by stream replay).
+wrong straggler theory (resolved by stream replay). From the build-749
+validation: CQ signal-line candidate selection flagged CamelCase and
+markdown-bullet artifacts from prior answers while missing the real
+gap in the live question (fixed, PR #166 — extraction scopes to the
+current-question segment); GP's 200ms recall budget silently ate one
+turn's block on CQ's long-text render tail (budget raised to 500ms,
+ratified; CQ phase-timing + slow-render logging shipped in PR #167,
+tail hunt open — slow mode is ~140-190ms in CQ's Python render path,
+not the database).
 
 **Resolved observation from the amendment live fires** (was: recalls
 but no capture sends from a fresh chat on a second device): working as
