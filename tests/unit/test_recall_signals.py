@@ -203,3 +203,38 @@ def test_unknown_names_in_current_question_still_reported_and_capped():
     )
     out = extract_unmatched_mentions(text, WIRE_KNOWN)
     assert out == ["Zephyrline", "Kestrelmark", "Ospreygate"]
+
+
+def test_qa_history_resend_shape_scopes_gap_to_live_question():
+    # Anonymized structural twin of the genuine Zephyrline recall resend GP
+    # captured off their socket (the 2586-char wire text; verified locally that
+    # the shipped extractor yields ["Zephyrline"] on the real bytes). Real
+    # names and meeting content are deliberately NOT committed to this public
+    # repo — only the fingerprint that made the resend a distinct regression:
+    # the "Previous conversation in this chat:" + inline Q:/A: framing (a
+    # different lead-in than the User/Assistant twin above but the same trailing
+    # "Current question:" marker), markdown headers/bullets, CamelCase known
+    # words, prior-answer names that must stay scoped out, and the one genuinely
+    # unknown name (Zephyrline) that lives in the live question while also
+    # echoing inside the prior answer. It must surface exactly once.
+    text = (
+        "Previous conversation in this chat:\n"
+        "Q: What are the current priorities on this project?\n"
+        "A: Based on the meetings in this project, here are the priorities:\n\n"
+        "---\n\n"
+        "## Current Priorities\n\n"
+        "### 1. **Pipeline Engagement**\n"
+        "- Review the HubSpot pipeline for deals at 60%+ stage\n"
+        "- Engage with relevant opportunities to build expertise\n"
+        "- Complete the Quickcore Academy course and review Artemis docs\n\n"
+        "### 2. **CBE Support**\n"
+        "- Devlin is experiencing response-time issues post-release\n"
+        "- Sarita asked about filling the gap left by Bram\n\n"
+        "Alpha Omega Consulting and Bravo Dynamics were also mentioned.\n"
+        "Q: What are the current priorities, and where did we land with Zephyrline?\n"
+        "A: I don't have any context about Zephyrline in the meetings available "
+        "to me. Could you clarify whether Zephyrline is a customer or a project?\n"
+        "Current question: What are the current priorities on this project, "
+        "and where did we land with Zephyrline?"
+    )
+    assert extract_unmatched_mentions(text, WIRE_KNOWN) == ["Zephyrline"]
