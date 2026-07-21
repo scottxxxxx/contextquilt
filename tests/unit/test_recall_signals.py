@@ -157,7 +157,7 @@ def test_no_coverage_line_when_complete_or_unscoped():
 # fragments, markdown bullet casing, and conversation-history focus.
 # ------------------------------------------------------------------
 
-WIRE_KNOWN = {"HubSpot", "Brightbeam Academy", "Artemis", "CBE"}
+WIRE_KNOWN = {"HubSpot", "Brightbeam Academy", "Northwind", "VXB"}
 
 
 def test_camelcase_word_is_swallowed_whole_and_suppressed():
@@ -226,8 +226,8 @@ def test_qa_history_resend_shape_scopes_gap_to_live_question():
         "### 1. **Pipeline Engagement**\n"
         "- Review the HubSpot pipeline for deals at 60%+ stage\n"
         "- Engage with relevant opportunities to build expertise\n"
-        "- Complete the Brightbeam Academy course and review Artemis docs\n\n"
-        "### 2. **CBE Support**\n"
+        "- Complete the Brightbeam Academy course and review Northwind docs\n\n"
+        "### 2. **VXB Support**\n"
         "- Devlin is experiencing response-time issues post-release\n"
         "- Sarita asked about filling the gap left by Bram\n\n"
         "Alpha Omega Consulting and Bravo Dynamics were also mentioned.\n"

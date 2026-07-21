@@ -24,7 +24,7 @@ Validated which of the current 11 patch types earn their keep at recall time.
 | `person` | Scaffolding, both tests | **Keep** |
 | `project` | Scaffolding, both tests | **Keep** |
 | `decision` | Option-framing 3/3 | **Keep** |
-| `commitment` | Only source of "what Sri owes" — 3/3 | **Keep** |
+| `commitment` | Only source of "what Ram owes" — 3/3 | **Keep** |
 | `blocker` | Pattern-link 3/3, push-topics 3/3 | **Keep** |
 | `takeaway` | Works when scope-matched to query — 3/3 in Test 2 | **Keep + tighten** |
 | `role` | 0 patches — but this turned out to be a prompt bug, not a type-value issue. Reinstated as SS domain_type on Connection facet. | **Keep as SS domain_type** |
