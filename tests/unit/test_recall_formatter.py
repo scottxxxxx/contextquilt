@@ -70,11 +70,11 @@ def test_flat_formatter_includes_entity_header():
     scored = []
     entities = [
         _entity("Alex", "person", description="MVP backend lead"),
-        _entity("Benefits App", "project", description="Q3 launch"),
+        _entity("Atlas App", "project", description="Q3 launch"),
     ]
     out = format_flat_ranked(scored, entity_rows=entities, relationship_rows=[])
     assert "Alex" in out
-    assert "Benefits App" in out
+    assert "Atlas App" in out
     assert "MVP backend lead" in out
 
 
@@ -88,9 +88,9 @@ def test_flat_formatter_respects_max_chars_budget():
 
 
 def test_flat_formatter_surfaces_relationships():
-    rels = [_relationship("Alex", "Benefits App", "works_on", context="backend lead")]
+    rels = [_relationship("Alex", "Atlas App", "works_on", context="backend lead")]
     out = format_flat_ranked([], entity_rows=[], relationship_rows=rels)
-    assert "Alex works_on Benefits App" in out
+    assert "Alex works_on Atlas App" in out
 
 
 def test_flat_formatter_handles_new_types():

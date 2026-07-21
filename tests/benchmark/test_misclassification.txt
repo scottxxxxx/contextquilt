@@ -1,6 +1,6 @@
 Team standup - March 28, 2026
 
-[Speaker 1] So the big update is that the Benefits App MVP is basically done. Kumar finished the multi-plan integration yesterday.
+[Speaker 1] So the big update is that the Atlas App MVP is basically done. Kumar finished the multi-plan integration yesterday.
 [Speaker 2] Nice. James Vowles mentioned in an interview that Williams is planning a major upgrade for Miami. I thought that was interesting.
 [Speaker 1] Yeah I saw that. Speaking of upgrades, Joe said he's not a fan of constant platform migrations. He wants stability.
 [Speaker 2] That's fair. Oh, the summary generation failure rate is still at 3-4%. Nobody's picked that up yet.
