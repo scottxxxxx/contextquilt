@@ -115,7 +115,7 @@ class TestStripProseFromPersonNames:
         strip_prose_from_person_names(content)
         assert content["patches"][0]["value"]["text"] == "Zephyra/Yardley"
 
-    def test_anand_and_family_unchanged(self):
+    def test_arvind_and_family_unchanged(self):
         """' and ' isn't in the separator list — preserves legitimate
         compound-form names that don't use slash."""
         content = {"patches": [_patch("person", "Arvind and Family")]}

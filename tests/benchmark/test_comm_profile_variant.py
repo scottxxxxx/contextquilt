@@ -50,13 +50,13 @@ HARBORVIEW_TRANSCRIPT = """Harborview Mutual Meeting - Mar 24, 2026
 
 Scott and the Harborview Mutual team discussed three main topics:
 
-1. Sales Call Summarization: Harborview Mutual needs transcription and summarization of approximately 1,500 sales call audio files. The summary should be about 1,000-5,000 characters (to be confirmed). Scott will use the best available model and Deepgram Nova 3 for transcription. He'll provide both transcription and summary outputs in an Excel format. Scott asked for 2 days after receiving the audio files. Trevor will upload the files via FTP.
+1. Sales Call Summarization: Harborview Mutual needs transcription and summarization of approximately 900 outreach call recordings. The summary should be about 1,200-4,000 characters (to be confirmed). Scott will use the best available model and Deepgram Nova 3 for transcription. He'll provide both transcription and summary outputs in an Excel format. Scott asked for 2 days after receiving the audio files. Trevor will upload the files via FTP.
 
-2. Multi-Language Support (Language Line): Harborview Mutual has scenarios where a caller speaks Spanish, an English-speaking agent picks up, and a translator is conferenced in. Currently using Deepgram Nova 2 which requires the language to be specified upfront. Nova 3 supports both Spanish and English and can auto-detect. Scott confirmed Nova 3 supports this. The team discussed upgrading from Nova 2 to Nova 3 for all transcription. Harborview Mutual is currently on their own VPC, not Core's servers, which makes the upgrade harder. Ramkumar will send an email to Scott, Arvind, and Melinda about the language line requirements.
+2. Multi-Language Support (Language Line): Harborview Mutual has scenarios where a caller speaks Spanish, an English-speaking agent picks up, and a translator is conferenced in. Currently using Deepgram Nova 2 which requires the language to be specified upfront. Nova 3 supports both Spanish and English and can auto-detect. Scott confirmed Nova 3 supports this. The team discussed upgrading from Nova 2 to Nova 3 for all transcription. Harborview Mutual is currently on their own VPC, not Corvex's servers, which makes the upgrade harder. Ramkumar will send an email to Scott, Arvind, and Melinda about the language line requirements.
 
-3. Open Support Tickets: The team reviewed several tickets including 70293 (call transfer visibility - agent 2 seeing agent 1's transcription), 70311 (audio hooks stopping randomly), 70413 (model deployment - has a Jira created), 70412 (engineering investigating), and 69227 (duplicate messages). Scott looked up ticket statuses and added internal comments. Melinda handles escalation through customer success.
+3. Open Support Tickets: The team reviewed several tickets including 41207 (call transfer visibility - agent 2 seeing agent 1's transcription), 41185 (audio hooks stopping randomly), 41733 (model deployment - has a Jira created), 41718 (engineering investigating), and 40922 (duplicate messages). Scott looked up ticket statuses and added internal comments. Melinda handles escalation through customer success.
 
-The production date for these capabilities is June 28, 2026. Implementation needs to happen within 4 weeks. Scott will reach out to Arvind regarding Nova 3 and the language line capabilities."""
+The production date for these capabilities is July 10, 2026. Implementation needs to happen within 4 weeks. Scott will reach out to Arvind regarding Nova 3 and the language line capabilities."""
 
 
 async def main():
