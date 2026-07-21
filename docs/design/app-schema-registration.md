@@ -340,7 +340,7 @@ These three additions make CQ core genuinely multi-app by design. Each is minor 
 **Why:** real hierarchies exist across app types:
 - Creative: novel → chapter → scene
 - Research: dissertation → chapter → section; experiment → sub-experiment
-- SS: Benefits App MVP → Florida Blue engagement (previously flagged gap)
+- SS: Atlas App MVP → Harborview Mutual engagement (previously flagged gap)
 - Interview tool: round → loop → company
 
 **Implementation:** relax the validation rule in `connection_vocabulary` that restricts `belongs_to` target types. The decay worker's cascade query already uses a recursive CTE, so depth handles itself.
@@ -352,7 +352,7 @@ These three additions make CQ core genuinely multi-app by design. Each is minor 
 **Why:** many stable facts describe things other than the user:
 - "Elena is 34" (character, creative)
 - "The 2023 Smith paper uses RCT methodology" (citation, research)
-- "Benefits App MVP is in defined-mode until finalized" (project, SS)
+- "Atlas App MVP is in defined-mode until finalized" (project, SS)
 - "Patient's current insurance plan covers infusions" (plan, healthcare)
 
 **Implementation:** nullable `about_patch_id` column on `context_patches`. When set, the patch applies to that target; when NULL, the patch applies to the submitting user (current behavior preserved). Recall traversal naturally surfaces Attributes when their `about` target is in scope.

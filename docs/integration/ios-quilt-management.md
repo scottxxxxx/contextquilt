@@ -27,14 +27,14 @@ The quilt is organized around the user as the root. Here's what a typical quilt 
       (universal)       (universal)        (universal)
 
      ┌─────────────────────────────────────────────────┐
-     │  PROJECT: "Florida Blue transcription"           │
+     │  PROJECT: "Harborview transcription"             │
      │                                                  │
      │  ├── DECISION: "Use Nova 3"                      │
      │  ├── COMMITMENT: "Deliver samples in 2 days"     │
      │  │   └── blocked_by → BLOCKER                    │
-     │  ├── BLOCKER: "Waiting on Travis to upload"      │
-     │  ├── PERSON: Travis (file uploads)               │
-     │  ├── PERSON: Amanda (escalation)                 │
+     │  ├── BLOCKER: "Waiting on Trevor to upload"      │
+     │  ├── PERSON: Trevor (file uploads)               │
+     │  ├── PERSON: Melinda (escalation)                │
      │  └── TAKEAWAY: "No summary template yet"         │
      └─────────────────────────────────────────────────┘
 ```
@@ -81,7 +81,7 @@ Each patch includes its `connections` — outgoing edges to other patches. Use `
   "facts": [
     {
       "patch_id": "aaa-111",
-      "fact": "Florida Blue transcription project",
+      "fact": "Harborview transcription project",
       "category": "project",
       "patch_type": "project",
       "project": null,
@@ -101,10 +101,10 @@ Each patch includes its `connections` — outgoing edges to other patches. Use `
     },
     {
       "patch_id": "aaa-333",
-      "fact": "Use Nova 3 for Florida Blue transcription",
+      "fact": "Use Nova 3 for Harborview transcription",
       "category": "decision",
       "patch_type": "decision",
-      "project": "Florida Blue",
+      "project": "Harborview",
       "source": "inferred",
       "created_at": "2026-03-25T14:32:10Z",
       "connections": [
@@ -129,7 +129,7 @@ Each patch includes its `connections` — outgoing edges to other patches. Use `
       "patch_type": "commitment",
       "owner": "Scott",
       "deadline": "2026-03-27",
-      "project": "Florida Blue",
+      "project": "Harborview",
       "source": "inferred",
       "created_at": "2026-03-25T14:32:10Z",
       "connections": [
@@ -139,10 +139,10 @@ Each patch includes its `connections` — outgoing edges to other patches. Use `
     },
     {
       "patch_id": "aaa-666",
-      "fact": "Waiting on Travis to upload audio files",
+      "fact": "Waiting on Trevor to upload audio files",
       "category": "blocker",
       "patch_type": "blocker",
-      "project": "Florida Blue",
+      "project": "Harborview",
       "source": "inferred",
       "created_at": "2026-03-25T14:32:10Z",
       "connections": [
@@ -203,12 +203,12 @@ Group patches into sections the user can scan quickly:
 │  💡 Prefers Nova 3                  │
 │  👤 Product Manager at Acme        │
 ├─────────────────────────────────────┤
-│  Florida Blue                   6 ▸ │
+│  Harborview                     6 ▸ │
 │  ✅ Use Nova 3 for transcription    │
 │  🤝 Deliver samples in 2 days      │
-│  🚫 Waiting on Travis to upload    │
-│  🤝 Travis — file uploads          │
-│  🤝 Amanda — escalation            │
+│  🚫 Waiting on Trevor to upload    │
+│  🤝 Trevor — file uploads          │
+│  🤝 Melinda — escalation           │
 │  💭 No summary template yet        │
 ├─────────────────────────────────────┤
 │  Action Items                   1 ▸ │
@@ -236,7 +236,7 @@ During a meeting or post-meeting chat, GhostPour returns headers indicating CQ a
 
 ```
 X-CQ-Matched: 3
-X-CQ-Entities: Travis,Florida Blue,Nova 3
+X-CQ-Entities: Trevor,Harborview,Nova 3
 ```
 
 The iOS app can show a subtle indicator on the response bubble:
@@ -379,7 +379,7 @@ Projects have stable IDs. Names can change without breaking the quilt.
 ```json
 {
   "project_id": "proj-uuid-123",
-  "project": "Florida Blue",
+  "project": "Harborview",
   "meeting_id": "meet-uuid-456"
 }
 ```
@@ -387,7 +387,7 @@ Projects have stable IDs. Names can change without breaking the quilt.
 **List projects:**
 ```
 GET /v1/projects/{user_id}
-→ [{"project_id": "...", "name": "Florida Blue", "status": "active", "patch_count": 9}]
+→ [{"project_id": "...", "name": "Harborview", "status": "active", "patch_count": 9}]
 ```
 
 **Rename a project:**

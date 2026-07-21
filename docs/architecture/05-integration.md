@@ -132,10 +132,10 @@ About you:
 
 Open commitments:
 - Vijay will import the agents (by Friday)
-- Pallavi will retest once the scope is corrected
+- Nandini will retest once the scope is corrected
 
 Decisions:
-- Use Nova 3 for transcription on the Florida Blue project.
+- Use Nova 3 for transcription on the Harborview Mutual project.
 
 Key facts:
 - You are based out of Austin, Texas.

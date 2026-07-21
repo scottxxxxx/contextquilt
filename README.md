@@ -60,9 +60,9 @@ A **patch** is a typed fact about a user:
 | `trait` | "Tends to over-explain technical details" | Permanent |
 | `preference` | "Prefers Nova 3 over Nova 2 for transcription" | Permanent |
 | `commitment` | "Scott: deliver samples by Friday" | 30-day TTL |
-| `blocker` | "Waiting on Travis to upload files" | 30-day TTL |
+| `blocker` | "Waiting on Trevor to upload files" | 30-day TTL |
 | `decision` | "Use AWS S3 for file storage" | Permanent |
-| `takeaway` | "Production deadline is June 28" | 14-day TTL |
+| `takeaway` | "Production deadline is July 10" | 14-day TTL |
 
 ### Connections
 
@@ -71,9 +71,9 @@ Patches are **stitched together** with typed connections:
 ```
 [Scott] --owns--> [Deliver samples by Friday]
                         |
-                  --belongs_to--> [Florida Blue Project]
+                  --belongs_to--> [Harborview Mutual Project]
                         |
-                  --blocked_by--> [Waiting on Travis]
+                  --blocked_by--> [Waiting on Trevor]
 ```
 
 Connection roles: `parent`, `depends_on`, `resolves`, `replaces`, `informs`
@@ -216,7 +216,7 @@ The write path (extraction) runs asynchronously after the user gets their respon
 
 ### Connected Quilt Model
 
-Unlike flat fact stores, ContextQuilt preserves **relationships** between facts. A commitment connects to a project, depends on a blocker, and is owned by a person. This enables queries like "what's blocking the Florida Blue project?" to return the full connected context.
+Unlike flat fact stores, ContextQuilt preserves **relationships** between facts. A commitment connects to a project, depends on a blocker, and is owned by a person. This enables queries like "what's blocking the Harborview Mutual project?" to return the full connected context.
 
 ### Extensible Patch Types
 
