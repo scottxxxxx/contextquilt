@@ -8,6 +8,6 @@ Team standup - March 28, 2026
 [Speaker 1] We should probably look into the Deepgram Flux model at some point. I heard it handles accents better.
 [Speaker 2] The presentation deck still needs work. Someone should finalize it before Tuesday.
 [Speaker 1] I tend to ramble in these meetings. Sorry about that.
-[Speaker 2] Ravikanth said he'd create the stories from our discussion but I haven't seen them yet.
+[Speaker 2] Chandran said he'd create the stories from our discussion but I haven't seen them yet.
 [Speaker 1] The new restaurant down the street has amazing tacos. We should go for lunch.
 [Speaker 2] Also, Anna mentioned she's been doing yoga every morning. Says it helps her focus.

@@ -2625,7 +2625,7 @@ async def rename_speaker(
 ):
     """
     Rename a speaker across entities, relationships, and the Redis entity index.
-    Called by ShoulderSurf when a user renames "Speaker 4" to "SriDev".
+    Called by ShoulderSurf when a user renames "Speaker 4" to "Ramkumar".
 
     The app is responsible for updating patch text separately via PATCH /v1/quilt.
     This endpoint handles the graph layer (entities + relationships).

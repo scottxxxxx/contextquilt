@@ -21,7 +21,7 @@ from src.contextquilt.services.entity_aliasing import (
 def test_tokenize_basic_and_punctuation():
     assert tokenize_name("Sarah Abrams") == ["sarah", "abrams"]
     assert tokenize_name("S. Abrams") == ["s", "abrams"]
-    assert tokenize_name("ABM Industries") == ["abm", "industries"]
+    assert tokenize_name("Axiom Industries") == ["axiom", "industries"]
 
 
 def test_tokenize_unicode_names_hold_together():
@@ -53,7 +53,7 @@ def test_initial_expansion():
 
 
 def test_company_short_form():
-    assert is_alias_form("ABM", "ABM Industries")
+    assert is_alias_form("Axiom", "Axiom Industries")
 
 
 def test_not_alias_of_itself():
@@ -109,7 +109,7 @@ def test_ambiguity_blocks_merge():
 
 
 def test_no_match():
-    existing = [(1, "Jordan Melville"), (2, "ABM Industries")]
+    existing = [(1, "Jordan Melville"), (2, "Axiom Industries")]
     assert find_alias_candidate("Sarah", existing) is None
 
 

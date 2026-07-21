@@ -70,9 +70,9 @@ class TestStripProseFromPersonNames:
         assert content["patches"][0]["value"]["text"] == "Jaffer"
 
     def test_who_clause(self):
-        content = {"patches": [_patch("person", "Anand who joined last quarter")]}
+        content = {"patches": [_patch("person", "Arvind who joined last quarter")]}
         strip_prose_from_person_names(content)
-        assert content["patches"][0]["value"]["text"] == "Anand"
+        assert content["patches"][0]["value"]["text"] == "Arvind"
 
     # ----- Names that must survive untouched -----
 
@@ -115,12 +115,12 @@ class TestStripProseFromPersonNames:
         strip_prose_from_person_names(content)
         assert content["patches"][0]["value"]["text"] == "Sai/Santosh"
 
-    def test_anand_and_family_unchanged(self):
+    def test_arvind_and_family_unchanged(self):
         """' and ' isn't in the separator list — preserves legitimate
         compound-form names that don't use slash."""
-        content = {"patches": [_patch("person", "Anand and Family")]}
+        content = {"patches": [_patch("person", "Arvind and Family")]}
         strip_prose_from_person_names(content)
-        assert content["patches"][0]["value"]["text"] == "Anand and Family"
+        assert content["patches"][0]["value"]["text"] == "Arvind and Family"
 
     # ----- Other types must not be touched -----
 

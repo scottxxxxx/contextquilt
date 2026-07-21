@@ -85,7 +85,9 @@ def _pull_source_transcript_payload() -> dict[str, Any]:
     redis_pwd = os.environ.get("REDIS_PASSWORD")
     if not redis_pwd:
         sys.exit("REDIS_PASSWORD env required to pull from prod Redis")
-    ssh_target = os.environ.get("CQ_SSH_TARGET", "scottguida@35.239.227.192")
+    ssh_target = os.environ.get("CQ_SSH_TARGET")
+    if not ssh_target:
+        sys.exit("CQ_SSH_TARGET env required (user@host of the prod box; see private ops runbook)")
     ssh_key = os.environ.get("CQ_SSH_KEY", os.path.expanduser("~/.ssh/id_ed25519"))
 
     cmd = [
@@ -125,7 +127,9 @@ async def _replay_extraction(
 def _query_db(sql: str) -> str:
     import subprocess
 
-    ssh_target = os.environ.get("CQ_SSH_TARGET", "scottguida@35.239.227.192")
+    ssh_target = os.environ.get("CQ_SSH_TARGET")
+    if not ssh_target:
+        sys.exit("CQ_SSH_TARGET env required (user@host of the prod box; see private ops runbook)")
     ssh_key = os.environ.get("CQ_SSH_KEY", os.path.expanduser("~/.ssh/id_ed25519"))
     cmd = [
         "ssh", "-i", ssh_key, "-o", "StrictHostKeyChecking=no", ssh_target,

@@ -1,0 +1,23 @@
+Harborview Mutual Meeting - Mar 24, 2026
+
+[Speaker 1] Depending on the quality of the recordings you give me, I can run the ASR and the transcription on them.
+[Speaker 1] Before committing I want to understand the constraints. The right pipeline is a transcription engine, then diarization, then a model with system instructions to produce the summary.
+[Speaker 1] My read is you want a summary that lands in front of a live agent. Is that correct?
+[Speaker 2] Corvex built this for us before. We had worked with Arvind and Venkat on that engagement.
+[Speaker 2] This capability is going to the outreach agents for the first time.
+[Speaker 2] What we're asking for is your best-practice summary, the way Corvex has done it for other clients.
+[Speaker 2] The one requirement is that it stays around twelve hundred characters.
+[Speaker 1] So twelve hundred characters is the only hard constraint? Every business we've built summaries for had something specific their team needed surfaced.
+[Speaker 2] We're starting from a blank slate. I'll confirm whether the ceiling is twelve hundred or four thousand.
+[Speaker 1] If it's four thousand, tell me the realistic target and I'll stay under it. Also consider scaling by call length: a five-minute call shouldn't get the same summary budget as a thirty-minute call.
+[Speaker 1] Once the recordings land, give me two days. How many are we talking about?
+[Speaker 2] Around nine hundred. Trevor is going to upload them over FTP and send an email when they're up.
+[Speaker 2] Second capability: language line support. The Meridian IVR detects the member's language, and mid-call the agent can conference in a translator, so you get three speakers across two languages.
+[Speaker 1] That's tractable. Transcribe both languages faithfully, then instruct the summarizer to produce one clean English summary for the agent. The model should infer the language from the audio, not need it declared up front.
+[Speaker 2] Put that in an email and copy me, Arvind, and Melinda so there's a paper trail.
+[Speaker 1] Nova 3 handles Spanish and English together, I just verified. Nova 2 struggled with background noise in my testing, and the word error rate improvement is close to twenty percent, so when I run your transcription I'll use Nova 3.
+[Speaker 2] We've been asking Corvex to enable Nova 3 for us. The production date is July 10, so these pieces need to be in place within four weeks.
+[Speaker 3] We hit an issue where transcription dropped most of a call because the caller switched languages midway. There's also the audio hook stopping at random, and the conversation visibility setting not hiding the transcript from a second agent after a transfer.
+[Speaker 1] I added a public comment on that ticket. 41733 has a Jira attached, which means a product engineer is on it. For escalations go through Melinda in customer success.
+[Speaker 1] Fair warning, I repeat myself and over-explain. That's how I work.
+[Speaker 2] Priority one is the FTP link so you can start transcription, then the summarization prompts. The other critical thread is language line support, covering agent assist and the transcription engines.

@@ -53,7 +53,7 @@ identity as V2 type, genericized examples, second-person patch text convention.
 - Claude Haiku 4.5 is the clear production winner on real messy transcripts
 - Gemini Flash/Flash-Lite look good on synthetic but fail on real data (orphan patches, duplications)
 - Connection enforcement reveals true quality: models that don't link patches to projects lose all operational context
-- Prompt-echo bug (Mistral echoing "Florida Blue"/"Travis") fixed by genericizing examples
+- Prompt-echo bug (Mistral echoing "Harborview Mutual"/"Trevor") fixed by genericizing examples
 - Flash-Lite's 12-duplicate identity hallucination fixed by genericizing JSON example block
 - Reasoning scratchpad unlocked GPT-4o-mini from OVER-SUPPRESS and fixed Haiku's trait/preference misclassification
 
