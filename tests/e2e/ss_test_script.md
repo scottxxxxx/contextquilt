@@ -126,7 +126,7 @@ That's the gating test. If they appear without enrollment, the gate is broken.
 ### Quality checks
 - [ ] "Prefers Go over Rust" is typed as `preference`, not `trait`
 - [ ] "Based in Boston" is typed as `identity`, not `trait`
-- [ ] No prompt-echo content (no "Florida Blue", "Travis", "transcription samples")
+- [ ] No prompt-echo content (no "Harborview Mutual", "Trevor", "transcription samples")
 - [ ] No duplicate patches
 - [ ] Person patches have meaningful context (role + location), not just names
 - [ ] Total patch count is 10-12 (not 3-5, not 20+)

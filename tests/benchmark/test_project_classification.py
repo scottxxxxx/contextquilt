@@ -41,17 +41,17 @@ VARIANT_PROMPT = VARIANT_PROMPT.replace(
 # --- TEST TRANSCRIPTS ---
 
 # Case 1: Real work meeting (should extract projects)
-WORK_MEETING = """Florida Blue Meeting - Mar 24, 2026
+WORK_MEETING = """Harborview Mutual Meeting - Mar 24, 2026
 
-Scott and the Florida Blue team discussed three main topics:
+Scott and the Harborview Mutual team discussed three main topics:
 
-1. Sales Call Summarization: Florida Blue needs transcription and summarization of approximately 1,500 sales call audio files. Scott will use Deepgram Nova 3 for transcription. He'll provide both transcription and summary outputs in an Excel format. Scott asked for 2 days after receiving the audio files. Travis will upload the files via FTP.
+1. Sales Call Summarization: Harborview Mutual needs transcription and summarization of approximately 900 outreach call recordings. Scott will use Deepgram Nova 3 for transcription. He'll provide both transcription and summary outputs in an Excel format. Scott asked for 2 days after receiving the audio files. Trevor will upload the files via FTP.
 
-2. Multi-Language Support (Language Line): Florida Blue has scenarios where a caller speaks Spanish. Nova 3 supports auto-detect. Sridev will send an email to Scott, Anand, and Amanda about the language line requirements.
+2. Multi-Language Support (Language Line): Harborview Mutual has scenarios where a caller speaks Spanish. Nova 3 supports auto-detect. Ramkumar will send an email to Scott, Arvind, and Melinda about the language line requirements.
 
-3. Open Support Tickets: The team reviewed several tickets. Amanda handles escalation through customer success.
+3. Open Support Tickets: The team reviewed several tickets. Melinda handles escalation through customer success.
 
-The production date is June 28, 2026. Scott will reach out to Anand regarding Nova 3."""
+The production date is July 10, 2026. Scott will reach out to Arvind regarding Nova 3."""
 
 # Case 2: Podcast / content discussion (should NOT extract projects)
 PODCAST_DISCUSSION = """True Crime Podcast Review - Mar 25, 2026
@@ -105,7 +105,7 @@ TEST_CASES = {
         "transcript": WORK_MEETING,
         "user": "Scott",
         "expect_projects": True,
-        "expected_project_names": ["Florida Blue", "Multi-Language", "Language Line"],
+        "expected_project_names": ["Harborview Mutual", "Multi-Language", "Language Line"],
         "description": "Real work meeting — should extract project patches",
     },
     "podcast": {

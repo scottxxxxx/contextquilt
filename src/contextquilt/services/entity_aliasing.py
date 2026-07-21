@@ -2,8 +2,8 @@
 Entity alias detection — pure name-form heuristics, no DB access.
 
 Decides whether one entity name is plausibly an alternate surface form
-of another ("Sarah" / "S. Abrams" → "Sarah Abrams"; "ABM" →
-"ABM Industries"). Deliberately conservative: callers must only merge
+of another ("Sarah" / "S. Abrams" → "Sarah Abrams"; "Axiom" →
+"Axiom Industries"). Deliberately conservative: callers must only merge
 when `find_alias_candidate` returns exactly one same-type match —
 ambiguity ("Sarah" with both "Sarah Abrams" and "Sarah Chen" present)
 means no merge, matching today's behavior of separate entities.
@@ -61,7 +61,7 @@ def is_alias_form(short: str, long: str) -> bool:
 
     Rules (all token-based, case-insensitive):
       - token subset: every token of `short` appears in `long`
-        ("Sarah" ⊂ "Sarah Abrams", "ABM" ⊂ "ABM Industries")
+        ("Sarah" ⊂ "Sarah Abrams", "Axiom" ⊂ "Axiom Industries")
       - initial expansion: a single-LETTER token of `short` ("S" from
         "S. Abrams") matches the first letter of an alphabetic `long`
         token not consumed by another short token. Digits never expand

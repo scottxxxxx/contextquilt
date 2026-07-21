@@ -1,0 +1,65 @@
+Harborview Mutual Meeting - Mar 24, 2026
+
+[Scott] So the quality of the recordings you hand me determines how far I can take the ASR and the transcription side of this.
+[Scott] Before I commit to anything I want to understand what constraints you're working under.
+[Scott] The right pipeline here is a transcription engine, then diarization, then feed that as context with system instructions to a model and generate the summary.
+[Scott] My read is you want a summary that lands in front of a live agent. Am I right about that?
+[Ramkumar] Corvex built something like this for us before, right?
+[Ramkumar] We had worked with Arvind and Venkat on that earlier engagement.
+[Ramkumar] If you can check with them on what was delivered back then, that would help.
+[Ramkumar] Yeah, I can follow up with Arvind on it.
+[Scott] I still need direction on what you expect the output to look like.
+[Scott] Ideally you hand me a model summary, an example of what good looks like. Otherwise it's too open-ended.
+[Ramkumar] Honestly, we don't know yet what the summary needs to contain.
+[Ramkumar] This capability is going to the outreach agents for the first time.
+[Ramkumar] What we want is your best-practice summary, the way Corvex has done it for other clients.
+[Ramkumar] The one requirement we have today is that it stays around twelve hundred characters.
+[Scott] So the only hard constraint right now is twelve hundred characters. Nothing else?
+[Ramkumar] That is the only constraint at this point.
+[Scott] Every business we've built summaries for has had something specific their team needed surfaced. Nothing like that here?
+[Ramkumar] We're starting from a blank slate. That's exactly why we're asking for your defaults.
+[Scott] We can do it that way. I'll give you something generic, you react to it, and we iterate.
+[Scott] It's not the most efficient path. What I'd rather do as an SME is sit with someone who reads these summaries daily and ask what gets their job done faster and what's always missing.
+[Scott] But if the business side can't give us requirements yet, I'll produce something useful and we iterate from there.
+[Ramkumar] I can connect you to the business directly, but trust me, that conversation will go in circles.
+[Scott] I don't love engineering against a problem I only half understand. "Do what Corvex always does" isn't a spec, because no two customers end up with the same solution.
+[Scott] That said, if you're telling me to use my judgment, I'll pick the best model, run the best transcription, include diarization, and show you real outputs.
+[Scott] If the ask is "give us your best product, Scott," that part is easy.
+[Ramkumar] Last time they delivered it in a spreadsheet. One row per recording, named by the audio file, one column for the transcription and one for the summary.
+[Scott] And the only restriction on my side is the summary stays under twelve hundred characters.
+[Ramkumar] I will confirm whether the ceiling is twelve hundred or four thousand.
+[Scott] If it turns out to be four thousand, just tell me the realistic target and I'll stay under it.
+[Scott] Also think about scaling it by call length. A five-minute call shouldn't get a four-thousand-character summary, but a thirty-minute call might. Some guideline like expected summary size per minute would help.
+[Ramkumar] Here's the actual business worry. This is the first time the outreach team gets summaries at all, and they're asking how the quality holds up on very long calls versus very short ones.
+[Scott] This isn't my first time doing this kind of work, so you'll get something good out of the gate. It won't be the final version, but it'll be a strong start. Once the recordings land, give me two days.
+[Scott] How many recordings are we talking about?
+[Ramkumar] Around nine hundred.
+[Scott] Volume just means processing time. I won't read nine hundred summaries, but I'll spot check them. Two days after I have the files.
+[Ramkumar] There's a second capability we need. Language line support. When a member calls in, the Meridian IVR detects the language they want to use.
+[Ramkumar] Today, an agent picks up, transcription runs during the call, and the summary generates at the end.
+[Ramkumar] The new scenario is the agent realizes mid-call that translation is needed and conferences in a translator who works between the agent and the member.
+[Ramkumar] So you end up with three speakers across two languages on one call.
+[Scott] That's tractable. Use a transcription engine that handles both languages, transcribe everything faithfully, then tell the summarizer in the system instructions to focus on the English side or to be aware a translation happened.
+[Ramkumar] The consumer is the agent, so at the end of the call they want one clean English summary of the conversation.
+[Scott] We shouldn't have to declare the language up front. The transcription model ought to infer it from the audio itself.
+[Ramkumar] Can you put that in an email and copy me, Arvind, and Melinda so there's a paper trail?
+[Scott] Nova 3 handles Spanish and English together. I verified that while we were talking.
+[Scott] I keep pushing Nova 3 because Nova 2 struggled with background noise in my own testing over a year ago. It's a generational jump. The word error rate improvement is close to twenty percent.
+[Ramkumar] We've been asking Corvex to enable Nova 3 for us for a while. We know it exists.
+[Scott] Arvind switched it on for another client recently. It was literally a config flip. Your setup might be different because you run your own VPC.
+[Scott] When I run your transcription I'll use Nova 3. I don't build for the past. If that's where we're heading, let's build against it now.
+[Ramkumar] The production date is July 10. These pieces need to be in place within the next four weeks.
+[Scott] So you're fine with me running Nova 3 for the transcription batch, given that's the direction?
+[Ramkumar] Yes, we want to push toward that.
+[Colin] We hit a recent issue where the transcription dropped most of a call because the caller switched languages midway through.
+[Ramkumar] The audio hook is another one. It stops working at random and we need support on it.
+[Colin] One of the open tickets is the conversation visibility setting not hiding the conversation from a second agent. And then the audio hook one.
+[Colin] The transfer case is the ugly one. Same conversation ID across the transfer, so pulling the transcript returns both agents' segments and nothing is hidden from the second agent.
+[Scott] I added a public comment on that ticket just now. Let me pull up 41733. That one has a Jira attached, which means a product engineer is actually on it.
+[Ramkumar] For the follow-up sessions, don't wait on me. Work directly with Scott to keep this moving.
+[Scott] For escalations, go through Melinda. She's in customer success and can prioritize and put weight behind tickets.
+[Scott] Fair warning, I repeat myself and over-explain. That's just how I work.
+[Ramkumar] Priority one is getting you the FTP link for the recordings so you can start the transcription runs and then the summarization prompts.
+[Ramkumar] Trevor is going to upload them and he'll send an email when they're up.
+[Ramkumar] The other critical thread is language line support, covering agent assist and the transcription engines.
+[Scott] Send that in an email and copy me, Arvind, and Melinda.

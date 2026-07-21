@@ -7,7 +7,7 @@ from src.contextquilt.services.recall_signals import (
     memory_signals_enabled,
 )
 
-KNOWN = {"Sarah Abrams", "ABM Industries", "Falcon Redesign", "S. Abrams"}
+KNOWN = {"Sarah Abrams", "Axiom Industries", "Falcon Redesign", "S. Abrams"}
 
 
 # ------------------------------------------------------------------
@@ -62,7 +62,7 @@ def test_alias_words_also_suppress():
 
 
 def test_known_entity_exact_mention_not_reported():
-    text = "Where are we on the Falcon Redesign with ABM Industries?"
+    text = "Where are we on the Falcon Redesign with Axiom Industries?"
     assert extract_unmatched_mentions(text, KNOWN) == []
 
 
@@ -157,7 +157,7 @@ def test_no_coverage_line_when_complete_or_unscoped():
 # fragments, markdown bullet casing, and conversation-history focus.
 # ------------------------------------------------------------------
 
-WIRE_KNOWN = {"HubSpot", "Quickcore Academy", "Artemis", "CBE"}
+WIRE_KNOWN = {"HubSpot", "Brightbeam Academy", "Northwind", "VXB"}
 
 
 def test_camelcase_word_is_swallowed_whole_and_suppressed():
@@ -183,7 +183,7 @@ def test_history_framing_scopes_gap_claims_to_current_question():
         "User question: What are the current priorities on this project? "
         "Assistant: Priorities are:\n"
         "- Engage with opportunities via the HubSpot pipeline\n"
-        "- Complete the Quickcore Academy course\n"
+        "- Complete the Brightbeam Academy course\n"
         "Alpha Omega Consulting and Bravo Dynamics were also mentioned.\n"
         "Current question: What are the current priorities on this project, "
         "and where did we land with Zephyrline?"
@@ -226,8 +226,8 @@ def test_qa_history_resend_shape_scopes_gap_to_live_question():
         "### 1. **Pipeline Engagement**\n"
         "- Review the HubSpot pipeline for deals at 60%+ stage\n"
         "- Engage with relevant opportunities to build expertise\n"
-        "- Complete the Quickcore Academy course and review Artemis docs\n\n"
-        "### 2. **CBE Support**\n"
+        "- Complete the Brightbeam Academy course and review Northwind docs\n\n"
+        "### 2. **VXB Support**\n"
         "- Devlin is experiencing response-time issues post-release\n"
         "- Sarita asked about filling the gap left by Bram\n\n"
         "Alpha Omega Consulting and Bravo Dynamics were also mentioned.\n"

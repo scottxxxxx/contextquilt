@@ -326,10 +326,10 @@ class TestCompoundOwnerSplitter:
     def test_no_split_on_other_separators(self):
         # Conservative: don't split on ', ', ' & ', ' and '. These can
         # legitimately appear inside single names ("Smith, John", "AT&T",
-        # "Anand and family").
+        # "Arvind and family").
         assert _split_compound_owner("Smith, John") == ["Smith, John"]
         assert _split_compound_owner("AT&T") == ["AT&T"]
-        assert _split_compound_owner("Anand and family") == ["Anand and family"]
+        assert _split_compound_owner("Arvind and family") == ["Arvind and family"]
 
 
 # ============================================================

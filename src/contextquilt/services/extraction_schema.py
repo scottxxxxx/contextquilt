@@ -720,7 +720,7 @@ def strip_owner_on_self_typed_patches(content: dict) -> dict:
 # doesn't matter (we use the earliest match), but the set is kept
 # conservative so multi-word names like "Bob Martinez" survive.
 #
-# Notably absent: " and " (occurs in "Anand and Family"-style legit
+# Notably absent: " and " (occurs in "Arvind and Family"-style legit
 # names — handled by split_compound_person_patches), bare hyphens
 # without surrounding spaces (preserves "Jean-Luc", "O'Brien-Smith"),
 # and " of " (preserves "Catherine of Aragon"-style; not common in our
@@ -1177,7 +1177,7 @@ def _split_compound_owner(owner_text: str | None) -> list[str]:
 
     Conservative splitter: ``/`` only. We don't split on ``,``, ``&``,
     or ``" and "`` — those legitimately appear inside single names
-    ("Smith, John", "AT&T", "Anand and family") and over-splitting would
+    ("Smith, John", "AT&T", "Arvind and family") and over-splitting would
     fragment real names. Slash is unambiguous in human-name contexts.
 
     Returns the list of trimmed parts. Single-part owners are returned
