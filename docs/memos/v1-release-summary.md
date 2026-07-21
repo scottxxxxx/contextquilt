@@ -281,7 +281,7 @@ SS lossy decoder handles the retired types; all other clients need to update.
 These came up during implementation. Flagging them here so future-you doesn't relitigate.
 
 1. **`role` stays a patch type (reversed a prior cut).** Rationale: "0 patches in real data" was an extraction-prompt weakness, not evidence of redundancy. With PR 3's schema-driven prompt generation, role extraction should actually fire now.
-2. **Recursive `belongs_to` is unrestricted at the Connection level.** A `project` can belong_to another `project`. Enables novel → chapter → scene, Benefits App MVP → Florida Blue parent engagement.
+2. **Recursive `belongs_to` is unrestricted at the Connection level.** A `project` can belong_to another `project`. Enables novel → chapter → scene, Atlas App MVP → Harborview Mutual parent engagement.
 3. **Permanence override is not just a user-facing feature.** Apps can use it too for algorithmic promotion (e.g., a blocker referenced across 5+ meetings → auto-promote from `week` to `quarter`). The `source` audit field distinguishes `user` vs `app`-driven overrides.
 4. **Schema versioning has three signals** for drift detection:
    - `manifest.version` (SS-declared)

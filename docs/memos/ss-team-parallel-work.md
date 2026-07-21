@@ -73,7 +73,7 @@ The patch shape is stable. Build against mocked data.
 When a user views or edits an individual patch:
 
 - Show patch text, owner (if applicable), deadline (if applicable)
-- Show connections: who/what this patch is connected to, with labels like "belongs to Benefits App MVP" / "owned by Ravikanth"
+- Show connections: who/what this patch is connected to, with labels like "belongs to Atlas App MVP" / "owned by Chandran"
 - Allow editing text, owner, deadline
 - **Connection editor** — use the filtered matrix (see below) to constrain which labels are available for a given source type
 
@@ -127,7 +127,7 @@ Already works: `GET /v1/quilt/{user_id}?since=ISO8601` returns patches created/u
 
 ### 8. Rename-speaker flow
 
-SS-specific feature: when user renames "Speaker 4" → "SriDev", call `POST /v1/quilt/{user_id}/rename-speaker`. Already supported. Ship UI for this.
+SS-specific feature: when user renames "Speaker 4" → "Ramkumar", call `POST /v1/quilt/{user_id}/rename-speaker`. Already supported. Ship UI for this.
 
 ### 9. Offline/local caching
 

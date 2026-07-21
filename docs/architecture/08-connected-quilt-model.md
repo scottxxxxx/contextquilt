@@ -172,7 +172,7 @@ First call without `since` = full sync. Subsequent calls = delta only.
 
 ## Speaker Rename
 
-When ShoulderSurf renames "Speaker 4" → "SriDev":
+When ShoulderSurf renames "Speaker 4" → "Ramkumar":
 1. App updates patch text via `PATCH /v1/quilt/{user_id}/patches/{patch_id}`
 2. App calls `POST /v1/quilt/{user_id}/rename-speaker` with `{old_name, new_name}`
 3. CQ creates entity (unnamed speakers are never stored as entities) and rebuilds Redis index
