@@ -62,7 +62,7 @@ A **patch** is a typed fact about a user:
 | `commitment` | "Scott: deliver samples by Friday" | 30-day TTL |
 | `blocker` | "Waiting on Trevor to upload files" | 30-day TTL |
 | `decision` | "Use AWS S3 for file storage" | Permanent |
-| `takeaway` | "Production deadline is June 28" | 14-day TTL |
+| `takeaway` | "Production deadline is July 10" | 14-day TTL |
 
 ### Connections
 

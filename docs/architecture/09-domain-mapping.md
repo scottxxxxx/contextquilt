@@ -12,7 +12,7 @@ ContextQuilt's API uses terms like "project" and "meeting" because its first int
 | **commitment** | Promise with a named owner | "Scott: deliver samples by Friday" | "Patient: walk 30 min daily" | "Send proposal by Tuesday" | "Fix the auth bug this sprint" |
 | **blocker** | Something preventing progress | "Waiting on Trevor to upload files" | "Insurance pre-auth pending" | "Legal review required" | "Blocked on API design decision" |
 | **decision** | Something agreed upon | "Use Nova 3 for transcription" | "Switch from metformin to insulin" | "Discount approved at 15%" | "Use gRPC for internal services" |
-| **takeaway** | Short-lived observation | "Deadline is June 28" | "A1C trending down" | "Competitor pricing is aggressive" | "Test coverage dropped to 60%" |
+| **takeaway** | Short-lived observation | "Deadline is July 10" | "A1C trending down" | "Competitor pricing is aggressive" | "Test coverage dropped to 60%" |
 | **trait** | User's behavioral pattern | "Tends to over-explain" | "Morning person, prefers early appointments" | "Prefers email over phone" | "Writes detailed PR descriptions" |
 | **preference** | What the user prefers | "Prefers Nova 3 over Nova 2" | "Prefers swimming over running" | "Prefers quarterly billing" | "Prefers TypeScript over JavaScript" |
 
