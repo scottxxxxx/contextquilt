@@ -1,6 +1,6 @@
 {
   "app_id": "shouldersurf",
-  "version": 6,
+  "version": 7,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
@@ -398,5 +398,19 @@
     ],
     "reasoning_requirement": "Before emitting patches, include a short _reasoning scratchpad identifying: the (you) speaker, the active project(s) in scope (typically matching the meeting's project tag), any named deliverables being built inside those projects (the specific product/feature/system), any explicit role attributions, and any goals/constraints mentioned. For each substantive episode (commitment/blocker/decision/takeaway/event) you plan to emit, note which parent it belongs to — the deliverable if one is in scope and the episode is about that deliverable, otherwise the project. This pre-scan reduces misattribution of ownership, traits, and parent hierarchy.",
     "domain_agnostic_examples": "When generating examples for the LLM, span multiple meeting contexts: legal ('file motion by June 18'), coaching ('client will write vision by next session'), creative ('deliver revised boards Thursday'), corporate ('CRO presents to board'), family/personal ('parents' travel unconfirmed'). Never privilege any one vertical."
-  }
+  },
+  "consolidation_rules": [
+    {
+      "from_types": ["blocker", "decision", "commitment"],
+      "produce_type": "takeaway",
+      "min_patches": 3,
+      "guidance": "Synthesize the current state of ONE issue thread that these patches all describe: what is blocked, what was decided about it, and who owns the next step. Only consolidate when the sources clearly concern the same underlying issue; skip mixed clusters that merely share a topic word. The statement should read as a status brief a colleague could act on."
+    },
+    {
+      "from_types": ["takeaway"],
+      "produce_type": "constraint",
+      "min_patches": 3,
+      "guidance": "Only durable working patterns or standing facts about an account, team, or system that keep recurring across meetings (recurring scope creep, a standing approval chain, an always-slow environment). Never one-off status notes, moods, or anything tied to a single meeting."
+    }
+  ]
 }
