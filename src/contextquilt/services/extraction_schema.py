@@ -291,7 +291,11 @@ _DEADLINE_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # Plausibility window around the meeting date. A deadline can predate the
 # meeting ("that was due yesterday") but a resolution outside this window
 # is far more likely a model error (wrong year) than a real deadline.
-_DEADLINE_PAST_WINDOW = timedelta(days=730)
+# A deadline resolved to more than 60 days before the meeting it was
+# spoken in is almost always a hallucinated year, not a real reference
+# ("we were supposed to ship last month" fits comfortably inside 60).
+# Was 730, which admitted wrong-year dates like 2024 on a 2026 meeting.
+_DEADLINE_PAST_WINDOW = timedelta(days=60)
 _DEADLINE_FUTURE_WINDOW = timedelta(days=3650)
 
 

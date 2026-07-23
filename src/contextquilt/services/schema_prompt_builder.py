@@ -247,7 +247,10 @@ def _output_shape(manifest: Dict[str, Any]) -> str:
         "\"2026-06-11\" and \"end of week\" → the upcoming Friday. If the deadline "
         "cannot be tied to a specific date (\"after the board meeting\", \"soon\"), "
         "set `deadline_date` to null. Never guess a year — when no Meeting date "
-        "line is present and the deadline is relative, set `deadline_date` to null."
+        "line is present and the deadline is relative, set `deadline_date` to null. "
+        "This applies to every patch type that carries a date, not just "
+        "action-like types — a goal with a target date gets both fields the "
+        "same way."
     )
 
 

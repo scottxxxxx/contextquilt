@@ -309,8 +309,18 @@ def format_category_grouped(
 
     # About you
     render_bucket("about_you", ("trait", "preference"))
-    # Goals + constraints (new facets)
-    render_bucket("goals", ("goal",))
+    # Goals + constraints (new facets). Goals get deadline decoration —
+    # a dated goal past its date must read as stale, matching the flat
+    # formatter, which renders the fragment for any type carrying one.
+    goals = buckets.get("goal", [])
+    if goals:
+        today = today or _today_utc()
+        goal_lines: List[str] = []
+        for v in goals:
+            fragment = _render_deadline(v, today)
+            dl = f" ({fragment})" if fragment else ""
+            goal_lines.append(f"- {v.get('text', '')}{dl}")
+        sections.append(f"{labels['goals']}:\n" + "\n".join(goal_lines))
     render_bucket("constraints", ("constraint",))
     # Decisions
     render_bucket("decisions", ("decision",))

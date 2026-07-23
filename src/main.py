@@ -995,6 +995,15 @@ async def recall_context(
     # before this it could age out of recall entirely while still open.
     # Day-grain condition (flips at UTC midnight) keeps rendered output
     # byte-stable within a day, consistent with the scorer's clock.
+    #
+    # The guarantee is age-capped at 30 days past deadline. Without the
+    # cap, a dead-but-unclosed item is guaranteed into every scoped
+    # recall forever: the fetch bumps last_accessed_at, the bump exempts
+    # it from decay, and the loop never ends (observed on prod: a
+    # 2024-deadline commitment at 199 accesses). Items past the cap can
+    # still surface through the normal recency/entity/cue legs; they
+    # just lose the guaranteed slot, so decay can eventually run from
+    # GREATEST(updated_at, deadline_date).
     overdue_rows: list = []
     if recall_project_id or recall_project:
         proj_col, proj_val = (
@@ -1013,6 +1022,7 @@ async def recall_context(
               AND cp.completed_at IS NULL
               AND cp.value->>'deadline_date' ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}$'
               AND (cp.value->>'deadline_date')::date < (NOW() AT TIME ZONE 'utc')::date
+              AND (cp.value->>'deadline_date')::date >= ((NOW() AT TIME ZONE 'utc')::date - 30)
             ORDER BY cp.value->>'deadline_date' ASC, cp.patch_id ASC
             LIMIT 5
             """,

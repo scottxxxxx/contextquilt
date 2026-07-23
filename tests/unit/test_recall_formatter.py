@@ -214,6 +214,28 @@ def test_flat_formatter_ignores_unparseable_deadline_date():
     assert "OVERDUE" not in out
 
 
+def test_flat_formatter_marks_overdue_goal():
+    # Goals carry deadlines too (audit 2026-07-23: a "production by July
+    # 15" goal rendered dateless a week past its date). The flat path
+    # renders the fragment for any type; this pins that behavior.
+    scored = [
+        (100.0, _patch("g", "goal", "Deliver IT Assist to production", deadline="July 15", deadline_date="2026-06-08")),
+    ]
+    out = format_flat_ranked(scored, entity_rows=[], relationship_rows=[], today=TODAY)
+    assert "[goal] Deliver IT Assist to production [by 2026-06-08 (OVERDUE)]" in out
+
+
+def test_grouped_formatter_marks_overdue_goal():
+    scored = [
+        (100.0, _patch("g", "goal", "Deliver IT Assist to production", deadline="July 15", deadline_date="2026-06-08")),
+        (90.0, _patch("g2", "goal", "Grow to 1500 users")),
+    ]
+    out = format_category_grouped(scored, entity_rows=[], relationship_rows=[], today=TODAY)
+    assert "- Deliver IT Assist to production (by 2026-06-08 (OVERDUE))" in out
+    # Undated goals render bare, unchanged
+    assert "- Grow to 1500 users" in out
+
+
 def test_grouped_formatter_marks_overdue_commitments():
     scored = [
         (100.0, _patch("c", "commitment", "Ship feature", owner="Alex", deadline="last Friday", deadline_date="2026-06-05")),
