@@ -77,6 +77,13 @@ CUE_MATCH_BOOST = 75.0
 DEADLINE_OVERDUE_BOOST = 25.0
 DEADLINE_DUE_SOON_BOOST = 15.0
 DEADLINE_DUE_SOON_WINDOW_DAYS = 7
+# The overdue boost expires 30 days past deadline, mirroring the recall
+# overdue-guarantee age cap (main.py). A months-stale open item is far
+# likelier dead-but-unclosed than urgent; boosting it lets it outrank
+# live work through the entity/graph legs even after the guarantee
+# stops carrying it (observed on prod: a January-deadline commitment
+# still ranking into ABM status renders in July via its entity match).
+DEADLINE_OVERDUE_BOOST_MAX_AGE_DAYS = 30
 
 # Salience (value.salience, set at extraction from speaker signals):
 # same magnitude band as deadline urgency — a weight modifier, never a
@@ -322,9 +329,9 @@ def score_patches(
             deadline_d = _patch_deadline_date(row)
             if deadline_d is not None:
                 days_until = (deadline_d - today).days
-                if days_until <= 0:
+                if -DEADLINE_OVERDUE_BOOST_MAX_AGE_DAYS <= days_until <= 0:
                     score += DEADLINE_OVERDUE_BOOST
-                elif days_until <= DEADLINE_DUE_SOON_WINDOW_DAYS:
+                elif 0 < days_until <= DEADLINE_DUE_SOON_WINDOW_DAYS:
                     score += DEADLINE_DUE_SOON_BOOST
 
         # Salience weight — extraction-time judgment of how strongly the
