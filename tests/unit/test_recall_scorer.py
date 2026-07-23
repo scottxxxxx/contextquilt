@@ -290,6 +290,29 @@ def test_overdue_boost_exceeds_due_soon_boost():
     assert scored[0][1]["patch_id"] == "overdue"
 
 
+def test_stale_overdue_gets_no_boost():
+    """The overdue boost expires 30 days past deadline (mirrors the
+    recall guarantee age cap): a months-stale open item scores like an
+    undated one instead of outranking live work."""
+    created = datetime.utcnow()
+    patches = [
+        _patch("stale", "commitment", "alpha bravo charlie", created_at=created, deadline_date=_iso(-180)),
+        _patch("undated", "commitment", "alpha bravo charlie", created_at=created),
+    ]
+    scored = score_patches(patches, query_text="unrelated query", matched_entity_names=[])
+    assert scored[0][0] == scored[1][0]  # equal scores: no boost either way
+
+
+def test_recently_overdue_still_boosted_at_cap_edge():
+    created = datetime.utcnow()
+    patches = [
+        _patch("edge", "commitment", "alpha bravo charlie", created_at=created, deadline_date=_iso(-30)),
+        _patch("undated", "commitment", "alpha bravo charlie", created_at=created),
+    ]
+    scored = score_patches(patches, query_text="unrelated query", matched_entity_names=[])
+    assert scored[0][1]["patch_id"] == "edge"
+
+
 def test_deadline_boost_only_applies_to_completable_types():
     """A takeaway with an overdue deadline_date gets no boost — equal
     scores mean ordering falls back to input stability, so just assert
