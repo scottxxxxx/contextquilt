@@ -53,7 +53,12 @@ def test_impossible_calendar_date_rejected():
 def test_plausibility_window_around_meeting_date():
     # A deadline can predate the meeting ("that was due yesterday")
     assert validate_deadline_date("2026-06-08", MEETING_DATE) == "2026-06-08"
-    # ...but not by more than the past window (~2 years)
+    # ..."we were supposed to ship last month" fits inside the 60-day window
+    assert validate_deadline_date("2026-04-20", MEETING_DATE) == "2026-04-20"
+    # ...but a wrong-year hallucination does not (observed on prod:
+    # 2024 deadlines emitted for 2026 meetings under the old 730d window)
+    assert validate_deadline_date("2024-05-27", MEETING_DATE) is None
+    assert validate_deadline_date("2026-04-01", MEETING_DATE) is None
     assert validate_deadline_date("2023-01-01", MEETING_DATE) is None
     # Far future within ~10 years is allowed
     assert validate_deadline_date("2031-01-01", MEETING_DATE) == "2031-01-01"

@@ -217,6 +217,12 @@ specific date ("after the board meeting", "soon", "before development").
 Never guess a year — if no `Meeting date:` line is present and the
 deadline is relative, set `deadline_date` to null.
 
+This applies to EVERY patch type that carries a date, not just
+commitments and blockers. A goal with a target date ("deliver to
+production by July 15") gets `deadline` and `deadline_date` exactly the
+same way — a dated goal with an empty deadline_date is a missed
+extraction.
+
 === END DEADLINE DATES ===
 
 === RESOLVED COMMITMENTS ===
