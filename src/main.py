@@ -1562,9 +1562,68 @@ class PatchUpdate(BaseModel):
 class PatchCompletionRequest(BaseModel):
     evidence: Optional[str] = None  # short free-text note on what completed it (e.g. "user tapped done")
 
+
+class TierChangeEvent(BaseModel):
+    """App-fired account/tier lifecycle signal (cq-tier-signals lane).
+
+    First consumer is `event_type='account_deleted'` (GP fires it with
+    new_tier='deleted' and old_tier = the tier at deletion when a user
+    deletes their account) — per the ownership split that event is the
+    deletion request for everything CQ holds for the user."""
+    event_type: str
+    old_tier: Optional[str] = None
+    new_tier: Optional[str] = None
+
 # Patch types that can be marked completed (matches the `completable`
 # flags in the registered app manifests: commitments and blockers).
 COMPLETABLE_PATCH_TYPES = ("commitment", "blocker")
+
+
+@app.post("/v1/users/{user_id}/tier-change", status_code=202, tags=["Lifecycle"])
+async def record_tier_change(
+    user_id: str,
+    event: TierChangeEvent,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Durable inbox for app-fired account/tier lifecycle events.
+
+    RECORD-ONLY by design: the endpoint validates shape, persists the
+    signal, and returns 202. Processing (for `account_deleted`, the
+    full account purge) runs as a separate consumer keyed on
+    `processed_at IS NULL`, so a signal that arrives before its
+    processor ships is queued, never lost. This endpoint went live
+    ahead of the purge wiring precisely so the sender's fires stop
+    404ing (observed: GP test fire 2026-07-25T16:17Z).
+
+    Unknown event_type values are recorded too (raw payload kept) —
+    the contract vocabulary is app-side; dropping an unrecognized
+    lifecycle signal is worse than storing it unprocessed.
+    """
+    et = (event.event_type or "").strip().lower()
+    if not et:
+        raise HTTPException(status_code=422, detail="event_type is required")
+    row = await db_pool.fetchrow(
+        """
+        INSERT INTO tier_signals (user_id, app_id, event_type, old_tier, new_tier, raw_payload)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING signal_id, received_at
+        """,
+        user_id, app_id, et, event.old_tier, event.new_tier,
+        json.dumps(event.model_dump() if hasattr(event, "model_dump") else event.dict()),
+    )
+    logger.info(
+        "tier_signal_recorded",
+        user_id=user_id, app_id=app_id, event_type=et,
+        old_tier=event.old_tier, new_tier=event.new_tier,
+        signal_id=str(row["signal_id"]),
+    )
+    return {
+        "status": "recorded",
+        "signal_id": str(row["signal_id"]),
+        "received_at": row["received_at"].isoformat(),
+        "processing": "queued",
+    }
 
 @app.get("/v1/quilt/{user_id}", response_model=QuiltResponse, tags=["Quilt"])
 async def get_user_quilt(
