@@ -16,11 +16,21 @@ CREATE TABLE IF NOT EXISTS tier_signals (
     event_type     TEXT NOT NULL,
     old_tier       TEXT,
     new_tier       TEXT,
+    occurred_at    TIMESTAMPTZ,          -- GP server time at the transition (contract)
     received_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     processed_at   TIMESTAMPTZ,
     action         TEXT,
     raw_payload    JSONB
 );
+
+-- Idempotency per the cq-tier-signals contract: key is
+-- (user_id, occurred_at), at-least-once delivery for account_deleted
+-- (GP durable outbox retries until our 202), best-effort double-fire
+-- tolerance for ordinary events. Signals without occurred_at cannot
+-- dedupe and are recorded as-is.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_tier_signals_idempotency
+    ON tier_signals (user_id, occurred_at)
+    WHERE occurred_at IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_tier_signals_unprocessed
     ON tier_signals (received_at)

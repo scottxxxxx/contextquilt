@@ -1566,13 +1566,20 @@ class PatchCompletionRequest(BaseModel):
 class TierChangeEvent(BaseModel):
     """App-fired account/tier lifecycle signal (cq-tier-signals lane).
 
-    First consumer is `event_type='account_deleted'` (GP fires it with
-    new_tier='deleted' and old_tier = the tier at deletion when a user
-    deletes their account) — per the ownership split that event is the
-    deletion request for everything CQ holds for the user."""
+    Contract (GP, 2026-07-25): fired only on real subscription state
+    transitions, never idempotent re-verifications or same-tier
+    renewals. Vocabulary: upgrade, downgrade, trial_start,
+    trial_to_paid, cancellation, expire, refund, account_deleted.
+    `occurred_at` is GP server time at the transition and forms the
+    idempotency key with user_id — account_deleted is delivered
+    at-least-once (GP durable outbox retries until our 202), ordinary
+    events fire-and-forget. Ordinary events are record-only today;
+    account_deleted is the deletion request for everything CQ holds
+    for the user (new_tier is the literal 'deleted')."""
     event_type: str
     old_tier: Optional[str] = None
     new_tier: Optional[str] = None
+    occurred_at: Optional[str] = None
 
 # Patch types that can be marked completed (matches the `completable`
 # flags in the registered app manifests: commitments and blockers).
@@ -1603,25 +1610,50 @@ async def record_tier_change(
     et = (event.event_type or "").strip().lower()
     if not et:
         raise HTTPException(status_code=422, detail="event_type is required")
+
+    # occurred_at: parse leniently — a malformed timestamp must not cost
+    # us the signal (the raw string survives in raw_payload either way).
+    occurred_dt = None
+    if event.occurred_at:
+        try:
+            occurred_dt = datetime.fromisoformat(event.occurred_at.replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            occurred_dt = None
+
+    payload = json.dumps(event.model_dump() if hasattr(event, "model_dump") else event.dict())
+
+    # Idempotent on (user_id, occurred_at): account_deleted arrives
+    # at-least-once from GP's durable outbox, ordinary events may
+    # best-effort double-fire. A duplicate returns the original
+    # signal_id with the same 202, so the sender's retry loop settles.
     row = await db_pool.fetchrow(
         """
-        INSERT INTO tier_signals (user_id, app_id, event_type, old_tier, new_tier, raw_payload)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO tier_signals (user_id, app_id, event_type, old_tier, new_tier, occurred_at, raw_payload)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (user_id, occurred_at) WHERE occurred_at IS NOT NULL
+        DO NOTHING
         RETURNING signal_id, received_at
         """,
-        user_id, app_id, et, event.old_tier, event.new_tier,
-        json.dumps(event.model_dump() if hasattr(event, "model_dump") else event.dict()),
+        user_id, app_id, et, event.old_tier, event.new_tier, occurred_dt, payload,
     )
+    duplicate = row is None
+    if duplicate:
+        row = await db_pool.fetchrow(
+            "SELECT signal_id, received_at FROM tier_signals WHERE user_id = $1 AND occurred_at = $2",
+            user_id, occurred_dt,
+        )
     logger.info(
         "tier_signal_recorded",
         user_id=user_id, app_id=app_id, event_type=et,
         old_tier=event.old_tier, new_tier=event.new_tier,
+        occurred_at=event.occurred_at, duplicate=duplicate,
         signal_id=str(row["signal_id"]),
     )
     return {
         "status": "recorded",
         "signal_id": str(row["signal_id"]),
         "received_at": row["received_at"].isoformat(),
+        "duplicate": duplicate,
         "processing": "queued",
     }
 
