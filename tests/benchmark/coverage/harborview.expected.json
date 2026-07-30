@@ -1,0 +1,125 @@
+{
+  "meeting_date": "2026-03-24",
+  "transcript": "../harborview_raw.txt",
+  "notes": "Expected memories for the standing harborview fixture (authored 2026-07-21, expectations enumerated 2026-07-30). Moderate density; exercises multi-speaker attribution and the July-10 production date. Keywords loosened 2026-07-30 after run-to-run rewording (two days vs 2 days) caused false misses.",
+  "expected": [
+    {
+      "id": "samples-2-days",
+      "type": "commitment",
+      "keywords": [
+        "sample"
+      ],
+      "owner_contains": "scott"
+    },
+    {
+      "id": "confirm-ceiling",
+      "type": "commitment",
+      "keywords": [
+        "twelve hundred",
+        "four thousand"
+      ],
+      "owner_contains": "ramkumar"
+    },
+    {
+      "id": "language-email",
+      "type": "commitment",
+      "keywords": [
+        "email"
+      ],
+      "owner_contains": "scott"
+    },
+    {
+      "id": "trevor-upload",
+      "type": "commitment",
+      "keywords": [
+        "upload"
+      ],
+      "owner_contains": "trevor"
+    },
+    {
+      "id": "nova3-decision",
+      "type": "decision",
+      "keywords": [
+        "nova 3"
+      ]
+    },
+    {
+      "id": "char-limit",
+      "type": "constraint",
+      "keywords": [
+        "twelve hundred"
+      ]
+    },
+    {
+      "id": "audio-hook",
+      "type": "blocker",
+      "keywords": [
+        "audio hook"
+      ]
+    },
+    {
+      "id": "visibility",
+      "type": "blocker",
+      "keywords": [
+        "visibility"
+      ]
+    },
+    {
+      "id": "over-explain",
+      "type": "trait",
+      "keywords": [
+        "over-explain"
+      ]
+    },
+    {
+      "id": "nova3-pref",
+      "type": "preference",
+      "keywords": [
+        "nova 3"
+      ]
+    },
+    {
+      "id": "prod-date",
+      "type": "event",
+      "alt_types": [
+        "takeaway",
+        "goal",
+        "constraint"
+      ],
+      "keywords": [
+        "production"
+      ],
+      "deadline_date": "2026-07-10"
+    },
+    {
+      "id": "escalation-melinda",
+      "type": "takeaway",
+      "alt_types": [
+        "role",
+        "person"
+      ],
+      "keywords": [
+        "melinda"
+      ]
+    },
+    {
+      "id": "person-ramkumar",
+      "type": "person",
+      "keywords": [
+        "ramkumar"
+      ]
+    },
+    {
+      "id": "person-trevor",
+      "type": "person",
+      "keywords": [
+        "trevor"
+      ]
+    },
+    {
+      "id": "summarization-project",
+      "type": "project",
+      "keywords": []
+    }
+  ]
+}

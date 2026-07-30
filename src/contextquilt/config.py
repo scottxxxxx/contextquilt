@@ -97,9 +97,15 @@ class Settings(BaseSettings):
     )
 
     # --- Extraction budgets ---
-    cq_max_entities: int = Field(default=10, alias="CQ_MAX_ENTITIES")
-    cq_max_patches: int = Field(default=12, alias="CQ_MAX_PATCHES")
-    cq_max_relationships: int = Field(default=10, alias="CQ_MAX_RELATIONSHIPS")
+    # cq_max_patches is the FLOOR of the length-scaled patch backstop
+    # (extraction_patch_backstop) — a minimum guarantee, not a target.
+    # Sized 36 by the 2026-07-30 density probe + fixtures: a 1.7K-char
+    # ultra-dense standup legitimately emitted 32 memories. Dedup
+    # downstream is the precision stage; the backstop only bounds
+    # degenerate output.
+    cq_max_entities: int = Field(default=15, alias="CQ_MAX_ENTITIES")
+    cq_max_patches: int = Field(default=36, alias="CQ_MAX_PATCHES")
+    cq_max_relationships: int = Field(default=15, alias="CQ_MAX_RELATIONSHIPS")
     cq_queue_budget_threshold: float = Field(
         default=0.8, alias="CQ_QUEUE_BUDGET_THRESHOLD"
     )
