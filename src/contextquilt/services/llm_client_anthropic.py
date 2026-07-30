@@ -53,8 +53,25 @@ _ANTHROPIC_API_VERSION = "2023-06-01"
 _NATIVE_PRICING: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5-20251001": (1.00, 5.00),
     "claude-sonnet-4-6": (3.00, 15.00),
+    # List price; $2/$10 introductory through 2026-08-31.
+    "claude-sonnet-5": (3.00, 15.00),
     "claude-opus-4-7": (15.00, 75.00),
+    "claude-opus-4-8": (5.00, 25.00),
 }
+
+# Models that reject non-default sampling parameters (400 on
+# `temperature`) and run adaptive thinking when `thinking` is omitted.
+# For the extraction pipeline we want deterministic JSON with no
+# thinking spend inside max_tokens, so requests to these models omit
+# temperature and disable thinking explicitly. Prefix match so date
+# suffixes keep working.
+_NO_SAMPLING_MODEL_PREFIXES = (
+    "claude-sonnet-5", "claude-opus-4-7", "claude-opus-4-8", "claude-fable-5",
+)
+
+
+def _model_rejects_sampling(model: str) -> bool:
+    return any(model.startswith(p) for p in _NO_SAMPLING_MODEL_PREFIXES)
 
 
 def _estimate_native_cost(model: str, input_tokens: int, output_tokens: int) -> float:
@@ -134,8 +151,16 @@ class AnthropicLLMClient:
             "messages": [
                 {"role": "user", "content": user_content},
             ],
-            "temperature": 0.1,
         }
+        if _model_rejects_sampling(use_model):
+            # Sonnet 5 / Opus 4.7+ / Fable: temperature is a hard 400,
+            # and omitting `thinking` runs adaptive thinking inside
+            # max_tokens (truncation risk for large JSON extractions).
+            # Fable rejects explicit disabled — omit there.
+            if not use_model.startswith("claude-fable"):
+                body["thinking"] = {"type": "disabled"}
+        else:
+            body["temperature"] = 0.1
 
         resp = await self._client.post("/v1/messages", json=body)
         resp.raise_for_status()
