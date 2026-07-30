@@ -389,7 +389,20 @@ def _priority_order(guidance: Dict[str, Any]) -> str:
     order = guidance.get("priority_order")
     if not order:
         return ""
-    lines = ["=== PRIORITY ORDER (when you must choose within the patch budget) ===", ""]
+    lines = [
+        "=== PRIORITY ORDER (when you must choose within the patch budget) ===",
+        "",
+        # Coverage-first: extraction is the recall stage of this
+        # pipeline — a separate dedup/merge step downstream handles
+        # overlap and noise. Under-extraction is unrecoverable;
+        # over-extraction is filtered. (2026-07-30 coverage eval:
+        # models self-limited well below the budget and dropped
+        # blockers and people.)
+        "Emit EVERY distinct memory-worthy item — a downstream dedup step "
+        "absorbs overlap, so do not self-censor to seem selective. "
+        "The order below matters ONLY if you approach the hard cap:",
+        "",
+    ]
     for i, item in enumerate(order, 1):
         lines.append(f"{i}. {item}")
     return "\n".join(lines)

@@ -34,6 +34,7 @@ from contextquilt.services.extraction_prompts import (
     format_open_commitments_block,
 )
 from contextquilt.services.extraction_schema import (
+    extraction_patch_backstop,
     EXTRACTION_SCHEMA,
     drop_placeholder_and_self_person_patches,
     drop_placeholder_entities,
@@ -116,12 +117,20 @@ QUEUE_MAX_WAIT_MINUTES = _settings.cq_queue_max_wait_minutes
 QUEUE_BUDGET_THRESHOLD = _settings.cq_queue_budget_threshold
 QUEUE_CHECK_INTERVAL_SECONDS = 30  # How often to check queues for processing
 
-# Extraction caps — belt-and-suspenders with prompt limits
+# Extraction caps — backstops against degenerate output, never
+# curation. The 2026-07-30 density probe (12 real meetings, uncapped)
+# showed natural emission ranges 1→47 with only 0.558 correlation to
+# transcript length — the model's density judgment is good (a sparse
+# 28K meeting yielded 1 patch beside a dense 25K one yielding 46), so
+# no fixed number can be both safe and non-binding. The patch bound is
+# therefore length-scaled via extraction_patch_backstop(): floor
+# CQ_MAX_PATCHES (24), ceiling 64 — sized so none of the 12 probed
+# meetings would have been touched. Dedup tiers + judge downstream are
+# the precision stage; extraction is the recall stage.
 MAX_FACTS_PER_MEETING = 5
 MAX_ACTION_ITEMS_PER_MEETING = 3
-MAX_PATCHES_PER_MEETING = 12  # Connected quilt model (replaces facts+actions for V2)
-MAX_ENTITIES_PER_MEETING = 10
-MAX_RELATIONSHIPS_PER_MEETING = 10
+MAX_ENTITIES_PER_MEETING = 15
+MAX_RELATIONSHIPS_PER_MEETING = 15
 
 # Longitudinal (time-series) patches: an incoming observation joins an
 # existing series when its descriptor field trigram-matches an active
@@ -2933,8 +2942,13 @@ class ColdPathWorker:
                 ).date()
             except ValueError:
                 meeting_date = None
+        # Weekday included: the coverage eval (2026-07-30) caught the
+        # model resolving "by Friday" off by one day from a bare ISO
+        # date — models are unreliable at date→weekday math, and every
+        # weekday-relative deadline depends on it.
         meeting_date_line = (
-            f"Meeting date: {meeting_date.isoformat()}\n\n" if meeting_date else ""
+            f"Meeting date: {meeting_date.isoformat()} ({meeting_date.strftime('%A')})\n\n"
+            if meeting_date else ""
         )
 
         # Memory language. Apps pass metadata.language (BCP-47, e.g. "es")
@@ -3012,23 +3026,27 @@ class ColdPathWorker:
                         model=response.model,
                     )
 
-            # Apply MAX_PATCHES_PER_MEETING to LLM output BEFORE the
+            # Apply the length-scaled patch backstop to LLM output BEFORE the
             # enforcer runs. The cap exists to bound LLM-output noise; the
             # enforcer's job is structural completeness (every named owner
             # must have a person patch + owns edge). Capping the
             # post-enforcer list silently drops the synthetic person
             # patches it appends, which silently breaks PR #84 for any
-            # meeting where the LLM emitted ≥ MAX_PATCHES_PER_MEETING
-            # patches on its own. Cap first; then enforce.
+            # meeting where the LLM emitted patches at the backstop
+            # on its own. Cap first; then enforce.
             raw_patches = response.content.get("patches") or []
-            if len(raw_patches) > MAX_PATCHES_PER_MEETING:
+            patch_backstop = extraction_patch_backstop(
+                len(summary), floor=_settings.cq_max_patches
+            )
+            if len(raw_patches) > patch_backstop:
                 logger.warning(
                     "extraction_capped",
                     type="patches",
                     original=len(raw_patches),
-                    capped=MAX_PATCHES_PER_MEETING,
+                    capped=patch_backstop,
+                    transcript_chars=len(summary),
                 )
-                response.content["patches"] = raw_patches[:MAX_PATCHES_PER_MEETING]
+                response.content["patches"] = raw_patches[:patch_backstop]
 
             # Person-ownership safety net. The prompt requires a person
             # patch + owns connection for every named action-item owner,

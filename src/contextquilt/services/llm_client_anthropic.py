@@ -97,7 +97,12 @@ class AnthropicLLMClient:
         api_key: str | None = None,
         model: str | None = None,
         timeout: float = 120.0,
-        max_tokens: int = 4096,
+        # 12000: the densest real meeting probed (2026-07-30) used 6.7K
+        # output tokens for 47 patches; 4096 physically capped dense
+        # extractions and risked mid-JSON truncation. Output tokens are
+        # billed as generated, not budgeted, so sparse meetings cost
+        # the same as before.
+        max_tokens: int = 12000,
     ):
         # Source the key via the secrets helper so a Secret Manager
         # value (when CQ_GCP_PROJECT is configured and the env var is
