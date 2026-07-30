@@ -331,13 +331,19 @@ def _patch_types_section(manifest: Dict[str, Any]) -> str:
             # finding: 0% cue emission on the generated prompt vs 85%
             # on a prompt whose shape includes cues, on two different
             # models. Manifest-declared fields always win on conflict.
-            merged = dict(shape)
-            for field, spec in (
+            guidance = manifest.get("extraction_prompt_guidance") or {}
+            universal = [
                 ("deadline", "string?"),
                 ("deadline_date", "string?"),
-                ("cues", "string[]? (0-5, see CUES section)"),
-                ("salience", "string? (high|low, see SALIENCE section)"),
-            ):
+            ]
+            # A killed section must not be advertised by the shapes —
+            # the field only merges when its instruction section renders.
+            if guidance.get("cues_enabled") is not False:
+                universal.append(("cues", "string[]? (0-5, see CUES section)"))
+            if guidance.get("salience_enabled") is not False:
+                universal.append(("salience", "string? (high|low, see SALIENCE section)"))
+            merged = dict(shape)
+            for field, spec in universal:
                 merged.setdefault(field, spec)
             shape_fields = ", ".join(
                 f"{k}: {v}" for k, v in merged.items()

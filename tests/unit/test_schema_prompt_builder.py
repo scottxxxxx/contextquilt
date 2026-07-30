@@ -280,3 +280,13 @@ def test_shape_hints_reference_existing_sections(minimal_manifest):
     # The shape's "see CUES/SALIENCE section" pointers must not dangle.
     prompt = build_prompt(minimal_manifest)
     assert "CUES" in prompt and "SALIENCE" in prompt
+
+
+def test_killed_sections_not_advertised_in_shapes(minimal_manifest):
+    m = copy.deepcopy(minimal_manifest)
+    m["extraction_prompt_guidance"] = {"cues_enabled": False, "salience_enabled": False}
+    prompt = build_prompt(m)
+    shape_line = next(l for l in prompt.splitlines() if "Value shape:" in l)
+    assert "cues" not in shape_line
+    assert "salience" not in shape_line
+    assert "deadline_date" in shape_line  # no kill switch for deadlines
