@@ -34,6 +34,7 @@ from contextquilt.services.extraction_prompts import (
     format_open_commitments_block,
 )
 from contextquilt.services.extraction_schema import (
+    extraction_patch_backstop,
     EXTRACTION_SCHEMA,
     drop_placeholder_and_self_person_patches,
     drop_placeholder_entities,
@@ -116,16 +117,18 @@ QUEUE_MAX_WAIT_MINUTES = _settings.cq_queue_max_wait_minutes
 QUEUE_BUDGET_THRESHOLD = _settings.cq_queue_budget_threshold
 QUEUE_CHECK_INTERVAL_SECONDS = 30  # How often to check queues for processing
 
-# Extraction caps — belt-and-suspenders with prompt limits. Raised
-# 12→24 / 10→15 (2026-07-30 coverage eval): dense meetings carry ~20
-# extractable memories and the old caps measurably cost recall
-# (harborview 60%→47% under the 12-cap; the victims were blockers).
-# Extraction is the recall stage — the dedup tiers + judge downstream
-# are the precision stage, so the caps only need to bound runaway
-# output, not curate it. Patch cap is env-tunable (CQ_MAX_PATCHES).
+# Extraction caps — backstops against degenerate output, never
+# curation. The 2026-07-30 density probe (12 real meetings, uncapped)
+# showed natural emission ranges 1→47 with only 0.558 correlation to
+# transcript length — the model's density judgment is good (a sparse
+# 28K meeting yielded 1 patch beside a dense 25K one yielding 46), so
+# no fixed number can be both safe and non-binding. The patch bound is
+# therefore length-scaled via extraction_patch_backstop(): floor
+# CQ_MAX_PATCHES (24), ceiling 64 — sized so none of the 12 probed
+# meetings would have been touched. Dedup tiers + judge downstream are
+# the precision stage; extraction is the recall stage.
 MAX_FACTS_PER_MEETING = 5
 MAX_ACTION_ITEMS_PER_MEETING = 3
-MAX_PATCHES_PER_MEETING = _settings.cq_max_patches  # default 24
 MAX_ENTITIES_PER_MEETING = 15
 MAX_RELATIONSHIPS_PER_MEETING = 15
 
@@ -3023,23 +3026,27 @@ class ColdPathWorker:
                         model=response.model,
                     )
 
-            # Apply MAX_PATCHES_PER_MEETING to LLM output BEFORE the
+            # Apply the length-scaled patch backstop to LLM output BEFORE the
             # enforcer runs. The cap exists to bound LLM-output noise; the
             # enforcer's job is structural completeness (every named owner
             # must have a person patch + owns edge). Capping the
             # post-enforcer list silently drops the synthetic person
             # patches it appends, which silently breaks PR #84 for any
-            # meeting where the LLM emitted ≥ MAX_PATCHES_PER_MEETING
-            # patches on its own. Cap first; then enforce.
+            # meeting where the LLM emitted patches at the backstop
+            # on its own. Cap first; then enforce.
             raw_patches = response.content.get("patches") or []
-            if len(raw_patches) > MAX_PATCHES_PER_MEETING:
+            patch_backstop = extraction_patch_backstop(
+                len(summary), floor=_settings.cq_max_patches
+            )
+            if len(raw_patches) > patch_backstop:
                 logger.warning(
                     "extraction_capped",
                     type="patches",
                     original=len(raw_patches),
-                    capped=MAX_PATCHES_PER_MEETING,
+                    capped=patch_backstop,
+                    transcript_chars=len(summary),
                 )
-                response.content["patches"] = raw_patches[:MAX_PATCHES_PER_MEETING]
+                response.content["patches"] = raw_patches[:patch_backstop]
 
             # Person-ownership safety net. The prompt requires a person
             # patch + owns connection for every named action-item owner,

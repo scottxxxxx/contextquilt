@@ -463,7 +463,7 @@ EXTRACTION RULES:
 3. Every relationship must reference entities from the entities list
 4. Keep each patch value to one clear sentence
 5. If any section has nothing to extract, return an empty array
-6. Use your full budget — 12-24 patches is normal for a substantive meeting. Do not stop early while distinct people, commitments, blockers, or decisions remain uncaptured.
+6. Let the content set the count — a sparse check-in may yield 2-3 patches, a dense working session 30 or more. Do not stop early while distinct people, commitments, blockers, or decisions remain uncaptured, and do not pad a sparse meeting to look thorough.
 7. One project patch per distinct initiative the (you) speaker owns deliverables within
 8. Consolidate — prefer one commitment over three sub-tasks"""
 

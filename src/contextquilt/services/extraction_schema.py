@@ -103,7 +103,11 @@ EXTRACTION_SCHEMA: dict = {
         },
         "patches": {
             "type": "array",
-            "maxItems": 12,
+            # Wire-side ceiling matches the backstop ceiling (see
+            # extraction_patch_backstop below) — the length-scaled
+            # runtime backstop is the real bound; this only stops a
+            # degenerate stream from running unbounded.
+            "maxItems": 64,
             "items": {
                 "type": "object",
                 "additionalProperties": False,
@@ -1414,3 +1418,28 @@ def enforce_owner_gate(content: dict, transcript: str) -> dict:
 # Backwards-compat alias. Kept so existing imports don't break mid-stack;
 # removable once downstream code standardizes on the new name.
 enforce_you_marker_gate = enforce_owner_gate
+
+
+# ------------------------------------------------------------------
+# Extraction patch backstop (2026-07-30 density probe, 12 real meetings)
+# ------------------------------------------------------------------
+
+def extraction_patch_backstop(
+    transcript_chars: int, floor: int = 36, ceiling: int = 64
+) -> int:
+    """Length-scaled ceiling on patches stored per extraction.
+
+    NOT a target — the model's own density judgment sets the count
+    (measured: 1 patch on a sparse 28K-char meeting sitting next to 46
+    on a dense 25K one; correlation length↔emission only 0.558). The
+    backstop exists solely to bound degenerate enumeration, so it is
+    sized never to bind legitimate content, with margin: the densest
+    probed meeting emitted 46 at 25K chars (this returns 61 there) and
+    47 at 50K (returns 64); the densest synthetic fixture emitted 32
+    on a 1.7K-char transcript (returns 37).
+    Length is the right variable for the BACKSTOP because it bounds
+    what can physically be said in the time, even though it does not
+    predict what was worth remembering.
+    """
+    scaled = 36 + max(0, int(transcript_chars)) // 1000
+    return max(floor, min(ceiling, scaled))

@@ -383,7 +383,7 @@
       "Takeaways — evaluative lessons only (max 3 per meeting)"
     ],
     "hard_caps": {
-      "total_patches_per_meeting": 24,
+      
       "entities_per_meeting": 15,
       "relationships_per_meeting": 15,
       "per_type_caps": { "takeaway": 3 }
