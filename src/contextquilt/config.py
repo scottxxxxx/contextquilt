@@ -97,9 +97,12 @@ class Settings(BaseSettings):
     )
 
     # --- Extraction budgets ---
-    cq_max_entities: int = Field(default=10, alias="CQ_MAX_ENTITIES")
-    cq_max_patches: int = Field(default=12, alias="CQ_MAX_PATCHES")
-    cq_max_relationships: int = Field(default=10, alias="CQ_MAX_RELATIONSHIPS")
+    # Raised 12→24 with the 2026-07-30 coverage eval — the old cap
+    # measurably cost recall on dense meetings; dedup downstream is
+    # the precision stage, the cap only bounds runaway output.
+    cq_max_entities: int = Field(default=15, alias="CQ_MAX_ENTITIES")
+    cq_max_patches: int = Field(default=24, alias="CQ_MAX_PATCHES")
+    cq_max_relationships: int = Field(default=15, alias="CQ_MAX_RELATIONSHIPS")
     cq_queue_budget_threshold: float = Field(
         default=0.8, alias="CQ_QUEUE_BUDGET_THRESHOLD"
     )

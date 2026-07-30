@@ -1,0 +1,26 @@
+{
+  "meeting_date": "2026-08-04",
+  "notes": "Dense fixture built to exercise extraction coverage: ~20 expected memories vs a 12-14 patch cap, plus relative deadlines anchored to the meeting date. Keywords are matched case-insensitively against patch value.text; all keywords in a group must appear. deadline_date entries assert exact resolution.",
+  "expected": [
+    {"id": "floorplan", "type": "commitment", "keywords": ["floor plan", "venue"], "owner_contains": "mara", "deadline_date": "2026-08-07"},
+    {"id": "chase-florist", "type": "commitment", "keywords": ["florist"], "owner_contains": "jess", "deadline_date": "2026-08-05"},
+    {"id": "seating-chart", "type": "commitment", "keywords": ["seating chart"], "owner_contains": "jess", "deadline_date": "2026-08-18"},
+    {"id": "av-site-visit", "type": "commitment", "keywords": ["site visit"], "owner_contains": "tomas", "deadline_date": "2026-08-12"},
+    {"id": "elevator-dims", "type": "commitment", "keywords": ["elevator", "dimensions"], "owner_contains": "tomas", "deadline_date": "2026-08-31"},
+    {"id": "tell-priyanka", "type": "commitment", "keywords": ["priyanka"], "owner_contains": "jess"},
+    {"id": "florist-blocker", "type": "blocker", "keywords": ["florist", "table design"]},
+    {"id": "loading-dock", "type": "blocker", "keywords": ["loading dock"]},
+    {"id": "w9-portal", "type": "blocker", "keywords": ["w-9"]},
+    {"id": "backup-florist", "type": "decision", "keywords": ["backup florist"]},
+    {"id": "harvest-table", "type": "decision", "keywords": ["harvest table"]},
+    {"id": "priyanka-teardown", "type": "decision", "keywords": ["priyanka", "teardown"]},
+    {"id": "okafor-email", "type": "preference", "keywords": ["email"], "owner_contains": "okafor"},
+    {"id": "overcommit", "type": "trait", "keywords": ["overcommit"]},
+    {"id": "run-of-show", "type": "constraint", "keywords": ["run-of-show", "seven days"]},
+    {"id": "twelve-weddings", "type": "goal", "keywords": ["twelve weddings"], "deadline_date": "2026-12-31"},
+    {"id": "okafor-project", "type": "project", "keywords": ["okafor"]},
+    {"id": "delgado-project", "type": "project", "keywords": ["delgado"]},
+    {"id": "person-jess", "type": "person", "keywords": ["jess"]},
+    {"id": "person-tomas", "type": "person", "keywords": ["tomas"]}
+  ]
+}

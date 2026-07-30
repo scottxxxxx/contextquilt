@@ -116,12 +116,18 @@ QUEUE_MAX_WAIT_MINUTES = _settings.cq_queue_max_wait_minutes
 QUEUE_BUDGET_THRESHOLD = _settings.cq_queue_budget_threshold
 QUEUE_CHECK_INTERVAL_SECONDS = 30  # How often to check queues for processing
 
-# Extraction caps — belt-and-suspenders with prompt limits
+# Extraction caps — belt-and-suspenders with prompt limits. Raised
+# 12→24 / 10→15 (2026-07-30 coverage eval): dense meetings carry ~20
+# extractable memories and the old caps measurably cost recall
+# (harborview 60%→47% under the 12-cap; the victims were blockers).
+# Extraction is the recall stage — the dedup tiers + judge downstream
+# are the precision stage, so the caps only need to bound runaway
+# output, not curate it. Patch cap is env-tunable (CQ_MAX_PATCHES).
 MAX_FACTS_PER_MEETING = 5
 MAX_ACTION_ITEMS_PER_MEETING = 3
-MAX_PATCHES_PER_MEETING = 12  # Connected quilt model (replaces facts+actions for V2)
-MAX_ENTITIES_PER_MEETING = 10
-MAX_RELATIONSHIPS_PER_MEETING = 10
+MAX_PATCHES_PER_MEETING = _settings.cq_max_patches  # default 24
+MAX_ENTITIES_PER_MEETING = 15
+MAX_RELATIONSHIPS_PER_MEETING = 15
 
 # Longitudinal (time-series) patches: an incoming observation joins an
 # existing series when its descriptor field trigram-matches an active
@@ -2933,8 +2939,13 @@ class ColdPathWorker:
                 ).date()
             except ValueError:
                 meeting_date = None
+        # Weekday included: the coverage eval (2026-07-30) caught the
+        # model resolving "by Friday" off by one day from a bare ISO
+        # date — models are unreliable at date→weekday math, and every
+        # weekday-relative deadline depends on it.
         meeting_date_line = (
-            f"Meeting date: {meeting_date.isoformat()}\n\n" if meeting_date else ""
+            f"Meeting date: {meeting_date.isoformat()} ({meeting_date.strftime('%A')})\n\n"
+            if meeting_date else ""
         )
 
         # Memory language. Apps pass metadata.language (BCP-47, e.g. "es")

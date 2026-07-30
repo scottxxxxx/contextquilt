@@ -436,6 +436,9 @@ DO NOT EXTRACT:
 - Generic statements about how support/escalation processes work
 
 PRIORITY ORDER (when you must choose what to keep within the limit):
+Emit EVERY distinct memory-worthy item first — a downstream dedup step
+absorbs overlap, so do not self-censor to seem selective. The order
+below matters ONLY if you approach the hard cap:
 1. Self-disclosed traits, preferences, goals, and constraints — rare and extremely valuable. Extract these ONLY when the (you) marker is present.
 2. Project patches — the container everything else connects to
 3. Person patches for anyone who owns a commitment or blocker — the quilt needs to know WHO is responsible
@@ -460,7 +463,7 @@ EXTRACTION RULES:
 3. Every relationship must reference entities from the entities list
 4. Keep each patch value to one clear sentence
 5. If any section has nothing to extract, return an empty array
-6. Use your full budget — 8-12 patches is normal for a substantive meeting. Do not stop at 5-6 if there are more people, commitments, or blockers to capture.
+6. Use your full budget — 12-24 patches is normal for a substantive meeting. Do not stop early while distinct people, commitments, blockers, or decisions remain uncaptured.
 7. One project patch per distinct initiative the (you) speaker owns deliverables within
 8. Consolidate — prefer one commitment over three sub-tasks"""
 

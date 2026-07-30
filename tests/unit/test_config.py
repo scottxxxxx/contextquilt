@@ -60,9 +60,10 @@ def test_defaults_match_pre_refactor_values(monkeypatch):
     assert s.cq_llm_model == "anthropic/claude-haiku-4.5"
     assert s.cq_llm_primary_provider == "anthropic"
     assert s.cq_anthropic_model == "claude-haiku-4-5-20251001"
-    assert s.cq_max_entities == 10
-    assert s.cq_max_patches == 12
-    assert s.cq_max_relationships == 10
+    # Raised 2026-07-30 with the coverage eval (recall was cap-bound).
+    assert s.cq_max_entities == 15
+    assert s.cq_max_patches == 24
+    assert s.cq_max_relationships == 15
     assert s.cq_queue_budget_threshold == 0.8
     assert s.cq_queue_max_wait_minutes == 60
     assert s.mcp_port == 8001
