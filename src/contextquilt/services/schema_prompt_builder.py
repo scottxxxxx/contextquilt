@@ -322,8 +322,25 @@ def _patch_types_section(manifest: Dict[str, Any]) -> str:
             lines.append(f"    {desc}")
         shape = pt.get("value_shape")
         if isinstance(shape, dict):
+            # Merge the universal optional fields into every rendered
+            # shape. Manifest value_shape declarations predate cues /
+            # salience / deadline_date, and models obey the per-type
+            # shape (the most concrete spec) over the generic sections
+            # above it — 14 shapes without `cues` beat one CUES section
+            # every time. Root cause of the 2026-07-30 cue-starvation
+            # finding: 0% cue emission on the generated prompt vs 85%
+            # on a prompt whose shape includes cues, on two different
+            # models. Manifest-declared fields always win on conflict.
+            merged = dict(shape)
+            for field, spec in (
+                ("deadline", "string?"),
+                ("deadline_date", "string?"),
+                ("cues", "string[]? (0-5, see CUES section)"),
+                ("salience", "string? (high|low, see SALIENCE section)"),
+            ):
+                merged.setdefault(field, spec)
             shape_fields = ", ".join(
-                f"{k}: {v}" for k, v in shape.items()
+                f"{k}: {v}" for k, v in merged.items()
             )
             lines.append(f"    Value shape: {{{shape_fields}}}")
         rules = pt.get("extraction_rules") or {}
