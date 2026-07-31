@@ -65,7 +65,9 @@ def test_tolerates_malformed_values():
 
 def test_prompt_embeds_shape_and_calendar():
     system, user = build_micropass_prompt(MEETING, [(0, "send deck", "by Friday")])
-    assert '"deadline_date": "YYYY-MM-DD" | null' in system
+    # Object contract — the worker's llm.extract() parser brace-extracts
+    # objects, so a bare-array contract gets mangled (2026-07-31 smoke).
+    assert '{"resolutions":' in system
     assert "Calendar" in user
     assert 'index 0: deadline "by Friday"' in user
 
@@ -74,7 +76,13 @@ def test_prompt_embeds_shape_and_calendar():
 # response parsing
 # ------------------------------------------------------------------
 
-def test_parse_handles_fences_and_prose():
+def test_parse_handles_object_contract_fences_and_bare_arrays():
+    assert parse_micropass_response('{"resolutions": [{"index":0,"deadline_date":"2026-08-07"}]}') == [
+        {"index": 0, "deadline_date": "2026-08-07"}
+    ]
+    assert parse_micropass_response('```json\n{"resolutions":[{"index":0,"deadline_date":"2026-08-07"}]}\n```') == [
+        {"index": 0, "deadline_date": "2026-08-07"}
+    ]
     assert parse_micropass_response('```json\n[{"index":0,"deadline_date":"2026-08-07"}]\n```') == [
         {"index": 0, "deadline_date": "2026-08-07"}
     ]

@@ -87,8 +87,8 @@ def build_micropass_prompt(meeting_date: date, items: List[Tuple[int, str, str]]
         "  ('soon', 'after the board meeting', 'when the cert renews').\n"
         "- Absolute dates ('July 10', 'the 15th') resolve in the meeting's\n"
         "  year (or the next occurrence if that day has passed).\n\n"
-        "Return ONLY a JSON array, no prose, exactly this shape:\n"
-        '[{"index": <int>, "deadline_date": "YYYY-MM-DD" | null}]\n'
+        "Return ONLY a JSON object, no prose, exactly this shape:\n"
+        '{"resolutions": [{"index": <int>, "deadline_date": "YYYY-MM-DD" | null}]}\n'
         "One entry per input item, same index values."
     )
     lines = [build_calendar_context(meeting_date), "", "Deadlines to resolve:"]
@@ -98,19 +98,34 @@ def build_micropass_prompt(meeting_date: date, items: List[Tuple[int, str, str]]
 
 
 def parse_micropass_response(text: str) -> Optional[List[Dict[str, Any]]]:
+    """Accepts the object contract ({"resolutions": [...]}) and, for
+    robustness, a bare array — models drift between the two, and the
+    worker's llm.extract() parser brace-extracts OBJECTS, which is why
+    the contract is object-shaped (2026-07-31 smoke: a fenced bare
+    array was mangled into an unparseable brace-substring)."""
     text = text.strip()
     if text.startswith("```"):
         text = text.split("```")[1]
         if text.startswith("json"):
             text = text[4:]
-    s, e = text.find("["), text.rfind("]")
-    if s < 0 or e <= s:
-        return None
-    try:
-        out = json.loads(text[s:e + 1])
-    except Exception:
-        return None
-    return out if isinstance(out, list) else None
+    for open_ch, close_ch in (("{", "}"), ("[", "]")):
+        s, e = text.find(open_ch), text.rfind(close_ch)
+        if s < 0 or e <= s:
+            continue
+        try:
+            out = json.loads(text[s:e + 1])
+        except Exception:
+            continue
+        if isinstance(out, list):
+            return out
+        if isinstance(out, dict):
+            res = out.get("resolutions")
+            if isinstance(res, list):
+                return res
+            for v in out.values():
+                if isinstance(v, list):
+                    return v
+    return None
 
 
 def apply_resolutions(
@@ -157,16 +172,17 @@ async def run_deadline_micropass(llm, patches: List[Dict[str, Any]],
         # array, which some clients surface as raw text. Handle both.
         if isinstance(content, list):
             resolutions = content
-        elif isinstance(content, dict) and isinstance(content.get("_raw"), str):
-            resolutions = parse_micropass_response(content["_raw"])
         elif isinstance(content, dict):
-            # object-wrapped array from a compliant-but-wrapping model
-            for v in content.values():
-                if isinstance(v, list):
-                    resolutions = v
-                    break
+            res = content.get("resolutions")
+            if isinstance(res, list):
+                resolutions = res
             else:
-                resolutions = None
+                # extract() parse fallback or a wrapping model — take
+                # the first list value, else give the raw dict text a
+                # last chance through the tolerant parser.
+                resolutions = next(
+                    (v for v in content.values() if isinstance(v, list) and v), None
+                ) or parse_micropass_response(json.dumps(content))
         else:
             resolutions = parse_micropass_response(str(content))
         if not resolutions:
