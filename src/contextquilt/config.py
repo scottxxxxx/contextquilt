@@ -113,6 +113,14 @@ class Settings(BaseSettings):
         default=60, alias="CQ_QUEUE_MAX_WAIT_MINUTES"
     )
 
+    # Deadline micro-pass: focused second LLM call per extraction that
+    # only resolves spoken deadlines against a rendered calendar table
+    # (main-call weekday math is off by one; measured 2026-07-30).
+    # Kill switch — off leaves the main call's dates as-is.
+    cq_deadline_micropass_enabled: bool = Field(
+        default=True, alias="CQ_DEADLINE_MICROPASS_ENABLED"
+    )
+
     # Semantic dedup: LLM judge for trigram gray-zone patch pairs at
     # write time. Kill switch — off reverts to trigram-only dedup.
     cq_semantic_dedup_enabled: bool = Field(
