@@ -937,6 +937,42 @@ async def store_connected_patches(
     return stored
 
 
+async def _resolve_merged_forward(db, entity_id):
+    """Follow entities.merged_into to the surviving canonical.
+
+    POST /v1/people/{user_id}/merge marks a folded entity with a forward
+    pointer instead of deleting it (held client ids must keep resolving,
+    and relationships cascade on delete). Every write path that resolves
+    an entity by name therefore has to hop that pointer, or the next
+    mention of the old surface form re-observes the dead row and rebuilds
+    the duplicate the user just resolved.
+
+    Degrades to the input id if the column is absent — the MCP
+    deployment's separate Postgres can lag migrations, and entity storage
+    must not start failing there because People shipped here.
+    """
+    current = entity_id
+    seen = set()
+    try:
+        for _ in range(8):
+            row = await db.fetchrow(
+                "SELECT merged_into FROM entities WHERE entity_id = $1", current
+            )
+            if row is None or row["merged_into"] is None:
+                return current
+            nxt = row["merged_into"]
+            if nxt in seen:
+                logger.warning("entity_merge_cycle", entity_id=str(nxt))
+                return current
+            seen.add(nxt)
+            current = nxt
+        logger.warning("entity_merge_chain_too_deep", entity_id=str(current))
+        return current
+    except Exception as e:
+        logger.debug("merged_forward_resolution_skipped", error=str(e)[:120])
+        return entity_id
+
+
 async def store_entities(
     db,
     redis_client,
@@ -1007,7 +1043,12 @@ async def store_entities(
             user_id, entity_type, name,
         )
         if row:
-            await _reobserve(row["entity_id"])
+            # A merged entity keeps its name (POST /v1/people/{u}/merge
+            # writes a forward pointer rather than deleting), so an exact
+            # hit can land on a row the user has already folded into
+            # someone else. Re-observing the dead row would quietly
+            # rebuild the duplicate the merge just resolved.
+            await _reobserve(await _resolve_merged_forward(db, row["entity_id"]))
             stored += 1
             continue
 
@@ -1025,7 +1066,7 @@ async def store_entities(
                 user_id, name, entity_type,
             )
             if row:
-                await _reobserve(row["entity_id"])
+                await _reobserve(await _resolve_merged_forward(db, row["entity_id"]))
                 stored += 1
                 continue
 
@@ -1033,8 +1074,16 @@ async def store_entities(
             #    Only acts on a UNIQUE candidate — ambiguity ("Sarah"
             #    with both "Sarah Abrams" and "Sarah Chen" present)
             #    falls through to a separate entity, as before.
+            #
+            #    Merged entities are excluded: aliasing a new surface form
+            #    onto a folded row would strand it outside the canonical's
+            #    neighborhood. (If the merged_into column is absent on a
+            #    lagging DB this raises, and the except below falls through
+            #    to the plain insert — same degrade as a missing
+            #    entity_aliases table.)
             candidate_rows = await db.fetch(
-                "SELECT entity_id, name FROM entities WHERE user_id = $1 AND entity_type = $2",
+                "SELECT entity_id, name FROM entities "
+                "WHERE user_id = $1 AND entity_type = $2 AND merged_into IS NULL",
                 user_id, entity_type,
             )
             match = find_alias_candidate(

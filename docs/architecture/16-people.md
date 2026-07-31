@@ -1,4 +1,11 @@
-# 16: People (DRAFT, not locked, no code has landed)
+# 16: People (DRAFT, not locked)
+
+> **Status, 2026-07-31.** The identity write-back half of section 5 has
+> shipped (5.3 merge, 5.4 keep separate, 5.5 create, 5.6 confirm, plus
+> migration 29). The read surface (5.1, 5.2), `person_appearances`, and
+> the `owed_to` label have NOT. Sections 4.1 and 5.3 through 5.6 are now
+> descriptions of live behavior; everything else remains a proposal, and
+> the open questions in section 8 are still open.
 
 ShoulderSurf is adding **People** as a fourth object type in Review,
 next to Meetings, Projects and Memory. A person becomes its own entity
@@ -102,13 +109,26 @@ between diarization labels. Neither means "these two entities are one
 human." `entity_aliases.source` already anticipates the value `'app'`,
 but nothing writes it.
 
-Both answers must be recorded. Recording only the positive is a bug:
-the conservative aliaser in `store_entities` runs on every extraction,
-and without a negative record it can re-merge a pair the user
-explicitly separated, silently undoing their answer on a later meeting.
+Both answers must be recorded. Recording only the positive leaves the
+negative answer with nowhere to live, and every consumer that proposes
+a merge will keep proposing the one the user already refused.
 
-**Needs:** a merge endpoint, a keep-separate endpoint, and a table to
-hold the negatives.
+**Correction to an earlier draft of this doc:** that risk was first
+written up as the live extraction path silently re-merging a separated
+pair. Reading `store_entities` closely, it cannot. Step 3's heuristic
+only attaches a *new* surface form to an existing entity, or promotes an
+entity to a fuller incoming name; an incoming name that already is an
+entity gets caught by the exact-match step first, so two existing rows
+can never be fused there. The real consumers of a separation are the
+merge endpoint, `scripts/backfill_entity_aliases.py` (which does delete
+the duplicate row), and any future merge-proposal read. The harm is a
+nag loop and a destructive ops script, not a silent worker merge.
+
+**Shipped.** `POST /v1/people/{user_id}/merge` and
+`.../keep-separate` (section 5), backed by `entity_separations` and
+`entities.merged_into` in migration 29. The backfill script now reads
+separations and **fails closed** if it cannot: merging blind there
+deletes a row the user asked to keep.
 
 ### 4.2 "You owe her" is not representable
 
@@ -300,9 +320,36 @@ transcript and the user vouched for.
 
 ---
 
-## 6. Schema additions (proposed)
+## 6. Schema
 
-New migration files, never edits to applied ones.
+### 6.1 Shipped (migration 29)
+
+`entity_separations` (the pair is canonicalised to `lo < hi` at write
+time and a CHECK enforces it, so an unordered pair cannot be stored two
+ways), plus four columns on `entities`: `confirmed_at`,
+`confirmation_source`, `merged_into`, `merged_at`.
+
+**Merge is a forward pointer, not a delete.** Deleting the folded row
+would cascade its relationships away (`relationships.from/to_entity_id`
+are `ON DELETE CASCADE`) and would break entity ids clients already
+hold: SS passes `to_person_id` to `POST /v1/quilt/{u}/reassign-speaker`
+today. A merged row stays readable and resolves forward, so a stale
+client id self-heals instead of 404ing.
+
+Every write path that resolves an entity by name has to hop that
+pointer. `store_entities` now does, via `_resolve_merged_forward`, which
+degrades to the input id if the column is absent (the MCP deployment's
+Postgres can lag migrations, and entity storage must not start failing
+there because People shipped here). Step 3's alias-candidate scan
+excludes merged entities.
+
+Recall is deliberately untouched. A merged entity keeps its name in the
+Redis entity index on purpose, because the merge records that name as an
+alias of the canonical and recall must still match it: the alias leg of
+the entity lookup resolves it. The dead row seeds graph traversal with
+an empty neighborhood, which costs nothing and changes no output bytes.
+
+### 6.2 Still proposed
 
 ```sql
 -- person_appearances: which meetings a person actually showed up in.
@@ -317,27 +364,22 @@ CREATE TABLE person_appearances (
     last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (user_id, entity_id, origin_id)
 );
-
--- entity_separations: pairs the user said are NOT the same person.
--- Ordering is canonicalised at write time so (a,b) and (b,a) collide.
-CREATE TABLE entity_separations (
-    user_id      TEXT NOT NULL,
-    entity_id_lo UUID NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
-    entity_id_hi UUID NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
-    source       TEXT NOT NULL DEFAULT 'app',
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (user_id, entity_id_lo, entity_id_hi)
-);
-
-ALTER TABLE entities ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;
-ALTER TABLE entities ADD COLUMN IF NOT EXISTS confirmation_source TEXT;
 ```
 
-Worker changes: `store_entities` writes the appearance row and consults
-`entity_separations` before proposing a heuristic alias. Both are cold
-path. The recall hot path is untouched by everything in this doc.
+Written from `store_entities`, cold path only. Manifest v9 adds the
+`owed_to` label and its extraction guidance.
 
-Manifest v9 adds the `owed_to` label and its extraction guidance.
+### 6.3 Known gap: person patches are not folded by a merge
+
+A merge collapses the *entity* layer. It does not touch the duplicate
+`person` patches the two surface forms may have produced. That is
+deliberate for now: patch dedup is the worker's job (trigram plus the
+semantic judge) and reaching into patches from an identity endpoint
+means ACLs, delta sync and connections all move at once.
+
+It is deferrable because the People list is keyed on entities (5.1), so
+the duplicate patch never surfaces as a second person in the UI. It
+stops being deferrable if the quilt view ever renders people directly.
 
 ---
 
@@ -395,6 +437,35 @@ splits this. Unchanged.
 
 ---
 
+## 8a. Behavior notes for the shipped endpoints
+
+Things a client integrator will hit that the shapes in section 5 do not
+convey:
+
+* **Merge refuses the whole batch on a separation conflict** (409), not
+  just the offending pair. Quietly merging part of a batch while
+  reporting success is how "why does CQ think my two Sarahs are one
+  person" investigations start.
+* **Merge is idempotent.** Re-sending a merge whose targets already
+  resolve to the canonical returns `status: "noop"`, not an error.
+* **Stale entity ids resolve forward** on every endpoint, so a client
+  that cached an id before a merge keeps working.
+* **Confirm is first-write-wins.** Re-confirming does not rewrite the
+  original timestamp or source.
+* **Merging and separating both vouch for the entities involved**
+  (`confirmed_at` is set if unset). A user answering an identity
+  question is confirmation, whichever way they answer.
+* **Create is resolve-or-create**, matching `store_entities`' order:
+  exact name, then recorded alias. Creating "Sarah C" after it merged
+  into "Sarah Chen" returns Sarah Chen rather than reviving a duplicate.
+  It answers with the name CQ stores, not the caller's casing.
+* **Create fills in a missing person patch** for an entity that only
+  existed as an inference. `status` still reads `"exists"` because the
+  entity did.
+* **Placeholder names are refused** (422 `PLACEHOLDER_NAME`).
+  `drop_placeholder_entities` spends real effort keeping "Speaker 3" out
+  of the graph and the create endpoint must not be a hole through it.
+
 ## 9. Verification plan
 
 People is a browse surface and does not ride the project-chat context
@@ -415,9 +486,24 @@ The lighter version still applies:
 
 ---
 
+Verification actually run for the shipped half (local docker, fresh DB,
+all 29 migrations applied in order, 2026-07-31): all four endpoints
+driven over HTTP across 11 cases, then the merge's database side effects
+checked directly. Confirmed a separation blocks a merge from **either**
+argument order; a duplicate relationship is dropped while a unique one
+repoints and the resulting self-loop is deleted; mention counts fold and
+first/last seen widen; a separation the folded entity owned transfers to
+the canonical; and an extraction naming the merged surface form
+re-observes the canonical without resurrecting the duplicate. Still
+outstanding from section 9: the prod smoke and the pass through GP's
+proxied path.
+
 ## 10. Status
 
-Draft, 2026-07-31. Written from the SS design project
+Written from the SS design project
 `e9e9f9be-a105-4b29-8b48-2f2bd3efb760` (`ShoulderSurf People.dc.html`)
-before any code exists on either side. Not reviewed by SS or GP. Not
-locked. No CQ code has landed.
+before any SS code existed. Not reviewed by SS or GP, not locked. The
+identity write-back half shipped 2026-07-31 (see the status note at the
+top); it is additive and touches no existing route, so it is safe ahead
+of the lock, but the read surface and `owed_to` should wait for SS and
+GP to answer section 8.
