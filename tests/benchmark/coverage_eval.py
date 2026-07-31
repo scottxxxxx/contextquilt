@@ -46,6 +46,7 @@ sys.path.insert(0, str(REPO / "src"))
 from src.contextquilt.services.llm_client_anthropic import AnthropicLLMClient  # noqa: E402
 from src.contextquilt.services.schema_prompt_builder import build_prompt  # noqa: E402
 from src.contextquilt.services.extraction_prompts import MEETING_SUMMARY_SYSTEM  # noqa: E402
+from src.contextquilt.services import deadline_resolver  # noqa: E402
 
 COVERAGE_DIR = Path(__file__).parent / "coverage"
 MANIFEST_PATH = REPO / "init-db" / "11_shouldersurf_schema.json"
@@ -184,6 +185,26 @@ async def run_eval(args):
                 results.append({"fixture": fx["name"], "error": "JSON parse failed"})
                 continue
             patches = content.get("patches") or []
+            if args.micropass and patches:
+                items = deadline_resolver.collect_deadline_items(patches)
+                if items:
+                    msys, muser = deadline_resolver.build_micropass_prompt(md, items)
+                    mbody = {"model": client.model, "max_tokens": 1500,
+                             "system": msys,
+                             "messages": [{"role": "user", "content": muser}]}
+                    if _model_rejects_sampling(client.model):
+                        if not client.model.startswith("claude-fable"):
+                            mbody["thinking"] = {"type": "disabled"}
+                    else:
+                        mbody["temperature"] = 0.1
+                    mresp = await client._client.post("/v1/messages", json=mbody)
+                    mresp.raise_for_status()
+                    mtext = "".join(b.get("text", "") for b in mresp.json().get("content", [])
+                                    if b.get("type") == "text")
+                    res = deadline_resolver.parse_micropass_response(mtext)
+                    if res:
+                        deadline_resolver.apply_resolutions(
+                            patches, res, md, {i for i, _, _ in items})
             row = {"fixture": fx["name"], "model": client.model,
                    "patches_emitted": len(patches),
                    "latency_s": round(latency, 1)}
@@ -203,6 +224,7 @@ def main():
     ap.add_argument("--prompt", choices=["manifest", "legacy"], default="manifest")
     ap.add_argument("--cap", type=int, help="also score after truncating to N patches")
     ap.add_argument("--max-tokens", type=int, default=8192)
+    ap.add_argument("--micropass", action="store_true", help="run the deadline micro-pass after extraction")
     args = ap.parse_args()
     if not (os.environ.get("CQ_ANTHROPIC_API_KEY") or os.environ.get("CQ_GCP_PROJECT")):
         sys.exit("Need CQ_ANTHROPIC_API_KEY (or run where Secret Manager is configured)")
