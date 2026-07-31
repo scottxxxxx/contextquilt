@@ -151,6 +151,116 @@ def validate_person_name(name: str) -> str:
     return cleaned
 
 
+# What the People read surface can and cannot answer today, reported on
+# every response.
+#
+# This exists because the alternative is worse. Without `owed_to` (doc 16
+# section 4.2) CQ has no counterparty on a commitment, so "what you owe
+# this person" is structurally unanswerable. Returning 0 for that would
+# render in ShoulderSurf as "you owe her nothing", which is a confident
+# lie from a memory product. Returning null plus a stated reason lets the
+# client render "not tracked yet" instead.
+#
+# Flip an entry to available=True in the same PR that makes it true.
+READ_CAPABILITIES: dict = {
+    "they_owe": {
+        "available": True,
+        "reason": None,
+    },
+    "you_owe": {
+        "available": False,
+        "reason": (
+            "Commitments carry a single named owner and no counterparty, "
+            "so CQ cannot tell who a commitment is owed TO. Needs the "
+            "owed_to connection label (docs/architecture/16-people.md 4.2)."
+        ),
+    },
+    "meeting_counts": {
+        "available": True,
+        "reason": None,
+    },
+    "confirmed_mention_split": {
+        "available": False,
+        "reason": (
+            "Nothing in CQ produces a per-meeting confirmation signal for a "
+            "third party; voice matching is the app's. Only the "
+            "person-level confirmed flag is real."
+        ),
+    },
+}
+
+
+def capability_report() -> dict:
+    """The capabilities block echoed on every People read."""
+    return {name: dict(spec) for name, spec in READ_CAPABILITIES.items()}
+
+
+def owner_keys(name: str, aliases: Iterable[str]) -> Set[str]:
+    """Every lowercased surface form a commitment's `owner` might use.
+
+    `value.owner` is free text the extractor copied out of a transcript,
+    so matching it to a person means matching the canonical name and
+    every recorded alias. Blank forms are dropped so an empty alias row
+    cannot swallow every ownerless commitment.
+    """
+    keys = {(name or "").strip().lower()}
+    keys.update((a or "").strip().lower() for a in aliases or ())
+    keys.discard("")
+    return keys
+
+
+def merge_project_rollups(
+    appearance_rows: Iterable[dict],
+    stated_rows: Iterable[dict],
+) -> List[dict]:
+    """Combine the two ways CQ knows a person is on a project.
+
+    `appearance_rows` are observed: the person and the project co-occur in
+    real meetings, carrying a `meeting_count`. `stated_rows` come from a
+    `works_on` connection, which is someone SAYING they are on it and may
+    have no co-attended meeting at all.
+
+    Both belong in "where she shows up", but they are not the same claim,
+    so each result carries `observed` and `stated` flags rather than
+    collapsing into one number the client cannot interpret. Ordered by
+    meeting_count descending, then name, so the response is deterministic
+    (a browse surface must not reshuffle between polls).
+    """
+    by_key: dict = {}
+
+    def _slot(project_id, project_name):
+        key = project_id or f"name:{(project_name or '').strip().lower()}"
+        if key not in by_key:
+            by_key[key] = {
+                "project_id": project_id,
+                "project": project_name,
+                "meeting_count": 0,
+                "observed": False,
+                "stated": False,
+            }
+        slot = by_key[key]
+        # A later row may carry the display name the earlier one lacked.
+        if not slot["project"] and project_name:
+            slot["project"] = project_name
+        if not slot["project_id"] and project_id:
+            slot["project_id"] = project_id
+        return slot
+
+    for row in appearance_rows or ():
+        slot = _slot(row.get("project_id"), row.get("project"))
+        slot["meeting_count"] += int(row.get("meeting_count") or 0)
+        slot["observed"] = True
+
+    for row in stated_rows or ():
+        slot = _slot(row.get("project_id"), row.get("project"))
+        slot["stated"] = True
+
+    return sorted(
+        by_key.values(),
+        key=lambda r: (-r["meeting_count"], (r["project"] or "").lower()),
+    )
+
+
 def resolve_identity_source(source: str | None) -> str:
     """Normalise the caller's `source`, defaulting to user_confirmation.
 

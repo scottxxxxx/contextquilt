@@ -1,11 +1,16 @@
 # 16: People (DRAFT, not locked)
 
-> **Status, 2026-07-31.** The identity write-back half of section 5 has
-> shipped (5.3 merge, 5.4 keep separate, 5.5 create, 5.6 confirm, plus
-> migration 29). The read surface (5.1, 5.2), `person_appearances`, and
-> the `owed_to` label have NOT. Sections 4.1 and 5.3 through 5.6 are now
-> descriptions of live behavior; everything else remains a proposal, and
-> the open questions in section 8 are still open.
+> **Status, 2026-07-31.** All of section 5 has shipped, plus
+> `person_appearances`: the read surface (5.1, 5.2), the identity
+> write-back (5.3 merge, 5.4 keep separate, 5.5 create, 5.6 confirm), and
+> migrations 29 and 30. Sections 4.1, 4.3, 4.5 and 5 are now descriptions
+> of live behavior.
+>
+> **Still proposal only: `owed_to` (4.2).** Commitments have no
+> counterparty, so `you_owe` is structurally unanswerable and every read
+> returns it as `null` with a stated reason in a `capabilities` block,
+> never `0`. Open question 1 is therefore answered in code but the label
+> itself still needs SS and GP. The rest of section 8 is still open.
 
 ShoulderSurf is adding **People** as a fourth object type in Review,
 next to Meetings, Projects and Memory. A person becomes its own entity
@@ -17,7 +22,8 @@ grow. It exists because People is a **shared surface**, and the
 standing rule is that shared surfaces lock with SS and GP before code
 lands on either side.
 
-Nothing here is implemented. Every shape below is a proposal.
+See the status note above for what is live versus proposed. The endpoint
+shapes in section 5 are as-built; the `owed_to` design in 4.2 is not.
 
 ---
 
@@ -202,7 +208,7 @@ lifecycle state.
 
 ---
 
-## 5. Proposed surface
+## 5. The surface (as built)
 
 All endpoints app-authenticated the same way as `/v1/quilt` (JWT or
 X-App-ID). All reads are hot-path-adjacent browse surfaces, like the
@@ -229,49 +235,74 @@ Query: `since=` (delta), `limit=`, `confirmed=true|false|all`
       "last_seen_at": "2026-07-28T…Z",
       "meeting_count": 9,
       "project_count": 3,
-      "open_you_owe": 2,
-      "open_they_owe": 2
+      "open_they_owe": 2,
+      "open_you_owe": null
     }
   ],
   "total": 155,
-  "deleted": [],
+  "deleted": ["…"],
+  "capabilities": { "you_owe": {"available": false, "reason": "…"}, "…": {} },
   "server_time": "…"
 }
 ```
 
 `patch_id` is null for a person CQ has as an entity but never emitted a
-person patch for. That is the unconfirmed Tom Bakker case and it should
-render as such, not be filtered out.
+person patch for. That is the unconfirmed Tom Bakker case and it renders
+as such rather than being filtered out: hiding it would mean the app can
+never offer the confirmation.
+
+`total` counts the filtered population before `limit`, so a client can
+tell "showing 50 of 155" without a second call. `deleted` carries the
+entity_ids folded away by a merge since `since`, since a merge removes a
+person from the list and clients holding that id need a tombstone (open
+question 5, answered yes).
+
+`open_you_owe` is always null. See 6.4.
 
 ### 5.2 `GET /v1/people/{user_id}/{entity_id}`
 
-Adds to the above:
+Resolves a folded entity_id forward, so a client that cached an id
+before a merge still lands on the right person. Adds to the above:
 
 ```json
 {
   "projects": [
-    {"project_id": "…", "project": "Atlas Migration", "meeting_count": 5}
+    {"project_id": "…", "project": "Atlas Migration",
+     "meeting_count": 5, "observed": true, "stated": false}
   ],
   "commitments": {
-    "you_owe":   [{"patch_id": "…", "text": "…", "deadline_date": "2026-08-07", "overdue_since": null, "project_id": "…"}],
-    "they_owe":  [{"patch_id": "…", "text": "…", "deadline_date": "2026-08-04", "overdue_since": null, "project_id": "…"}]
+    "they_owe":  [{"patch_id": "…", "type": "commitment", "text": "…",
+                   "deadline": "Friday", "deadline_date": "2026-08-04",
+                   "overdue_since": null, "project_id": "…", "origin_id": "…"}],
+    "you_owe": null
   },
   "meetings": [
-    {"origin_id": "…", "origin_type": "meeting", "last_seen_at": "2026-07-28T…Z"}
+    {"origin_id": "…", "origin_type": "meeting", "project_id": "…",
+     "last_seen_at": "2026-07-28T…Z"}
   ],
   "provenance": {
     "name_mentions": 11,
-    "confirmed_mentions": 6,
-    "assumed_mentions": 5,
-    "alias_sources": {"heuristic": 2, "app": 1}
+    "meetings_observed": 9,
+    "confirmed": true,
+    "confirmation_source": "user_confirmation",
+    "alias_sources": {"heuristic": 2, "user_confirmation": 1},
+    "confirmed_mentions": null,
+    "assumed_mentions": null
   }
 }
 ```
 
-`you_owe` is populated by the `owed_to` connection from 4.2 and is
-empty until v9 ships plus a backfill. **That must be honest in the
-response, not silently zero.** Options for the meaning of an empty
-`you_owe` are an open question in section 8.
+`projects` carries `observed` and `stated` separately, because they are
+different claims. `observed` means the person and the project co-occur
+in real meetings and `meeting_count` is real. `stated` means a
+`works_on` connection says they are on it, which may involve no
+co-attended meeting at all (`meeting_count: 0`). Collapsing them into
+one number would hand the client a figure it cannot interpret. Ordering
+is meeting_count descending then name, so a browse surface does not
+reshuffle between polls.
+
+`you_owe` is `null`, not `[]`. An empty list means "none open"; null
+means CQ cannot tell. See 6.4.
 
 CQ deliberately does **not** return meeting titles or durations. Per
 doc 15 item 5, CQ wins on state and SS wins on content. SS joins
@@ -349,27 +380,52 @@ alias of the canonical and recall must still match it: the alias leg of
 the entity lookup resolves it. The dead row seeds graph traversal with
 an empty neighborhood, which costs nothing and changes no output bytes.
 
-### 6.2 Still proposed
+### 6.2 person_appearances (shipped, migration 30)
 
-```sql
--- person_appearances: which meetings a person actually showed up in.
-CREATE TABLE person_appearances (
-    user_id      TEXT NOT NULL,
-    entity_id    UUID NOT NULL REFERENCES entities(entity_id) ON DELETE CASCADE,
-    origin_id    TEXT NOT NULL,
-    origin_type  TEXT NOT NULL,
-    project_id   TEXT,
-    confirmed    BOOLEAN NOT NULL DEFAULT FALSE,
-    first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    last_seen_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (user_id, entity_id, origin_id)
-);
-```
+Keyed `(user_id, entity_id, origin_id)`, so a person mentioned five
+times in one meeting is one appearance. Written from `store_entities`
+on the cold path, for people only, and only when the ingest carried an
+`origin_id` (a person named in a chat turn has no meeting to record).
+Degrades silently if the table is absent, same reason as
+`_resolve_merged_forward`. Resolution happens first, so an appearance
+recorded from an alias lands on the canonical.
 
-Written from `store_entities`, cold path only. Manifest v9 adds the
-`owed_to` label and its extraction guidance.
+**A merge folds appearances forward**, and two identities seen in the
+same meeting collapse to one row rather than double-counting. This was
+caught in verification, not review: the first cut of merge folded
+aliases and relationships but not appearances, so merging silently cost
+the canonical every meeting the folded identity was seen in.
 
-### 6.3 Known gap: person patches are not folded by a merge
+**Deviation from the earlier draft: no per-appearance `confirmed`
+column.** It was specced here to back "six mentions you confirmed, five
+still assumed", but nothing in CQ produces a per-meeting confirmation
+signal for a third party. Voice matching is the app's, and
+`identification_source` / `user_attribution_hint` describe the *user's*
+identity, not a participant's. A column no writer populates would read
+as "zero confirmed" and become a quiet lie, so the split is reported as
+untracked instead (see 6.4).
+
+### 6.3 Still proposed
+
+Manifest v9 adds the `owed_to` label (4.2) and its extraction guidance,
+plus a backfill so existing commitments gain a counterparty.
+
+### 6.4 Honesty over convenience: the `capabilities` block
+
+Every People read carries a `capabilities` map naming what CQ can and
+cannot answer, each unavailable entry with a reason.
+
+The alternative was worse. Without `owed_to`, returning `open_you_owe:
+0` renders in ShoulderSurf as "you owe her nothing", which is a
+confident lie from a memory product. Returning `null` plus a reason lets
+the client render "not tracked yet". Same treatment for the
+confirmed/assumed mention split. An empty *list* means "none open"; a
+`null` means "CQ cannot tell". Those are different claims and the API
+distinguishes them.
+
+Flip an entry to `available: true` in the same PR that makes it true.
+
+### 6.5 Known gap: person patches are not folded by a merge
 
 A merge collapses the *entity* layer. It does not touch the duplicate
 `person` patches the two surface forms may have produced. That is
@@ -409,11 +465,11 @@ splits this. Unchanged.
 
 ## 8. Open questions for SS and GP
 
-1. **Empty `you_owe` before v9.** Until `owed_to` ships and backfills,
-   `you_owe` is structurally empty. Should the response carry an
-   explicit capability flag so SS renders "not tracked yet" rather than
-   an empty ledger that reads as "you owe her nothing"? Silent zero is
-   the wrong answer for a memory product.
+1. ~~**Empty `you_owe` before v9.**~~ **Answered in code (6.4):** every
+   read carries a `capabilities` block, and `you_owe` comes back as
+   `null` with a stated reason rather than `0` or `[]`. SS should render
+   "not tracked yet". Still needs SS to confirm they will render it that
+   way rather than treating null as empty.
 2. **Does the merge nudge originate in CQ or SS?** The design shows SS
    surfacing it. CQ's aliaser has the candidate pairs. Either CQ
    exposes proposals as a read, or SS proposes from voice and CQ only
@@ -426,10 +482,11 @@ splits this. Unchanged.
    needs explicit route allowlisting, and per the standing rule these
    get verified through GP's proxied path, not just CQ's socket. GP has
    eaten query params before.
-5. **Delta sync shape.** Should `GET /v1/people` support `since=` with
-   a `deleted` array like `/v1/quilt` does, or does SS re-fetch the
-   list wholesale? Merges make people disappear, so tombstones probably
-   matter here.
+5. ~~**Delta sync shape.**~~ **Answered yes:** `since=` returns only
+   people whose `last_seen_at` or `confirmed_at` moved, plus a `deleted`
+   array of entity_ids folded away by a merge. Still needs SS to confirm
+   they will decode `deleted` (the 2026-07 `action_items` lesson: an
+   array nobody decodes is an array that does not exist).
 6. **Backfill scope.** `person_appearances` can be reconstructed for
    history from the ingest stream, which preserves original payloads
    verbatim. Worth doing at launch, or let it fill forward and accept
@@ -486,24 +543,53 @@ The lighter version still applies:
 
 ---
 
-Verification actually run for the shipped half (local docker, fresh DB,
-all 29 migrations applied in order, 2026-07-31): all four endpoints
-driven over HTTP across 11 cases, then the merge's database side effects
-checked directly. Confirmed a separation blocks a merge from **either**
-argument order; a duplicate relationship is dropped while a unique one
-repoints and the resulting self-loop is deleted; mention counts fold and
-first/last seen widen; a separation the folded entity owned transfers to
-the canonical; and an extraction naming the merged surface form
-re-observes the canonical without resurrecting the duplicate. Still
-outstanding from section 9: the prod smoke and the pass through GP's
-proxied path.
+Verification actually run (local docker, fresh DB, all 30 migrations in
+order, 2026-07-31).
+
+Write-back: all four endpoints over HTTP across 11 cases, then the
+merge's database side effects checked directly. A separation blocks a
+merge from **either** argument order; a duplicate relationship is
+dropped while a unique one repoints and the resulting self-loop is
+deleted; mention counts fold and first/last seen widen; a separation the
+folded entity owned transfers to the canonical; an extraction naming the
+merged surface form re-observes the canonical without resurrecting the
+duplicate.
+
+Reads: list and detail against a fixture with three people, two
+projects, an alias-owned commitment and a completed one. Confirmed the
+alias-owned commitment counts toward `they_owe` while the completed one
+does not; the entity-only person returns `patch_id: null` and
+`confirmed: false` rather than being hidden; `observed` and `stated`
+projects both appear and are distinguishable; `confirmed=` filtering,
+`limit` with an unfiltered `total`, `since` deltas, and merge tombstones
+in `deleted` all behave; a stale entity_id forward-resolves on detail;
+unknown ids 404 and malformed ids 422.
+
+Appearances: written for people only, never for other entity types or
+for a person with no origin; one row per meeting no matter how many
+times the name appears; an alias-resolved mention lands on the
+canonical; **and a merge folds them forward with same-meeting overlap
+collapsing rather than double-counting** (that last one was a real bug
+this pass caught, see 6.2).
+
+Still outstanding from section 9: the prod smoke and the pass through
+GP's proxied path.
 
 ## 10. Status
 
 Written from the SS design project
 `e9e9f9be-a105-4b29-8b48-2f2bd3efb760` (`ShoulderSurf People.dc.html`)
-before any SS code existed. Not reviewed by SS or GP, not locked. The
-identity write-back half shipped 2026-07-31 (see the status note at the
-top); it is additive and touches no existing route, so it is safe ahead
-of the lock, but the read surface and `owed_to` should wait for SS and
-GP to answer section 8.
+before any SS code existed. Not reviewed by SS or GP, not locked.
+
+Section 5 and `person_appearances` shipped 2026-07-31. All of it is
+additive: new routes, new tables, one new column set on `entities`. No
+existing route, response shape or recall output changed, which is why it
+was safe to land ahead of the lock. `owed_to` (4.2) is the piece that
+touches the manifest and the extraction prompt, so it waits for SS and
+GP.
+
+Before SS builds against this: the shapes are as-built but unreviewed,
+so treat them as a proposal SS can still push back on. The cheap changes
+to make now are field names and nesting. The expensive one later is
+`entity_id` as the key, since that is the whole anti-split-brain
+premise.

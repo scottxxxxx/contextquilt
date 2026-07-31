@@ -1018,6 +1018,41 @@ async def store_entities(
 
         metadata_json = json.dumps(metadata or {})
 
+        async def _record_appearance(entity_id) -> None:
+            """Log that this person showed up in this meeting.
+
+            People only, and only when the ingest carried an origin: a
+            person named in a chat turn with no meeting behind it has no
+            appearance to record. One row per (person, origin), so five
+            mentions in one meeting stay one meeting.
+
+            Degrades silently if the table is absent — the MCP
+            deployment's Postgres lags migrations, and entity storage must
+            not start failing there because People shipped here.
+            """
+            if entity_type != "person":
+                return
+            meta = metadata or {}
+            origin_id = meta.get("origin_id")
+            if not origin_id:
+                return
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO person_appearances
+                        (user_id, entity_id, origin_id, origin_type, project_id)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
+                        last_seen_at = NOW(),
+                        project_id = COALESCE(EXCLUDED.project_id, person_appearances.project_id)
+                    """,
+                    user_id, entity_id, str(origin_id),
+                    meta.get("origin_type") or "meeting",
+                    meta.get("project_id"),
+                )
+            except Exception as e:
+                logger.debug("person_appearance_skipped", error=str(e)[:120])
+
         async def _reobserve(entity_id) -> None:
             await db.execute(
                 """
@@ -1030,6 +1065,7 @@ async def store_entities(
                 """,
                 description, metadata_json, entity_id,
             )
+            await _record_appearance(entity_id)
 
         # 1. Exact match, case-insensitive (the old ON CONFLICT only
         #    caught exact case, so "sarah abrams" vs "Sarah Abrams"
@@ -1126,7 +1162,9 @@ async def store_entities(
             logger.debug("entity_alias_resolution_skipped", error=str(e)[:120])
 
         # 4. New entity. ON CONFLICT retained as a race-safety net.
-        await db.execute(
+        #    RETURNING on both arms so the appearance can be recorded
+        #    against whichever row won.
+        new_entity_id = await db.fetchval(
             """
             INSERT INTO entities (user_id, name, entity_type, description, metadata)
             VALUES ($1, $2, $3, $4, $5)
@@ -1135,10 +1173,13 @@ async def store_entities(
                 last_seen_at = NOW(),
                 mention_count = entities.mention_count + 1,
                 metadata = entities.metadata || EXCLUDED.metadata
+            RETURNING entity_id
             """,
             user_id, name, entity_type, description,
             metadata_json,
         )
+        if new_entity_id is not None:
+            await _record_appearance(new_entity_id)
         stored += 1
 
     # Update Redis entity name index for this user

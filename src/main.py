@@ -16,7 +16,7 @@ import redis.asyncio as redis
 import json
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import sys
 
 import structlog
@@ -53,7 +53,10 @@ from contextquilt.services.recall_formatter import (
 from contextquilt.services.people_identity import (
     IdentityRequestError,
     canonical_pair,
+    capability_report,
+    merge_project_rollups,
     normalise_merge_request,
+    owner_keys,
     resolve_identity_source,
     separation_conflicts,
     validate_person_name,
@@ -3109,6 +3112,341 @@ async def _read_separations(conn, user_id: str, entity_ids: List[str]) -> List[t
     return [(str(r["entity_id_lo"]), str(r["entity_id_hi"])) for r in rows]
 
 
+async def _people_core(conn, user_id: str, entity_ids: Optional[List[str]] = None) -> dict:
+    """Everything the list and the detail both need, in set-based queries.
+
+    Deliberately not N+1: at 155 people a per-person round trip would be
+    155 round trips. Each leg fetches for the whole population and the
+    rows are stitched in Python.
+    """
+    subject_key = f"user:{user_id}"
+    scope = " AND e.entity_id = ANY($2::uuid[])" if entity_ids else ""
+    args = [user_id] + ([entity_ids] if entity_ids else [])
+
+    people = await conn.fetch(
+        f"""
+        SELECT e.entity_id, e.name, e.description, e.mention_count,
+               e.first_seen_at, e.last_seen_at,
+               e.confirmed_at, e.confirmation_source
+        FROM entities e
+        WHERE e.user_id = $1 AND e.entity_type = 'person'
+          AND e.merged_into IS NULL{scope}
+        ORDER BY e.last_seen_at DESC NULLS LAST, e.entity_id
+        """,
+        *args,
+    )
+    ids = [r["entity_id"] for r in people]
+    if not ids:
+        return {"people": [], "by_id": {}}
+
+    alias_rows = await conn.fetch(
+        "SELECT entity_id, alias, source FROM entity_aliases "
+        "WHERE user_id = $1 AND entity_id = ANY($2::uuid[]) ORDER BY alias",
+        user_id, ids,
+    )
+    appearance_rows = await conn.fetch(
+        """
+        SELECT pa.entity_id, pa.origin_id, pa.origin_type, pa.project_id,
+               pa.last_seen_at, pr.name AS project
+        FROM person_appearances pa
+        LEFT JOIN projects pr ON pr.project_id = pa.project_id
+        WHERE pa.user_id = $1 AND pa.entity_id = ANY($2::uuid[])
+        ORDER BY pa.last_seen_at DESC
+        """,
+        user_id, ids,
+    )
+    # Person patches are matched to entities by name, the same way the
+    # rest of CQ does: there is no entity_id on context_patches.
+    patch_rows = await conn.fetch(
+        """
+        SELECT cp.patch_id, LOWER(cp.value->>'text') AS text_key
+        FROM context_patches cp
+        JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+        WHERE ps.subject_key = $1 AND cp.patch_type = 'person'
+          AND COALESCE(cp.status, 'active') = 'active'
+        """,
+        subject_key,
+    )
+    patch_by_name = {r["text_key"]: str(r["patch_id"]) for r in patch_rows if r["text_key"]}
+
+    # Open completables, with whichever ownership signal they carry: a
+    # free-text value.owner the extractor copied out of the transcript,
+    # or an explicit `owns` edge from a person patch.
+    open_items = await conn.fetch(
+        """
+        SELECT cp.patch_id, cp.patch_type, cp.value->>'text' AS text,
+               cp.value->>'owner' AS owner,
+               cp.value->>'deadline' AS deadline,
+               cp.value->>'deadline_date' AS deadline_date,
+               cp.value->>'overdue_since' AS overdue_since,
+               cp.project_id, cp.project, cp.origin_id,
+               (SELECT pc.from_patch_id FROM patch_connections pc
+                 WHERE pc.to_patch_id = cp.patch_id
+                   AND pc.connection_label = 'owns' LIMIT 1) AS owner_patch_id
+        FROM context_patches cp
+        JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+        WHERE ps.subject_key = $1
+          AND cp.patch_type = ANY($2::text[])
+          AND COALESCE(cp.status, 'active') = 'active'
+        ORDER BY cp.value->>'deadline_date' NULLS LAST, cp.patch_id
+        """,
+        subject_key, list(COMPLETABLE_PATCH_TYPES),
+    )
+    stated_rows = await conn.fetch(
+        """
+        SELECT src.patch_id AS person_patch_id,
+               tgt.project_id, tgt.value->>'text' AS project
+        FROM patch_connections pc
+        JOIN context_patches src ON src.patch_id = pc.from_patch_id
+        JOIN context_patches tgt ON tgt.patch_id = pc.to_patch_id
+        JOIN patch_subjects ps ON ps.patch_id = src.patch_id
+        WHERE ps.subject_key = $1 AND pc.connection_label = 'works_on'
+          AND COALESCE(src.status, 'active') = 'active'
+          AND COALESCE(tgt.status, 'active') = 'active'
+        """,
+        subject_key,
+    )
+
+    aliases_by_id: dict = {}
+    alias_sources: dict = {}
+    for r in alias_rows:
+        aliases_by_id.setdefault(str(r["entity_id"]), []).append(r["alias"])
+        src = alias_sources.setdefault(str(r["entity_id"]), {})
+        src[r["source"]] = src.get(r["source"], 0) + 1
+
+    appearances_by_id: dict = {}
+    for r in appearance_rows:
+        appearances_by_id.setdefault(str(r["entity_id"]), []).append(r)
+
+    assembled = []
+    by_id = {}
+    for p in people:
+        eid = str(p["entity_id"])
+        aliases = aliases_by_id.get(eid, [])
+        keys = owner_keys(p["name"], aliases)
+        patch_id = next(
+            (patch_by_name[k] for k in ([p["name"].lower()] + [a.lower() for a in aliases])
+             if k in patch_by_name),
+            None,
+        )
+
+        appearances = appearances_by_id.get(eid, [])
+        project_counts: dict = {}
+        for a in appearances:
+            if a["project_id"] or a["project"]:
+                k = (a["project_id"], a["project"])
+                project_counts[k] = project_counts.get(k, 0) + 1
+        observed = [
+            {"project_id": pid, "project": pname, "meeting_count": n}
+            for (pid, pname), n in project_counts.items()
+        ]
+        stated = [
+            {"project_id": r["project_id"], "project": r["project"]}
+            for r in stated_rows
+            if patch_id and str(r["person_patch_id"]) == patch_id
+        ]
+        projects = merge_project_rollups(observed, stated)
+
+        they_owe = [
+            r for r in open_items
+            if (r["owner"] or "").strip().lower() in keys
+            or (patch_id and r["owner_patch_id"] and str(r["owner_patch_id"]) == patch_id)
+        ]
+
+        row = {
+            "entity_id": eid,
+            "name": p["name"],
+            "aliases": aliases,
+            "patch_id": patch_id,
+            "description": p["description"] or None,
+            "confirmed": p["confirmed_at"] is not None,
+            "confirmation_source": p["confirmation_source"],
+            "first_seen_at": p["first_seen_at"].isoformat() if p["first_seen_at"] else None,
+            "last_seen_at": p["last_seen_at"].isoformat() if p["last_seen_at"] else None,
+            "meeting_count": len(appearances),
+            "project_count": len(projects),
+            "open_they_owe": len(they_owe),
+            # null, never 0 — see READ_CAPABILITIES.you_owe.
+            "open_you_owe": None,
+            "_appearances": appearances,
+            "_projects": projects,
+            "_they_owe": they_owe,
+            "_mention_count": p["mention_count"] or 0,
+            "_alias_sources": alias_sources.get(eid, {}),
+            # Newest of the two things that change a person row: another
+            # mention (last_seen_at) or a human vouching (confirmed_at).
+            # Drives the `since` delta.
+            "_changed_at": max(
+                [t for t in (p["last_seen_at"], p["confirmed_at"]) if t is not None],
+                default=None,
+            ),
+        }
+        assembled.append(row)
+        by_id[eid] = row
+
+    return {"people": assembled, "by_id": by_id}
+
+
+def _public_person(row: dict) -> dict:
+    return {k: v for k, v in row.items() if not k.startswith("_")}
+
+
+@app.get("/v1/people/{user_id}", tags=["People"])
+async def list_people(
+    user_id: str,
+    since: Optional[str] = Query(None, description="ISO 8601 — only people changed after this time, plus a `deleted` array of entity_ids folded away by a merge since then"),
+    confirmed: str = Query("all", description="Filter on confirmation state: true, false, or all"),
+    limit: Optional[int] = Query(None, ge=1, le=1000, description="Cap the people array (applied after ordering)"),
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    The People list: every person CQ knows about this user, newest activity
+    first.
+
+    Includes people CQ only inferred from a transcript and nobody has
+    vouched for. Those come back with `confirmed: false` and often a null
+    `patch_id` (an entity with no person patch behind it yet). They are
+    NOT filtered out: the design renders them explicitly as unconfirmed,
+    and hiding them would mean the app can never offer the confirmation.
+
+    `open_you_owe` is always null. See the `capabilities` block: CQ has no
+    counterparty on a commitment yet, and answering 0 would read as "you
+    owe this person nothing".
+    """
+    server_time = datetime.utcnow()
+    since_dt = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            # Postgres hands back tz-aware timestamps; a caller echoing our
+            # naive `server_time` back would blow up the comparison.
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
+    async with db_pool.acquire() as conn:
+        core = await _people_core(conn, user_id)
+        rows = core["people"]
+
+        if confirmed in ("true", "false"):
+            want = confirmed == "true"
+            rows = [r for r in rows if r["confirmed"] is want]
+
+        deleted: List[str] = []
+        if since_dt:
+            merged = await conn.fetch(
+                """
+                SELECT entity_id, merged_into FROM entities
+                WHERE user_id = $1 AND entity_type = 'person'
+                  AND merged_into IS NOT NULL AND merged_at > $2
+                """,
+                user_id, since_dt,
+            )
+            # A merge removes a person from the list, so clients holding
+            # the folded id need a tombstone the same way patch deletes do.
+            deleted = [str(r["entity_id"]) for r in merged]
+            rows = [
+                r for r in rows
+                if r["_changed_at"] is not None and r["_changed_at"] > since_dt
+            ]
+
+    total = len(rows)
+    if limit:
+        rows = rows[:limit]
+
+    return {
+        "people": [_public_person(r) for r in rows],
+        "total": total,
+        "deleted": deleted,
+        "capabilities": capability_report(),
+        "server_time": server_time.isoformat(),
+    }
+
+
+@app.get("/v1/people/{user_id}/{entity_id}", tags=["People"])
+async def get_person(
+    user_id: str,
+    entity_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    One person, with the meetings, projects and open items behind the
+    counts on the list row.
+
+    Resolves a folded entity_id forward, so a client that cached an id
+    before a merge still lands on the right person.
+
+    CQ deliberately returns no meeting titles or durations, only
+    `origin_id`. Per the context-flow contract (doc 15 item 5) CQ wins on
+    state and the app wins on content: ShoulderSurf joins origin_id to its
+    own records for "Atlas cutover checkpoint, Jul 28, 47m".
+    """
+    async with db_pool.acquire() as conn:
+        try:
+            resolved = await _load_active_person(conn, user_id, entity_id)
+        except IdentityRequestError as e:
+            raise _identity_error(e)
+        if resolved is None:
+            raise HTTPException(
+                status_code=404, detail=f"Person {entity_id} not found for this user"
+            )
+        eid = str(resolved["entity_id"])
+        core = await _people_core(conn, user_id, [eid])
+
+    row = core["by_id"].get(eid)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Person {eid} not found for this user")
+
+    def _item(r):
+        return {
+            "patch_id": str(r["patch_id"]),
+            "type": r["patch_type"],
+            "text": r["text"],
+            "deadline": r["deadline"],
+            "deadline_date": r["deadline_date"],
+            "overdue_since": r["overdue_since"],
+            "project_id": r["project_id"],
+            "project": r["project"],
+            "origin_id": r["origin_id"],
+        }
+
+    detail = _public_person(row)
+    detail.update({
+        "projects": row["_projects"],
+        "commitments": {
+            "they_owe": [_item(r) for r in row["_they_owe"]],
+            # Not an empty list: an empty list means "none open", and CQ
+            # cannot tell the difference yet. See capabilities.you_owe.
+            "you_owe": None,
+        },
+        "meetings": [
+            {
+                "origin_id": a["origin_id"],
+                "origin_type": a["origin_type"],
+                "project_id": a["project_id"],
+                "last_seen_at": a["last_seen_at"].isoformat() if a["last_seen_at"] else None,
+            }
+            for a in row["_appearances"]
+        ],
+        "provenance": {
+            "name_mentions": row["_mention_count"],
+            "meetings_observed": row["meeting_count"],
+            "confirmed": row["confirmed"],
+            "confirmation_source": row["confirmation_source"],
+            # How each surface form was resolved: 'heuristic' is CQ
+            # guessing, 'user_confirmation' is the human saying so. The
+            # design shows these differently and should keep being able to.
+            "alias_sources": row["_alias_sources"],
+            # Null, not 0. See capabilities.confirmed_mention_split.
+            "confirmed_mentions": None,
+            "assumed_mentions": None,
+        },
+        "capabilities": capability_report(),
+    })
+    return detail
+
+
 @app.post("/v1/people/{user_id}/merge", tags=["People"])
 async def merge_people(
     user_id: str,
@@ -3254,6 +3592,40 @@ async def merge_people(
                     "DELETE FROM relationships WHERE user_id = $1 "
                     "AND from_entity_id = $2::uuid AND to_entity_id = $2::uuid",
                     user_id, canonical_uuid,
+                )
+
+                # 4b. Meeting history follows the person. Without this a
+                #     merge silently costs the canonical every meeting the
+                #     folded identity was seen in, which is the opposite of
+                #     what "these are the same human" means. Two identities
+                #     seen in the SAME meeting collapse to one appearance,
+                #     because that is still one meeting.
+                #
+                #     Unguarded on purpose: if person_appearances is
+                #     missing, a 500 is the right answer. Swallowing it
+                #     would mangle history quietly.
+                await conn.execute(
+                    """
+                    INSERT INTO person_appearances
+                        (user_id, entity_id, origin_id, origin_type,
+                         project_id, first_seen_at, last_seen_at)
+                    SELECT user_id, $1::uuid, origin_id, origin_type,
+                           project_id, first_seen_at, last_seen_at
+                    FROM person_appearances
+                    WHERE user_id = $2 AND entity_id = $3::uuid
+                    ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
+                        first_seen_at = LEAST(person_appearances.first_seen_at,
+                                              EXCLUDED.first_seen_at),
+                        last_seen_at  = GREATEST(person_appearances.last_seen_at,
+                                                 EXCLUDED.last_seen_at),
+                        project_id    = COALESCE(person_appearances.project_id,
+                                                 EXCLUDED.project_id)
+                    """,
+                    canonical_uuid, user_id, loser_uuid,
+                )
+                await conn.execute(
+                    "DELETE FROM person_appearances WHERE user_id = $1 AND entity_id = $2::uuid",
+                    user_id, loser_uuid,
                 )
 
                 # 5. Separations the loser was party to survive against the
