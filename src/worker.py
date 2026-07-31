@@ -33,6 +33,7 @@ from contextquilt.services.extraction_prompts import (
     TRACE_SYSTEM,
     format_open_commitments_block,
 )
+from contextquilt.services.deadline_resolver import run_deadline_micropass
 from contextquilt.services.extraction_schema import (
     extraction_patch_backstop,
     EXTRACTION_SCHEMA,
@@ -3117,6 +3118,18 @@ class ColdPathWorker:
             sanitize_salience(response.content)
             sanitize_deadline_dates(response.content, meeting_date=meeting_date)
             strip_ephemeral_fields(response.content)
+
+            # Deadline micro-pass: one small focused call that ONLY
+            # resolves spoken deadlines against a rendered calendar
+            # table. The main call resolves weekday-relative dates off
+            # by one (measured 2026-07-30; the weekday hint on the
+            # Meeting date line did not fix it). Runs after the
+            # sanitizers so its output passes the same plausibility
+            # gate; failure leaves the main call's dates untouched.
+            if get_settings().cq_deadline_micropass_enabled:
+                await run_deadline_micropass(
+                    llm, response.content.get("patches") or [], meeting_date
+                )
 
             timestamp = payload.get("timestamp")
             project = metadata.get("project") if metadata else None
