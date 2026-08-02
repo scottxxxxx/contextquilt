@@ -99,7 +99,7 @@ _MANIFEST = {
 
 
 def test_salience_section_present_by_default():
-    assert "=== SALIENCE — how strongly to remember ===" in build_prompt(_MANIFEST)
+    assert "=== SALIENCE: how strongly to remember ===" in build_prompt(_MANIFEST)
 
 
 def test_salience_disabled_and_overridden_via_guidance():
