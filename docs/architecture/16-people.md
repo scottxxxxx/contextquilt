@@ -1,16 +1,39 @@
-# 16: People (DRAFT, not locked)
+# 16: People
 
-> **Status, 2026-07-31.** All of section 5 has shipped, plus
-> `person_appearances`: the read surface (5.1, 5.2), the identity
-> write-back (5.3 merge, 5.4 keep separate, 5.5 create, 5.6 confirm), and
-> migrations 29 and 30. Sections 4.1, 4.3, 4.5 and 5 are now descriptions
-> of live behavior.
+> ## Status, 2026-08-02, after SS review round 1
+>
+> **SS has acked the section 1 premise.** An SS Person is a projection
+> keyed on CQ's `entity_id`; SS may cache but is never the source of
+> truth for who someone is. That was the whole anti-split-brain bet and
+> it is now agreed rather than proposed.
+>
+> **All six open questions in section 8 are closed.** The two SS asked CQ
+> to land on: the merge nudge is **SS proposes, CQ records** (Q2), and
+> the ledger collision is answered in the new **8d**.
+>
+> **Live on prod:** all of section 5 plus `person_appearances`, on
+> migrations 29 and 30. Sections 4.1, 4.3, 4.5 and 5 describe live
+> behavior. Verified 2026-08-02: 272 people returned, capabilities block
+> correct, `/v1/quilt` unaffected.
+>
+> **Specified but deliberately NOT shipped**, pending SS ack of the exact
+> shapes: the three API deltas in **8b**, and the person-patch fold in
+> **6.5**. See the process note at the end of section 10 for why these
+> are being held.
 >
 > **Still proposal only: `owed_to` (4.2).** Commitments have no
 > counterparty, so `you_owe` is structurally unanswerable and every read
 > returns it as `null` with a stated reason in a `capabilities` block,
-> never `0`. Open question 1 is therefore answered in code but the label
-> itself still needs SS and GP. The rest of section 8 is still open.
+> never `0`. Needs SS and GP before it lands.
+>
+> **Hard gate before either side calls this integrated:** the GP
+> proxied-path pass (Q4, section 9 item 3), testing `since` specifically.
+>
+> ### Where to look first
+>
+> If you only read four things: **1** (the entity_id rule), **6.4** (why
+> `you_owe` is null and not zero), **8b** (the three deltas awaiting your
+> ack), and **8d** (the ledger collision).
 
 ShoulderSurf is adding **People** as a fourth object type in Review,
 next to Meetings, Projects and Memory. A person becomes its own entity
@@ -425,16 +448,38 @@ distinguishes them.
 
 Flip an entry to `available: true` in the same PR that makes it true.
 
-### 6.5 Known gap: person patches are not folded by a merge
+### 6.5 SCHEDULED (was deferred): person patches are not folded by a merge
+
+> **Escalated 2026-08-02 by SS review.** This section shipped saying the
+> gap "stops being deferrable if the quilt view ever renders people
+> directly." SS reports that it already does: `person` is a first-class
+> rendered patch type in the Memory segment today, with its own icon and
+> display name, and nothing filters it out.
+>
+> Verified against the code rather than taken on trust: `VALID_PATCH_TYPES`
+> includes `person`, `GET /v1/quilt` applies no type exclusion, and merge
+> touches `entities` only and never `context_patches`. So the sequence is
+> real today: a user merges two Sarahs in People, switches one segment
+> over to Memory, and sees two Sarah patches. **The condition was written
+> in future tense and is present tense.** Moved from deferred to
+> scheduled. SS confirms it does not block their first cut.
+>
+> Planned fix, mirroring what merge already does one layer down: pick a
+> surviving person patch, repoint its inbound and outbound connections
+> (`works_on`, `member_of`, `reports_to`, `describes`, `held_by`) onto the
+> survivor the same way relationships repoint, then archive the losers so
+> they ride the existing delta-sync `deleted` array. No new machinery, and
+> archival rather than deletion for the usual tombstone reason.
 
 A merge collapses the *entity* layer. It does not touch the duplicate
-`person` patches the two surface forms may have produced. That is
-deliberate for now: patch dedup is the worker's job (trigram plus the
-semantic judge) and reaching into patches from an identity endpoint
+`person` patches the two surface forms may have produced. That was
+deliberate at ship time: patch dedup is the worker's job (trigram plus
+the semantic judge) and reaching into patches from an identity endpoint
 means ACLs, delta sync and connections all move at once.
 
-It is deferrable because the People list is keyed on entities (5.1), so
-the duplicate patch never surfaces as a second person in the UI. It
+It was thought deferrable because the People list is keyed on entities
+(5.1), so the duplicate patch never surfaces as a second person in the
+People UI. It
 stops being deferrable if the quilt view ever renders people directly.
 
 ---
@@ -463,34 +508,119 @@ splits this. Unchanged.
 
 ---
 
-## 8. Open questions for SS and GP
+## 8. Open questions for SS and GP (ALL CLOSED, SS round 1, 2026-08-02)
 
-1. ~~**Empty `you_owe` before v9.**~~ **Answered in code (6.4):** every
-   read carries a `capabilities` block, and `you_owe` comes back as
-   `null` with a stated reason rather than `0` or `[]`. SS should render
-   "not tracked yet". Still needs SS to confirm they will render it that
-   way rather than treating null as empty.
-2. **Does the merge nudge originate in CQ or SS?** The design shows SS
-   surfacing it. CQ's aliaser has the candidate pairs. Either CQ
-   exposes proposals as a read, or SS proposes from voice and CQ only
-   records the answer. This changes who owns the false-positive rate.
-3. **Unconfirmed people in the count.** Does "155 people" include
-   entities CQ inferred from transcripts but nobody confirmed? The
-   sidebar shows Tom Bakker as unconfirmed inline, which suggests yes,
-   but it changes the number a lot.
-4. **GP passthrough.** These are new routes, not new metadata keys. GP
-   needs explicit route allowlisting, and per the standing rule these
-   get verified through GP's proxied path, not just CQ's socket. GP has
-   eaten query params before.
-5. ~~**Delta sync shape.**~~ **Answered yes:** `since=` returns only
-   people whose `last_seen_at` or `confirmed_at` moved, plus a `deleted`
-   array of entity_ids folded away by a merge. Still needs SS to confirm
-   they will decode `deleted` (the 2026-07 `action_items` lesson: an
-   array nobody decodes is an array that does not exist).
-6. **Backfill scope.** `person_appearances` can be reconstructed for
-   history from the ingest stream, which preserves original payloads
-   verbatim. Worth doing at launch, or let it fill forward and accept
-   that older people show low meeting counts?
+SS acked section 1's `entity_id` projection rule: an SS Person is a
+projection keyed on CQ's `entity_id`, SS may cache but is never the
+source of truth for who someone is. That was the whole premise and it is
+now agreed rather than proposed.
+
+1. ~~**Empty `you_owe` before v9.**~~ **CLOSED.** SS will render
+   `you_owe: null` as "not tracked yet", not as empty. The
+   `capabilities` block stands (6.4).
+2. ~~**Who originates the merge nudge?**~~ **CLOSED: SS proposes, CQ
+   records.** SS owns the false-positive rate explicitly. Their signal is
+   voice enrollment, which is acoustic and high precision; CQ's aliaser
+   candidate pairs would raise volume and lower precision, turning a
+   light "is this the same person?" nudge into the merge manager the
+   design deliberately avoids. **CQ will not expose candidate pairs as a
+   read.** If it ever does it is additive, lower priority, and SS looks at
+   it then. CQ records both answers, which is already built (5.3, 5.4).
+3. ~~**Unconfirmed people in the count.**~~ **CLOSED: yes in the data,
+   no in the UI.** SS defaults the list to confirmed plus a floor on
+   appearances and puts unconfirmed behind `confirmed=`. Consequence SS
+   raised: when filtering, `total` comes back filtered, so "40 confirmed
+   of 155 known" needs a second call. **Action: add an unfiltered count
+   alongside the filtered one** (see 8b).
+4. ~~**GP passthrough.**~~ **CLOSED as a HARD GATE**, stronger than
+   originally written. These routes carry meaningful query params
+   (`since`, `limit`, `confirmed`) and GP has silently eaten params
+   before. Neither side calls this integrated until the proxied-path pass
+   runs, and **the `since` path is tested specifically**: a dropped
+   `since` degrades quietly into a full sync instead of erroring, which
+   is the worst failure shape available. **Action: echo the effective
+   query back** so the degradation is detectable rather than silent
+   (see 8b).
+5. ~~**Delta sync shape.**~~ **CLOSED.** SS will decode `deleted` as
+   tombstones.
+6. ~~**Backfill scope.**~~ **CLOSED: do it at launch, not close.** If
+   `person_appearances` only fills forward then on day one every person
+   the user has ever met shows a low or zero meeting count, and the
+   feature reads as knowing nothing. See 8c for the plan, which corrects
+   one assumption in the original question.
+
+### 8b. API deltas agreed in this round (NOT yet shipped)
+
+Held pending SS ack of the exact shapes, per the process note in 10.
+
+**Ledger items gain `owner`.** `_item()` currently returns `patch_id`,
+`type`, `text`, `deadline`, `deadline_date`, `overdue_since`,
+`project_id`, `project`, `origin_id`, and no `owner`. That is an
+omission, not a decision: without it SS cannot diff CQ's attribution
+against its own action-item owner strings, which is precisely the
+reconciliation 8d asks for.
+
+**List gains an unfiltered count.** `total` stays filtered (it is what
+paginates); `total_unfiltered` is the full active-person count, so
+"40 confirmed of 272 known" costs one call. A `min_meetings=` filter is
+available if SS wants the appearance floor server-side rather than
+client-side; not built on spec.
+
+**Reads echo the effective query.** A `query` object reflecting the
+`since`, `confirmed` and `limit` CQ actually received. A GP middlebox
+that drops `since` then produces a response whose `query.since` is null
+against a request that set it, which turns a silent full-sync
+degradation into a one-line assertion in the three-way test.
+
+### 8c. Backfill plan, and a correction to Q6's premise
+
+Q6 said appearances are reconstructible "from the ingest stream, which
+preserves original payloads verbatim." That is true but **not sufficient
+on its own**: `memory_updates` is a Redis Stream with no MAXLEN trim
+policy settled (a known deferred item), currently 888 entries against
+220 distinct meetings in the patch table. Stream-only backfill cannot be
+proven complete.
+
+Two tiers instead:
+
+1. **Postgres-derived (complete, no retention risk).** Every patch
+   carries `origin_id`, and 809 of them carry a `value.owner`. Joining
+   owner strings and recorded aliases to person entities reconstructs
+   appearances for all 220 meetings deterministically, no LLM call. High
+   precision, and complete over all history.
+2. **Stream-derived (fills the tail).** A person mentioned in a meeting
+   who owned nothing produces no owner-bearing patch and is missed by
+   tier 1. Scanning retained transcripts with the same entity-plus-alias
+   matching recall already uses recovers those, bounded by whatever the
+   stream still holds.
+
+Dry-run default with `--apply`, reusing live matching logic, same shape
+as the other `scripts/backfill_*.py`.
+
+### 8d. Ledger collision: CQ commitments vs SS action items
+
+Raised by SS and not previously addressed. SS builds its own action-item
+ledger from meeting reports with its own owner strings. Who wins when
+they disagree?
+
+**The 5.2 projects treatment does not transfer, and it is worth saying
+why.** `observed` and `stated` work there because CQ holds *both*
+signals: appearances and `works_on` edges are both in CQ, so CQ can
+return them side by side and let the client decide. For the ledger CQ
+holds only one side. It cannot mark "SS also says this" about data it
+has never seen, so mechanically copying the pattern would produce a flag
+CQ cannot populate, which is the same failure 6.2 rejected.
+
+**Doc 15 item 5 already governs and is not being reopened:** CQ wins on
+state, SS wins on content. Applied here, CQ is authoritative for whether
+an item is open, closed, overdue, and for the cross-meeting rollup; SS
+is authoritative for the wording and for the per-meeting list.
+
+**Reconciliation belongs on the SS side because only SS holds both
+halves.** Every ledger item already returns `origin_id` and `patch_id`,
+and with `owner` added (8b) SS can join `origin_id` to its own meeting,
+diff CQ's owner attribution against its own, and decide what to render.
+CQ's job is to give SS enough to do that, not to guess.
 
 ---
 
@@ -588,8 +718,28 @@ was safe to land ahead of the lock. `owed_to` (4.2) is the piece that
 touches the manifest and the extraction prompt, so it waits for SS and
 GP.
 
-Before SS builds against this: the shapes are as-built but unreviewed,
-so treat them as a proposal SS can still push back on. The cheap changes
-to make now are field names and nesting. The expensive one later is
-`entity_id` as the key, since that is the whole anti-split-brain
-premise.
+### Process, and a correction owed to SS
+
+Section 1 says shared surfaces lock with SS and GP before code lands on
+either side. Section 5 and migrations 29 and 30 shipped on 07-31 against
+that sentence, before SS had reviewed anything, while SS held and wrote
+no People code at all, including the token layer that has no CQ
+dependency.
+
+Section 10 originally justified this as additive and shape-preserving.
+That is a reason it did no harm, not a reason it was in bounds, and SS
+correctly pointed out that this doc's own claim that field names and
+nesting are "cheap to change now" gets less true the longer something
+sits deployed. Nothing is being reverted, but the rule for the next
+shared surface is **both hold or both move**, and CQ is the side that
+broke it this time.
+
+Applied immediately: the 8b deltas and the 6.5 fold are specified here
+and **not shipped**, pending SS ack of the shapes.
+
+**Still open, tracked here so it is not lost:** SS notes their rendered
+meeting count may be lower than CQ's `meeting_count`, because SS will
+only show a count it can back with a tappable row and it holds meetings
+CQ never ingested (pre-upgrade, imported recordings) and possibly the
+reverse. Expected, not a defect on either side. `meeting_count` means
+"meetings CQ knows this person appeared in", nothing more.
