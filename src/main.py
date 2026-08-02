@@ -3296,7 +3296,8 @@ async def list_people(
     user_id: str,
     since: Optional[str] = Query(None, description="ISO 8601 — only people changed after this time, plus a `deleted` array of entity_ids folded away by a merge since then"),
     confirmed: str = Query("all", description="Filter on confirmation state: true, false, or all"),
-    limit: Optional[int] = Query(None, ge=1, le=1000, description="Cap the people array (applied after ordering)"),
+    min_meetings: Optional[int] = Query(None, ge=0, description="Only people seen in at least this many meetings. Applied BEFORE limit, and `total` reflects it."),
+    limit: Optional[int] = Query(None, ge=1, le=1000, description="Cap the people array (applied last, after every filter)"),
     app_id: str = Depends(verify_application_access),
 ):
     """
@@ -3306,14 +3307,41 @@ async def list_people(
     Includes people CQ only inferred from a transcript and nobody has
     vouched for. Those come back with `confirmed: false` and often a null
     `patch_id` (an entity with no person patch behind it yet). They are
-    NOT filtered out: the design renders them explicitly as unconfirmed,
-    and hiding them would mean the app can never offer the confirmation.
+    NOT filtered out by default: the design renders them explicitly as
+    unconfirmed, and hiding them would mean the app can never offer the
+    confirmation. Use `confirmed=` and `min_meetings=` to shape the list.
+
+    **Every filter runs before `limit`, and `total` reflects the filters.**
+    A floor applied after pagination is not a filter, it is a truncation:
+    the caller gets an arbitrary subset with no way to know whether the
+    next page holds more that would have passed.
+
+    Three counts, three meanings:
+      * `len(people)`      what came back, after `limit`
+      * `total`            how many matched the filters, before `limit`
+      * `total_unfiltered` every active person, ignoring all filters
+
+    `total_unfiltered` counts ACTIVE entities only and excludes anything
+    folded away by a merge, so tidying up a roster makes the number go
+    down rather than quietly inflating it.
 
     `open_you_owe` is always null. See the `capabilities` block: CQ has no
     counterparty on a commitment yet, and answering 0 would read as "you
     owe this person nothing".
+
+    **The `query` block echoes what CQ RECEIVED, not what it applied.**
+    See the response contract in doc 16 section 8b: raw received values,
+    plus an `ignored` array naming anything CQ could not use. That split
+    is deliberate. A middlebox that strips or mangles a parameter is the
+    thing this exists to catch, so the echo has to show the wire, and the
+    `ignored` array separately shows CQ's behavior. `confirmed=maybe`
+    therefore echoes `"maybe"` and lists `confirmed` in `ignored`.
     """
     server_time = datetime.utcnow()
+    # Received values, echoed verbatim. Anything CQ cannot act on is named
+    # in `ignored` rather than silently rewritten here.
+    ignored: List[str] = []
+
     since_dt = None
     if since:
         try:
@@ -3323,15 +3351,25 @@ async def list_people(
             if since_dt.tzinfo is None:
                 since_dt = since_dt.replace(tzinfo=timezone.utc)
         except ValueError:
-            pass
+            # Lenient on purpose (rejecting would be a breaking change for
+            # existing callers), but no longer silent: an unparseable
+            # `since` degrades to a full sync, and this is what says so.
+            ignored.append("since")
+
+    if confirmed not in ("true", "false", "all"):
+        ignored.append("confirmed")
 
     async with db_pool.acquire() as conn:
         core = await _people_core(conn, user_id)
         rows = core["people"]
+        total_unfiltered = len(rows)
 
         if confirmed in ("true", "false"):
             want = confirmed == "true"
             rows = [r for r in rows if r["confirmed"] is want]
+
+        if min_meetings:
+            rows = [r for r in rows if r["meeting_count"] >= min_meetings]
 
         deleted: List[str] = []
         if since_dt:
@@ -3351,6 +3389,8 @@ async def list_people(
                 if r["_changed_at"] is not None and r["_changed_at"] > since_dt
             ]
 
+    # `total` is taken after every filter and before `limit`, so a caller
+    # can always tell "showing 50 of 137 matching, 272 known".
     total = len(rows)
     if limit:
         rows = rows[:limit]
@@ -3358,8 +3398,16 @@ async def list_people(
     return {
         "people": [_public_person(r) for r in rows],
         "total": total,
+        "total_unfiltered": total_unfiltered,
         "deleted": deleted,
         "capabilities": capability_report(),
+        "query": {
+            "since": since,
+            "confirmed": confirmed,
+            "min_meetings": min_meetings,
+            "limit": limit,
+            "ignored": ignored,
+        },
         "server_time": server_time.isoformat(),
     }
 
@@ -3399,10 +3447,24 @@ async def get_person(
         raise HTTPException(status_code=404, detail=f"Person {eid} not found for this user")
 
     def _item(r):
+        """One open ledger item.
+
+        `owner` is the RAW extracted surface form, exactly as it sits in
+        `value.owner`. **Normalizing it to the canonical entity name is a
+        regression, not a tidy-up.** This is one of the few places where
+        the raw string is the payload and the resolved identity is the
+        redundant part: the caller already knows the canonical identity,
+        because it is the person whose endpoint they called. What they
+        cannot get anywhere else is the string the extractor actually
+        wrote, which is the only thing that will line up against the owner
+        strings in the app's own action-item ledger (doc 16 section 8d).
+        Resolve it here and the field looks helpful while doing nothing.
+        """
         return {
             "patch_id": str(r["patch_id"]),
             "type": r["patch_type"],
             "text": r["text"],
+            "owner": r["owner"],
             "deadline": r["deadline"],
             "deadline_date": r["deadline_date"],
             "overdue_since": r["overdue_since"],
