@@ -1,16 +1,39 @@
-# 16: People (DRAFT, not locked)
+# 16: People
 
-> **Status, 2026-07-31.** All of section 5 has shipped, plus
-> `person_appearances`: the read surface (5.1, 5.2), the identity
-> write-back (5.3 merge, 5.4 keep separate, 5.5 create, 5.6 confirm), and
-> migrations 29 and 30. Sections 4.1, 4.3, 4.5 and 5 are now descriptions
-> of live behavior.
+> ## Status, 2026-08-02, after SS review round 1
+>
+> **SS has acked the section 1 premise.** An SS Person is a projection
+> keyed on CQ's `entity_id`; SS may cache but is never the source of
+> truth for who someone is. That was the whole anti-split-brain bet and
+> it is now agreed rather than proposed.
+>
+> **All six open questions in section 8 are closed.** The two SS asked CQ
+> to land on: the merge nudge is **SS proposes, CQ records** (Q2), and
+> the ledger collision is answered in the new **8d**.
+>
+> **Live on prod:** all of section 5 plus `person_appearances`, on
+> migrations 29 and 30. Sections 4.1, 4.3, 4.5 and 5 describe live
+> behavior. Verified 2026-08-02: 272 people returned, capabilities block
+> correct, `/v1/quilt` unaffected.
+>
+> **Specified but deliberately NOT shipped**, pending SS ack of the exact
+> shapes: the three API deltas in **8b**, and the person-patch fold in
+> **6.5**. See the process note at the end of section 10 for why these
+> are being held.
 >
 > **Still proposal only: `owed_to` (4.2).** Commitments have no
 > counterparty, so `you_owe` is structurally unanswerable and every read
 > returns it as `null` with a stated reason in a `capabilities` block,
-> never `0`. Open question 1 is therefore answered in code but the label
-> itself still needs SS and GP. The rest of section 8 is still open.
+> never `0`. Needs SS and GP before it lands.
+>
+> **Hard gate before either side calls this integrated:** the GP
+> proxied-path pass (Q4, section 9 item 3), testing `since` specifically.
+>
+> ### Where to look first
+>
+> If you only read four things: **1** (the entity_id rule), **6.4** (why
+> `you_owe` is null and not zero), **8b** (the three deltas awaiting your
+> ack), and **8d** (the ledger collision).
 
 ShoulderSurf is adding **People** as a fourth object type in Review,
 next to Meetings, Projects and Memory. A person becomes its own entity
