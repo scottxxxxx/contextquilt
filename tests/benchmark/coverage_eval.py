@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extraction coverage eval — recall against known-answer fixtures.
+"""Extraction coverage eval: recall against known-answer fixtures.
 
 Measures what the extraction pipeline MISSES: each fixture pairs a
 transcript with an expected-memories list, and the eval scores recall
@@ -9,12 +9,12 @@ prompt self-limiting) that model choice does not fix.
 
 Match rule (deterministic, no LLM judge): an expected item matches an
 extracted patch when the type matches (`type` or one of `alt_types`),
-every keyword appears case-insensitively in value.text, and — when the
-expectation pins them — owner_contains appears in value.owner and
+every keyword appears case-insensitively in value.text, and (when the
+expectation pins them) owner_contains appears in value.owner and
 deadline_date equals value.deadline_date exactly. Each extracted patch
 satisfies at most one expectation (greedy, expectation order).
 
-Usage (needs an Anthropic key — env CQ_ANTHROPIC_API_KEY, or run inside
+Usage (needs an Anthropic key: env CQ_ANTHROPIC_API_KEY, or run inside
 the prod container where Secret Manager provides it):
 
     python tests/benchmark/coverage_eval.py                    # all fixtures
@@ -24,10 +24,46 @@ the prod container where Secret Manager provides it):
     python tests/benchmark/coverage_eval.py --cap 12           # simulate worker cap
 
 The default prompt is generated from the repo's SS manifest fixture
-(init-db/11_shouldersurf_schema.json) via schema_prompt_builder — the
+(init-db/11_shouldersurf_schema.json) via schema_prompt_builder, the
 same path prod uses, minus DB round-trip. Raw model output is scored
 first; --cap additionally scores the post-truncation list so the two
 loss lanes (model self-limiting vs worker cap) are visible separately.
+
+TEMPERATURE, AND WHY THIS EVAL IS STILL BLUNT
+---------------------------------------------
+
+Defaults to 0.0, a deliberate divergence from prod (the live client uses
+0.1). Read absolute numbers here as an instrument reading, not a
+prediction of prod recall; pass --temperature 0.1 for prod fidelity.
+
+Do NOT expect the pin to make this eval sharp. It was changed on the
+theory that sampling temperature was the dominant noise source. Two
+16-run paired measurements say otherwise:
+
+    mean per-arm sd     temp 0.1  ->  1.34
+                        temp 0.0  ->  1.06     (about 20% better)
+
+    widest single arm   temp 0.1  ->  9/15 to 13/15
+                        temp 0.0  ->  10/15 to 15/15   (WIDER)
+
+Roughly a fifth of the variance was temperature. The rest is inherent to
+the task: extraction picks ~30 memories out of many near-ties, and small
+perturbations flip several at once. Sampling at 0.0 is also not a
+determinism guarantee (no seed is exposed).
+
+Practical consequences:
+
+  - Run at least 8 reps per arm, at any temperature. A single run is
+    worthless: one showed a spurious +7pp "improvement" from a
+    punctuation-only prompt edit that vanished under repetition.
+  - A delta under about 2 items per fixture is not resolvable here at
+    n=8. Both paired measurements of that punctuation change came back
+    statistically flat (t=+0.24 then t=+0.44) with the two fixtures
+    moving in OPPOSITE directions, which is the signature of noise.
+  - Never compare absolute numbers across temperature settings. The same
+    code scored about 3pp higher at 0.0 than at 0.1 on both arms.
+  - If this eval needs to actually gate small changes, the lever is more
+    fixtures and more expectations per fixture, not sampling config.
 """
 from __future__ import annotations
 
@@ -122,7 +158,7 @@ def score(expected: list, patches: list) -> dict:
             hits.append(exp["id"])
         else:
             # Diagnose NEAR misses: right type+keywords but a pinned
-            # field failed — that's a resolution miss, not an
+            # field failed. That's a resolution miss, not an
             # extraction miss.
             near = None
             relaxed = {k: v for k, v in exp.items()
@@ -166,13 +202,14 @@ async def run_eval(args):
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user}],
             }
-            # Mirror the live client's per-model request shape.
+            # Mirror the live client's per-model request shape. Temperature
+            # is the one deliberate divergence; see --temperature.
             from src.contextquilt.services.llm_client_anthropic import _model_rejects_sampling
             if _model_rejects_sampling(client.model):
                 if not client.model.startswith("claude-fable"):
                     body["thinking"] = {"type": "disabled"}
             else:
-                body["temperature"] = 0.1
+                body["temperature"] = args.temperature
             start = time.monotonic()
             resp = await client._client.post("/v1/messages", json=body)
             latency = time.monotonic() - start
@@ -196,7 +233,7 @@ async def run_eval(args):
                         if not client.model.startswith("claude-fable"):
                             mbody["thinking"] = {"type": "disabled"}
                     else:
-                        mbody["temperature"] = 0.1
+                        mbody["temperature"] = args.temperature
                     mresp = await client._client.post("/v1/messages", json=mbody)
                     mresp.raise_for_status()
                     mtext = "".join(b.get("text", "") for b in mresp.json().get("content", [])
@@ -225,6 +262,9 @@ def main():
     ap.add_argument("--cap", type=int, help="also score after truncating to N patches")
     ap.add_argument("--max-tokens", type=int, default=8192)
     ap.add_argument("--micropass", action="store_true", help="run the deadline micro-pass after extraction")
+    ap.add_argument("--temperature", type=float, default=0.0,
+                    help="sampling temperature (default 0.0 for comparable runs; "
+                         "prod runs 0.1, pass --temperature 0.1 to mirror it)")
     args = ap.parse_args()
     if not (os.environ.get("CQ_ANTHROPIC_API_KEY") or os.environ.get("CQ_GCP_PROJECT")):
         sys.exit("Need CQ_ANTHROPIC_API_KEY (or run where Secret Manager is configured)")
