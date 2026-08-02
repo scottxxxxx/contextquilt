@@ -271,3 +271,105 @@ def test_capability_report_is_a_copy():
     caps = capability_report()
     caps["you_owe"]["available"] = True
     assert capability_report()["you_owe"]["available"] is False
+
+
+# =====================================================================
+# SS review round 1 deltas (doc 16 section 8b).
+#
+# These assert the CONTRACT the SS team acked, not the plumbing. Each one
+# encodes a condition they attached to their ack, so a future refactor
+# that "tidies" one of them fails here with the reason attached.
+# =====================================================================
+
+def test_ledger_owner_must_stay_the_raw_surface_form():
+    """The whole point of `owner` is diffing against SS's own action-item
+    owner strings. Resolving "Lockridge C" to canonical "Lockridge Chen" makes the
+    field look helpful while doing nothing, because the caller never sees
+    the form that would match. SS already knows the canonical identity:
+    it is the person whose endpoint they called.
+
+    Guards the docstring contract on _item() in src/main.py.
+    """
+    import inspect
+    import pathlib
+
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "main.py"
+    text = src.read_text(encoding="utf-8")
+
+    # The field exists and is wired straight from the row, unresolved.
+    assert '"owner": r["owner"],' in text, (
+        "ledger _item() must pass value.owner through verbatim; any "
+        "canonicalisation here breaks SS-side ledger reconciliation"
+    )
+    # The reason is recorded where someone refactoring would see it.
+    assert "regression, not a tidy-up" in text
+
+
+def test_open_items_query_selects_raw_owner():
+    """`owner` has to come from value.owner, not from a join against
+    entities, or it would arrive canonicalised by construction."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "main.py"
+    text = src.read_text(encoding="utf-8")
+    assert "cp.value->>'owner' AS owner" in text
+
+
+def test_min_meetings_is_applied_before_limit():
+    """A floor applied after pagination is a truncation, not a filter:
+    the caller gets an arbitrary subset and cannot tell whether the next
+    page holds more that would have passed. Assert source ordering."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "main.py"
+    text = src.read_text(encoding="utf-8")
+    body = text.split("async def list_people")[1].split("@app.get")[0]
+
+    floor_at = body.index('r["meeting_count"] >= min_meetings')
+    total_at = body.index("total = len(rows)")
+    limit_at = body.index("rows[:limit]")
+
+    assert floor_at < total_at < limit_at, (
+        "order must be: filter, then total, then limit"
+    )
+
+
+def test_total_unfiltered_is_taken_before_any_filter():
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "main.py"
+    text = src.read_text(encoding="utf-8")
+    body = text.split("async def list_people")[1].split("@app.get")[0]
+
+    unfiltered_at = body.index("total_unfiltered = len(rows)")
+    confirmed_filter_at = body.index('if confirmed in ("true", "false")')
+    assert unfiltered_at < confirmed_filter_at
+
+
+def test_total_unfiltered_counts_active_entities_only():
+    """SS pinned this: it must exclude anything folded away by a merge,
+    so tidying a roster makes the number go DOWN rather than inflate it.
+    _people_core is the only source, and it filters merged_into IS NULL."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "main.py"
+    text = src.read_text(encoding="utf-8")
+    core = text.split("async def _people_core")[1].split("def _public_person")[0]
+    assert "e.merged_into IS NULL" in core
+
+
+def test_query_echo_reports_received_values_not_applied_ones():
+    """SS needs the contract named, because their three-way assertion is
+    written against it. Received, plus an `ignored` array for anything CQ
+    could not use. A malformed `confirmed` echoes the malformed value AND
+    appears in `ignored`."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "main.py"
+    text = src.read_text(encoding="utf-8")
+    body = text.split("async def list_people")[1].split("@app.get")[0]
+
+    # Echoed straight from the request parameters, never from local
+    # post-fallback variables.
+    assert '"since": since,' in body
+    assert '"confirmed": confirmed,' in body
+    assert '"ignored": ignored,' in body
+    # And both degradation paths record themselves.
+    assert 'ignored.append("since")' in body
+    assert 'ignored.append("confirmed")' in body
+    assert "echoes what CQ RECEIVED" in body
