@@ -16,7 +16,7 @@ import redis.asyncio as redis
 import json
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import sys
 
 import structlog
@@ -49,6 +49,17 @@ from contextquilt.services.recall_formatter import (
     format_category_grouped,
     format_flat_ranked_with_stats,
     resolve_token_budget,
+)
+from contextquilt.services.people_identity import (
+    IdentityRequestError,
+    canonical_pair,
+    capability_report,
+    merge_project_rollups,
+    normalise_merge_request,
+    owner_keys,
+    resolve_identity_source,
+    separation_conflicts,
+    validate_person_name,
 )
 from contextquilt.services.recall_signals import (
     build_coverage_line,
@@ -2976,6 +2987,1041 @@ async def reassign_speaker(
         "connections_updated": 0,  # v1: patch attribution changes; connection structure unchanged
         "entities_merged": entities_merged,
         "labels_skipped": labels_skipped,
+    }
+
+
+# ============================================
+# People — identity write-back
+#
+# The user is the authority on who is who. These four endpoints are where
+# that authority lands: merge two entities the user says are one human,
+# record the ones they say are NOT, confirm an inferred person, and create
+# a person from a name in a report.
+#
+# See docs/architecture/16-people.md. Reads (the People list and detail)
+# ship separately; nothing here changes the recall hot path.
+#
+# Merge is a forward pointer, never a delete: SS already holds entity_ids
+# (POST /v1/quilt/{u}/reassign-speaker takes to_person_id), and
+# relationships cascade on entity delete. A merged row stays readable and
+# resolves forward, so a stale client id self-heals.
+# ============================================
+
+class PeopleMergeRequest(BaseModel):
+    canonical_entity_id: str
+    merge_entity_ids: List[str]
+    source: Optional[str] = None
+
+
+class KeepSeparateRequest(BaseModel):
+    entity_ids: List[str]
+    source: Optional[str] = None
+
+
+class ConfirmPersonRequest(BaseModel):
+    source: Optional[str] = None
+
+
+class PersonCreate(BaseModel):
+    name: str
+    description: Optional[str] = None
+    source: Optional[str] = None
+
+
+def _identity_error(exc: IdentityRequestError) -> HTTPException:
+    detail = {"code": exc.code, "message": exc.message}
+    detail.update(exc.extra)
+    return HTTPException(status_code=422, detail=detail)
+
+
+async def _rebuild_entity_index(user_id: str) -> None:
+    """Repoint the Redis entity index at current names + aliases.
+
+    Same shape rename-speaker uses. Merged entities keep their name in the
+    index on purpose: the merge records that name as an alias of the
+    canonical, so recall must still match it. It resolves to the canonical
+    through the alias leg of the entity lookup.
+    """
+    entity_index_key = f"entity_index:{user_id}"
+    rows = await db_pool.fetch(ENTITY_INDEX_NAMES_SQL, user_id)
+    if not rows:
+        return
+    await redis_client.delete(entity_index_key)
+    await redis_client.sadd(entity_index_key, *[r["name"] for r in rows])
+    await redis_client.expire(entity_index_key, 7200)
+
+
+async def _load_active_person(conn, user_id: str, entity_id: str) -> Any:
+    """Fetch a person entity, following merged_into forward.
+
+    A client holding the id of an already-merged entity gets the canonical
+    it became rather than a 404 — that is the whole point of keeping the
+    row. The hop count is bounded because merge always points at an
+    already-resolved canonical, but the loop is capped anyway: a cycle
+    here would hang a request holding a transaction open.
+    """
+    try:
+        current = str(uuid.UUID(str(entity_id)))
+    except (ValueError, AttributeError, TypeError):
+        raise IdentityRequestError(
+            "MALFORMED_ENTITY_ID", f"'{entity_id}' is not a valid entity id",
+            entity_id=str(entity_id),
+        )
+
+    seen: set[str] = set()
+    for _ in range(8):
+        row = await conn.fetchrow(
+            """
+            SELECT entity_id, name, entity_type, description, metadata,
+                   first_seen_at, last_seen_at, mention_count,
+                   confirmed_at, confirmation_source, merged_into
+            FROM entities
+            WHERE user_id = $1 AND entity_id = $2::uuid
+            """,
+            user_id, current,
+        )
+        if row is None:
+            return None
+        if row["entity_type"] != "person":
+            raise IdentityRequestError(
+                "NOT_A_PERSON",
+                f"Entity {current} is a '{row['entity_type']}', not a person",
+                entity_id=current, entity_type=row["entity_type"],
+            )
+        if row["merged_into"] is None:
+            return row
+        nxt = str(row["merged_into"])
+        if nxt in seen:
+            logger.error("entity_merge_cycle", user_id=user_id, entity_id=nxt)
+            return row
+        seen.add(nxt)
+        current = nxt
+    logger.error("entity_merge_chain_too_deep", user_id=user_id, entity_id=current)
+    return None
+
+
+async def _read_separations(conn, user_id: str, entity_ids: List[str]) -> List[tuple]:
+    rows = await conn.fetch(
+        """
+        SELECT entity_id_lo, entity_id_hi FROM entity_separations
+        WHERE user_id = $1
+          AND (entity_id_lo = ANY($2::uuid[]) OR entity_id_hi = ANY($2::uuid[]))
+        """,
+        user_id, entity_ids,
+    )
+    return [(str(r["entity_id_lo"]), str(r["entity_id_hi"])) for r in rows]
+
+
+async def _people_core(conn, user_id: str, entity_ids: Optional[List[str]] = None) -> dict:
+    """Everything the list and the detail both need, in set-based queries.
+
+    Deliberately not N+1: at 155 people a per-person round trip would be
+    155 round trips. Each leg fetches for the whole population and the
+    rows are stitched in Python.
+    """
+    subject_key = f"user:{user_id}"
+    scope = " AND e.entity_id = ANY($2::uuid[])" if entity_ids else ""
+    args = [user_id] + ([entity_ids] if entity_ids else [])
+
+    people = await conn.fetch(
+        f"""
+        SELECT e.entity_id, e.name, e.description, e.mention_count,
+               e.first_seen_at, e.last_seen_at,
+               e.confirmed_at, e.confirmation_source
+        FROM entities e
+        WHERE e.user_id = $1 AND e.entity_type = 'person'
+          AND e.merged_into IS NULL{scope}
+        ORDER BY e.last_seen_at DESC NULLS LAST, e.entity_id
+        """,
+        *args,
+    )
+    ids = [r["entity_id"] for r in people]
+    if not ids:
+        return {"people": [], "by_id": {}}
+
+    alias_rows = await conn.fetch(
+        "SELECT entity_id, alias, source FROM entity_aliases "
+        "WHERE user_id = $1 AND entity_id = ANY($2::uuid[]) ORDER BY alias",
+        user_id, ids,
+    )
+    appearance_rows = await conn.fetch(
+        """
+        SELECT pa.entity_id, pa.origin_id, pa.origin_type, pa.project_id,
+               pa.last_seen_at, pr.name AS project
+        FROM person_appearances pa
+        LEFT JOIN projects pr ON pr.project_id = pa.project_id
+        WHERE pa.user_id = $1 AND pa.entity_id = ANY($2::uuid[])
+        ORDER BY pa.last_seen_at DESC
+        """,
+        user_id, ids,
+    )
+    # Person patches are matched to entities by name, the same way the
+    # rest of CQ does: there is no entity_id on context_patches.
+    patch_rows = await conn.fetch(
+        """
+        SELECT cp.patch_id, LOWER(cp.value->>'text') AS text_key
+        FROM context_patches cp
+        JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+        WHERE ps.subject_key = $1 AND cp.patch_type = 'person'
+          AND COALESCE(cp.status, 'active') = 'active'
+        """,
+        subject_key,
+    )
+    patch_by_name = {r["text_key"]: str(r["patch_id"]) for r in patch_rows if r["text_key"]}
+
+    # Open completables, with whichever ownership signal they carry: a
+    # free-text value.owner the extractor copied out of the transcript,
+    # or an explicit `owns` edge from a person patch.
+    open_items = await conn.fetch(
+        """
+        SELECT cp.patch_id, cp.patch_type, cp.value->>'text' AS text,
+               cp.value->>'owner' AS owner,
+               cp.value->>'deadline' AS deadline,
+               cp.value->>'deadline_date' AS deadline_date,
+               cp.value->>'overdue_since' AS overdue_since,
+               cp.project_id, cp.project, cp.origin_id,
+               (SELECT pc.from_patch_id FROM patch_connections pc
+                 WHERE pc.to_patch_id = cp.patch_id
+                   AND pc.connection_label = 'owns' LIMIT 1) AS owner_patch_id
+        FROM context_patches cp
+        JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+        WHERE ps.subject_key = $1
+          AND cp.patch_type = ANY($2::text[])
+          AND COALESCE(cp.status, 'active') = 'active'
+        ORDER BY cp.value->>'deadline_date' NULLS LAST, cp.patch_id
+        """,
+        subject_key, list(COMPLETABLE_PATCH_TYPES),
+    )
+    stated_rows = await conn.fetch(
+        """
+        SELECT src.patch_id AS person_patch_id,
+               tgt.project_id, tgt.value->>'text' AS project
+        FROM patch_connections pc
+        JOIN context_patches src ON src.patch_id = pc.from_patch_id
+        JOIN context_patches tgt ON tgt.patch_id = pc.to_patch_id
+        JOIN patch_subjects ps ON ps.patch_id = src.patch_id
+        WHERE ps.subject_key = $1 AND pc.connection_label = 'works_on'
+          AND COALESCE(src.status, 'active') = 'active'
+          AND COALESCE(tgt.status, 'active') = 'active'
+        """,
+        subject_key,
+    )
+
+    aliases_by_id: dict = {}
+    alias_sources: dict = {}
+    for r in alias_rows:
+        aliases_by_id.setdefault(str(r["entity_id"]), []).append(r["alias"])
+        src = alias_sources.setdefault(str(r["entity_id"]), {})
+        src[r["source"]] = src.get(r["source"], 0) + 1
+
+    appearances_by_id: dict = {}
+    for r in appearance_rows:
+        appearances_by_id.setdefault(str(r["entity_id"]), []).append(r)
+
+    assembled = []
+    by_id = {}
+    for p in people:
+        eid = str(p["entity_id"])
+        aliases = aliases_by_id.get(eid, [])
+        keys = owner_keys(p["name"], aliases)
+        patch_id = next(
+            (patch_by_name[k] for k in ([p["name"].lower()] + [a.lower() for a in aliases])
+             if k in patch_by_name),
+            None,
+        )
+
+        appearances = appearances_by_id.get(eid, [])
+        project_counts: dict = {}
+        for a in appearances:
+            if a["project_id"] or a["project"]:
+                k = (a["project_id"], a["project"])
+                project_counts[k] = project_counts.get(k, 0) + 1
+        observed = [
+            {"project_id": pid, "project": pname, "meeting_count": n}
+            for (pid, pname), n in project_counts.items()
+        ]
+        stated = [
+            {"project_id": r["project_id"], "project": r["project"]}
+            for r in stated_rows
+            if patch_id and str(r["person_patch_id"]) == patch_id
+        ]
+        projects = merge_project_rollups(observed, stated)
+
+        they_owe = [
+            r for r in open_items
+            if (r["owner"] or "").strip().lower() in keys
+            or (patch_id and r["owner_patch_id"] and str(r["owner_patch_id"]) == patch_id)
+        ]
+
+        row = {
+            "entity_id": eid,
+            "name": p["name"],
+            "aliases": aliases,
+            "patch_id": patch_id,
+            "description": p["description"] or None,
+            "confirmed": p["confirmed_at"] is not None,
+            "confirmation_source": p["confirmation_source"],
+            "first_seen_at": p["first_seen_at"].isoformat() if p["first_seen_at"] else None,
+            "last_seen_at": p["last_seen_at"].isoformat() if p["last_seen_at"] else None,
+            "meeting_count": len(appearances),
+            "project_count": len(projects),
+            "open_they_owe": len(they_owe),
+            # null, never 0 — see READ_CAPABILITIES.you_owe.
+            "open_you_owe": None,
+            "_appearances": appearances,
+            "_projects": projects,
+            "_they_owe": they_owe,
+            "_mention_count": p["mention_count"] or 0,
+            "_alias_sources": alias_sources.get(eid, {}),
+            # Newest of the two things that change a person row: another
+            # mention (last_seen_at) or a human vouching (confirmed_at).
+            # Drives the `since` delta.
+            "_changed_at": max(
+                [t for t in (p["last_seen_at"], p["confirmed_at"]) if t is not None],
+                default=None,
+            ),
+        }
+        assembled.append(row)
+        by_id[eid] = row
+
+    return {"people": assembled, "by_id": by_id}
+
+
+def _public_person(row: dict) -> dict:
+    return {k: v for k, v in row.items() if not k.startswith("_")}
+
+
+@app.get("/v1/people/{user_id}", tags=["People"])
+async def list_people(
+    user_id: str,
+    since: Optional[str] = Query(None, description="ISO 8601 — only people changed after this time, plus a `deleted` array of entity_ids folded away by a merge since then"),
+    confirmed: str = Query("all", description="Filter on confirmation state: true, false, or all"),
+    limit: Optional[int] = Query(None, ge=1, le=1000, description="Cap the people array (applied after ordering)"),
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    The People list: every person CQ knows about this user, newest activity
+    first.
+
+    Includes people CQ only inferred from a transcript and nobody has
+    vouched for. Those come back with `confirmed: false` and often a null
+    `patch_id` (an entity with no person patch behind it yet). They are
+    NOT filtered out: the design renders them explicitly as unconfirmed,
+    and hiding them would mean the app can never offer the confirmation.
+
+    `open_you_owe` is always null. See the `capabilities` block: CQ has no
+    counterparty on a commitment yet, and answering 0 would read as "you
+    owe this person nothing".
+    """
+    server_time = datetime.utcnow()
+    since_dt = None
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            # Postgres hands back tz-aware timestamps; a caller echoing our
+            # naive `server_time` back would blow up the comparison.
+            if since_dt.tzinfo is None:
+                since_dt = since_dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
+    async with db_pool.acquire() as conn:
+        core = await _people_core(conn, user_id)
+        rows = core["people"]
+
+        if confirmed in ("true", "false"):
+            want = confirmed == "true"
+            rows = [r for r in rows if r["confirmed"] is want]
+
+        deleted: List[str] = []
+        if since_dt:
+            merged = await conn.fetch(
+                """
+                SELECT entity_id, merged_into FROM entities
+                WHERE user_id = $1 AND entity_type = 'person'
+                  AND merged_into IS NOT NULL AND merged_at > $2
+                """,
+                user_id, since_dt,
+            )
+            # A merge removes a person from the list, so clients holding
+            # the folded id need a tombstone the same way patch deletes do.
+            deleted = [str(r["entity_id"]) for r in merged]
+            rows = [
+                r for r in rows
+                if r["_changed_at"] is not None and r["_changed_at"] > since_dt
+            ]
+
+    total = len(rows)
+    if limit:
+        rows = rows[:limit]
+
+    return {
+        "people": [_public_person(r) for r in rows],
+        "total": total,
+        "deleted": deleted,
+        "capabilities": capability_report(),
+        "server_time": server_time.isoformat(),
+    }
+
+
+@app.get("/v1/people/{user_id}/{entity_id}", tags=["People"])
+async def get_person(
+    user_id: str,
+    entity_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    One person, with the meetings, projects and open items behind the
+    counts on the list row.
+
+    Resolves a folded entity_id forward, so a client that cached an id
+    before a merge still lands on the right person.
+
+    CQ deliberately returns no meeting titles or durations, only
+    `origin_id`. Per the context-flow contract (doc 15 item 5) CQ wins on
+    state and the app wins on content: ShoulderSurf joins origin_id to its
+    own records for "Atlas cutover checkpoint, Jul 28, 47m".
+    """
+    async with db_pool.acquire() as conn:
+        try:
+            resolved = await _load_active_person(conn, user_id, entity_id)
+        except IdentityRequestError as e:
+            raise _identity_error(e)
+        if resolved is None:
+            raise HTTPException(
+                status_code=404, detail=f"Person {entity_id} not found for this user"
+            )
+        eid = str(resolved["entity_id"])
+        core = await _people_core(conn, user_id, [eid])
+
+    row = core["by_id"].get(eid)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Person {eid} not found for this user")
+
+    def _item(r):
+        return {
+            "patch_id": str(r["patch_id"]),
+            "type": r["patch_type"],
+            "text": r["text"],
+            "deadline": r["deadline"],
+            "deadline_date": r["deadline_date"],
+            "overdue_since": r["overdue_since"],
+            "project_id": r["project_id"],
+            "project": r["project"],
+            "origin_id": r["origin_id"],
+        }
+
+    detail = _public_person(row)
+    detail.update({
+        "projects": row["_projects"],
+        "commitments": {
+            "they_owe": [_item(r) for r in row["_they_owe"]],
+            # Not an empty list: an empty list means "none open", and CQ
+            # cannot tell the difference yet. See capabilities.you_owe.
+            "you_owe": None,
+        },
+        "meetings": [
+            {
+                "origin_id": a["origin_id"],
+                "origin_type": a["origin_type"],
+                "project_id": a["project_id"],
+                "last_seen_at": a["last_seen_at"].isoformat() if a["last_seen_at"] else None,
+            }
+            for a in row["_appearances"]
+        ],
+        "provenance": {
+            "name_mentions": row["_mention_count"],
+            "meetings_observed": row["meeting_count"],
+            "confirmed": row["confirmed"],
+            "confirmation_source": row["confirmation_source"],
+            # How each surface form was resolved: 'heuristic' is CQ
+            # guessing, 'user_confirmation' is the human saying so. The
+            # design shows these differently and should keep being able to.
+            "alias_sources": row["_alias_sources"],
+            # Null, not 0. See capabilities.confirmed_mention_split.
+            "confirmed_mentions": None,
+            "assumed_mentions": None,
+        },
+        "capabilities": capability_report(),
+    })
+    return detail
+
+
+@app.post("/v1/people/{user_id}/merge", tags=["People"])
+async def merge_people(
+    user_id: str,
+    req: PeopleMergeRequest,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Record that two or more person entities are the same human.
+
+    Each losing entity's name becomes an alias of the canonical, its
+    aliases and relationships repoint, its mention counts fold in, and it
+    is marked merged rather than deleted.
+
+    Refuses (409) any pair the user has previously answered "keep
+    separate" — the whole batch, not just the offending pair, because
+    quietly merging part of a batch while reporting success is how you end
+    up investigating why CQ thinks two people are one.
+    """
+    try:
+        canonical_id, loser_ids = normalise_merge_request(
+            req.canonical_entity_id, req.merge_entity_ids
+        )
+        source = resolve_identity_source(req.source)
+    except IdentityRequestError as e:
+        raise _identity_error(e)
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                canonical = await _load_active_person(conn, user_id, canonical_id)
+                if canonical is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Person {canonical_id} not found for this user",
+                    )
+                canonical_uuid = str(canonical["entity_id"])
+
+                losers = []
+                for lid in loser_ids:
+                    row = await _load_active_person(conn, user_id, lid)
+                    if row is None:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"Person {lid} not found for this user",
+                        )
+                    # Already resolved to the canonical (a re-sent request,
+                    # or a chain that already collapsed) — nothing to do.
+                    if str(row["entity_id"]) == canonical_uuid:
+                        continue
+                    losers.append(row)
+            except IdentityRequestError as e:
+                raise _identity_error(e)
+
+            if not losers:
+                return {
+                    "status": "noop",
+                    "canonical_entity_id": canonical_uuid,
+                    "merged": [],
+                    "reason": "all requested entities already resolve to the canonical",
+                }
+
+            loser_uuids = [str(r["entity_id"]) for r in losers]
+            separated = await _read_separations(
+                conn, user_id, [canonical_uuid] + loser_uuids
+            )
+            conflicts = separation_conflicts(canonical_uuid, loser_uuids, separated)
+            if conflicts:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "SEPARATION_CONFLICT",
+                        "message": (
+                            "These entities were previously kept separate by the user. "
+                            "Merging would silently overturn that answer."
+                        ),
+                        "pairs": [
+                            {"canonical_entity_id": a, "entity_id": b}
+                            for a, b in conflicts
+                        ],
+                    },
+                )
+
+            for loser in losers:
+                loser_uuid = str(loser["entity_id"])
+
+                # 1. The loser's name becomes an alias of the canonical.
+                #    DO UPDATE rather than DO NOTHING: if the surface form
+                #    was pointing somewhere else, the user just told us
+                #    where it actually belongs.
+                await conn.execute(
+                    """
+                    INSERT INTO entity_aliases (user_id, entity_id, alias, source)
+                    VALUES ($1, $2::uuid, $3, $4)
+                    ON CONFLICT (user_id, LOWER(alias))
+                    DO UPDATE SET entity_id = EXCLUDED.entity_id,
+                                  source = EXCLUDED.source
+                    """,
+                    user_id, canonical_uuid, loser["name"], source,
+                )
+
+                # 2. The loser's own aliases follow it. The unique index is
+                #    on (user_id, LOWER(alias)) so a repoint cannot collide.
+                await conn.execute(
+                    "UPDATE entity_aliases SET entity_id = $1::uuid "
+                    "WHERE user_id = $2 AND entity_id = $3::uuid",
+                    canonical_uuid, user_id, loser_uuid,
+                )
+
+                # 3. Relationships repoint, skipping edges the canonical
+                #    already has (relationships is UNIQUE on
+                #    user_id + from + to + type, so a blind UPDATE would
+                #    throw on any overlapping neighborhood).
+                for column in ("from_entity_id", "to_entity_id"):
+                    other = "to_entity_id" if column == "from_entity_id" else "from_entity_id"
+                    await conn.execute(
+                        f"""
+                        UPDATE relationships r SET {column} = $1::uuid
+                        WHERE r.user_id = $2 AND r.{column} = $3::uuid
+                          AND NOT EXISTS (
+                              SELECT 1 FROM relationships r2
+                              WHERE r2.user_id = r.user_id
+                                AND r2.{column} = $1::uuid
+                                AND r2.{other} = r.{other}
+                                AND r2.relationship_type = r.relationship_type
+                          )
+                        """,
+                        canonical_uuid, user_id, loser_uuid,
+                    )
+
+                # 4. Whatever is still attached to the loser is a true
+                #    duplicate of an edge the canonical already had, plus
+                #    any loser->canonical edge that just became a self
+                #    loop. Both are dropped.
+                await conn.execute(
+                    """
+                    DELETE FROM relationships
+                    WHERE user_id = $1
+                      AND (from_entity_id = $2::uuid OR to_entity_id = $2::uuid)
+                    """,
+                    user_id, loser_uuid,
+                )
+                await conn.execute(
+                    "DELETE FROM relationships WHERE user_id = $1 "
+                    "AND from_entity_id = $2::uuid AND to_entity_id = $2::uuid",
+                    user_id, canonical_uuid,
+                )
+
+                # 4b. Meeting history follows the person. Without this a
+                #     merge silently costs the canonical every meeting the
+                #     folded identity was seen in, which is the opposite of
+                #     what "these are the same human" means. Two identities
+                #     seen in the SAME meeting collapse to one appearance,
+                #     because that is still one meeting.
+                #
+                #     Unguarded on purpose: if person_appearances is
+                #     missing, a 500 is the right answer. Swallowing it
+                #     would mangle history quietly.
+                await conn.execute(
+                    """
+                    INSERT INTO person_appearances
+                        (user_id, entity_id, origin_id, origin_type,
+                         project_id, first_seen_at, last_seen_at)
+                    SELECT user_id, $1::uuid, origin_id, origin_type,
+                           project_id, first_seen_at, last_seen_at
+                    FROM person_appearances
+                    WHERE user_id = $2 AND entity_id = $3::uuid
+                    ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
+                        first_seen_at = LEAST(person_appearances.first_seen_at,
+                                              EXCLUDED.first_seen_at),
+                        last_seen_at  = GREATEST(person_appearances.last_seen_at,
+                                                 EXCLUDED.last_seen_at),
+                        project_id    = COALESCE(person_appearances.project_id,
+                                                 EXCLUDED.project_id)
+                    """,
+                    canonical_uuid, user_id, loser_uuid,
+                )
+                await conn.execute(
+                    "DELETE FROM person_appearances WHERE user_id = $1 AND entity_id = $2::uuid",
+                    user_id, loser_uuid,
+                )
+
+                # 5. Separations the loser was party to survive against the
+                #    canonical. Without this, "A is not B" silently stops
+                #    applying the moment B merges into C. Re-inserted rather
+                #    than updated because the (lo, hi) ordering has to be
+                #    recomputed against the new id.
+                loser_seps = await conn.fetch(
+                    """
+                    SELECT entity_id_lo, entity_id_hi, source FROM entity_separations
+                    WHERE user_id = $1
+                      AND (entity_id_lo = $2::uuid OR entity_id_hi = $2::uuid)
+                    """,
+                    user_id, loser_uuid,
+                )
+                await conn.execute(
+                    """
+                    DELETE FROM entity_separations
+                    WHERE user_id = $1
+                      AND (entity_id_lo = $2::uuid OR entity_id_hi = $2::uuid)
+                    """,
+                    user_id, loser_uuid,
+                )
+                for sep in loser_seps:
+                    lo, hi = str(sep["entity_id_lo"]), str(sep["entity_id_hi"])
+                    other_id = hi if lo == loser_uuid else lo
+                    if other_id == canonical_uuid:
+                        continue  # would be a self-pair; the merge settled it
+                    new_lo, new_hi = canonical_pair(canonical_uuid, other_id)
+                    await conn.execute(
+                        """
+                        INSERT INTO entity_separations
+                            (user_id, entity_id_lo, entity_id_hi, source)
+                        VALUES ($1, $2::uuid, $3::uuid, $4)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        user_id, new_lo, new_hi, sep["source"],
+                    )
+
+                # 6. Fold the observation history forward. Canonical wins on
+                #    metadata key collisions (its own keys applied last).
+                await conn.execute(
+                    """
+                    UPDATE entities SET
+                        mention_count = mention_count + $1,
+                        first_seen_at = LEAST(first_seen_at, $2),
+                        last_seen_at  = GREATEST(last_seen_at, $3),
+                        description   = COALESCE(NULLIF(description, ''), $4),
+                        metadata      = COALESCE($5::jsonb, '{}'::jsonb) || COALESCE(metadata, '{}'::jsonb)
+                    WHERE entity_id = $6::uuid
+                    """,
+                    loser["mention_count"] or 0,
+                    loser["first_seen_at"], loser["last_seen_at"],
+                    loser["description"],
+                    json.dumps(loser["metadata"]) if isinstance(loser["metadata"], dict) else (loser["metadata"] or "{}"),
+                    canonical_uuid,
+                )
+
+                # 7. Forward pointer. The row survives so held ids resolve.
+                await conn.execute(
+                    """
+                    UPDATE entities
+                    SET merged_into = $1::uuid, merged_at = NOW()
+                    WHERE entity_id = $2::uuid
+                    """,
+                    canonical_uuid, loser_uuid,
+                )
+
+            # A user-asserted merge also vouches for the canonical.
+            await conn.execute(
+                """
+                UPDATE entities
+                SET confirmed_at = COALESCE(confirmed_at, NOW()),
+                    confirmation_source = COALESCE(confirmation_source, $1)
+                WHERE entity_id = $2::uuid
+                """,
+                source, canonical_uuid,
+            )
+
+            alias_rows = await conn.fetch(
+                "SELECT alias FROM entity_aliases WHERE user_id = $1 AND entity_id = $2::uuid ORDER BY alias",
+                user_id, canonical_uuid,
+            )
+
+    await _rebuild_entity_index(user_id)
+    logger.info(
+        "people_merged", user_id=user_id, app_id=str(app_id),
+        canonical_entity_id=canonical_uuid, merged=loser_uuids, source=source,
+    )
+    return {
+        "status": "merged",
+        "canonical_entity_id": canonical_uuid,
+        "canonical_name": canonical["name"],
+        "merged": loser_uuids,
+        "aliases": [r["alias"] for r in alias_rows],
+    }
+
+
+@app.post("/v1/people/{user_id}/keep-separate", tags=["People"])
+async def keep_people_separate(
+    user_id: str,
+    req: KeepSeparateRequest,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Record that two person entities are NOT the same human.
+
+    The negative answer has to be as durable as the positive one. Without
+    it the merge endpoint, scripts/backfill_entity_aliases.py, and any
+    future merge-proposal read will keep re-offering a merge the user has
+    already refused.
+
+    Idempotent. Refuses (409) a pair that is already merged: undoing a
+    merge is a different operation and does not exist yet.
+    """
+    if not req.entity_ids or len(req.entity_ids) != 2:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "INVALID_PAIR",
+                "message": "entity_ids must contain exactly two entity ids",
+            },
+        )
+
+    source = resolve_identity_source(req.source)
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                raw_a, raw_b = req.entity_ids
+                # Resolve BEFORE pairing: separating two ids that both
+                # already point at one canonical is the merged case, not a
+                # legitimate pair.
+                a_row = await _load_active_person(conn, user_id, raw_a)
+                b_row = await _load_active_person(conn, user_id, raw_b)
+                if a_row is None or b_row is None:
+                    missing = raw_a if a_row is None else raw_b
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Person {missing} not found for this user",
+                    )
+                a_id, b_id = str(a_row["entity_id"]), str(b_row["entity_id"])
+                if a_id == b_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "ALREADY_MERGED",
+                            "message": (
+                                "These ids already resolve to one entity. "
+                                "Separating a merged pair is not supported."
+                            ),
+                            "entity_id": a_id,
+                        },
+                    )
+                lo, hi = canonical_pair(a_id, b_id)
+            except IdentityRequestError as e:
+                raise _identity_error(e)
+
+            await conn.execute(
+                """
+                INSERT INTO entity_separations
+                    (user_id, entity_id_lo, entity_id_hi, source)
+                VALUES ($1, $2::uuid, $3::uuid, $4)
+                ON CONFLICT (user_id, entity_id_lo, entity_id_hi) DO NOTHING
+                """,
+                user_id, lo, hi, source,
+            )
+
+            # Saying "these are two different people" vouches for both.
+            await conn.execute(
+                """
+                UPDATE entities
+                SET confirmed_at = COALESCE(confirmed_at, NOW()),
+                    confirmation_source = COALESCE(confirmation_source, $1)
+                WHERE entity_id = ANY($2::uuid[])
+                """,
+                source, [lo, hi],
+            )
+
+    logger.info(
+        "people_kept_separate", user_id=user_id, app_id=str(app_id),
+        entity_id_lo=lo, entity_id_hi=hi, source=source,
+    )
+    return {
+        "status": "separated",
+        "entity_ids": [lo, hi],
+        "source": source,
+    }
+
+
+@app.post("/v1/people/{user_id}/{entity_id}/confirm", tags=["People"])
+async def confirm_person(
+    user_id: str,
+    entity_id: str,
+    req: Optional[ConfirmPersonRequest] = None,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Mark a person a human has vouched for.
+
+    This is the unconfirmed-to-confirmed transition for someone CQ
+    inferred from a transcript. Idempotent: the first confirmation's
+    timestamp and source stick, so re-confirming does not rewrite history.
+    """
+    source = resolve_identity_source(req.source if req else None)
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            try:
+                row = await _load_active_person(conn, user_id, entity_id)
+            except IdentityRequestError as e:
+                raise _identity_error(e)
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Person {entity_id} not found for this user",
+                )
+            resolved = str(row["entity_id"])
+            updated = await conn.fetchrow(
+                """
+                UPDATE entities
+                SET confirmed_at = COALESCE(confirmed_at, NOW()),
+                    confirmation_source = COALESCE(confirmation_source, $1)
+                WHERE entity_id = $2::uuid
+                RETURNING name, confirmed_at, confirmation_source
+                """,
+                source, resolved,
+            )
+
+    logger.info(
+        "person_confirmed", user_id=user_id, app_id=str(app_id),
+        entity_id=resolved, source=source,
+    )
+    return {
+        "status": "confirmed",
+        "entity_id": resolved,
+        "name": updated["name"],
+        "confirmed_at": updated["confirmed_at"].isoformat() if updated["confirmed_at"] else None,
+        "confirmation_source": updated["confirmation_source"],
+    }
+
+
+@app.post("/v1/people/{user_id}", tags=["People"])
+async def create_person(
+    user_id: str,
+    req: PersonCreate,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Create a person the user named directly.
+
+    Backs the People list "+" button and "Create X as a new person" in the
+    link-or-create sheet. Writes both halves of CQ's person model so the
+    new person is whole: the entity (so recall can match the name and the
+    graph can hang relationships off it) and a declared person patch (so
+    it appears in the quilt like any other stated fact).
+
+    Returns the existing person if the name is already known, rather than
+    creating a duplicate the user would then have to merge.
+    """
+    try:
+        name = validate_person_name(req.name)
+        source = resolve_identity_source(req.source)
+    except IdentityRequestError as e:
+        raise _identity_error(e)
+
+    description = (req.description or "").strip()
+    subject_key = f"user:{user_id}"
+    now = datetime.utcnow()
+    created = False
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            # Exact name, then recorded alias — the same resolution order
+            # the worker's store_entities uses, so the API and the
+            # extraction path agree on what counts as "already known".
+            row = await conn.fetchrow(
+                """
+                SELECT entity_id FROM entities
+                WHERE user_id = $1 AND entity_type = 'person'
+                  AND LOWER(name) = LOWER($2)
+                LIMIT 1
+                """,
+                user_id, name,
+            )
+            if row is None:
+                row = await conn.fetchrow(
+                    """
+                    SELECT e.entity_id
+                    FROM entity_aliases a
+                    JOIN entities e ON e.entity_id = a.entity_id
+                    WHERE a.user_id = $1 AND LOWER(a.alias) = LOWER($2)
+                      AND e.entity_type = 'person'
+                    LIMIT 1
+                    """,
+                    user_id, name,
+                )
+
+            if row is not None:
+                resolved = await _load_active_person(conn, user_id, str(row["entity_id"]))
+                entity_uuid = str(resolved["entity_id"])
+                # Answer with the name CQ actually stores, not the caller's
+                # casing — "kinsley raman" resolving to "Kinsley Raman" is
+                # information the client needs to render the row it just got.
+                name = resolved["name"]
+                await conn.execute(
+                    """
+                    UPDATE entities SET
+                        description = COALESCE(NULLIF(description, ''), $1),
+                        confirmed_at = COALESCE(confirmed_at, NOW()),
+                        confirmation_source = COALESCE(confirmation_source, $2)
+                    WHERE entity_id = $3::uuid
+                    """,
+                    description, source, entity_uuid,
+                )
+            else:
+                created = True
+                entity_uuid = str(await conn.fetchval(
+                    """
+                    INSERT INTO entities
+                        (user_id, name, entity_type, description,
+                         confirmed_at, confirmation_source)
+                    VALUES ($1, $2, 'person', $3, NOW(), $4)
+                    RETURNING entity_id
+                    """,
+                    user_id, name, description, source,
+                ))
+
+            # The person patch. Looked up in both branches so the caller
+            # always gets an id it can wire connections to; only created
+            # when missing, because a second person patch for the same
+            # human is exactly the duplicate this endpoint exists to avoid.
+            existing_patch = await conn.fetchrow(
+                """
+                SELECT cp.patch_id FROM context_patches cp
+                JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+                WHERE ps.subject_key = $1
+                  AND cp.patch_type = 'person'
+                  AND COALESCE(cp.status, 'active') = 'active'
+                  AND LOWER(cp.value->>'text') = LOWER($2)
+                LIMIT 1
+                """,
+                subject_key, name,
+            )
+            patch_id = str(existing_patch["patch_id"]) if existing_patch else None
+            patch_created = patch_id is None
+            if patch_id is None:
+                patch_id = str(uuid.uuid4())
+                await conn.execute(
+                    """
+                    INSERT INTO context_patches (
+                        patch_id, patch_name, patch_type, value,
+                        origin_mode, source_prompt, confidence, persistence,
+                        status, created_at, updated_at, last_observed_at
+                    ) VALUES ($1, $2, 'person', $3, 'declared', 'people_create',
+                              1.0, $4, 'active', $5, $5, $5)
+                    """,
+                    patch_id, f"declared_{patch_id[:8]}",
+                    json.dumps({"text": name}),
+                    PATCH_PERSISTENCE.get("person", "decaying"), now,
+                )
+                await conn.execute(
+                    "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
+                    patch_id, subject_key,
+                )
+                try:
+                    await conn.execute(
+                        """
+                        INSERT INTO context_patch_acl
+                            (patch_id, app_id, can_read, can_write, can_delete)
+                        VALUES ($1, $2, TRUE, TRUE, TRUE)
+                        """,
+                        patch_id, uuid.UUID(str(app_id)),
+                    )
+                except (ValueError, AttributeError):
+                    pass  # legacy X-App-ID, no ACL row
+
+    await _rebuild_entity_index(user_id)
+    # An entity that already existed can still gain its first person patch
+    # here (the entity-only "inferred but never stated" case), and that is
+    # a quilt change readers need to see.
+    if created or patch_created:
+        await redis_client.xadd("memory_updates", {"data": json.dumps(
+            {"type": "hydrate", "user_id": user_id, "timestamp": now.isoformat()}
+        )})
+
+    logger.info(
+        "person_created" if created else "person_create_resolved_existing",
+        user_id=user_id, app_id=str(app_id), entity_id=entity_uuid,
+        name=name, source=source,
+    )
+    return {
+        "status": "created" if created else "exists",
+        "entity_id": entity_uuid,
+        "patch_id": patch_id,
+        "name": name,
     }
 
 

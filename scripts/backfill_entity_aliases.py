@@ -134,8 +134,36 @@ async def main(apply: bool) -> None:
 
     conn = await asyncpg.connect(dsn)
     try:
+        # Pairs the user explicitly refused to merge (POST
+        # /v1/people/{u}/keep-separate). This read FAILS CLOSED on
+        # purpose: merging is destructive here (the duplicate row is
+        # deleted), and a merge that overturns an explicit "these are
+        # different people" is exactly the answer this table exists to
+        # protect. If the table cannot be read, the tool stops rather
+        # than merging blind.
+        try:
+            sep_rows = await conn.fetch(
+                "SELECT user_id, entity_id_lo, entity_id_hi FROM entity_separations"
+            )
+        except Exception as e:
+            print(
+                "Cannot read entity_separations, refusing to merge "
+                f"(apply migration 29 first): {e}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        separated = {
+            (r["user_id"], str(r["entity_id_lo"]), str(r["entity_id_hi"]))
+            for r in sep_rows
+        }
+
+        def is_separated(user_id, a, b) -> bool:
+            lo, hi = sorted((str(a), str(b)))
+            return (user_id, lo, hi) in separated
+
         groups = await conn.fetch(
-            "SELECT DISTINCT user_id, entity_type FROM entities ORDER BY user_id, entity_type"
+            "SELECT DISTINCT user_id, entity_type FROM entities "
+            "WHERE merged_into IS NULL ORDER BY user_id, entity_type"
         )
         proposals = []
         for g in groups:
@@ -144,6 +172,7 @@ async def main(apply: bool) -> None:
                 SELECT entity_id, name, description, mention_count, last_seen_at
                   FROM entities
                  WHERE user_id = $1 AND entity_type = $2
+                   AND merged_into IS NULL
                 """,
                 g["user_id"], g["entity_type"],
             )
@@ -156,6 +185,12 @@ async def main(apply: bool) -> None:
                 entity_id, _, direction = match
                 if direction == "name_is_alias":
                     # row is the short form → fold row into the matched entity
+                    if is_separated(g["user_id"], row["entity_id"], entity_id):
+                        print(
+                            f"  SKIP (kept separate by user) {row['name']!r} -> "
+                            f"{by_id[entity_id]['name']!r} [{g['user_id']} {g['entity_type']}]"
+                        )
+                        continue
                     proposals.append((g["user_id"], g["entity_type"], row, by_id[entity_id]))
                 # name_is_canonical pairs surface again from the other
                 # side of the scan as name_is_alias — skip to avoid dupes.
