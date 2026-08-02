@@ -795,7 +795,19 @@ GP's proxied path.
 
 Written from the SS design project
 `e9e9f9be-a105-4b29-8b48-2f2bd3efb760` (`ShoulderSurf People.dc.html`)
-before any SS code existed. Not reviewed by SS or GP, not locked.
+before any SS code existed.
+
+**Review status, 2026-08-02.** SS has reviewed and acked round 1: the
+section 1 `entity_id` rule, all six section 8 questions, and the three
+8b deltas with their conditions. Those calls are settled and SS is
+building against them. **GP has not reviewed this doc at all**, which
+matters because section 2 and open question 4 both land on GP: the tier
+gate is entirely theirs, and the six `/v1/people/*` routes need explicit
+allowlisting before SS can reach any of this through the gateway.
+
+Not settled and explicitly still open: `owed_to` (4.2), the person-patch
+fold (6.5), the appearance `source` column (8c), and the GP proxied-path
+pass (9).
 
 Section 5 and `person_appearances` shipped 2026-07-31. All of it is
 additive: new routes, new tables, one new column set on `entities`. No
