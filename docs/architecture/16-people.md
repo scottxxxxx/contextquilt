@@ -627,30 +627,61 @@ one-line assertion in the three-way test.
 Only the list endpoint echoes a query. The detail endpoint takes no
 query parameters, so an empty echo there would be noise.
 
-### 8c. Backfill plan, and a correction to Q6's premise
+### 8c. Backfill: tier 1 APPLIED, tier 2 HELD (and why)
 
 Q6 said appearances are reconstructible "from the ingest stream, which
-preserves original payloads verbatim." That is true but **not sufficient
-on its own**: `memory_updates` is a Redis Stream with no MAXLEN trim
-policy settled (a known deferred item), currently 888 entries against
-220 distinct meetings in the patch table. Stream-only backfill cannot be
-proven complete.
+preserves original payloads verbatim." The stream does carry `content`
+(854 of 888 entries, longest 210k chars), so tier 2 is technically
+viable. But `memory_updates` has no settled MAXLEN policy, so
+stream-only can never be proven complete. Hence two tiers.
 
-Two tiers instead:
+**Tier 1, Postgres-derived. Applied 2026-08-02.** Every patch carries
+`origin_id`, and ownership is recorded two ways: a raw `value.owner`
+string and an explicit `owns` edge from a person patch. Both resolve to
+a person entity through the same exact-then-alias path `store_entities`
+uses, with `merged_into` followed forward. Deterministic, no LLM call,
+complete over all patch history.
 
-1. **Postgres-derived (complete, no retention risk).** Every patch
-   carries `origin_id`, and 809 of them carry a `value.owner`. Joining
-   owner strings and recorded aliases to person entities reconstructs
-   appearances for all 220 meetings deterministically, no LLM call. High
-   precision, and complete over all history.
-2. **Stream-derived (fills the tail).** A person mentioned in a meeting
-   who owned nothing produces no owner-bearing patch and is missed by
-   tier 1. Scanning retained transcripts with the same entity-plus-alias
-   matching recall already uses recovers those, bounded by whatever the
-   stream still holds.
+Result: **436 appearances, 114 people, 157 meetings.** Timestamps come
+from the source patch (spanning 2026-04-12 to 2026-08-04), never
+`NOW()`: importing at wall-clock time would make `last_seen_at DESC`
+meaningless and tell the app every meeting happened today. Re-running is
+a no-op (436 upserts, table stays 436).
 
-Dry-run default with `--apply`, reusing live matching logic, same shape
-as the other `scripts/backfill_*.py`.
+Effect on the read surface: `min_meetings` went from a no-op to the
+useful default SS wanted. 93 of 272 people now have at least one
+meeting, 12 have five or more, 7 have twenty or more.
+
+**Tier 2, stream-derived. Built, dry-run, NOT applied.**
+
+The dry run is what stopped it. Tier 2 adds 1843 rows on top of tier 1,
+taking the busiest person from 37 meetings to 179, and finds 337
+distinct meetings against the 220 that actually produced patches.
+
+The reason is a semantic mismatch this doc did not catch when it
+specified the tier. **Tier 2 measures "this person's name appears in the
+transcript", which is not the same claim as "this person was in the
+meeting."** It counts people discussed in absentia, referenced in the
+third person, or named once in passing. The design renders
+`meeting_count` as "9 meetings, last 3d ago" and "5 meetings together",
+which read as co-attendance. Writing 179 into that field would make the
+number confidently wrong, which is the failure mode 6.4 exists to
+prevent.
+
+Tier 2 is not worthless. It is the correct number for the provenance
+line in design section 1e, "Named in 11 transcripts". It is the wrong
+number for `meeting_count`.
+
+**Proposed resolution, same instinct as the 5.2 projects rollup:** do
+not collapse two different claims into one number. Add a `source` column
+to `person_appearances` (`ownership` vs `mention`), let `meeting_count`
+count ownership-grounded rows, and expose the mention count separately
+in `provenance` where 1e actually wants it. That keeps both signals and
+lets the client decide, instead of picking one and losing the other.
+
+Needs a migration and an SS ack on the extra field, so it is held rather
+than shipped. Script is `scripts/backfill_person_appearances.py`,
+dry-run default, `--tier 1|2|both`, `--apply` writes.
 
 ### 8d. Ledger collision: CQ commitments vs SS action items
 
