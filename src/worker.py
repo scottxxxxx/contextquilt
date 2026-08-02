@@ -937,6 +937,42 @@ async def store_connected_patches(
     return stored
 
 
+async def _resolve_merged_forward(db, entity_id):
+    """Follow entities.merged_into to the surviving canonical.
+
+    POST /v1/people/{user_id}/merge marks a folded entity with a forward
+    pointer instead of deleting it (held client ids must keep resolving,
+    and relationships cascade on delete). Every write path that resolves
+    an entity by name therefore has to hop that pointer, or the next
+    mention of the old surface form re-observes the dead row and rebuilds
+    the duplicate the user just resolved.
+
+    Degrades to the input id if the column is absent — the MCP
+    deployment's separate Postgres can lag migrations, and entity storage
+    must not start failing there because People shipped here.
+    """
+    current = entity_id
+    seen = set()
+    try:
+        for _ in range(8):
+            row = await db.fetchrow(
+                "SELECT merged_into FROM entities WHERE entity_id = $1", current
+            )
+            if row is None or row["merged_into"] is None:
+                return current
+            nxt = row["merged_into"]
+            if nxt in seen:
+                logger.warning("entity_merge_cycle", entity_id=str(nxt))
+                return current
+            seen.add(nxt)
+            current = nxt
+        logger.warning("entity_merge_chain_too_deep", entity_id=str(current))
+        return current
+    except Exception as e:
+        logger.debug("merged_forward_resolution_skipped", error=str(e)[:120])
+        return entity_id
+
+
 async def store_entities(
     db,
     redis_client,
@@ -982,6 +1018,41 @@ async def store_entities(
 
         metadata_json = json.dumps(metadata or {})
 
+        async def _record_appearance(entity_id) -> None:
+            """Log that this person showed up in this meeting.
+
+            People only, and only when the ingest carried an origin: a
+            person named in a chat turn with no meeting behind it has no
+            appearance to record. One row per (person, origin), so five
+            mentions in one meeting stay one meeting.
+
+            Degrades silently if the table is absent — the MCP
+            deployment's Postgres lags migrations, and entity storage must
+            not start failing there because People shipped here.
+            """
+            if entity_type != "person":
+                return
+            meta = metadata or {}
+            origin_id = meta.get("origin_id")
+            if not origin_id:
+                return
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO person_appearances
+                        (user_id, entity_id, origin_id, origin_type, project_id)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
+                        last_seen_at = NOW(),
+                        project_id = COALESCE(EXCLUDED.project_id, person_appearances.project_id)
+                    """,
+                    user_id, entity_id, str(origin_id),
+                    meta.get("origin_type") or "meeting",
+                    meta.get("project_id"),
+                )
+            except Exception as e:
+                logger.debug("person_appearance_skipped", error=str(e)[:120])
+
         async def _reobserve(entity_id) -> None:
             await db.execute(
                 """
@@ -994,6 +1065,7 @@ async def store_entities(
                 """,
                 description, metadata_json, entity_id,
             )
+            await _record_appearance(entity_id)
 
         # 1. Exact match, case-insensitive (the old ON CONFLICT only
         #    caught exact case, so "sarah abrams" vs "Sarah Abrams"
@@ -1007,7 +1079,12 @@ async def store_entities(
             user_id, entity_type, name,
         )
         if row:
-            await _reobserve(row["entity_id"])
+            # A merged entity keeps its name (POST /v1/people/{u}/merge
+            # writes a forward pointer rather than deleting), so an exact
+            # hit can land on a row the user has already folded into
+            # someone else. Re-observing the dead row would quietly
+            # rebuild the duplicate the merge just resolved.
+            await _reobserve(await _resolve_merged_forward(db, row["entity_id"]))
             stored += 1
             continue
 
@@ -1025,7 +1102,7 @@ async def store_entities(
                 user_id, name, entity_type,
             )
             if row:
-                await _reobserve(row["entity_id"])
+                await _reobserve(await _resolve_merged_forward(db, row["entity_id"]))
                 stored += 1
                 continue
 
@@ -1033,8 +1110,16 @@ async def store_entities(
             #    Only acts on a UNIQUE candidate — ambiguity ("Sarah"
             #    with both "Sarah Abrams" and "Sarah Chen" present)
             #    falls through to a separate entity, as before.
+            #
+            #    Merged entities are excluded: aliasing a new surface form
+            #    onto a folded row would strand it outside the canonical's
+            #    neighborhood. (If the merged_into column is absent on a
+            #    lagging DB this raises, and the except below falls through
+            #    to the plain insert — same degrade as a missing
+            #    entity_aliases table.)
             candidate_rows = await db.fetch(
-                "SELECT entity_id, name FROM entities WHERE user_id = $1 AND entity_type = $2",
+                "SELECT entity_id, name FROM entities "
+                "WHERE user_id = $1 AND entity_type = $2 AND merged_into IS NULL",
                 user_id, entity_type,
             )
             match = find_alias_candidate(
@@ -1077,7 +1162,9 @@ async def store_entities(
             logger.debug("entity_alias_resolution_skipped", error=str(e)[:120])
 
         # 4. New entity. ON CONFLICT retained as a race-safety net.
-        await db.execute(
+        #    RETURNING on both arms so the appearance can be recorded
+        #    against whichever row won.
+        new_entity_id = await db.fetchval(
             """
             INSERT INTO entities (user_id, name, entity_type, description, metadata)
             VALUES ($1, $2, $3, $4, $5)
@@ -1086,10 +1173,13 @@ async def store_entities(
                 last_seen_at = NOW(),
                 mention_count = entities.mention_count + 1,
                 metadata = entities.metadata || EXCLUDED.metadata
+            RETURNING entity_id
             """,
             user_id, name, entity_type, description,
             metadata_json,
         )
+        if new_entity_id is not None:
+            await _record_appearance(new_entity_id)
         stored += 1
 
     # Update Redis entity name index for this user
