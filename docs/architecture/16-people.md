@@ -16,10 +16,13 @@
 > behavior. Verified 2026-08-02: 272 people returned, capabilities block
 > correct, `/v1/quilt` unaffected.
 >
-> **Specified but deliberately NOT shipped**, pending SS ack of the exact
-> shapes: the three API deltas in **8b**, and the person-patch fold in
-> **6.5**. See the process note at the end of section 10 for why these
-> are being held.
+> **8b shipped 2026-08-02** after SS acked all three with conditions:
+> ledger `owner` is the raw surface form, `total_unfiltered` counts
+> active entities only, `min_meetings=` runs server-side before `limit`,
+> and the query echo reports RECEIVED values plus an `ignored` array.
+>
+> **Still held: the person-patch fold in 6.5.** Ready to build; SS
+> confirmed their client half already works.
 >
 > **Still proposal only: `owed_to` (4.2).** Commitments have no
 > counterparty, so `you_owe` is structurally unanswerable and every read
@@ -31,9 +34,10 @@
 >
 > ### Where to look first
 >
-> If you only read four things: **1** (the entity_id rule), **6.4** (why
-> `you_owe` is null and not zero), **8b** (the three deltas awaiting your
-> ack), and **8d** (the ledger collision).
+> If you only read four things: **1** (the entity_id rule, now acked),
+> **6.4** (why `you_owe` is null and not zero), **8b** (the three shipped
+> deltas and the conditions attached to each), and **8d** (the ledger
+> collision).
 
 ShoulderSurf is adding **People** as a fourth object type in Review,
 next to Meetings, Projects and Memory. A person becomes its own entity
@@ -66,8 +70,8 @@ those aliases diverge, and the graph fragments exactly the way the ABM
 project-id split did, one layer down. Recall matching "Sarah" then
 misses everything filed under "Sarah Chen".
 
-**Proposed rule (needs SS ack):** an SS `Person` is a projection of a
-CQ person entity, keyed on CQ's `entity_id`. Every user action that
+**ACKED BY SS 2026-08-02, this is the rule:** an SS `Person` is a
+projection of a CQ person entity, keyed on CQ's `entity_id`. Every user action that
 asserts identity (confirm, merge, keep separate, create) writes back to
 CQ. SS may cache freely; SS may not be the source of truth for who
 someone is.
@@ -470,6 +474,13 @@ Flip an entry to `available: true` in the same PR that makes it true.
 > survivor the same way relationships repoint, then archive the losers so
 > they ride the existing delta-sync `deleted` array. No new machinery, and
 > archival rather than deletion for the usual tombstone reason.
+>
+> **Estimate shrunk by SS, 2026-08-02:** the client half is already done.
+> SS's `QuiltService` has decoded `deleted` on every delta sync since
+> delta sync shipped, and removes those patch ids from the local store.
+> So archiving really is all CQ needs: no SS change, no new decode path,
+> and no repeat of the `action_items` lesson, because this array has had
+> a consumer from day one. Ready to build on request.
 
 A merge collapses the *entity* layer. It does not touch the duplicate
 `person` patches the two surface forms may have produced. That was
@@ -549,28 +560,72 @@ now agreed rather than proposed.
    feature reads as knowing nothing. See 8c for the plan, which corrects
    one assumption in the original question.
 
-### 8b. API deltas agreed in this round (NOT yet shipped)
+### 8b. API deltas (SS acked 2026-08-02, SHIPPED)
 
-Held pending SS ack of the exact shapes, per the process note in 10.
+Three additions, each carrying a condition SS attached to their ack.
+Every condition has a test that names the reason, so a later "cleanup"
+fails loudly rather than quietly reverting the contract.
 
-**Ledger items gain `owner`.** `_item()` currently returns `patch_id`,
-`type`, `text`, `deadline`, `deadline_date`, `overdue_since`,
-`project_id`, `project`, `origin_id`, and no `owner`. That is an
-omission, not a decision: without it SS cannot diff CQ's attribution
-against its own action-item owner strings, which is precisely the
-reconciliation 8d asks for.
+**1. Ledger items gain `owner`, and it is the RAW extracted surface
+form.** Not normalized to the canonical entity name, ever.
 
-**List gains an unfiltered count.** `total` stays filtered (it is what
-paginates); `total_unfiltered` is the full active-person count, so
-"40 confirmed of 272 known" costs one call. A `min_meetings=` filter is
-available if SS wants the appearance floor server-side rather than
-client-side; not built on spec.
+This is the condition that decides whether the field works at all. SS's
+action items carry whatever string the meeting report produced. If a
+commitment was extracted with `value.owner` of `"Sarah C"` and CQ
+returned `"Sarah Chen"` because that is the canonical entity, the field
+would look helpful and do nothing, because SS never sees the form that
+would let it match. The caller already knows the canonical identity: it
+is the person whose endpoint they called.
 
-**Reads echo the effective query.** A `query` object reflecting the
-`since`, `confirmed` and `limit` CQ actually received. A GP middlebox
-that drops `since` then produces a response whose `query.since` is null
-against a request that set it, which turns a silent full-sync
-degradation into a one-line assertion in the three-way test.
+**Normalizing this field is a regression, not a tidy-up.** It is one of
+the few places where the raw string is the payload and the resolved
+identity is the redundant part. That sentence is in `_item()`'s
+docstring and asserted by a test.
+
+**2. `total_unfiltered`, plus `min_meetings=` server-side.**
+
+`total` stays filtered and is what paginates. `total_unfiltered` is the
+full count, so "40 confirmed of 272 known" costs one call.
+
+`min_meetings` moved server-side because the client-side version is
+broken by construction: request `limit=50`, filter to whatever clears
+the floor, and you get an arbitrary subset with no way to know whether
+the next page holds more that pass. A floor applied after pagination is
+a truncation with extra steps. It runs before `limit` and `total`
+reflects it, the same shape `confirmed=` already had.
+
+**Pinned definition:** `total_unfiltered` counts ACTIVE person entities
+and excludes anything folded away by a merge. Otherwise "272 known"
+would inflate every time someone tidied their roster, which is the
+opposite of what the number is for.
+
+Three counts, three meanings: `len(people)` is what came back after
+`limit`, `total` is what matched the filters before `limit`,
+`total_unfiltered` is every active person ignoring all filters.
+
+**3. Reads echo the query. RECEIVED values, not applied ones.**
+
+The distinction only matters when a value arrives malformed, which is
+exactly when it will be read, so it is named rather than left to
+inference. `query` carries `since`, `confirmed`, `min_meetings` and
+`limit` exactly as they arrived, plus an `ignored` array listing
+anything CQ could not use.
+
+So `confirmed=maybe` echoes `"maybe"` and puts `confirmed` in `ignored`.
+The echo shows the wire (was this parameter mangled in transit?) and
+`ignored` separately shows CQ's behavior (did CQ act on it?). Both
+questions get answered without either field having to serve two masters.
+
+A malformed `since` stays lenient rather than becoming a 422, because
+rejecting it would break existing callers. It is no longer silent
+though: it degrades to a full sync AND reports itself in `ignored`.
+
+For the GP case this means a stripped `since` produces a response whose
+`query.since` is null against a request that set it, which is a
+one-line assertion in the three-way test.
+
+Only the list endpoint echoes a query. The detail endpoint takes no
+query parameters, so an empty echo there would be noise.
 
 ### 8c. Backfill plan, and a correction to Q6's premise
 
@@ -734,8 +789,13 @@ sits deployed. Nothing is being reverted, but the rule for the next
 shared surface is **both hold or both move**, and CQ is the side that
 broke it this time.
 
-Applied immediately: the 8b deltas and the 6.5 fold are specified here
-and **not shipped**, pending SS ack of the shapes.
+Applied immediately: the 8b deltas and the 6.5 fold were specified and
+held rather than shipped. SS acked 8b on 2026-08-02 with conditions, and
+it shipped after that ack, not before it. 6.5 is still held.
+
+SS considers the process point closed and will not raise it again. It
+stays written down here because the rule it produced outlives the
+incident.
 
 **Still open, tracked here so it is not lost:** SS notes their rendered
 meeting count may be lower than CQ's `meeting_count`, because SS will
