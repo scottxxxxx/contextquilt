@@ -219,7 +219,7 @@ def test_shouldersurf_manifest_generates_coherent_prompt():
 
 def test_cues_section_present_by_default(minimal_manifest):
     prompt = build_prompt(minimal_manifest)
-    assert "=== CUES — associative retrieval hooks ===" in prompt
+    assert "=== CUES: associative retrieval hooks ===" in prompt
     assert "`value.cues`" in prompt
 
 

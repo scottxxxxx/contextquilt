@@ -17,6 +17,7 @@ See docs/design/app-schema-registration.md for the manifest shape.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Dict, List, Optional
 
 
@@ -25,16 +26,55 @@ from typing import Any, Dict, List, Optional
 # ============================================================
 
 
+def normalize_dashes(text: str) -> str:
+    """Replace em and en dashes with punctuation the model can copy safely.
+
+    Models reproduce the punctuation they are shown. ShoulderSurf has a
+    hard no-dash rule for anything a user sees, and CQ patch text renders
+    straight into the app, so a dash in the prompt becomes a dash in a
+    patch becomes a dash on screen. Catching it here is far cheaper than
+    filtering extraction output downstream.
+
+    This is a BACKSTOP, not the fix. CQ's own prompt strings are written
+    dash-free; what this catches is manifest-supplied text (patch type and
+    connection label `description`s, `extraction_prompt_guidance`), which
+    app teams author and CQ renders verbatim. Nine of ShoulderSurf's 25
+    descriptions carried dashes at schema v8, live in every extraction.
+    Normalizing at render fixes that immediately instead of waiting on a
+    schema version bump, and it protects the next app onboarded without
+    anyone remembering this rule.
+
+    The stored manifest is untouched. This only affects what is rendered
+    into the prompt, so `GET /v1/schema` still returns exactly what the
+    app registered.
+
+    A spaced dash becomes a colon because the dominant shape in a
+    description is "phrase - expansion" ("...in the user's world - company,
+    team, committee"), where a colon is what the author meant. An unspaced
+    dash becomes a comma. Neither is as good as fixing it at source; app
+    teams should still do that.
+    """
+    if not text:
+        return text
+    # Escaped rather than literal so this file itself stays dash-free and
+    # tests/unit/test_prompt_no_dashes.py can scan the source strictly.
+    text = re.sub("\\s+[\u2014\u2013]\\s+", ": ", text)
+    return re.sub("\\s*[\u2014\u2013]\\s*", ", ", text)
+
+
 def build_prompt(manifest: Dict[str, Any]) -> str:
     """Return the system prompt string for this app's extraction.
 
     If the manifest provides `extraction_prompt_override`, returns it
     verbatim. Otherwise synthesizes a prompt from the structural
     declarations plus `extraction_prompt_guidance`.
+
+    Either way the result is dash-normalized on the way out; see
+    `normalize_dashes`.
     """
     override = manifest.get("extraction_prompt_override")
     if isinstance(override, str) and override.strip():
-        return override
+        return normalize_dashes(override)
 
     guidance = manifest.get("extraction_prompt_guidance") or {}
 
@@ -55,7 +95,7 @@ def build_prompt(manifest: Dict[str, Any]) -> str:
     sections.append(_closing_rules())
 
     # Drop any empty sections before joining
-    return "\n\n".join(s for s in sections if s and s.strip())
+    return normalize_dashes("\n\n".join(s for s in sections if s and s.strip()))
 
 
 def build_output_schema(manifest: Dict[str, Any]) -> Dict[str, Any]:
@@ -80,7 +120,7 @@ def build_output_schema(manifest: Dict[str, Any]) -> Dict[str, Any]:
         "required": ["output_language", "patches", "resolved_commitments", "entities", "relationships"],
         "properties": {
             "you_speaker_present": {"type": "boolean"},
-            # Language commitment — generated before patches (property order
+            # Language commitment, generated before patches (property order
             # drives generation order under strict mode) so English context
             # blocks can't pull the output prose back to English.
             "output_language": {"type": "string"},
@@ -202,18 +242,18 @@ def _language_section() -> str:
         "=== LANGUAGE ===\n"
         "Transcripts may be in ANY language, or a mix (e.g. one speaker in "
         "Spanish, another in English). Extract with EQUAL diligence from "
-        "every language present — a trait, preference, person, commitment, "
+        "every language present: a trait, preference, person, commitment, "
         "or blocker stated in Spanish, Japanese, or Portuguese is exactly "
         "as memorable as one stated in English. Never skip a speaker's "
         "content because of the language they spoke.\n"
         "\n"
-        "Write all output prose — patch value `text`, entity `description`, "
-        "relationship `context` — in the user's language: use the "
+        "Write all output prose (patch value `text`, entity `description`, "
+        "relationship `context`) in the user's language: use the "
         "`User language:` line at the top of the input if present "
         "(e.g. \"User language: es\"); otherwise use the dominant language "
         "spoken by the (you) speaker. Commit to it in the `output_language` "
         "field BEFORE generating patches, and honor it for every prose field "
-        "after — these instructions and any context blocks being in English "
+        "after. These instructions and any context blocks being in English "
         "does NOT change the output language. Keep proper names verbatim as spoken. "
         "Structural fields are language-independent and unchanged: patch "
         "`type`, connection roles/labels, entity `type`, and `deadline_date` "
@@ -227,7 +267,7 @@ def _output_shape(manifest: Dict[str, Any]) -> str:
         "=== OUTPUT SHAPE ===\n"
         "Return a JSON object with exactly these keys:\n"
         "- `output_language`: the language code ALL output prose must be written in "
-        "(from the `User language:` line, else the (you) speaker's dominant language) — "
+        "(from the `User language:` line, else the (you) speaker's dominant language). "
         "set this before generating patches and honor it for every prose field\n"
         "- `_reasoning`: short scratchpad explaining why you chose the patches you did\n"
         "- `patches`: array of typed patches (see PATCH TYPES below)\n"
@@ -243,13 +283,13 @@ def _output_shape(manifest: Dict[str, Any]) -> str:
         "(\"tomorrow\", \"end of week\", \"June 19th\") AND set `deadline_date` to "
         "that deadline resolved to an absolute calendar date in YYYY-MM-DD form. "
         "Resolve relative expressions against the `Meeting date:` line at the top "
-        "of the input — e.g. if the meeting date is 2026-06-10, \"tomorrow\" → "
+        "of the input. For example, if the meeting date is 2026-06-10, \"tomorrow\" → "
         "\"2026-06-11\" and \"end of week\" → the upcoming Friday. If the deadline "
         "cannot be tied to a specific date (\"after the board meeting\", \"soon\"), "
-        "set `deadline_date` to null. Never guess a year — when no Meeting date "
+        "set `deadline_date` to null. Never guess a year. When no Meeting date "
         "line is present and the deadline is relative, set `deadline_date` to null. "
         "This applies to every patch type that carries a date, not just "
-        "action-like types — a goal with a target date gets both fields the "
+        "action-like types: a goal with a target date gets both fields the "
         "same way."
     )
 
@@ -270,13 +310,13 @@ def _cues_section(manifest: Dict[str, Any], guidance: Dict[str, Any]) -> str:
         "entity name. Ask: \"in a future conversation, what topic words "
         "would someone use when this patch should surface?\" Emit those, "
         "0-5 per patch: short lowercase phrases of 1-4 words "
-        "(\"pricing model\", \"visa paperwork\") — topics, not sentences. "
+        "(\"pricing model\", \"visa paperwork\"): topics, not sentences. "
         "Do NOT repeat entity names (the entities array indexes those), "
         "and do NOT emit medium words (\"meeting\", \"update\") or "
         "anything generic enough to match every conversation. An empty "
         "array is correct when the entities already cover it."
     )
-    lines = ["=== CUES — associative retrieval hooks ===", body]
+    lines = ["=== CUES: associative retrieval hooks ===", body]
     per_type = [
         f"- **{pt.get('domain_type')}**: {pt['cue_guidance']}"
         for pt in (manifest.get("patch_types") or [])
@@ -304,9 +344,9 @@ def _salience_section(guidance: Dict[str, Any]) -> str:
         "ONLY for unusual weight (emotional emphasis, surprise, explicit "
         "stakes, a reversal of something previously believed, repetition); "
         "\"low\" for passing remarks unlikely to matter later; null for "
-        "everything else — MOST patches are null."
+        "everything else. MOST patches are null."
     )
-    return "=== SALIENCE — how strongly to remember ===\n" + body
+    return "=== SALIENCE: how strongly to remember ===\n" + body
 
 
 def _patch_types_section(manifest: Dict[str, Any]) -> str:
@@ -314,7 +354,7 @@ def _patch_types_section(manifest: Dict[str, Any]) -> str:
     if not patch_types:
         return ""
 
-    lines = ["=== PATCH TYPES — use the most specific type that fits ===", ""]
+    lines = ["=== PATCH TYPES: use the most specific type that fits ===", ""]
     for pt in patch_types:
         lines.append(f"- **{pt.get('domain_type')}** (facet: {pt.get('facet')}, permanence: {pt.get('permanence')})")
         desc = pt.get("description")
@@ -326,7 +366,7 @@ def _patch_types_section(manifest: Dict[str, Any]) -> str:
             # shape. Manifest value_shape declarations predate cues /
             # salience / deadline_date, and models obey the per-type
             # shape (the most concrete spec) over the generic sections
-            # above it — 14 shapes without `cues` beat one CUES section
+            # above it, 14 shapes without `cues` beat one CUES section
             # every time. Root cause of the 2026-07-30 cue-starvation
             # finding: 0% cue emission on the generated prompt vs 85%
             # on a prompt whose shape includes cues, on two different
@@ -336,7 +376,7 @@ def _patch_types_section(manifest: Dict[str, Any]) -> str:
                 ("deadline", "string?"),
                 ("deadline_date", "string?"),
             ]
-            # A killed section must not be advertised by the shapes —
+            # A killed section must not be advertised by the shapes, 
             # the field only merges when its instruction section renders.
             if guidance.get("cues_enabled") is not False:
                 universal.append(("cues", "string[]? (0-5, see CUES section)"))
@@ -358,7 +398,7 @@ def _patch_types_section(manifest: Dict[str, Any]) -> str:
         if pt.get("completable"):
             lines.append("    Can be marked completed.")
         if pt.get("project_scoped"):
-            lines.append("    Project-scoped — should connect to a project patch via belongs_to.")
+            lines.append("    Project-scoped: connect it to a project patch via belongs_to.")
         lines.append("")
     return "\n".join(lines).rstrip()
 
@@ -368,7 +408,7 @@ def _connection_labels_section(manifest: Dict[str, Any]) -> str:
     if not labels:
         return ""
 
-    lines = ["=== CONNECTION LABELS — valid `connects_to` edges ===", ""]
+    lines = ["=== CONNECTION LABELS: valid `connects_to` edges ===", ""]
     for lb in labels:
         label = lb.get("label")
         role = lb.get("role")
@@ -393,12 +433,12 @@ def _priority_order(guidance: Dict[str, Any]) -> str:
         "=== PRIORITY ORDER (when you must choose within the patch budget) ===",
         "",
         # Coverage-first: extraction is the recall stage of this
-        # pipeline — a separate dedup/merge step downstream handles
+        # pipeline, a separate dedup/merge step downstream handles
         # overlap and noise. Under-extraction is unrecoverable;
         # over-extraction is filtered. (2026-07-30 coverage eval:
         # models self-limited well below the budget and dropped
         # blockers and people.)
-        "Emit EVERY distinct memory-worthy item — a downstream dedup step "
+        "Emit EVERY distinct memory-worthy item. A downstream dedup step "
         "absorbs overlap, so do not self-censor to seem selective. "
         "The order below matters ONLY if you approach the hard cap:",
         "",
@@ -465,7 +505,7 @@ def _resolved_commitments_section() -> str:
         "\n"
         "Rules:\n"
         "1. Only include patch_ids that appear in the `Open commitments` block.\n"
-        "   Never invent or guess — the worker rejects unknown patch_ids.\n"
+        "   Never invent or guess. The worker rejects unknown patch_ids.\n"
         "2. Copy patch_id strings verbatim, character for character.\n"
         "3. The `evidence` field is a short quote or paraphrase from the\n"
         "   transcript showing the action was completed. Under ~300 chars.\n"
@@ -481,10 +521,10 @@ def _resolved_commitments_section() -> str:
 def _closing_rules() -> str:
     return (
         "=== GENERAL RULES ===\n"
-        "1. Every value must be grounded in the transcript — do not invent.\n"
+        "1. Every value must be grounded in the transcript. Do not invent.\n"
         "2. Entity names must match exactly as mentioned in the transcript.\n"
         "3. Keep each patch's text concise (one clear sentence).\n"
         "4. If a section has nothing to extract, return an empty array.\n"
         "5. Only create connections that genuinely exist in the transcript.\n"
-        "6. Prefer consolidation — one commitment patch over three sub-tasks."
+        "6. Prefer consolidation: one commitment patch over three sub-tasks."
     )
