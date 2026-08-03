@@ -134,6 +134,14 @@ class Settings(BaseSettings):
         default=True, alias="CQ_CONSOLIDATION_ENABLED"
     )
 
+    # Account purge (cq-tier-signals lane): processes queued
+    # account_deleted signals into full hard deletion of everything CQ
+    # holds for the user. Kill switch stops PROCESSING only — signals
+    # keep recording either way and are processed when re-enabled.
+    cq_account_purge_enabled: bool = Field(
+        default=True, alias="CQ_ACCOUNT_PURGE_ENABLED"
+    )
+
     # --- Alerting / email ---
     cq_alert_email_from: str = Field(default="", alias="CQ_ALERT_EMAIL_FROM")
     resend_api_key: str = Field(default="", alias="RESEND_API_KEY")

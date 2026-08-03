@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from contextquilt.gateway.extraction import classify_fact
 from contextquilt.services.alerting import report_incident, sweep_stale_incidents
+from contextquilt.services import account_purge
 from contextquilt.services.attribution import validate_user_attribution_hint
 from contextquilt.services.extraction_prompts import (
     COMMUNICATION_PROFILE_SYSTEM,
@@ -1436,6 +1437,7 @@ class ColdPathWorker:
             self.consolidation_loop(),
             self.backup_failure_watch_loop(),
             self.provider_health_loop(),
+            self.tier_signals_loop(),
         )
 
     async def stop(self):
@@ -1498,6 +1500,69 @@ class ColdPathWorker:
                 await self._process_ready_queues()
             except Exception as e:
                 logger.error("queue_check_error", error=str(e))
+
+    async def tier_signals_loop(self):
+        """Consume queued tier signals (cq-tier-signals lane).
+
+        The endpoint is record-only; this loop is the processor. For a
+        shape-consistent `account_deleted` (event_type AND new_tier
+        both say deletion) it runs the full hard purge via
+        services/account_purge.py and stamps the signal row as the
+        durable deletion receipt. Ordinary tier events are stamped
+        recorded_only. Inconsistent deletion-shaped signals are never
+        processed destructively — stamped skipped_inconsistent and
+        logged loudly for a human.
+
+        Kill switch CQ_ACCOUNT_PURGE_ENABLED stops processing only;
+        signals keep recording and are processed on re-enable.
+        """
+        # Interval literal is local to this coroutine on purpose — the
+        # worker's cross-loop-constant NameError crash-looped us once
+        # (hotfix 2026-06-12), never share loop constants.
+        POLL_INTERVAL_SECONDS = 60
+        while self.running:
+            try:
+                if get_settings().cq_account_purge_enabled:
+                    rows = await self.db.fetch(
+                        """
+                        SELECT signal_id, user_id, event_type, new_tier
+                        FROM tier_signals
+                        WHERE processed_at IS NULL
+                        ORDER BY received_at
+                        LIMIT 20
+                        """
+                    )
+                    for row in rows:
+                        action = account_purge.classify_signal(
+                            row["event_type"], row["new_tier"]
+                        )
+                        detail = action
+                        if action == account_purge.ACTION_PURGED:
+                            counts = await account_purge.purge_user_data(
+                                self.db, self.redis, row["user_id"]
+                            )
+                            detail = json.dumps({"action": action, "counts": counts})
+                            logger.info(
+                                "account_purged",
+                                user_id=row["user_id"],
+                                signal_id=str(row["signal_id"]),
+                                counts=counts,
+                            )
+                        elif action == account_purge.ACTION_INCONSISTENT:
+                            logger.warning(
+                                "tier_signal_inconsistent",
+                                user_id=row["user_id"],
+                                signal_id=str(row["signal_id"]),
+                                event_type=row["event_type"],
+                                new_tier=row["new_tier"],
+                            )
+                        await self.db.execute(
+                            "UPDATE tier_signals SET processed_at = NOW(), action = $2 WHERE signal_id = $1",
+                            row["signal_id"], detail,
+                        )
+            except Exception as e:
+                logger.error("tier_signals_loop_error", error=str(e))
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     async def deadline_sweep_loop(self):
         """Scheduled pass over deadline-bearing completables whose due
