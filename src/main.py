@@ -54,6 +54,7 @@ from contextquilt.services.people_identity import (
     IdentityRequestError,
     canonical_pair,
     capability_report,
+    choose_surviving_person_patch,
     merge_project_rollups,
     normalise_merge_request,
     owner_keys,
@@ -3535,6 +3536,7 @@ async def merge_people(
     except IdentityRequestError as e:
         raise _identity_error(e)
 
+    subject_key = f"user:{user_id}"
     async with db_pool.acquire() as conn:
         async with conn.transaction():
             try:
@@ -3756,6 +3758,105 @@ async def merge_people(
                     canonical_uuid, loser_uuid,
                 )
 
+            # 8. Fold duplicate person PATCHES (doc 16 section 6.5).
+            #
+            #    Merging entities alone left the quilt showing two Sarahs
+            #    one segment over: `person` is a rendered patch type and
+            #    GET /v1/quilt applies no type exclusion, so a user who
+            #    merged in People still saw both in Memory. That is the
+            #    same split brain this feature exists to prevent,
+            #    reappearing inside the same screen.
+            #
+            #    Patches join to entities only by case-insensitive name,
+            #    so the fold set is every person patch matching the
+            #    canonical or any folded identity, including their
+            #    aliases.
+            names = {canonical["name"]}
+            names.update(str(r["alias"]) for r in await conn.fetch(
+                "SELECT alias FROM entity_aliases WHERE user_id = $1 AND entity_id = $2::uuid",
+                user_id, canonical_uuid,
+            ))
+            for loser in losers:
+                names.add(loser["name"])
+            keys = [n.strip().lower() for n in names if n and n.strip()]
+
+            candidates = [dict(r) for r in await conn.fetch(
+                """
+                SELECT cp.patch_id, cp.value->>'text' AS text, cp.created_at
+                FROM context_patches cp
+                JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                WHERE ps.subject_key = $1
+                  AND cp.patch_type = 'person'
+                  AND COALESCE(cp.status, 'active') = 'active'
+                  AND LOWER(cp.value->>'text') = ANY($2::text[])
+                ORDER BY cp.created_at
+                """,
+                subject_key, keys,
+            )]
+            survivor, patch_losers = choose_surviving_person_patch(
+                candidates, canonical["name"]
+            )
+            folded_patch_ids: List[str] = []
+
+            if survivor and patch_losers:
+                survivor_id = survivor["patch_id"]
+                loser_ids = [c["patch_id"] for c in patch_losers]
+
+                # Connections follow the person. Same UNIQUE(from, to,
+                # role) collision the relationship repoint has, so guard
+                # with NOT EXISTS and sweep the true duplicates after.
+                for column, other in (("from_patch_id", "to_patch_id"),
+                                      ("to_patch_id", "from_patch_id")):
+                    await conn.execute(
+                        f"""
+                        UPDATE patch_connections pc SET {column} = $1
+                        WHERE pc.{column} = ANY($2::uuid[])
+                          AND NOT EXISTS (
+                              SELECT 1 FROM patch_connections pc2
+                              WHERE pc2.{column} = $1
+                                AND pc2.{other} = pc.{other}
+                                AND pc2.connection_role = pc.connection_role
+                          )
+                        """,
+                        survivor_id, loser_ids,
+                    )
+                await conn.execute(
+                    "DELETE FROM patch_connections WHERE from_patch_id = ANY($1::uuid[]) "
+                    "OR to_patch_id = ANY($1::uuid[])",
+                    loser_ids,
+                )
+                await conn.execute(
+                    "DELETE FROM patch_connections WHERE from_patch_id = $1 AND to_patch_id = $1",
+                    survivor_id,
+                )
+
+                # The survivor speaks for the canonical identity now.
+                await conn.execute(
+                    """
+                    UPDATE context_patches
+                    SET value = jsonb_set(value, '{text}', to_jsonb($1::text)),
+                        updated_at = NOW()
+                    WHERE patch_id = $2
+                    """,
+                    canonical["name"], survivor_id,
+                )
+
+                # Archive, never delete: this is what puts the folded ids
+                # in the delta-sync `deleted` array, which SS has decoded
+                # since delta sync shipped.
+                await conn.execute(
+                    """
+                    UPDATE context_patches
+                    SET status = 'archived', updated_at = NOW(),
+                        value = value
+                            || jsonb_build_object('merged_into_patch', $1::text)
+                            || jsonb_build_object('merge_source', $2::text)
+                    WHERE patch_id = ANY($3::uuid[])
+                    """,
+                    str(survivor_id), source, loser_ids,
+                )
+                folded_patch_ids = [str(p) for p in loser_ids]
+
             # A user-asserted merge also vouches for the canonical.
             await conn.execute(
                 """
@@ -3783,6 +3884,10 @@ async def merge_people(
         "canonical_name": canonical["name"],
         "merged": loser_uuids,
         "aliases": [r["alias"] for r in alias_rows],
+        # Archived duplicate person patches. They ride the delta-sync
+        # `deleted` array too; named here so a caller does not have to
+        # diff a sync to find out what a merge did (doc 16 section 6.5).
+        "folded_patch_ids": folded_patch_ids,
     }
 
 
