@@ -117,6 +117,15 @@ shape change and cannot report that it failed.
 4. **Quiet is not a signal** for anything older than 2026-08-02. Those
    builds cannot report a decode failure, so evidence that a change landed
    safely has to come from somewhere other than the absence of alerts.
+5. **Locale coverage matches across siblings.** Every served config covers
+   the same locale set its siblings cover, or declares which it does not.
+   This is rule 2 at file granularity and it hides the same way: nothing
+   throws, and some fraction of users silently receives another locale's
+   content. Found live with three different locale sets in one stack: CQ's
+   recall labels cover five (en, es, fr, pt, ja), tier copy four, and the
+   protected instruction text three with no Japanese file at all. So a
+   Japanese user reads CQ's section labels in Japanese next to an
+   entirely English instruction block. Nothing threw.
 
 Rule 4 is the same lesson doc 15's defect ledger records twice, arriving
 from a third direction.
@@ -180,10 +189,17 @@ Doc 15 is locked. This doc is ratified but expected to gain lanes.
   design question, and shipping placement alone leaves inclusion
   client-authored.
 - **Two lock scopes must not become one served flag.** See section 3.
-- **Placement may be expressed in two served configs.** The model
-  capabilities config carries a placement field of its own. Two configs
-  that can each assert placement will diverge; the envelope should be the
-  single owner, or the overlap needs an explicit precedence rule.
+- **Placement authority: settled 2026-08-03.** The model capabilities
+  config carries a placement field of its own, so two served configs could
+  each assert placement. The envelope now declares itself sole owner and
+  names the other field as deprecated. Note that section 6 rule 1 forbids
+  deleting it, so it is deprecated in place, and two tests pin the
+  arrangement: the declaration itself, and that the deprecated field stays
+  present and uniform, since it vanishing breaks every shipped build and
+  it varying means something started reading it again. Residual: "no
+  shipped build consumes the value" is still an assumption. The field
+  being declared non-optional proves only that the key must be present.
+  The per-build manifest below can settle it.
 - **The model capabilities config is whole-file strict** with eight
   non-optional fields, so one entry missing any of them discards the file
   on every build including current, and it gates a shipped UI element.
@@ -194,6 +210,9 @@ Doc 15 is locked. This doc is ratified but expected to gain lanes.
 - GhostPour owes a compact instruction variant for the on-device lane.
   The cloud default costs roughly 8% of that lane's usable budget before
   any transcript arrives, and includes an image rule the lane cannot use.
+- GhostPour owes the missing Japanese instruction file. Until it exists,
+  those users receive the full English instruction block. See section 6
+  rule 5.
 - Order of sections within the user turn on the session surfaces is not
   asserted, pending a byte diff. Treat the served order there as
   undiffed, not as ground truth.
