@@ -21,8 +21,9 @@
 > active entities only, `min_meetings=` runs server-side before `limit`,
 > and the query echo reports RECEIVED values plus an `ignored` array.
 >
-> **Still held: the person-patch fold in 6.5.** Ready to build; SS
-> confirmed their client half already works.
+> **6.5 person-patch fold SHIPPED 2026-08-03.** Merging now folds
+> duplicate `person` patches too, so the Memory segment stops showing
+> two Sarahs after a merge in People.
 >
 > **Still proposal only: `owed_to` (4.2).** Commitments have no
 > counterparty, so `you_owe` is structurally unanswerable and every read
@@ -452,35 +453,46 @@ distinguishes them.
 
 Flip an entry to `available: true` in the same PR that makes it true.
 
-### 6.5 SCHEDULED (was deferred): person patches are not folded by a merge
+### 6.5 SHIPPED: a merge folds duplicate person patches
 
-> **Escalated 2026-08-02 by SS review.** This section shipped saying the
-> gap "stops being deferrable if the quilt view ever renders people
-> directly." SS reports that it already does: `person` is a first-class
-> rendered patch type in the Memory segment today, with its own icon and
-> display name, and nothing filters it out.
+> **Shipped 2026-08-03.** A merge now folds duplicate `person` patches,
+> not just entities.
 >
-> Verified against the code rather than taken on trust: `VALID_PATCH_TYPES`
-> includes `person`, `GET /v1/quilt` applies no type exclusion, and merge
-> touches `entities` only and never `context_patches`. So the sequence is
-> real today: a user merges two Sarahs in People, switches one segment
-> over to Memory, and sees two Sarah patches. **The condition was written
-> in future tense and is present tense.** Moved from deferred to
-> scheduled. SS confirms it does not block their first cut.
+> It shipped because SS reported the deferral condition was already met.
+> This section said the gap "stops being deferrable if the quilt view ever
+> renders people directly", and it does: `person` is a first-class
+> rendered patch type in the Memory segment. Verified against the code
+> rather than taken on trust, `VALID_PATCH_TYPES` includes `person`,
+> `GET /v1/quilt` applies no type exclusion, and merge touched `entities`
+> only. So merging two Sarahs in People and switching one segment over
+> showed two Sarahs in Memory: the same split brain this document exists
+> to prevent, reappearing inside the same screen.
 >
-> Planned fix, mirroring what merge already does one layer down: pick a
-> surviving person patch, repoint its inbound and outbound connections
-> (`works_on`, `member_of`, `reports_to`, `describes`, `held_by`) onto the
-> survivor the same way relationships repoint, then archive the losers so
-> they ride the existing delta-sync `deleted` array. No new machinery, and
-> archival rather than deletion for the usual tombstone reason.
+> **How the survivor is chosen.** A patch whose text already IS the
+> canonical name wins, so the surviving fact needs no rewrite. Otherwise
+> the OLDEST patch wins and its text is rewritten to the canonical name.
+> Oldest rather than newest on purpose: the newest is the extractor's
+> most recent guess, the oldest is what the rest of the quilt has been
+> pointing at.
 >
-> **Estimate shrunk by SS, 2026-08-02:** the client half is already done.
-> SS's `QuiltService` has decoded `deleted` on every delta sync since
-> delta sync shipped, and removes those patch ids from the local store.
-> So archiving really is all CQ needs: no SS change, no new decode path,
-> and no repeat of the `action_items` lesson, because this array has had
-> a consumer from day one. Ready to build on request.
+> Connections repoint onto the survivor with the same NOT EXISTS guard
+> the relationship repoint uses, since `patch_connections` has the same
+> UNIQUE(from, to, role) collision. Duplicates collapse, self loops are
+> swept.
+>
+> Losers are **archived, never deleted**, which is what puts them in the
+> delta-sync `deleted` array. SS confirmed `QuiltService` has decoded
+> that array since delta sync shipped, so this needed no SS change at
+> all. Archived rows carry `value.merged_into_patch` and
+> `value.merge_source` so the fold is auditable after the fact. The merge
+> response also names them in `folded_patch_ids`, so a caller does not
+> have to diff a sync to find out what happened.
+>
+> Verified end to end: `/v1/quilt?category=person` goes from two Sarahs
+> to one, an unrelated person is untouched, the folded id appears in
+> `deleted`, a unique connection on the loser repoints while a duplicate
+> collapses, and the rename branch rewrites the survivor's text when no
+> patch matched the canonical name.
 
 A merge collapses the *entity* layer. It does not touch the duplicate
 `person` patches the two surface forms may have produced. That was
