@@ -142,6 +142,23 @@ that varies per turn belongs after the boundary or in the user turn. This
 is why doc 15 item 6 (CQ recall output is byte stable within a UTC day) is
 load bearing well beyond CQ's own render cache.
 
+**What item 6 does and does not promise.** It has been read once as a
+claim that the recall block is invariant across turns, and it is not.
+Recall is ranked against the question: the scorer takes the query text and
+boosts patches whose matched entities appear in it, and CQ's own render
+cache is keyed on a hash of the request text plus metadata. Item 6 says
+that *time* is not a source of variation, because the scorer buckets `now`
+to the UTC day so a freshness penalty cannot step by the second. So the
+promise is determinism for a repeated identical request within a day, not
+invariance across different questions.
+
+The practical consequence: recall is per-turn volatile and belongs after
+the cache boundary. Its identity is the whole request shape, which is
+user, question text, and metadata (project scope, locale, token budget,
+signal flags), quantized to the UTC day. A boundary can never be placed
+above recall on the strength of user or project alone, because asking a
+different question in the same project changes the block.
+
 **Served instructions are model-facing content.** They are subject to the
 same review CQ applies to its own prompt strings. Two interactions to
 re-check whenever the served instruction text changes:
