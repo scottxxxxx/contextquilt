@@ -373,3 +373,85 @@ def test_query_echo_reports_received_values_not_applied_ones():
     assert 'ignored.append("since")' in body
     assert 'ignored.append("confirmed")' in body
     assert "echoes what CQ RECEIVED" in body
+
+
+# =====================================================================
+# Person-patch fold on merge (doc 16 section 6.5).
+#
+# Merging entities alone left two Sarahs visible one segment over,
+# because `person` is a rendered patch type and /v1/quilt applies no
+# type exclusion. These cover which patch survives the fold.
+# =====================================================================
+
+from datetime import datetime, timedelta  # noqa: E402
+
+from contextquilt.services.people_identity import (  # noqa: E402
+    choose_surviving_person_patch,
+)
+
+T0 = datetime(2026, 5, 1)
+
+
+def _p(pid, text, days=0):
+    return {"patch_id": pid, "text": text, "created_at": T0 + timedelta(days=days)}
+
+
+def test_exact_canonical_name_wins_even_when_newer():
+    # Keeping the patch that already says the canonical name means the
+    # surviving fact needs no rewrite.
+    survivor, losers = choose_surviving_person_patch(
+        [_p("old", "Sarah C", 0), _p("new", "Sarah Chen", 10)], "Sarah Chen"
+    )
+    assert survivor["patch_id"] == "new"
+    assert [l["patch_id"] for l in losers] == ["old"]
+
+
+def test_oldest_wins_when_no_exact_match():
+    # The oldest patch carries the longest history and the most
+    # connections; the newest is just the extractor's latest guess.
+    survivor, losers = choose_surviving_person_patch(
+        [_p("newer", "Sarah C", 10), _p("older", "S. Chen", 0)], "Sarah Chen"
+    )
+    assert survivor["patch_id"] == "older"
+
+
+def test_match_is_case_and_whitespace_insensitive():
+    survivor, _ = choose_surviving_person_patch(
+        [_p("a", "Sarah C", 0), _p("b", "  sarah chen  ", 5)], "Sarah Chen"
+    )
+    assert survivor["patch_id"] == "b"
+
+
+def test_single_candidate_is_not_a_fold():
+    # One patch is already the survivor; folding would archive the only
+    # copy of the fact.
+    assert choose_surviving_person_patch([_p("only", "Sarah Chen")], "Sarah Chen") == (None, [])
+
+
+def test_no_candidates_is_a_noop():
+    assert choose_surviving_person_patch([], "Sarah Chen") == (None, [])
+
+
+def test_rows_without_a_patch_id_are_ignored():
+    survivor, losers = choose_surviving_person_patch(
+        [_p("real", "Sarah C", 0), {"text": "Sarah Chen"}, None], "Sarah Chen"
+    )
+    assert survivor is None and losers == []
+
+
+def test_missing_created_at_does_not_break_ordering():
+    # Hand-made rows can lack created_at; sorting must not raise.
+    survivor, losers = choose_surviving_person_patch(
+        [{"patch_id": "x", "text": "A", "created_at": None}, _p("y", "B", 3)], "Z"
+    )
+    assert survivor["patch_id"] == "y"
+    assert [l["patch_id"] for l in losers] == ["x"]
+
+
+def test_every_loser_is_returned_for_a_three_way_merge():
+    survivor, losers = choose_surviving_person_patch(
+        [_p("a", "Sarah Chen", 0), _p("b", "Sarah C", 1), _p("c", "S. Chen", 2)],
+        "Sarah Chen",
+    )
+    assert survivor["patch_id"] == "a"
+    assert sorted(l["patch_id"] for l in losers) == ["b", "c"]

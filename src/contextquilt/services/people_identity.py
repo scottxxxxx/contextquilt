@@ -261,6 +261,50 @@ def merge_project_rollups(
     )
 
 
+def choose_surviving_person_patch(
+    candidates: Sequence[dict],
+    canonical_name: str,
+) -> Tuple[dict | None, List[dict]]:
+    """Pick which duplicate person patch survives a merge, and which fold.
+
+    `candidates` are person patches whose text matches the canonical or
+    any folded identity, each a dict with at least `patch_id`, `text` and
+    `created_at`. Returns (survivor, losers).
+
+    Preference order:
+      1. A patch whose text already IS the canonical name. Keeping it
+         means the survivor needs no rewrite, so nothing about the
+         surviving fact changes.
+      2. Otherwise the OLDEST patch, which carries the longest history:
+         it has the most connections hanging off it and the earliest
+         created_at, and the caller renames its text to the canonical.
+
+    Oldest rather than newest on purpose. The newest patch is the one the
+    extractor most recently guessed at; the oldest is the one the rest of
+    the quilt has been pointing at.
+
+    Returns (None, []) for zero or one candidate: there is nothing to
+    fold, and a lone patch is already the survivor.
+    """
+    usable = [c for c in candidates if c and c.get("patch_id")]
+    if len(usable) < 2:
+        return (None, [])
+
+    target = (canonical_name or "").strip().lower()
+    exact = [c for c in usable if (c.get("text") or "").strip().lower() == target]
+    if exact:
+        survivor = exact[0]
+    else:
+        # created_at may be None on hand-made rows; sort those last
+        # rather than blowing up the comparison.
+        survivor = sorted(
+            usable, key=lambda c: (c.get("created_at") is None, c.get("created_at"))
+        )[0]
+
+    losers = [c for c in usable if c["patch_id"] != survivor["patch_id"]]
+    return (survivor, losers)
+
+
 def resolve_identity_source(source: str | None) -> str:
     """Normalise the caller's `source`, defaulting to user_confirmation.
 
