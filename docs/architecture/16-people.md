@@ -627,61 +627,75 @@ one-line assertion in the three-way test.
 Only the list endpoint echoes a query. The detail endpoint takes no
 query parameters, so an empty echo there would be noise.
 
-### 8c. Backfill: tier 1 APPLIED, tier 2 HELD (and why)
+### 8c. Backfill: three tiers, two applied
 
-Q6 said appearances are reconstructible "from the ingest stream, which
-preserves original payloads verbatim." The stream does carry `content`
-(854 of 888 entries, longest 210k chars), so tier 2 is technically
-viable. But `memory_updates` has no settled MAXLEN policy, so
-stream-only can never be proven complete. Hence two tiers.
+`person_appearances` only fills forward, so without a backfill every
+person shows a zero meeting count on day one and the feature reads as
+knowing nothing.
 
-**Tier 1, Postgres-derived. Applied 2026-08-02.** Every patch carries
-`origin_id`, and ownership is recorded two ways: a raw `value.owner`
-string and an explicit `owns` edge from a person patch. Both resolve to
-a person entity through the same exact-then-alias path `store_entities`
-uses, with `merged_into` followed forward. Deterministic, no LLM call,
-complete over all patch history.
+**`meeting_count` renders to a user as "9 meetings", which is a claim
+about ATTENDANCE.** That sentence decides which tiers may feed it.
 
-Result: **436 appearances, 114 people, 157 meetings.** Timestamps come
-from the source patch (spanning 2026-04-12 to 2026-08-04), never
-`NOW()`: importing at wall-clock time would make `last_seen_at DESC`
-meaningless and tell the app every meeting happened today. Re-running is
-a no-op (436 upserts, table stays 436).
+**ownership (APPLIED).** Postgres-derived, complete over all patch
+history with no retention dependency. A person appears if they own
+something anchored to that meeting, via a raw `value.owner` string or an
+`owns` edge. Deterministic, no LLM call. 436 appearances, 114 people,
+157 meetings.
 
-Effect on the read surface: `min_meetings` went from a no-op to the
-useful default SS wanted. 93 of 272 people now have at least one
-meeting, 12 have five or more, 7 have twenty or more.
+**speakers (APPLIED).** Transcript speaker labels resolved against known
+person entities. The strongest attendance signal CQ holds: having spoken
+in a meeting is better evidence of being there than having owned an
+action item out of it, since work gets assigned in absentia. Took the
+table to 971 rows, and for the primary user took `min_meetings=1` from
+93 people to **118**.
 
-**Tier 2, stream-derived. Built, dry-run, NOT applied.**
+Only labels resolving to a known person entity are recorded, which drops
+caption-scanner noise without a blocklist. SS's screen-capture reader
+hands on-screen text to a name-shape extractor, so strings like "Ask
+Gemini" and "BUILD SUCCEEDED" arrive shaped exactly like two-word human
+names. They were never entities, so they never land. SS owns that defect
+and is fixing it at source.
 
-The dry run is what stopped it. Tier 2 adds 1843 rows on top of tier 1,
-taking the busiest person from 37 meetings to 179, and finds 337
-distinct meetings against the 220 that actually produced patches.
+**mentions (BUILT, NOT APPLIED).** Anyone named anywhere in a transcript.
+Not attendance. It counts people discussed in absentia and took the
+busiest person from 37 meetings to 179 in a dry run. It IS the right
+number for the provenance line in design 1e ("named in 11 transcripts"),
+which needs the `source` column below before it can land anywhere useful.
 
-The reason is a semantic mismatch this doc did not catch when it
-specified the tier. **Tier 2 measures "this person's name appears in the
-transcript", which is not the same claim as "this person was in the
-meeting."** It counts people discussed in absentia, referenced in the
-third person, or named once in passing. The design renders
-`meeting_count` as "9 meetings, last 3d ago" and "5 meetings together",
-which read as co-attendance. Writing 179 into that field would make the
-number confidently wrong, which is the failure mode 6.4 exists to
-prevent.
+**Still proposed: a `source` column** (`ownership` | `speaker` |
+`mention`) so `meeting_count` can stay attendance-grounded while
+provenance exposes mentions separately. Needs a migration and an SS ack.
 
-Tier 2 is not worthless. It is the correct number for the provenance
-line in design section 1e, "Named in 11 transcripts". It is the wrong
-number for `meeting_count`.
+Script is `scripts/backfill_person_appearances.py`. `--tier attendance`
+(default) runs ownership plus speakers; `mentions` and `all` are
+explicit opt-ins because the wrong one is destructive to trust.
 
-**Proposed resolution, same instinct as the 5.2 projects rollup:** do
-not collapse two different claims into one number. Add a `source` column
-to `person_appearances` (`ownership` vs `mention`), let `meeting_count`
-count ownership-grounded rows, and expose the mention count separately
-in `provenance` where 1e actually wants it. That keeps both signals and
-lets the client decide, instead of picking one and losing the other.
+#### The lesson underneath it (SS, 2026-08-03)
 
-Needs a migration and an SS ack on the extra field, so it is held rather
-than shipped. Script is `scripts/backfill_person_appearances.py`,
-dry-run default, `--tier 1|2|both`, `--apply` writes.
+SS planned to show a local count in the signed-out CTA and CQ's count
+after sign-in, under the rule that the signed-out number must be a lower
+bound so it can only grow. Good rule. It did not save them, because the
+two numbers came from different sources: SS parses transcript speaker
+labels, CQ counted ownership-grounded appearance rows. Measured against
+CQ's own copy of the transcripts, SS's predicate yields 189 speakers
+against CQ's 93, so signing in would have SHRUNK the number, which is
+precisely what the rule existed to prevent.
+
+Adding the speaker tier narrows that (93 to 118) but cannot close it:
+107 of 189 speaker labels resolve to no CQ person entity, part scanner
+noise and part real people who spoke but were never extracted. **CQ
+cannot record a person it never learned**, so no backfill makes CQ's
+number a superset.
+
+The generalisation, which is worth more than the fix:
+
+> A number shown before an auth or tier boundary has to be computed from
+> the same source as the number shown after it, or it should not be a
+> number.
+
+No threshold on either side could reconcile a different-source problem.
+SS dropped the count and uses GP's `body` string instead of
+`body_with_count`.
 
 ### 8d. Ledger collision: CQ commitments vs SS action items
 
