@@ -75,3 +75,81 @@ def test_malformed_entries_never_match():
 
 def test_missing_user_id_never_matches():
     assert stream_entry_is_users(json.dumps({"content": "x"}), "u-1") is False
+
+
+# =====================================================================
+# Failure alerting (added 2026-08-02).
+#
+# The deletion lane had the exact blind spot GP had just disclosed in
+# their own telemetry: a purge that failed every cycle logged and
+# nothing else, so "no alerts" was indistinguishable from "no deletion
+# requests". These cover the threshold and the two alert categories.
+# =====================================================================
+
+from contextquilt.services.account_purge import (  # noqa: E402
+    PURGE_ALERT_AFTER_FAILURES,
+    should_alert_for_failures,
+)
+
+
+def test_single_failure_does_not_alert():
+    # One failure is usually a DB or Redis blip, and the consumer retries
+    # the same signal in 60s regardless. Alerting here would train people
+    # to ignore the category.
+    assert should_alert_for_failures(1) is False
+
+
+def test_alerts_once_failures_are_sustained():
+    assert should_alert_for_failures(PURGE_ALERT_AFTER_FAILURES) is True
+    assert should_alert_for_failures(PURGE_ALERT_AFTER_FAILURES + 5) is True
+
+
+def test_threshold_is_short_enough_to_matter():
+    # A stuck deletion means a user asked to be deleted and CQ still
+    # holds their data. Minutes, not hours.
+    assert 2 <= PURGE_ALERT_AFTER_FAILURES <= 5
+
+
+def test_both_purge_alert_categories_are_registered():
+    # report_incident logs a warning and records anyway for an unknown
+    # category, so an unregistered one would still "work" while losing
+    # its label and description in the email. Assert they are real.
+    from contextquilt.services.alerting import KNOWN_CATEGORIES
+    for cat in ("account_purge_failed", "account_purge_inconsistent"):
+        assert cat in KNOWN_CATEGORIES, f"{cat} must be a known category"
+        assert KNOWN_CATEGORIES[cat]["label"]
+        assert KNOWN_CATEGORIES[cat]["description"]
+
+
+def test_consumer_isolates_each_signal():
+    """One signal that always throws must not starve the queue behind it.
+
+    The batch is ordered by received_at, so before per-row isolation a
+    permanently-failing signal meant nothing after it was ever processed:
+    the exception escaped to the outer handler every cycle, forever.
+    """
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "worker.py"
+    body = src.read_text(encoding="utf-8").split("async def tier_signals_loop")[1]
+    body = body.split("\n    async def ", 1)[0]
+
+    assert "except Exception as row_exc:" in body, "per-signal handler missing"
+    # The per-row handler has to sit inside the for loop, before the
+    # outer one, or it is not isolating anything.
+    assert body.index("for row in rows:") < body.index("except Exception as row_exc:")
+    assert body.index("except Exception as row_exc:") < body.index("except Exception as e:")
+
+
+def test_inconsistent_signals_alert_immediately():
+    """Inconsistent signals are stamped and never retried, so waiting for
+    a repeat would wait forever."""
+    import pathlib
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "worker.py"
+    body = src.read_text(encoding="utf-8").split("async def tier_signals_loop")[1]
+    body = body.split("\n    async def ", 1)[0]
+    inconsistent = body.index("ACTION_INCONSISTENT")
+    alert = body.index('"account_purge_inconsistent"')
+    # Alert fires in the inconsistent branch, not gated behind the
+    # consecutive-failure threshold.
+    assert inconsistent < alert
+    assert "should_alert_for_failures" not in body[inconsistent:alert]

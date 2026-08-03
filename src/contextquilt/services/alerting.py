@@ -118,6 +118,32 @@ KNOWN_CATEGORIES: dict[str, dict[str, str]] = {
             "backup_runs.error_message column for the cause."
         ),
     },
+    "account_purge_failed": {
+        "label": "Account deletion could not be completed",
+        "description": (
+            "A queued account_deleted signal failed to purge across "
+            "repeated retries, so a user asked to be deleted and CQ "
+            "still holds their data. The consumer keeps retrying every "
+            "60s, so this will not self-heal quietly, but it will also "
+            "not stop on its own. Inspect the signal row in "
+            "tier_signals (processed_at IS NULL) and the "
+            "tier_signals_loop_error log lines. Subject is the "
+            "signal_id, or 'tier_signals_loop' when the whole consumer "
+            "is failing rather than one signal."
+        ),
+    },
+    "account_purge_inconsistent": {
+        "label": "Deletion request refused as malformed",
+        "description": (
+            "A signal arrived claiming account deletion but with an "
+            "inconsistent shape (event_type and new_tier disagree), so "
+            "CQ recorded it and deliberately did NOT purge. This is "
+            "one-shot: the signal is stamped skipped_inconsistent and "
+            "never retried, so nothing will fix it without a human. "
+            "Either the request was malformed upstream and needs "
+            "re-sending, or a real deletion is silently not happening."
+        ),
+    },
     "anthropic_fallback_to_or": {
         "label": "Anthropic extraction fell back to OpenRouter",
         "description": (

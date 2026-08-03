@@ -49,6 +49,29 @@ ACTION_INCONSISTENT = "skipped_inconsistent"
 STREAM_KEY = "memory_updates"
 STREAM_SCAN_BATCH = 500
 
+# A purge that fails once is usually a transient DB or Redis blip, and the
+# consumer retries the same signal every 60s anyway. A purge still failing
+# after this many consecutive cycles is a real stuck deletion and a human
+# needs to know: the user asked to be deleted and CQ still holds them.
+#
+# Three cycles is about three minutes. Low enough that a genuinely stuck
+# deletion surfaces fast, high enough that a database restart does not
+# page anyone.
+PURGE_ALERT_AFTER_FAILURES = 3
+
+
+def should_alert_for_failures(consecutive_failures: int) -> bool:
+    """True once a signal has failed enough consecutive cycles to be a
+    real problem rather than a blip. See PURGE_ALERT_AFTER_FAILURES.
+
+    Deliberately not "alert on first failure": the alerting layer
+    deduplicates by (category, subject) and suppresses re-emails while an
+    incident is open, so a first-failure alert would still only email
+    once, but it would email for every transient hiccup and train
+    everyone to ignore the category.
+    """
+    return consecutive_failures >= PURGE_ALERT_AFTER_FAILURES
+
 
 def classify_signal(event_type: str, new_tier: object) -> str:
     """Decide what the consumer does with a queued signal.

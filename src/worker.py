@@ -1520,6 +1520,22 @@ class ColdPathWorker:
         # worker's cross-loop-constant NameError crash-looped us once
         # (hotfix 2026-06-12), never share loop constants.
         POLL_INTERVAL_SECONDS = 60
+        # Consecutive-failure counters, coroutine-local for the same
+        # reason the interval is. Keyed by signal_id, plus the sentinel
+        # key for whole-loop failures. Cleared on success so a signal
+        # that recovers stops counting toward an alert.
+        failures: dict[str, int] = {}
+        LOOP_KEY = "tier_signals_loop"
+
+        async def _alert(category: str, subject: str, **details):
+            """Alerting must never break the lane it is watching."""
+            try:
+                await report_incident(
+                    self.db, category=category, subject=subject, details=details
+                )
+            except Exception as alert_exc:
+                logger.error("purge_alert_failed", error=str(alert_exc))
+
         while self.running:
             try:
                 if get_settings().cq_account_purge_enabled:
@@ -1533,35 +1549,87 @@ class ColdPathWorker:
                         """
                     )
                     for row in rows:
-                        action = account_purge.classify_signal(
-                            row["event_type"], row["new_tier"]
-                        )
-                        detail = action
-                        if action == account_purge.ACTION_PURGED:
-                            counts = await account_purge.purge_user_data(
-                                self.db, self.redis, row["user_id"]
+                        sid = str(row["signal_id"])
+                        # Per-signal isolation. Without it, one signal
+                        # that always throws starves every signal behind
+                        # it forever: the batch is ordered by
+                        # received_at, the exception escapes to the outer
+                        # handler, and the queue never drains past the
+                        # bad row.
+                        try:
+                            action = account_purge.classify_signal(
+                                row["event_type"], row["new_tier"]
                             )
-                            detail = json.dumps({"action": action, "counts": counts})
-                            logger.info(
-                                "account_purged",
-                                user_id=row["user_id"],
-                                signal_id=str(row["signal_id"]),
-                                counts=counts,
+                            detail = action
+                            if action == account_purge.ACTION_PURGED:
+                                counts = await account_purge.purge_user_data(
+                                    self.db, self.redis, row["user_id"]
+                                )
+                                detail = json.dumps({"action": action, "counts": counts})
+                                logger.info(
+                                    "account_purged",
+                                    user_id=row["user_id"],
+                                    signal_id=sid,
+                                    counts=counts,
+                                )
+                            elif action == account_purge.ACTION_INCONSISTENT:
+                                logger.warning(
+                                    "tier_signal_inconsistent",
+                                    user_id=row["user_id"],
+                                    signal_id=sid,
+                                    event_type=row["event_type"],
+                                    new_tier=row["new_tier"],
+                                )
+                                # One-shot, not retried: the row is about
+                                # to be stamped and never looked at
+                                # again. Nothing will fix this without a
+                                # human, so alert on the first one rather
+                                # than waiting for a repeat that cannot
+                                # come.
+                                await _alert(
+                                    "account_purge_inconsistent", sid,
+                                    user_id=row["user_id"],
+                                    event_type=row["event_type"],
+                                    new_tier=row["new_tier"],
+                                )
+                            await self.db.execute(
+                                "UPDATE tier_signals SET processed_at = NOW(), action = $2 WHERE signal_id = $1",
+                                row["signal_id"], detail,
                             )
-                        elif action == account_purge.ACTION_INCONSISTENT:
-                            logger.warning(
-                                "tier_signal_inconsistent",
-                                user_id=row["user_id"],
-                                signal_id=str(row["signal_id"]),
-                                event_type=row["event_type"],
-                                new_tier=row["new_tier"],
+                            failures.pop(sid, None)
+                        except Exception as row_exc:
+                            failures[sid] = failures.get(sid, 0) + 1
+                            logger.error(
+                                "tier_signal_processing_failed",
+                                signal_id=sid, user_id=row["user_id"],
+                                consecutive_failures=failures[sid],
+                                error=str(row_exc),
                             )
-                        await self.db.execute(
-                            "UPDATE tier_signals SET processed_at = NOW(), action = $2 WHERE signal_id = $1",
-                            row["signal_id"], detail,
-                        )
+                            if account_purge.should_alert_for_failures(failures[sid]):
+                                await _alert(
+                                    "account_purge_failed", sid,
+                                    user_id=row["user_id"],
+                                    event_type=row["event_type"],
+                                    consecutive_failures=failures[sid],
+                                    error=str(row_exc)[:400],
+                                )
+                    failures.pop(LOOP_KEY, None)
             except Exception as e:
-                logger.error("tier_signals_loop_error", error=str(e))
+                failures[LOOP_KEY] = failures.get(LOOP_KEY, 0) + 1
+                logger.error(
+                    "tier_signals_loop_error",
+                    error=str(e), consecutive_failures=failures[LOOP_KEY],
+                )
+                # The whole consumer is down, so NOTHING is being
+                # deleted. Silence here would look identical to "no
+                # deletion requests", which is the failure mode this
+                # alert exists to break.
+                if account_purge.should_alert_for_failures(failures[LOOP_KEY]):
+                    await _alert(
+                        "account_purge_failed", LOOP_KEY,
+                        consecutive_failures=failures[LOOP_KEY],
+                        error=str(e)[:400],
+                    )
             await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     async def deadline_sweep_loop(self):
