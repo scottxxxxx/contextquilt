@@ -2,39 +2,52 @@
 """
 Reconstruct person_appearances for history (docs/architecture/16-people.md 8c).
 
-person_appearances (migration 30) only fills forward from the next
-extraction. Without a backfill, every person the user has ever met shows
-a zero meeting count on day one and the People feature reads as knowing
-nothing, which is the opposite of the point.
+person_appearances only fills forward from the next extraction. Without a
+backfill every person shows a zero meeting count on day one and the People
+feature reads as knowing nothing, which is the opposite of the point.
 
-TWO TIERS, and the split matters.
+THREE TIERS, and the split is the whole design. `meeting_count` renders to
+a user as "9 meetings", which is a claim about ATTENDANCE. Two tiers
+support that claim and one does not.
 
-  Tier 1, Postgres-derived. Complete over all patch history with no
-  retention dependency. Every patch carries `origin_id`, and ownership is
-  recorded two ways: a raw `value.owner` string, and an explicit `owns`
-  connection from a person patch. Both resolve to a person entity through
-  the same exact-then-alias path store_entities uses. Deterministic, no
-  LLM call.
+  ownership  Postgres-derived, complete over all patch history with no
+             retention dependency. A person appears if they own something
+             anchored to that meeting, via a raw `value.owner` string or
+             an explicit `owns` edge. Deterministic, no LLM call.
 
-  Tier 2, stream-derived. Tier 1 can only see people who OWNED something.
-  Someone named in a meeting who owned nothing produces no owner-bearing
-  patch and is invisible to it. The ingest stream keeps the original
-  request `content`, so scanning retained transcripts for known entity
-  names recovers those. Bounded by whatever the stream still holds:
-  `memory_updates` has no settled MAXLEN policy, which is exactly why
-  tier 2 cannot be the only tier.
+  speakers   Transcript speaker labels, resolved against known person
+             entities. The STRONGEST attendance signal CQ holds: having
+             spoken in a meeting is better evidence of being there than
+             having owned an action item out of it, since work gets
+             assigned in absentia.
 
-Both tiers are idempotent and safe to re-run. Timestamps come from the
-source patch or stream entry, never NOW(): setting them to import time
-would make `last_seen_at DESC` meaningless and would tell the app every
-meeting happened today.
+  mentions   Anyone NAMED anywhere in a transcript. NOT attendance, and it
+             must never feed meeting_count. It counts people discussed in
+             absentia or named once in passing, and on prod it took the
+             busiest person from 37 meetings to 179. It IS the right
+             number for the provenance line in design 1e ("named in 11
+             transcripts"), which needs the `source` column proposed in
+             8c before it can land anywhere useful.
+
+`--tier attendance` (the default) runs ownership + speakers and is what
+you almost always want.
+
+Both stream-backed tiers are bounded by retention: `memory_updates` has
+no settled MAXLEN policy, which is exactly why `ownership` exists and
+cannot be replaced by them.
+
+Everything is idempotent and safe to re-run. Timestamps come from the
+source patch or stream entry, never NOW(): importing at wall-clock time
+would make `last_seen_at DESC` meaningless and tell the app every meeting
+happened today.
 
 USAGE
 
     DATABASE_URL=... python scripts/backfill_person_appearances.py
     DATABASE_URL=... python scripts/backfill_person_appearances.py --apply
-    DATABASE_URL=... python scripts/backfill_person_appearances.py --tier 1 --apply
-    ... --user <user_id>     restrict to one user
+    ... --tier speakers --apply      one tier
+    ... --tier ownership,speakers    explicit set
+    ... --user <user_id>             restrict to one user
 """
 
 from __future__ import annotations
@@ -48,6 +61,7 @@ import sys
 from collections import defaultdict
 
 import asyncpg
+from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -62,6 +76,37 @@ from contextquilt.services.extraction_schema import (  # noqa: E402
 # would fire inside "Announce", and a backfill that writes noise is worse
 # than one that misses a row.
 MIN_FREE_TEXT_NAME = 4
+
+# The ingest stream both stream-backed tiers read.
+STREAM_KEY = "memory_updates"
+
+
+def _as_dt(value):
+    """Coerce a stream timestamp to a datetime, or None.
+
+    Patch-derived tiers get real datetimes from asyncpg. Stream-derived
+    tiers get whatever JSON held, which is an ISO string, and asyncpg
+    rejects a str for a timestamptz parameter even with a cast in the
+    SQL. Returning None is safe: the writer COALESCEs to NOW().
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _redis_url() -> str:
+    url = os.environ.get("REDIS_URL")
+    if url:
+        return url
+    host = os.environ.get("REDIS_HOST", "localhost")
+    port = os.environ.get("REDIS_PORT", "6379")
+    pw = os.environ.get("REDIS_PASSWORD")
+    return f"redis://:{pw}@{host}:{port}" if pw else f"redis://{host}:{port}"
 
 
 async def load_people(conn, user_id: str | None):
@@ -113,7 +158,7 @@ async def load_people(conn, user_id: str | None):
     return forms, canonical_name
 
 
-async def tier1(conn, forms, user_id: str | None):
+async def tier_ownership(conn, forms, user_id: str | None):
     """Owner strings and `owns` edges on origin-bearing patches."""
     found: dict[tuple, dict] = {}
 
@@ -182,7 +227,98 @@ async def tier1(conn, forms, user_id: str | None):
     return found
 
 
-async def tier2(redis_url, forms, user_id, existing_keys):
+SPEAKER_LABEL = re.compile(r"^\s*\[([^\]]{1,60})\]", re.MULTILINE)
+
+
+async def tier_speakers(redis_url, forms, user_id, existing_keys):
+    """Attendance from transcript speaker labels.
+
+    The strongest attendance signal CQ holds. `meeting_count` renders to a
+    user as "9 meetings", which is a claim about being THERE, and having
+    spoken in a meeting is better evidence of that than having owned an
+    action item out of it (people get assigned work in absentia).
+
+    Only labels that resolve to a KNOWN person entity are recorded. That
+    is what keeps caption-scanner noise out: ShoulderSurf's screen-capture
+    reader hands on-screen text to a name-shape extractor, so strings like
+    "Ask Gemini" and "BUILD SUCCEEDED" arrive shaped exactly like two-word
+    human names and nothing downstream catches them. Resolving against the
+    entity table drops them without needing a blocklist, because they were
+    never people.
+
+    Measured on prod 2026-08-02: 189 distinct non-placeholder speaker
+    labels, 82 of which resolve to a person entity, taking coverage from
+    93 people to 118 (+512 appearance rows). The 107 that do not resolve
+    are a mix of that scanner noise and real people who spoke but were
+    never extracted as entities. CQ cannot record a person it never
+    learned, which is why this tier narrows the gap rather than closing
+    it.
+    """
+    try:
+        import redis.asyncio as redis
+    except ImportError:
+        print("  speaker tier skipped: redis package unavailable", file=sys.stderr)
+        return {}
+
+    client = redis.from_url(redis_url, decode_responses=True)
+    try:
+        entries = await client.xrange(STREAM_KEY, "-", "+")
+    except Exception as e:
+        # Include the type. This guard exists for retention and
+        # connectivity, but it will happily swallow a code bug and report
+        # it as a stream problem, which is how a NameError once looked
+        # like an empty stream and produced a silent zero.
+        print(f"  speaker tier skipped: {type(e).__name__}: {str(e)[:100]}",
+              file=sys.stderr)
+        return {}
+    finally:
+        try:
+            await client.aclose()
+        except Exception:
+            pass
+
+    found: dict[tuple, dict] = {}
+    for _sid, fields in entries:
+        raw = fields.get("data")
+        if not raw:
+            continue
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            continue
+        content = payload.get("content")
+        meta = payload.get("metadata") or {}
+        uid = payload.get("user_id")
+        origin_id = meta.get("origin_id")
+        if not (content and uid and origin_id):
+            continue
+        if user_id and uid != user_id:
+            continue
+
+        table = forms.get(uid) or {}
+        ts = payload.get("timestamp")
+        for raw_label in SPEAKER_LABEL.findall(content):
+            # The (you) marker identifies the app user; strip it so the
+            # label matches the entity name it was extracted from.
+            name = raw_label.replace("(you)", "").strip()
+            if not name or is_placeholder_or_self_person(name):
+                continue
+            eid = table.get(name.lower())
+            if not eid:
+                continue
+            key = (uid, eid, str(origin_id))
+            if key in existing_keys or key in found:
+                continue
+            found[key] = {
+                "user_id": uid, "entity_id": eid, "origin_id": str(origin_id),
+                "origin_type": meta.get("origin_type") or "meeting",
+                "project_id": meta.get("project_id"),
+                "first": _as_dt(ts), "last": _as_dt(ts),
+            }
+    return found
+
+
+async def tier_mentions(redis_url, forms, user_id, existing_keys):
     """Mention-level appearances from retained transcripts.
 
     Only adds keys tier 1 did not already find, so the cheaper and more
@@ -196,9 +332,10 @@ async def tier2(redis_url, forms, user_id, existing_keys):
 
     client = redis.from_url(redis_url, decode_responses=True)
     try:
-        entries = await client.xrange("memory_updates", "-", "+")
+        entries = await client.xrange(STREAM_KEY, "-", "+")
     except Exception as e:
-        print(f"  tier 2 skipped: cannot read stream ({str(e)[:80]})", file=sys.stderr)
+        print(f"  mentions tier skipped: {type(e).__name__}: {str(e)[:100]}",
+              file=sys.stderr)
         return {}
     finally:
         try:
@@ -244,7 +381,7 @@ async def tier2(redis_url, forms, user_id, existing_keys):
                     "user_id": uid, "entity_id": eid, "origin_id": str(origin_id),
                     "origin_type": meta.get("origin_type") or "meeting",
                     "project_id": meta.get("project_id"),
-                    "first": ts, "last": ts,
+                    "first": _as_dt(ts), "last": _as_dt(ts),
                 }
     return found
 
@@ -287,21 +424,25 @@ async def main(args) -> None:
         print(f"known person surface forms: {sum(len(v) for v in forms.values())} "
               f"across {len(forms)} users")
 
+        want = set(args.tier.split(",")) if args.tier != "attendance" else {"ownership", "speakers"}
+        if args.tier == "all":
+            want = {"ownership", "speakers", "mentions"}
+
         rows: dict = {}
-        if args.tier in ("1", "both"):
-            t1 = await tier1(conn, forms, args.user)
-            print(f"tier 1 (owner strings + owns edges): {len(t1)} appearances")
+        if "ownership" in want:
+            t1 = await tier_ownership(conn, forms, args.user)
+            print(f"ownership (owner strings + owns edges): {len(t1)} appearances")
             rows.update(t1)
 
-        if args.tier in ("2", "both"):
-            redis_url = os.environ.get("REDIS_URL")
-            if not redis_url:
-                host = os.environ.get("REDIS_HOST", "localhost")
-                port = os.environ.get("REDIS_PORT", "6379")
-                pw = os.environ.get("REDIS_PASSWORD")
-                redis_url = f"redis://:{pw}@{host}:{port}" if pw else f"redis://{host}:{port}"
-            t2 = await tier2(redis_url, forms, args.user, set(rows.keys()))
-            print(f"tier 2 (retained transcripts):       {len(t2)} additional")
+        if "speakers" in want:
+            redis_url = _redis_url()
+            ts_ = await tier_speakers(redis_url, forms, args.user, set(rows.keys()))
+            print(f"speakers  (transcript speaker labels): {len(ts_)} additional")
+            rows.update(ts_)
+
+        if "mentions" in want:
+            t2 = await tier_mentions(_redis_url(), forms, args.user, set(rows.keys()))
+            print(f"mentions  (named anywhere in text)   : {len(t2)} additional")
             rows.update(t2)
 
         people = len({(k[0], k[1]) for k in rows})
@@ -329,6 +470,12 @@ async def main(args) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="write (default is dry run)")
-    ap.add_argument("--tier", choices=["1", "2", "both"], default="both")
+    ap.add_argument(
+        "--tier", default="attendance",
+        help=("attendance (default) = ownership + speakers, the two tiers "
+              "that mean 'was in the meeting'. Also: ownership, speakers, "
+              "mentions, all, or a comma-separated set. `mentions` counts "
+              "people merely NAMED in a transcript and must not feed "
+              "meeting_count; see docs/architecture/16-people.md 8c."))
     ap.add_argument("--user", help="restrict to one user_id")
     asyncio.run(main(ap.parse_args()))
