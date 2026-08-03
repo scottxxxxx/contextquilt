@@ -38,7 +38,7 @@ def test_overdue_annotation():
     out = format_open_commitments_block(
         [_commit("id-1", "Send the deck", deadline_date="2026-06-09")], now=NOW
     )
-    assert "due 2026-06-09 — OVERDUE" in out
+    assert "due 2026-06-09 (OVERDUE)" in out
 
 
 def test_future_deadline_annotated_without_overdue():

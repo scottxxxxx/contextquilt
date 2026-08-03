@@ -219,7 +219,7 @@ def test_shouldersurf_manifest_generates_coherent_prompt():
 
 def test_cues_section_present_by_default(minimal_manifest):
     prompt = build_prompt(minimal_manifest)
-    assert "=== CUES — associative retrieval hooks ===" in prompt
+    assert "=== CUES: associative retrieval hooks ===" in prompt
     assert "`value.cues`" in prompt
 
 
@@ -246,3 +246,47 @@ def test_cue_guidance_override_and_per_type_lines(minimal_manifest):
     assert "- **note**: Use the skill name being coached." in prompt
     # Default guidance body replaced, section header retained
     assert "`value.cues` is how a patch gets FOUND" not in prompt
+
+
+# ============================================================
+# Universal value fields merged into every rendered type shape
+# (2026-07-30 cue-starvation root cause: manifest value_shape
+# declarations predate cues/salience/deadline_date, and models obey
+# the per-type shape — the most concrete spec — over the generic
+# sections. 0% cue emission on the generated prompt vs 85% on a
+# cue-bearing shape, reproduced on two models.)
+# ============================================================
+
+
+def test_rendered_shape_includes_universal_fields(minimal_manifest):
+    prompt = build_prompt(minimal_manifest)
+    shape_line = next(l for l in prompt.splitlines() if "Value shape:" in l)
+    for field in ("cues", "salience", "deadline_date"):
+        assert field in shape_line, f"{field} missing from rendered shape"
+    # manifest-declared field survives untouched
+    assert "text: string" in shape_line
+
+
+def test_manifest_declared_fields_win_on_conflict(minimal_manifest):
+    m = copy.deepcopy(minimal_manifest)
+    m["patch_types"][0]["value_shape"]["cues"] = "custom-spec"
+    prompt = build_prompt(m)
+    shape_line = next(l for l in prompt.splitlines() if "Value shape:" in l)
+    assert "cues: custom-spec" in shape_line
+    assert "see CUES section" not in shape_line.split("cues:")[1].split(",")[0]
+
+
+def test_shape_hints_reference_existing_sections(minimal_manifest):
+    # The shape's "see CUES/SALIENCE section" pointers must not dangle.
+    prompt = build_prompt(minimal_manifest)
+    assert "CUES" in prompt and "SALIENCE" in prompt
+
+
+def test_killed_sections_not_advertised_in_shapes(minimal_manifest):
+    m = copy.deepcopy(minimal_manifest)
+    m["extraction_prompt_guidance"] = {"cues_enabled": False, "salience_enabled": False}
+    prompt = build_prompt(m)
+    shape_line = next(l for l in prompt.splitlines() if "Value shape:" in l)
+    assert "cues" not in shape_line
+    assert "salience" not in shape_line
+    assert "deadline_date" in shape_line  # no kill switch for deadlines

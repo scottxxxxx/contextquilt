@@ -34,7 +34,9 @@ from contextquilt.services.extraction_prompts import (
     TRACE_SYSTEM,
     format_open_commitments_block,
 )
+from contextquilt.services.deadline_resolver import run_deadline_micropass
 from contextquilt.services.extraction_schema import (
+    extraction_patch_backstop,
     EXTRACTION_SCHEMA,
     drop_placeholder_and_self_person_patches,
     drop_placeholder_entities,
@@ -117,12 +119,20 @@ QUEUE_MAX_WAIT_MINUTES = _settings.cq_queue_max_wait_minutes
 QUEUE_BUDGET_THRESHOLD = _settings.cq_queue_budget_threshold
 QUEUE_CHECK_INTERVAL_SECONDS = 30  # How often to check queues for processing
 
-# Extraction caps — belt-and-suspenders with prompt limits
+# Extraction caps — backstops against degenerate output, never
+# curation. The 2026-07-30 density probe (12 real meetings, uncapped)
+# showed natural emission ranges 1→47 with only 0.558 correlation to
+# transcript length — the model's density judgment is good (a sparse
+# 28K meeting yielded 1 patch beside a dense 25K one yielding 46), so
+# no fixed number can be both safe and non-binding. The patch bound is
+# therefore length-scaled via extraction_patch_backstop(): floor
+# CQ_MAX_PATCHES (24), ceiling 64 — sized so none of the 12 probed
+# meetings would have been touched. Dedup tiers + judge downstream are
+# the precision stage; extraction is the recall stage.
 MAX_FACTS_PER_MEETING = 5
 MAX_ACTION_ITEMS_PER_MEETING = 3
-MAX_PATCHES_PER_MEETING = 12  # Connected quilt model (replaces facts+actions for V2)
-MAX_ENTITIES_PER_MEETING = 10
-MAX_RELATIONSHIPS_PER_MEETING = 10
+MAX_ENTITIES_PER_MEETING = 15
+MAX_RELATIONSHIPS_PER_MEETING = 15
 
 # Longitudinal (time-series) patches: an incoming observation joins an
 # existing series when its descriptor field trigram-matches an active
@@ -928,6 +938,42 @@ async def store_connected_patches(
     return stored
 
 
+async def _resolve_merged_forward(db, entity_id):
+    """Follow entities.merged_into to the surviving canonical.
+
+    POST /v1/people/{user_id}/merge marks a folded entity with a forward
+    pointer instead of deleting it (held client ids must keep resolving,
+    and relationships cascade on delete). Every write path that resolves
+    an entity by name therefore has to hop that pointer, or the next
+    mention of the old surface form re-observes the dead row and rebuilds
+    the duplicate the user just resolved.
+
+    Degrades to the input id if the column is absent — the MCP
+    deployment's separate Postgres can lag migrations, and entity storage
+    must not start failing there because People shipped here.
+    """
+    current = entity_id
+    seen = set()
+    try:
+        for _ in range(8):
+            row = await db.fetchrow(
+                "SELECT merged_into FROM entities WHERE entity_id = $1", current
+            )
+            if row is None or row["merged_into"] is None:
+                return current
+            nxt = row["merged_into"]
+            if nxt in seen:
+                logger.warning("entity_merge_cycle", entity_id=str(nxt))
+                return current
+            seen.add(nxt)
+            current = nxt
+        logger.warning("entity_merge_chain_too_deep", entity_id=str(current))
+        return current
+    except Exception as e:
+        logger.debug("merged_forward_resolution_skipped", error=str(e)[:120])
+        return entity_id
+
+
 async def store_entities(
     db,
     redis_client,
@@ -973,6 +1019,41 @@ async def store_entities(
 
         metadata_json = json.dumps(metadata or {})
 
+        async def _record_appearance(entity_id) -> None:
+            """Log that this person showed up in this meeting.
+
+            People only, and only when the ingest carried an origin: a
+            person named in a chat turn with no meeting behind it has no
+            appearance to record. One row per (person, origin), so five
+            mentions in one meeting stay one meeting.
+
+            Degrades silently if the table is absent — the MCP
+            deployment's Postgres lags migrations, and entity storage must
+            not start failing there because People shipped here.
+            """
+            if entity_type != "person":
+                return
+            meta = metadata or {}
+            origin_id = meta.get("origin_id")
+            if not origin_id:
+                return
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO person_appearances
+                        (user_id, entity_id, origin_id, origin_type, project_id)
+                    VALUES ($1, $2, $3, $4, $5)
+                    ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
+                        last_seen_at = NOW(),
+                        project_id = COALESCE(EXCLUDED.project_id, person_appearances.project_id)
+                    """,
+                    user_id, entity_id, str(origin_id),
+                    meta.get("origin_type") or "meeting",
+                    meta.get("project_id"),
+                )
+            except Exception as e:
+                logger.debug("person_appearance_skipped", error=str(e)[:120])
+
         async def _reobserve(entity_id) -> None:
             await db.execute(
                 """
@@ -985,6 +1066,7 @@ async def store_entities(
                 """,
                 description, metadata_json, entity_id,
             )
+            await _record_appearance(entity_id)
 
         # 1. Exact match, case-insensitive (the old ON CONFLICT only
         #    caught exact case, so "sarah abrams" vs "Sarah Abrams"
@@ -998,7 +1080,12 @@ async def store_entities(
             user_id, entity_type, name,
         )
         if row:
-            await _reobserve(row["entity_id"])
+            # A merged entity keeps its name (POST /v1/people/{u}/merge
+            # writes a forward pointer rather than deleting), so an exact
+            # hit can land on a row the user has already folded into
+            # someone else. Re-observing the dead row would quietly
+            # rebuild the duplicate the merge just resolved.
+            await _reobserve(await _resolve_merged_forward(db, row["entity_id"]))
             stored += 1
             continue
 
@@ -1016,7 +1103,7 @@ async def store_entities(
                 user_id, name, entity_type,
             )
             if row:
-                await _reobserve(row["entity_id"])
+                await _reobserve(await _resolve_merged_forward(db, row["entity_id"]))
                 stored += 1
                 continue
 
@@ -1024,8 +1111,16 @@ async def store_entities(
             #    Only acts on a UNIQUE candidate — ambiguity ("Sarah"
             #    with both "Sarah Abrams" and "Sarah Chen" present)
             #    falls through to a separate entity, as before.
+            #
+            #    Merged entities are excluded: aliasing a new surface form
+            #    onto a folded row would strand it outside the canonical's
+            #    neighborhood. (If the merged_into column is absent on a
+            #    lagging DB this raises, and the except below falls through
+            #    to the plain insert — same degrade as a missing
+            #    entity_aliases table.)
             candidate_rows = await db.fetch(
-                "SELECT entity_id, name FROM entities WHERE user_id = $1 AND entity_type = $2",
+                "SELECT entity_id, name FROM entities "
+                "WHERE user_id = $1 AND entity_type = $2 AND merged_into IS NULL",
                 user_id, entity_type,
             )
             match = find_alias_candidate(
@@ -1068,7 +1163,9 @@ async def store_entities(
             logger.debug("entity_alias_resolution_skipped", error=str(e)[:120])
 
         # 4. New entity. ON CONFLICT retained as a race-safety net.
-        await db.execute(
+        #    RETURNING on both arms so the appearance can be recorded
+        #    against whichever row won.
+        new_entity_id = await db.fetchval(
             """
             INSERT INTO entities (user_id, name, entity_type, description, metadata)
             VALUES ($1, $2, $3, $4, $5)
@@ -1077,10 +1174,13 @@ async def store_entities(
                 last_seen_at = NOW(),
                 mention_count = entities.mention_count + 1,
                 metadata = entities.metadata || EXCLUDED.metadata
+            RETURNING entity_id
             """,
             user_id, name, entity_type, description,
             metadata_json,
         )
+        if new_entity_id is not None:
+            await _record_appearance(new_entity_id)
         stored += 1
 
     # Update Redis entity name index for this user
@@ -2998,8 +3098,13 @@ class ColdPathWorker:
                 ).date()
             except ValueError:
                 meeting_date = None
+        # Weekday included: the coverage eval (2026-07-30) caught the
+        # model resolving "by Friday" off by one day from a bare ISO
+        # date — models are unreliable at date→weekday math, and every
+        # weekday-relative deadline depends on it.
         meeting_date_line = (
-            f"Meeting date: {meeting_date.isoformat()}\n\n" if meeting_date else ""
+            f"Meeting date: {meeting_date.isoformat()} ({meeting_date.strftime('%A')})\n\n"
+            if meeting_date else ""
         )
 
         # Memory language. Apps pass metadata.language (BCP-47, e.g. "es")
@@ -3077,23 +3182,27 @@ class ColdPathWorker:
                         model=response.model,
                     )
 
-            # Apply MAX_PATCHES_PER_MEETING to LLM output BEFORE the
+            # Apply the length-scaled patch backstop to LLM output BEFORE the
             # enforcer runs. The cap exists to bound LLM-output noise; the
             # enforcer's job is structural completeness (every named owner
             # must have a person patch + owns edge). Capping the
             # post-enforcer list silently drops the synthetic person
             # patches it appends, which silently breaks PR #84 for any
-            # meeting where the LLM emitted ≥ MAX_PATCHES_PER_MEETING
-            # patches on its own. Cap first; then enforce.
+            # meeting where the LLM emitted patches at the backstop
+            # on its own. Cap first; then enforce.
             raw_patches = response.content.get("patches") or []
-            if len(raw_patches) > MAX_PATCHES_PER_MEETING:
+            patch_backstop = extraction_patch_backstop(
+                len(summary), floor=_settings.cq_max_patches
+            )
+            if len(raw_patches) > patch_backstop:
                 logger.warning(
                     "extraction_capped",
                     type="patches",
                     original=len(raw_patches),
-                    capped=MAX_PATCHES_PER_MEETING,
+                    capped=patch_backstop,
+                    transcript_chars=len(summary),
                 )
-                response.content["patches"] = raw_patches[:MAX_PATCHES_PER_MEETING]
+                response.content["patches"] = raw_patches[:patch_backstop]
 
             # Person-ownership safety net. The prompt requires a person
             # patch + owns connection for every named action-item owner,
@@ -3164,6 +3273,18 @@ class ColdPathWorker:
             sanitize_salience(response.content)
             sanitize_deadline_dates(response.content, meeting_date=meeting_date)
             strip_ephemeral_fields(response.content)
+
+            # Deadline micro-pass: one small focused call that ONLY
+            # resolves spoken deadlines against a rendered calendar
+            # table. The main call resolves weekday-relative dates off
+            # by one (measured 2026-07-30; the weekday hint on the
+            # Meeting date line did not fix it). Runs after the
+            # sanitizers so its output passes the same plausibility
+            # gate; failure leaves the main call's dates untouched.
+            if get_settings().cq_deadline_micropass_enabled:
+                await run_deadline_micropass(
+                    llm, response.content.get("patches") or [], meeting_date
+                )
 
             timestamp = payload.get("timestamp")
             project = metadata.get("project") if metadata else None

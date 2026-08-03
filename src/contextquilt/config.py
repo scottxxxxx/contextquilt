@@ -97,14 +97,28 @@ class Settings(BaseSettings):
     )
 
     # --- Extraction budgets ---
-    cq_max_entities: int = Field(default=10, alias="CQ_MAX_ENTITIES")
-    cq_max_patches: int = Field(default=12, alias="CQ_MAX_PATCHES")
-    cq_max_relationships: int = Field(default=10, alias="CQ_MAX_RELATIONSHIPS")
+    # cq_max_patches is the FLOOR of the length-scaled patch backstop
+    # (extraction_patch_backstop) — a minimum guarantee, not a target.
+    # Sized 36 by the 2026-07-30 density probe + fixtures: a 1.7K-char
+    # ultra-dense standup legitimately emitted 32 memories. Dedup
+    # downstream is the precision stage; the backstop only bounds
+    # degenerate output.
+    cq_max_entities: int = Field(default=15, alias="CQ_MAX_ENTITIES")
+    cq_max_patches: int = Field(default=36, alias="CQ_MAX_PATCHES")
+    cq_max_relationships: int = Field(default=15, alias="CQ_MAX_RELATIONSHIPS")
     cq_queue_budget_threshold: float = Field(
         default=0.8, alias="CQ_QUEUE_BUDGET_THRESHOLD"
     )
     cq_queue_max_wait_minutes: int = Field(
         default=60, alias="CQ_QUEUE_MAX_WAIT_MINUTES"
+    )
+
+    # Deadline micro-pass: focused second LLM call per extraction that
+    # only resolves spoken deadlines against a rendered calendar table
+    # (main-call weekday math is off by one; measured 2026-07-30).
+    # Kill switch — off leaves the main call's dates as-is.
+    cq_deadline_micropass_enabled: bool = Field(
+        default=True, alias="CQ_DEADLINE_MICROPASS_ENABLED"
     )
 
     # Semantic dedup: LLM judge for trigram gray-zone patch pairs at
