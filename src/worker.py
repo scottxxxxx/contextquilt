@@ -3360,7 +3360,22 @@ class ColdPathWorker:
                     model=response.model,
                 )
             sanitize_you_marker_from_patches(response.content)
-            strip_owner_on_self_typed_patches(response.content)
+            strip_owner_on_self_typed_patches(response.content, user_label=user_label)
+            if (so := response.content.get("_self_typed_owner_stripped")):
+                # Instrumentation only, nothing changed behaviourally. The
+                # third_party count is the one to watch: those are genuine
+                # attributions ("Joe prefers X") that the manifest wants as
+                # a held_by edge and that we currently delete. Logged
+                # because the strip destroys the evidence, so stored rows
+                # cannot tell us whether the model still attempts them.
+                logger.info(
+                    "self_typed_owner_stripped",
+                    user_id=user_id,
+                    self_or_placeholder=so.get("self_or_placeholder", 0),
+                    third_party=so.get("third_party", 0),
+                    third_party_detail=so.get("third_party_detail", []),
+                    model=response.model,
+                )
             strip_prose_from_person_names(response.content)
             drop_placeholder_and_self_person_patches(
                 response.content, user_label=user_label
