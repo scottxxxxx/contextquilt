@@ -25,6 +25,40 @@ MENTION = "mention"
 CAPACITIES = (OWNERSHIP, SPEAKER, MENTION)
 
 
+def counts_as_attendance(capacities) -> bool:
+    """True unless we positively know this appearance was mention-only.
+
+    `meeting_count` renders to a user as "9 meetings", a claim about being
+    THERE. Being named in a transcript is not attendance: someone can be
+    discussed at length in a meeting they never joined. On prod, counting
+    mentions took the busiest person from 37 meetings to 179.
+
+    Stated as an exclusion rather than an inclusion, deliberately. An
+    appearance counts unless its capacity set is exactly {mention}, so
+    ownership, speaker, both, and UNKNOWN all count. That follows the rule
+    in migration 31: a row carrying no capacity means we do not know, not
+    that the person was absent, and silently dropping unknowns from a
+    number a user reads would be inventing a claim we cannot support.
+
+    The practical consequence is that turning the mention tier on cannot
+    move any existing number, because no row today is mention-only. If a
+    count changes on the day this ships, this predicate is wrong.
+    """
+    caps = set(capacities or ())
+    return caps != {MENTION}
+
+
+def counts_as_named(capacities) -> bool:
+    """True when the person was named in this meeting's transcript.
+
+    Feeds the provenance line ("named in 11 transcripts"), which is a
+    different and larger number than attendance on purpose. Someone who
+    spoke was also named, so this deliberately overlaps attendance rather
+    than partitioning against it.
+    """
+    return MENTION in set(capacities or ())
+
+
 def merge_tier(rows: dict, found: dict, capacity: str) -> int:
     """Fold one tier's findings into the accumulator.
 
