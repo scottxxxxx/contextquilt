@@ -26,8 +26,17 @@ support that claim and one does not.
              absentia or named once in passing, and on prod it took the
              busiest person from 37 meetings to 179. It IS the right
              number for the provenance line in design 1e ("named in 11
-             transcripts"), which needs the `source` column proposed in
-             8c before it can land anywhere useful.
+             transcripts"), and migration 31's `capacities` column is what
+             finally lets it land: with capacity recorded, mentions can be
+             stored and the READ filters to attendance, so the consumer
+             decides what "9 meetings" means instead of CQ deciding by
+             withholding the tier.
+
+Every appearance now carries the set of capacities it was observed in.
+Tiers no longer mask one another: a person recorded by ownership who also
+spoke ends up with both, which is what makes co-appearance usable as an
+identity signal. See migration 31 for why absence of a capacity means
+unknown rather than no.
 
 `--tier attendance` (the default) runs ownership + speakers and is what
 you almost always want.
@@ -70,6 +79,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from contextquilt.services.extraction_schema import (  # noqa: E402
     _split_compound_owner,
     is_placeholder_or_self_person,
+)
+# Capacity vocabulary and the fold live in src so the worker, this
+# script and the tests all read the same definition.
+from contextquilt.services.person_appearances import (  # noqa: E402
+    MENTION,
+    OWNERSHIP,
+    SPEAKER,
+    merge_tier,
 )
 
 # A surface form shorter than this is not matched in free text: "Ann"
@@ -321,8 +338,11 @@ async def tier_speakers(redis_url, forms, user_id, existing_keys):
 async def tier_mentions(redis_url, forms, user_id, existing_keys):
     """Mention-level appearances from retained transcripts.
 
-    Only adds keys tier 1 did not already find, so the cheaper and more
-    certain signal always wins on timestamps and project scope.
+    Returns every mention-level appearance it finds. merge_tier folds
+    these in: the first tier to find a (person, meeting) keeps its
+    timestamps and project scope, and the mention capacity is added
+    regardless. Previously this tier skipped keys earlier tiers had
+    found, which is what made capacity unrecoverable.
     """
     try:
         import redis.asyncio as redis
@@ -393,20 +413,28 @@ async def write(conn, rows) -> int:
             """
             INSERT INTO person_appearances
                 (user_id, entity_id, origin_id, origin_type, project_id,
-                 first_seen_at, last_seen_at)
+                 first_seen_at, last_seen_at, capacities)
             VALUES ($1, $2::uuid, $3, $4, $5,
                     COALESCE($6::timestamptz, NOW()),
-                    COALESCE($7::timestamptz, NOW()))
+                    COALESCE($7::timestamptz, NOW()),
+                    $8::text[])
             ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
                 first_seen_at = LEAST(person_appearances.first_seen_at,
                                       EXCLUDED.first_seen_at),
                 last_seen_at  = GREATEST(person_appearances.last_seen_at,
                                          EXCLUDED.last_seen_at),
                 project_id    = COALESCE(person_appearances.project_id,
-                                         EXCLUDED.project_id)
+                                         EXCLUDED.project_id),
+                -- Union, never replace. Re-running one tier must not erase
+                -- what another tier established, which is what makes this
+                -- script safe to run repeatedly and per-tier.
+                capacities    = ARRAY(SELECT DISTINCT unnest(
+                                    person_appearances.capacities
+                                    || EXCLUDED.capacities))
             """,
             r["user_id"], r["entity_id"], r["origin_id"], r["origin_type"],
             r["project_id"], r["first"], r["last"],
+            sorted(r.get("capacities") or set()),
         )
         written += 1
     return written
@@ -428,22 +456,35 @@ async def main(args) -> None:
         if args.tier == "all":
             want = {"ownership", "speakers", "mentions"}
 
+        # Every tier now runs over the full population and merge_tier folds
+        # the results, so an empty exclusion set is passed deliberately. The
+        # old code handed each tier the keys earlier tiers had found, which
+        # made capacity strongest-wins and unrecoverable. First tier still
+        # wins on timestamps and project scope; capacities accumulate.
         rows: dict = {}
         if "ownership" in want:
             t1 = await tier_ownership(conn, forms, args.user)
-            print(f"ownership (owner strings + owns edges): {len(t1)} appearances")
-            rows.update(t1)
+            n = merge_tier(rows, t1, OWNERSHIP)
+            print(f"ownership (owner strings + owns edges): {len(t1)} appearances, {n} new")
 
         if "speakers" in want:
-            redis_url = _redis_url()
-            ts_ = await tier_speakers(redis_url, forms, args.user, set(rows.keys()))
-            print(f"speakers  (transcript speaker labels): {len(ts_)} additional")
-            rows.update(ts_)
+            ts_ = await tier_speakers(_redis_url(), forms, args.user, set())
+            n = merge_tier(rows, ts_, SPEAKER)
+            print(f"speakers  (transcript speaker labels): {len(ts_)} appearances, {n} new")
 
         if "mentions" in want:
-            t2 = await tier_mentions(_redis_url(), forms, args.user, set(rows.keys()))
-            print(f"mentions  (named anywhere in text)   : {len(t2)} additional")
-            rows.update(t2)
+            t2 = await tier_mentions(_redis_url(), forms, args.user, set())
+            n = merge_tier(rows, t2, MENTION)
+            print(f"mentions  (named anywhere in text)   : {len(t2)} appearances, {n} new")
+
+        caps: dict = {}
+        for r in rows.values():
+            caps[tuple(sorted(r.get("capacities") or ()))] = (
+                caps.get(tuple(sorted(r.get("capacities") or ())), 0) + 1
+            )
+        print("\ncapacity combinations:")
+        for combo, n in sorted(caps.items(), key=lambda kv: -kv[1]):
+            print(f"  {n:5d}  {'+'.join(combo) or '(none)'}")
 
         people = len({(k[0], k[1]) for k in rows})
         meetings = len({(k[0], k[2]) for k in rows})
