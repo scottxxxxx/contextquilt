@@ -3687,9 +3687,9 @@ async def merge_people(
                     """
                     INSERT INTO person_appearances
                         (user_id, entity_id, origin_id, origin_type,
-                         project_id, first_seen_at, last_seen_at)
+                         project_id, first_seen_at, last_seen_at, capacities)
                     SELECT user_id, $1::uuid, origin_id, origin_type,
-                           project_id, first_seen_at, last_seen_at
+                           project_id, first_seen_at, last_seen_at, capacities
                     FROM person_appearances
                     WHERE user_id = $2 AND entity_id = $3::uuid
                     ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
@@ -3698,7 +3698,15 @@ async def merge_people(
                         last_seen_at  = GREATEST(person_appearances.last_seen_at,
                                                  EXCLUDED.last_seen_at),
                         project_id    = COALESCE(person_appearances.project_id,
-                                                 EXCLUDED.project_id)
+                                                 EXCLUDED.project_id),
+                        -- Union rather than replace. If the loser was a
+                        -- speaker in a meeting where the canonical was only
+                        -- mentioned, the merged person was demonstrably in
+                        -- the room, and dropping that would weaken the very
+                        -- signal the next merge decision reads.
+                        capacities    = ARRAY(SELECT DISTINCT unnest(
+                                            person_appearances.capacities
+                                            || EXCLUDED.capacities))
                     """,
                     canonical_uuid, user_id, loser_uuid,
                 )

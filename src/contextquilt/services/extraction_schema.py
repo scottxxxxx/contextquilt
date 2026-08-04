@@ -1174,6 +1174,39 @@ def is_placeholder_or_self_person(text: object, user_label: "str | None" = None)
     return False
 
 
+# Transcript speaker labels look like "[Reshmi] ..." at line start. Bounded
+# length so a stray bracket in prose cannot swallow a paragraph.
+SPEAKER_LABEL = re.compile(r"^\s*\[([^\]]{1,60})\]", re.MULTILINE)
+
+
+def speaker_labels_in(text: object, user_label: "str | None" = None) -> set:
+    """Lowercased speaker labels appearing in a transcript.
+
+    Single source of truth for "who actually spoke", shared by the worker's
+    appearance writer and the appearance backfill so the two cannot drift.
+
+    Measured on the ABM meeting of 2026-07-28: speaker labels are clean and
+    consistent (Jayanth appears as a label 23 times, spelled correctly every
+    time) while the same names inside spoken text are not ("Palavi" for
+    Pallavi, "Rashmi" for Reshmi, "JN" and "JNZ" for Jayanth). Labels are a
+    trustworthy identity signal; mention text is not. That asymmetry is why
+    the speaker capacity is worth recording separately from the mention one.
+
+    The `(you)` marker is stripped so a label matches the entity name it was
+    extracted from. Diarization placeholders ("Speaker 3", "Unknown") are
+    dropped: they are not people and must never gate an identity decision.
+    """
+    if not isinstance(text, str) or not text:
+        return set()
+    labels = set()
+    for raw in SPEAKER_LABEL.findall(text):
+        name = raw.replace("(you)", "").strip()
+        if not name or is_placeholder_or_self_person(name, user_label):
+            continue
+        labels.add(name.lower())
+    return labels
+
+
 def _split_compound_owner(owner_text: str | None) -> list[str]:
     """Split a slash-joined owner string into individual name parts.
 
