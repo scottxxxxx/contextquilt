@@ -45,6 +45,7 @@ from contextquilt.services.extraction_schema import (
     enforce_owner_gate,
     enforce_owner_edge_agreement,
     enforce_person_ownership,
+    speaker_labels_in,
     is_placeholder_or_self_person,
     normalize_cue_list,
     normalize_owner_in_transcript,
@@ -981,6 +982,7 @@ async def store_entities(
     user_id: str,
     entities: list[dict],
     metadata: dict | None = None,
+    speaker_labels: set | None = None,
 ):
     """
     Store extracted entities to Postgres, resolving alternate surface
@@ -1038,19 +1040,34 @@ async def store_entities(
             origin_id = meta.get("origin_id")
             if not origin_id:
                 return
+            # Capacity: what we can honestly assert from this ingest. Being
+            # named in the extraction is a mention; being a transcript
+            # speaker label is stronger and is what the identity gate reads.
+            # `ownership` is deliberately not stamped here — it is fully
+            # derivable from Postgres at any time (owner strings + owns
+            # edges) with no retention risk, so the backfill owns it.
+            # Capacities UNION on conflict rather than overwrite: a second
+            # ingest that only mentions someone must not erase the fact
+            # that they spoke.
+            capacities = ["mention"]
+            if speaker_labels and name.strip().lower() in speaker_labels:
+                capacities.append("speaker")
             try:
                 await db.execute(
                     """
                     INSERT INTO person_appearances
-                        (user_id, entity_id, origin_id, origin_type, project_id)
-                    VALUES ($1, $2, $3, $4, $5)
+                        (user_id, entity_id, origin_id, origin_type, project_id, capacities)
+                    VALUES ($1, $2, $3, $4, $5, $6::text[])
                     ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
                         last_seen_at = NOW(),
-                        project_id = COALESCE(EXCLUDED.project_id, person_appearances.project_id)
+                        project_id = COALESCE(EXCLUDED.project_id, person_appearances.project_id),
+                        capacities = ARRAY(SELECT DISTINCT unnest(
+                            person_appearances.capacities || EXCLUDED.capacities))
                     """,
                     user_id, entity_id, str(origin_id),
                     meta.get("origin_type") or "meeting",
                     meta.get("project_id"),
+                    capacities,
                 )
             except Exception as e:
                 logger.debug("person_appearance_skipped", error=str(e)[:120])
@@ -3442,7 +3459,11 @@ class ColdPathWorker:
                 relationships = relationships[:MAX_RELATIONSHIPS_PER_MEETING]
 
             entities_stored = await store_entities(
-                self.db, self.redis, user_id, entities, metadata
+                self.db, self.redis, user_id, entities, metadata,
+                # Who actually spoke, so the appearance carries the capacity
+                # the identity gate needs. Read off the same normalized
+                # transcript the extraction saw.
+                speaker_labels=speaker_labels_in(effective_summary, owner_speaker_label),
             )
             relationships_stored = await store_relationships(
                 self.db, user_id, relationships, metadata
