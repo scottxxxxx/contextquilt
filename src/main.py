@@ -3181,9 +3181,24 @@ async def _people_core(conn, user_id: str, entity_ids: Optional[List[str]] = Non
                cp.value->>'deadline_date' AS deadline_date,
                cp.value->>'overdue_since' AS overdue_since,
                cp.project_id, cp.project, cp.origin_id,
+               -- An item can carry more than one `owns` edge when the
+               -- extractor had no vocabulary for a person's actual role
+               -- (a counterparty, someone supplying a precondition) and
+               -- fell back to ownership. Bare LIMIT 1 over that set is
+               -- non-deterministic: Postgres may return either row, so a
+               -- person's ledger could gain or lose an item between two
+               -- identical calls. Prefer the edge whose person matches the
+               -- stated value.owner, then oldest, then id for a total
+               -- order. enforce_owner_edge_agreement stops new multi-owner
+               -- items being written; this keeps existing ones stable.
                (SELECT pc.from_patch_id FROM patch_connections pc
+                  JOIN context_patches op ON op.patch_id = pc.from_patch_id
                  WHERE pc.to_patch_id = cp.patch_id
-                   AND pc.connection_label = 'owns' LIMIT 1) AS owner_patch_id
+                   AND pc.connection_label = 'owns'
+                 ORDER BY (lower(btrim(op.value->>'text'))
+                           = lower(btrim(cp.value->>'owner'))) DESC NULLS LAST,
+                          pc.created_at, pc.connection_id
+                 LIMIT 1) AS owner_patch_id
         FROM context_patches cp
         JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
         WHERE ps.subject_key = $1
