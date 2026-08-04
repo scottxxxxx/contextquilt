@@ -117,7 +117,18 @@ shape change and cannot report that it failed.
 4. **Quiet is not a signal** for anything older than 2026-08-02. Those
    builds cannot report a decode failure, so evidence that a change landed
    safely has to come from somewhere other than the absence of alerts.
-5. **Locale coverage matches across siblings.** Every served config covers
+5. **A type never changes; richer forms arrive as siblings.** The
+   constructive form of rule 3, and the stronger version. Do not widen a
+   field in place, and do not restructure it. If `upgrade_cta` ships as a
+   string it stays a string forever, and per-tier copy arrives later as a
+   new key beside it. The reader-side habit that makes this work: when
+   reading a value, look for the richer sibling first and fall back to the
+   simple one. A consumer that does that by default makes every future
+   change additive by construction, and nobody has to reason about frozen
+   builds again. Proposed by the gateway team 2026-08-04 after a week in
+   which every incident on both sides traced back to removing, renaming,
+   retyping or restructuring a field, never to adding one.
+6. **Locale coverage matches across siblings.** Every served config covers
    the same locale set its siblings cover, or declares which it does not.
    This is rule 2 at file granularity and it hides the same way: nothing
    throws, and some fraction of users silently receives another locale's
@@ -256,7 +267,7 @@ Doc 15 is locked. This doc is ratified but expected to gain lanes.
   any transcript arrives, and includes an image rule the lane cannot use.
 - GhostPour owes the missing Japanese instruction file. Until it exists,
   those users receive the full English instruction block. See section 6
-  rule 5.
+  rule 6.
 - Order of sections within the user turn on the session surfaces is not
   asserted, pending a byte diff. Treat the served order there as
   undiffed, not as ground truth.
