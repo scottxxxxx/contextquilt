@@ -189,6 +189,33 @@ diffed against wire, describes intent and unverified). Flipping a flag
 without doing the diff is itself the regression, and there is a test that
 says so.
 
+**Presence is not consumption.** The same rule pointed the other way, at
+data travelling client to server rather than server to client. A field
+being accepted by a hop proves only that the hop tolerated it, never that
+anything read it.
+
+Traced on the capture path 2026-08-03. The gateway does not allowlist
+metadata keys and does not forward the object wholesale; it enumerates
+every field by hand, twice, once in the route handler and again inside a
+service function with a closed parameter list and no `**kwargs` that
+rebuilds its own outbound metadata. A correctly nested new key is accepted
+by the request model, whose metadata is typed as an open dict, and then
+read by nothing. That is worse than an allowlist, because an allowlist is
+at least a single list somebody can audit. Adding one key takes three
+separate edits, and missing any one produces the identical symptom:
+the field never arrives, forever, with no error anywhere.
+
+So a field is integrated only when every hop that must read it is shown to
+read it. The precedent is the `language` key, which had to be threaded
+through all three places, and whose incident note records only the request
+model behavior and therefore understates what a new key costs.
+
+This is why doc 15 item 8 makes the gateway diff its own leg of the
+three-way test rather than folding it into an end-to-end check. Confirming
+a key reaches CQ's socket tests the client leg and the last gateway edit
+together; only the gateway's own outbound body localises a break to the
+hop that dropped it.
+
 ## 9. Relationship to doc 15
 
 A composition change that alters bytes in the ProjectChat system block is
