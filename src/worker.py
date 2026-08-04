@@ -43,6 +43,7 @@ from contextquilt.services.extraction_schema import (
     enforce_connection_requirements,
     enforce_connection_vocabulary,
     enforce_owner_gate,
+    enforce_owner_edge_agreement,
     enforce_person_ownership,
     is_placeholder_or_self_person,
     normalize_cue_list,
@@ -3310,6 +3311,25 @@ class ColdPathWorker:
                     flipped=cv.get("flipped", 0),
                     dropped=cv.get("dropped", 0),
                     dropped_detail=cv.get("dropped_detail", []),
+                    model=response.model,
+                )
+
+            # Owner-edge agreement — the mirror of enforce_person_ownership
+            # above. That one adds the missing owns edge for a named owner;
+            # this drops owns edges from everyone who is not that owner.
+            # `owns` is the only person-to-item label SS defines, so any
+            # other involvement the extractor cannot name (a counterparty,
+            # someone supplying a precondition) lands as a second owner and
+            # is indistinguishable from the real one downstream. Runs after
+            # vocabulary enforcement so edge directions are already
+            # normalized.
+            enforce_owner_edge_agreement(response.content, user_label=user_label)
+            if (oe := response.content.get("_owner_edge_agreement_enforced")):
+                logger.info(
+                    "owner_edge_agreement_enforced",
+                    user_id=user_id,
+                    dropped=len(oe.get("dropped", [])),
+                    dropped_detail=oe.get("dropped", []),
                     model=response.model,
                 )
 

@@ -1351,6 +1351,101 @@ def enforce_person_ownership(
     return content
 
 
+def enforce_owner_edge_agreement(
+    content: dict, user_label: str | None = None
+) -> dict:
+    """
+    Drop `owns` edges into an action item from anyone who is not that
+    item's stated owner.
+
+    This is the other half of enforce_person_ownership. That one guarantees
+    the *presence* of an owns edge for every named owner; this guarantees
+    their *absence* for everyone else.
+
+    The failure it fixes: the extractor attaches a second person to a
+    commitment when the transcript involves them in some other capacity,
+    because `owns` is the only person-to-item label most manifests define.
+    Any involvement the vocabulary cannot name gets recorded as ownership,
+    and nothing downstream can tell a real owner from a bystander.
+
+    Observed live (ABM, meeting of 2026-07-28): "Configure IP whitelisting
+    for new non-prod environment; coordinate with Denby on turnaround
+    time" carried owns edges from BOTH Denby, the real owner, and
+    Ellery, whose actual role was supplying the IP address the work waits
+    on. The app rendered both as owners because that is what we stored.
+
+    Conservative by construction:
+      - An action item with no usable stated owner is left completely
+        alone. With no stated owner there is nothing to filter against,
+        and dropping edges there would discard the only ownership signal
+        the patch has.
+      - Compound owners ("Marlowe/Quill") keep every edge, using the same
+        split that enforce_person_ownership used to create them.
+      - Only `owns` edges are touched. Every other label passes through.
+    """
+    patches = content.get("patches")
+    if not isinstance(patches, list):
+        return content
+
+    dropped: list[dict] = []
+
+    # Stated-owner name set per action item, keyed by (type, text). Only
+    # items that survive the real-owner filter get an entry; everything
+    # else is deliberately absent so the edge walk below skips it.
+    allowed_by_target: dict[tuple, set] = {}
+    for p in patches:
+        if not isinstance(p, dict) or p.get("type") not in PERSON_OWNED_ACTION_TYPES:
+            continue
+        value = p.get("value") or {}
+        text = (value.get("text") or "").strip()
+        if not text:
+            continue
+        allowed = {
+            name.strip().lower()
+            for name in _split_compound_owner(value.get("owner"))
+            if _is_real_person_owner(name, user_label)
+        }
+        if allowed:
+            allowed_by_target[(p.get("type"), text.lower())] = allowed
+
+    if not allowed_by_target:
+        return content
+
+    for p in patches:
+        if not isinstance(p, dict) or p.get("type") != "person":
+            continue
+        person_name = ((p.get("value") or {}).get("text") or "").strip().lower()
+        edges = p.get("connects_to")
+        if not isinstance(edges, list):
+            continue
+        kept = []
+        for c in edges:
+            if not isinstance(c, dict) or c.get("label") != "owns":
+                kept.append(c)
+                continue
+            key = (
+                c.get("target_type"),
+                (c.get("target_text") or "").strip().lower(),
+            )
+            allowed = allowed_by_target.get(key)
+            if allowed is None or person_name in allowed:
+                kept.append(c)
+                continue
+            dropped.append(
+                {
+                    "person": (p.get("value") or {}).get("text", ""),
+                    "target_type": c.get("target_type"),
+                    "target_text": c.get("target_text"),
+                }
+            )
+        if len(kept) != len(edges):
+            p["connects_to"] = kept
+
+    if dropped:
+        content["_owner_edge_agreement_enforced"] = {"dropped": dropped}
+    return content
+
+
 def normalize_owner_in_transcript(
     transcript: str, owner_speaker_label: str | None
 ) -> str:
