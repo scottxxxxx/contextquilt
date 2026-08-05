@@ -699,7 +699,9 @@ _SELF_TYPED_PATCH_TYPES_WITH_IMPLICIT_OWNER = frozenset(
 )
 
 
-def strip_owner_on_self_typed_patches(content: dict) -> dict:
+def strip_owner_on_self_typed_patches(
+    content: dict, user_label: str | None = None
+) -> dict:
     """Set owner=null on trait/preference/goal/constraint patches.
 
     The prompt instructs the model to leave owner empty on these types
@@ -712,13 +714,59 @@ def strip_owner_on_self_typed_patches(content: dict) -> dict:
     Belt-and-suspenders: prompt says "set owner to null", this sanitizer
     enforces it post-hoc. Run after sanitize_you_marker_from_patches,
     before strip_ephemeral_fields. Mutates content in place.
+
+    **Instrumentation, no behavior change.** Everything is still stripped.
+    The rule is right in intent and too broad in effect: it also deletes a
+    genuine third-party attribution ("Joe prefers to avoid continuous
+    upgrades"), which the manifest wants expressed as a `held_by` edge
+    from the preference to that person.
+
+    Measured on prod 2026-08-04, the 12 surviving owner-carrying
+    preference patches all predate this sanitizer (none since April) and
+    split seven self-attributions, two placeholders, one corrupt, and two
+    genuine third parties. So the wrong-kill rate looked like roughly one
+    in six on legacy data.
+
+    The problem with acting on that number is that this function destroys
+    the evidence, so stored data cannot say whether the model still
+    attempts third-party attribution or stopped. This records what it
+    dropped, and classifies it with the same `_is_real_person_owner` gate
+    the ownership backstop uses, so the conversion to `held_by` can be
+    built against a measured frequency from live traffic rather than an
+    inference from rows written before the rule existed.
     """
+    stripped_self: list = []
+    stripped_third_party: list = []
+
     for patch in content.get("patches") or []:
-        if patch.get("type") not in _SELF_TYPED_PATCH_TYPES_WITH_IMPLICIT_OWNER:
+        if not isinstance(patch, dict):
+            continue
+        ptype = patch.get("type")
+        if ptype not in _SELF_TYPED_PATCH_TYPES_WITH_IMPLICIT_OWNER:
             continue
         value = patch.get("value")
-        if isinstance(value, dict) and value.get("owner"):
-            value["owner"] = None
+        if not (isinstance(value, dict) and value.get("owner")):
+            continue
+        owner = value["owner"]
+        record = {
+            "type": ptype,
+            "owner": owner,
+            "text": (value.get("text") or "")[:80],
+        }
+        # Real named human who is not the (you) speaker: the case the
+        # manifest wants as a held_by edge and which we are deleting.
+        if _is_real_person_owner(owner, user_label):
+            stripped_third_party.append(record)
+        else:
+            stripped_self.append(record)
+        value["owner"] = None
+
+    if stripped_self or stripped_third_party:
+        content["_self_typed_owner_stripped"] = {
+            "self_or_placeholder": len(stripped_self),
+            "third_party": len(stripped_third_party),
+            "third_party_detail": stripped_third_party,
+        }
     return content
 
 
