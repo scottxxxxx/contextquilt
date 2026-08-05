@@ -115,6 +115,28 @@ jobs:
             done
 
             # --- MCP stack (separate compose + env file) ---
+            # DISABLED 2026-08-05. Gated off by default rather than
+            # deleted, so re-enabling is a variable flip.
+            #
+            # Why: the MCP deployment was dead and had been for a while.
+            # cq-mcp was crash-looping on `ModuleNotFoundError: No module
+            # named 'mcp.server.fastmcp'`, so it had never served a request
+            # in this image, and its database held zero rows in every
+            # table including `applications`, meaning nothing could have
+            # authenticated to it anyway. It also had no schema_migrations
+            # table at all, so it was not lagging our migrations, it was
+            # never tracked against them.
+            #
+            # It survived this long because `docker ps` showed containers
+            # and nobody read further. Restarting it every deploy kept it
+            # looking alive.
+            #
+            # Before re-enabling: bring cq-mcp-postgres up to the current
+            # schema (it needs seed_schema_migrations.py first, since the
+            # runner refuses an existing-but-unseeded database) and fix the
+            # missing mcp dependency in the image. Turning MCP_ENABLED on
+            # without both will resurrect a crash loop against a schema
+            # that predates migration 29.
             # `--project-name contextquilt` matches the project the running
             # MCP containers were created under (when docker-compose.mcp.yml
             # lived at /opt/contextquilt/). Without it, `cd /opt/cq-ops`
@@ -124,7 +146,12 @@ jobs:
             # services use the same image as the main stack, so this
             # pulls/restarts MCP on every deploy — historical behavior.
             # Sudo test because /opt/cq-ops is mode 700.
-            if sudo test -f /opt/cq-ops/docker-compose.mcp.yml && sudo test -f /opt/cq-ops/.env.mcp; then
+            # Rendered by Actions before the shell sees it, so an
+            # unset variable becomes an empty string rather than
+            # tripping `set -u` and failing the whole deploy.
+            if [ "${{ vars.MCP_ENABLED }}" = "true" ] \
+               && sudo test -f /opt/cq-ops/docker-compose.mcp.yml \
+               && sudo test -f /opt/cq-ops/.env.mcp; then
               echo "Syncing MCP stack…"
               # MCP's cq-mcp + cq-mcp-worker use the same GHCR image as
               # the main stack — already pulled (and rate-limit ticked)
