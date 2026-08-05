@@ -66,22 +66,24 @@ production run: every item that was acted on had a real named third-party
 owner, and no `Scott`-owned item was touched. Fix the lookup if this
 script is ever reused against data where that coincidence does not hold.
 
-Deletion, not archival
-----------------------
+Archival, and the bump that makes it visible
+--------------------------------------------
 
-`patch_connections` has no status column, so archival is not available
-without a migration. This is a deliberate exception to the archive-never-
-delete rule, which exists for *patches* because clients need delta-sync
-tombstones. Connections carry no tombstone channel: they ride inside the
-patch payload, so a removed edge simply stops appearing. Every deleted row
-is printed in full before it goes, so a dry run is a complete record of
-what an apply would do.
+Migration 32 gave `patch_connections` a status column, so removals archive
+rather than delete and stay auditable. The first run of this script
+predated that and hard-deleted 14 edges, which turned out to be
+unreconstructable afterwards. That is the reason the column exists.
 
-Note the change does not bump `updated_at` on the patch, deliberately.
-Commitment decay anchors on `GREATEST(updated_at, deadline_date)`, so
-bumping it would silently extend the patch's life. The consequence is that
-the edit reaches clients on their next full sync rather than through a
-delta.
+Archival alone does not reach anyone. An archived edge and a deleted edge
+look identical to a client, because both stop appearing in the payload.
+The delta filters on `updated_at` and connections are fetched
+outgoing-only, so a removal is only visible once the FROM-side patch is
+touched. This script therefore does both: archive the edge, then bump the
+person patch that owned it.
+
+Bumping the from-side patch is cheap here. Person patches anchor decay on
+plain `updated_at` with no deadline interaction, and the record genuinely
+did change.
 
 Read-only by default; `--apply` writes. One transaction per patch.
 
@@ -191,8 +193,18 @@ async def main(apply: bool) -> int:
         if apply:
             async with conn.transaction():
                 await conn.execute(
-                    "DELETE FROM patch_connections WHERE connection_id = ANY($1::uuid[])",
+                    "UPDATE patch_connections SET status = 'archived' "
+                    "WHERE connection_id = ANY($1::uuid[])",
                     [e["connection_id"] for e in doomed],
+                )
+                # Bump the from-side patch so the removal actually reaches
+                # clients. Archiving is for us; the delta filters on
+                # updated_at and connections are fetched outgoing-only, so
+                # without this the correction is invisible forever.
+                await conn.execute(
+                    "UPDATE context_patches SET updated_at = NOW() "
+                    "WHERE patch_id = ANY($1::uuid[])",
+                    list({e["from_patch_id"] for e in doomed}),
                 )
         deleted += len(doomed)
         kept += survivors

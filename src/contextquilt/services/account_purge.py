@@ -138,7 +138,10 @@ async def purge_user_data(db, redis_client, user_id: str) -> Dict[str, Any]:
             counts["patches"] = len(patch_ids)
             if patch_ids:
                 for table, col_sql in (
-                    ("patch_connections", "from_patch_id = ANY($1) OR to_patch_id = ANY($1)"),
+                    # Hard delete on purpose. Migration 32 gives connections an
+        # archived state for auditability, which is the opposite of
+        # what an account deletion is for.
+        ("patch_connections", "from_patch_id = ANY($1) OR to_patch_id = ANY($1)"),
                     ("patch_cues", "patch_id = ANY($1)"),
                     ("patch_observations", "patch_id = ANY($1)"),
                     ("patch_usage_metrics", "patch_id = ANY($1)"),

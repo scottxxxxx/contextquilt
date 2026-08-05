@@ -996,6 +996,7 @@ async def recall_context(
                 JOIN context_patches cp ON pc.from_patch_id = cp.patch_id
                 WHERE pc.to_patch_id = $1 AND pc.connection_role = 'parent'
                   AND COALESCE(cp.status, 'active') = 'active'
+                  AND COALESCE(pc.status, 'active') = 'active'
                 ORDER BY cp.created_at DESC, cp.patch_id ASC
                 """,
                 project_patch["patch_id"]
@@ -1794,7 +1795,8 @@ async def get_user_quilt(
             """SELECT pc.from_patch_id, pc.to_patch_id,
                       pc.connection_role, pc.connection_label, pc.context
                FROM patch_connections pc
-               WHERE pc.from_patch_id = ANY($1::uuid[])""",
+               WHERE pc.from_patch_id = ANY($1::uuid[])
+                 AND COALESCE(pc.status, 'active') = 'active'""",
             patch_ids,
         )
         for cr in conn_rows:
@@ -1925,8 +1927,9 @@ async def get_user_quilt_graph(
         """SELECT pc.from_patch_id, pc.to_patch_id,
                   pc.connection_role, pc.connection_label
            FROM patch_connections pc
-           WHERE pc.from_patch_id = ANY($1::uuid[])
-              OR pc.to_patch_id = ANY($1::uuid[])""",
+           WHERE (pc.from_patch_id = ANY($1::uuid[])
+              OR pc.to_patch_id = ANY($1::uuid[]))
+             AND COALESCE(pc.status, 'active') = 'active'""",
         patch_ids,
     )
 
@@ -2455,6 +2458,9 @@ async def delete_all_patches(
 
     for row in patch_ids:
         pid = row["patch_id"]
+        # Hard delete, like account purge. Migration 32 archives connections
+        # so ordinary removals stay auditable; erasing a user's data is the
+        # one case where leaving rows behind defeats the purpose.
         await db_pool.execute("DELETE FROM patch_connections WHERE from_patch_id = $1 OR to_patch_id = $1", pid)
         await db_pool.execute("DELETE FROM patch_usage_metrics WHERE patch_id = $1", pid)
         await db_pool.execute("DELETE FROM context_patch_acl WHERE patch_id = $1", pid)
@@ -2622,7 +2628,8 @@ async def create_patch(
                 VALUES ($1, $2, $3, $4, $5)
                 ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO UPDATE SET
                     connection_label = EXCLUDED.connection_label,
-                    context = EXCLUDED.context
+                    context = EXCLUDED.context,
+                    status = 'active'
                 """,
                 patch_id, conn.target_patch_id, conn.role, conn.label, conn.context
             )
@@ -2686,7 +2693,8 @@ async def create_connection(
         VALUES ($1, $2, $3, $4, $5)
         ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO UPDATE SET
             connection_label = EXCLUDED.connection_label,
-            context = EXCLUDED.context
+            context = EXCLUDED.context,
+            status = 'active'
         """,
         conn.from_patch_id, conn.to_patch_id, conn.role, conn.label, conn.context
     )
@@ -2711,7 +2719,9 @@ async def delete_connection(
 ):
     """Delete a connection between two patches."""
     result = await db_pool.execute(
-        "DELETE FROM patch_connections WHERE from_patch_id = $1 AND to_patch_id = $2 AND connection_role = $3",
+        "UPDATE patch_connections SET status = 'archived' "
+        "WHERE from_patch_id = $1 AND to_patch_id = $2 AND connection_role = $3 "
+        "AND COALESCE(status, 'active') = 'active'",
         from_patch_id, to_patch_id, role
     )
     deleted = int(result.split()[-1]) if result else 0
@@ -3195,6 +3205,7 @@ async def _people_core(conn, user_id: str, entity_ids: Optional[List[str]] = Non
                   JOIN context_patches op ON op.patch_id = pc.from_patch_id
                  WHERE pc.to_patch_id = cp.patch_id
                    AND pc.connection_label = 'owns'
+                   AND COALESCE(pc.status, 'active') = 'active'
                  ORDER BY (lower(btrim(op.value->>'text'))
                            = lower(btrim(cp.value->>'owner'))) DESC NULLS LAST,
                           pc.created_at, pc.connection_id
@@ -3217,6 +3228,7 @@ async def _people_core(conn, user_id: str, entity_ids: Optional[List[str]] = Non
         JOIN context_patches tgt ON tgt.patch_id = pc.to_patch_id
         JOIN patch_subjects ps ON ps.patch_id = src.patch_id
         WHERE ps.subject_key = $1 AND pc.connection_label = 'works_on'
+          AND COALESCE(pc.status, 'active') = 'active'
           AND COALESCE(src.status, 'active') = 'active'
           AND COALESCE(tgt.status, 'active') = 'active'
         """,
@@ -3835,6 +3847,12 @@ async def merge_people(
                         UPDATE patch_connections pc SET {column} = $1
                         WHERE pc.{column} = ANY($2::uuid[])
                           AND NOT EXISTS (
+                              -- status-agnostic read, deliberately. This is a
+                              -- unique-constraint collision check, not a
+                              -- semantic one, and the index on
+                              -- (from, to, role) spans archived rows. Filtering
+                              -- to active here would let the repoint collide
+                              -- with an archived duplicate.
                               SELECT 1 FROM patch_connections pc2
                               WHERE pc2.{column} = $1
                                 AND pc2.{other} = pc.{other}
@@ -3843,6 +3861,11 @@ async def merge_people(
                         """,
                         survivor_id, loser_ids,
                     )
+                # Hard delete, deliberately. Migration 32 archives
+                # connections so a removal stays auditable, but these
+                # edges reference an identity that no longer exists as
+                # a distinct thing. Archiving them would preserve rows
+                # pointing at a patch the merge just retired.
                 await conn.execute(
                     "DELETE FROM patch_connections WHERE from_patch_id = ANY($1::uuid[]) "
                     "OR to_patch_id = ANY($1::uuid[])",

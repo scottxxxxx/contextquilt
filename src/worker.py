@@ -911,7 +911,9 @@ async def store_connected_patches(
                     """
                     INSERT INTO patch_connections (from_patch_id, to_patch_id, connection_role, connection_label, context)
                     VALUES ($1::uuid, $2::uuid, $3, $4, $5)
-                    ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO NOTHING
+                    ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO UPDATE SET
+                        status = 'active'
+                    WHERE patch_connections.status <> 'active'
                     """,
                     actual_from, actual_to, role, label, conn.get("context")
                 )
@@ -2094,7 +2096,9 @@ class ColdPathWorker:
                         INSERT INTO patch_connections
                             (from_patch_id, to_patch_id, connection_role, connection_label, context)
                         VALUES ($1::uuid, $2::uuid, 'informs', 'consolidated_into', 'consolidation source')
-                        ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO NOTHING
+                        ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO UPDATE SET
+                        status = 'active'
+                    WHERE patch_connections.status <> 'active'
                         """,
                         src, patch_id,
                     )
@@ -2544,7 +2548,9 @@ class ColdPathWorker:
                     """
                     INSERT INTO patch_connections (from_patch_id, to_patch_id, connection_role, connection_label)
                     VALUES ($1::uuid, $2::uuid, 'informs', 'works_on')
-                    ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO NOTHING
+                    ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO UPDATE SET
+                        status = 'active'
+                    WHERE patch_connections.status <> 'active'
                     """,
                     person_patch_id, proj_id
                 )
@@ -2769,7 +2775,9 @@ class ColdPathWorker:
                         INSERT INTO patch_connections
                             (from_patch_id, to_patch_id, connection_role, connection_label, context)
                         VALUES ($1::uuid, $2::uuid, 'replaces', 'corrects', 'user correction from chat')
-                        ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO NOTHING
+                        ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO UPDATE SET
+                        status = 'active'
+                    WHERE patch_connections.status <> 'active'
                         """,
                         new_patch_id, old["patch_id"],
                     )
