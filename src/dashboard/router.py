@@ -675,6 +675,7 @@ async def get_user_quilt(
             JOIN patch_subjects ps ON pc.from_patch_id = ps.patch_id
             LEFT JOIN context_patches cp2 ON pc.to_patch_id = cp2.patch_id
             WHERE ps.subject_key = $1
+              AND COALESCE(pc.status, 'active') = 'active'
         """, subject_key)
 
         # Build connection lookup: from_patch_id -> [connections]
