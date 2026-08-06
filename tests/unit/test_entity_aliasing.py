@@ -20,7 +20,7 @@ from src.contextquilt.services.entity_aliasing import (
 
 def test_tokenize_basic_and_punctuation():
     assert tokenize_name("Lockridge Abrams") == ["lockridge", "abrams"]
-    assert tokenize_name("S. Abrams") == ["s", "abrams"]
+    assert tokenize_name("L. Abrams") == ["l", "abrams"]
     assert tokenize_name("Axiom Industries") == ["axiom", "industries"]
 
 
@@ -48,8 +48,8 @@ def test_last_name_is_alias_of_full_name():
 
 
 def test_initial_expansion():
-    assert is_alias_form("S. Abrams", "Lockridge Abrams")
-    assert is_alias_form("S Abrams", "Lockridge Abrams")
+    assert is_alias_form("L. Abrams", "Lockridge Abrams")
+    assert is_alias_form("L Abrams", "Lockridge Abrams")
 
 
 def test_company_short_form():
@@ -75,16 +75,16 @@ def test_reordered_tokens_not_aliases():
 
 
 def test_multiword_substring_not_enough():
-    # Multi-letter tokens never expand — "Sar" is not "Lockridge"
-    assert not is_alias_form("Sar Abrams", "Lockridge Abrams")
+    # Multi-letter tokens never expand, "Lock" is not "Lockridge" here
+    assert not is_alias_form("Loc Abrams", "Lockridge Abrams")
 
 
 def test_initial_only_claims_leftover_tokens():
-    # "S. Lockridge" against "Lockridge Mayfield": "lockridge" consumes the exact
+    # "M. Lockridge" against "Lockridge Mayfield": "lockridge" consumes the exact
     # token, so the initial must expand against "mayfield"
-    assert is_alias_form("S. Lockridge", "Lockridge Mayfield")
-    # ...but "S. Lockridge" against plain "Lockridge" has nothing left for S
-    assert not is_alias_form("S. Lockridge", "Lockridge")
+    assert is_alias_form("M. Lockridge", "Lockridge Mayfield")
+    # ...but "M. Lockridge" against plain "Lockridge" has nothing left for M
+    assert not is_alias_form("M. Lockridge", "Lockridge")
 
 
 # ============================================================
@@ -115,9 +115,9 @@ def test_no_match():
 
 def test_initial_form_resolves():
     existing = [(1, "Lockridge Abrams"), (2, "Sam Abreu")]
-    # "S. Abrams" expands against both? Sam Abreu: tokens [sam, abreu];
+    # "L. Abrams" expands against both? Sam Abreu: tokens [sam, abreu];
     # "abrams" is not a token of it, so only Lockridge Abrams matches.
-    assert find_alias_candidate("S. Abrams", existing) == (1, "Lockridge Abrams", "name_is_alias")
+    assert find_alias_candidate("L. Abrams", existing) == (1, "Lockridge Abrams", "name_is_alias")
 
 
 def test_empty_existing():

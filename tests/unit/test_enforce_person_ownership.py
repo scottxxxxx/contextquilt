@@ -350,7 +350,7 @@ class TestCompoundOwnerInEnforcer:
             for p in content["patches"]
             if p.get("type") == "person"
         )
-        assert person_texts == ["Quill", "Marlowe"]
+        assert person_texts == ["Marlowe", "Quill"]
 
         # Each person patch owns the same commitment.
         for p in content["patches"]:
@@ -364,7 +364,7 @@ class TestCompoundOwnerInEnforcer:
 
         audit = content.get("_person_ownership_enforced")
         assert audit is not None
-        assert sorted(audit["persons_injected"]) == ["Quill", "Marlowe"]
+        assert sorted(audit["persons_injected"]) == ["Marlowe", "Quill"]
         assert len(audit["connections_injected"]) == 2
 
     def test_compound_owner_dedups_against_existing_person(self):
@@ -382,7 +382,7 @@ class TestCompoundOwnerInEnforcer:
             for p in content["patches"]
             if p.get("type") == "person"
         )
-        assert person_texts == ["Quill", "Marlowe"]
+        assert person_texts == ["Marlowe", "Quill"]
 
         audit = content["_person_ownership_enforced"]
         assert audit["persons_injected"] == ["Quill"]  # Marlowe not re-injected
@@ -450,7 +450,7 @@ class TestCompoundOwnerInEnforcer:
             for p in content["patches"]
             if p.get("type") == "person"
         )
-        assert person_texts == ["Quill", "Marlowe"]
+        assert person_texts == ["Marlowe", "Quill"]
 
         # Each person should have 2 owns edges (one per commitment).
         for p in content["patches"]:
