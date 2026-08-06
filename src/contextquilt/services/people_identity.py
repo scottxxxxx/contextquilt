@@ -18,7 +18,10 @@ from __future__ import annotations
 
 from typing import Iterable, List, Sequence, Set, Tuple
 
-from contextquilt.services.extraction_schema import is_placeholder_or_self_person
+from contextquilt.services.extraction_schema import (
+    is_placeholder_or_self_person,
+    is_user_reference,
+)
 
 # Free-form, but these are the values the apps send today. Recorded so a
 # later audit can tell a user's own answer apart from a heuristic or a
@@ -193,14 +196,6 @@ READ_CAPABILITIES: dict = {
 
 OWED_TO_LABEL = "owed_to"
 
-# Owner strings that mean "the submitting user", independent of what they
-# happen to be called. The extraction prompt asks for `owner: null` on the
-# user's own action items, and mostly gets it, but the model also writes
-# the user's own name into the field often enough to matter: on prod today
-# 32 open completables carry an empty owner and 21 carry "Scott" or "Scott
-# Guida" for a user whose display name is "Scott Guida".
-_SELF_OWNER_TOKENS = frozenset({"(you)", "you", "self", "me", "i", "myself"})
-
 
 def manifest_declares_owed_to(manifest: object) -> bool:
     """True when this app's manifest defines the `owed_to` label.
@@ -241,27 +236,21 @@ def is_self_owned(owner: object, user_label: "str | None") -> bool:
     user's display name, and the display name's first token on its own
     ("Scott" for "Scott Guida"), which is how the extractor usually writes
     it when it writes it at all.
+
+    The name matching itself is `is_user_reference`, shared with the
+    extraction sanitizer on purpose. The two ran on different rules once
+    (exact display name there, first token here) and that gap was a live
+    bug: an item owned by "Scott Guida" kept an owed_to edge to "Scott",
+    which the write path allowed and the read path then counted as the
+    user owing themselves.
     """
     if owner is None:
         return True
     if not isinstance(owner, str):
         return False
-    s = owner.strip()
-    if not s:
+    if not owner.strip():
         return True
-    low = s.lower()
-    if low in _SELF_OWNER_TOKENS:
-        return True
-    if not user_label or not user_label.strip():
-        return False
-    label = user_label.strip().lower()
-    if low == label:
-        return True
-    # First token only, and only when the display name actually has more
-    # than one. A single-token display name matching a bare first name is
-    # the same comparison already made above.
-    parts = label.split()
-    return len(parts) > 1 and low == parts[0]
+    return is_user_reference(owner, user_label)
 
 
 def capability_report(owed_to_available: bool = False) -> dict:

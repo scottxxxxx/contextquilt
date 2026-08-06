@@ -164,3 +164,48 @@ def test_no_owed_to_edges_leaves_content_byte_identical():
     before = repr(content)
     enforce_owed_to_counterparty(content, user_label="Scott Guida")
     assert repr(content) == before
+
+
+# --------------------------------------------------------------------
+# Regression: the first production dry run, 2026-08-06
+# --------------------------------------------------------------------
+
+def test_first_name_counterparty_against_a_full_name_owner_is_dropped():
+    """THE BUG THE PROD DRY RUN FOUND. "Scott to obtain feature request
+    number", owner "Scott Guida", judge proposed owed_to "Scott". The
+    sanitizer's self check required an exact display-name match while the
+    read side's ownership check used the first token, so the edge passed
+    the write path and then counted as the user owing themselves. There
+    is a real person patch named "Scott" for this user, so it would have
+    been written."""
+    content = {"patches": [_item(
+        "Scott to obtain feature request number for history issue",
+        "Scott Guida", ["Scott"],
+    )]}
+    enforce_owed_to_counterparty(content, user_label="Scott Guida")
+    assert _labels(content["patches"][0]) == []
+    assert content["_owed_to_enforced"]["dropped"][0]["why"] == "self_or_placeholder"
+
+
+def test_first_name_counterparty_is_dropped_even_with_no_owner():
+    """An unowned item is the user's by convention, so a first-name self
+    counterparty is the same lie without the owner string to catch it."""
+    content = {"patches": [_item("Write up the summary", None, ["Scott"])]}
+    enforce_owed_to_counterparty(content, user_label="Scott Guida")
+    assert _labels(content["patches"][0]) == []
+
+
+def test_a_real_person_sharing_the_first_name_shape_still_survives():
+    """The self rule keys on the user's OWN display name, not on any
+    single-token name."""
+    content = {"patches": [_item("Send the deck", None, ["Marcus"])]}
+    enforce_owed_to_counterparty(content, user_label="Scott Guida")
+    assert _labels(content["patches"][0]) == ["Marcus"]
+
+
+def test_surname_alone_is_not_the_user():
+    """Only the first token, because that is what the extractor writes.
+    A surname on its own is far more likely to be somebody else."""
+    content = {"patches": [_item("Send the deck", None, ["Guida"])]}
+    enforce_owed_to_counterparty(content, user_label="Scott Guida")
+    assert _labels(content["patches"][0]) == ["Guida"]

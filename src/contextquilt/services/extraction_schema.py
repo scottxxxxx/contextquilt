@@ -1199,7 +1199,7 @@ PERSON_OWNED_ACTION_TYPES = frozenset(
 # - diarization placeholders that aren't real human names
 # - empty / unknown markers
 _OWNER_PLACEHOLDER_PREFIXES = ("speaker ", "speaker_", "unknown", "unidentified")
-_OWNER_YOU_TOKENS = frozenset({"(you)", "you", "self", "me", "i"})
+_OWNER_YOU_TOKENS = frozenset({"(you)", "you", "self", "me", "i", "myself"})
 
 
 def is_placeholder_or_self_person(text: object, user_label: "str | None" = None) -> bool:
@@ -1253,6 +1253,45 @@ def speaker_labels_in(text: object, user_label: "str | None" = None) -> set:
             continue
         labels.add(name.lower())
     return labels
+
+
+def is_user_reference(name: object, user_label: "str | None" = None) -> bool:
+    """True when a name refers to the submitting user themselves.
+
+    Deliberately broader than `is_placeholder_or_self_person`, which
+    requires the display name to match exactly. The extractor writes the
+    user's FIRST name far more often than their full one, and for the
+    self case an exact-match-only test is a hole rather than a
+    conservative choice: it lets "Scott" through as a counterparty on an
+    item owned by "Scott Guida", which renders as the user owing
+    themselves.
+
+    Caught on the first production dry run of the owed_to backfill:
+    "Scott to obtain feature request number", owner "Scott Guida",
+    proposed owed_to "Scott". There is a real person patch named "Scott"
+    for this user, so the edge would have been written and the People
+    card would have shown the user an obligation to themselves.
+
+    Kept separate from `is_placeholder_or_self_person` rather than
+    widening it, because that predicate already gates which person
+    patches get dropped, and broadening it there would change what
+    extraction stores for every app.
+    """
+    if not isinstance(name, str):
+        return False
+    s = name.strip()
+    if not s:
+        return False
+    low = s.lower()
+    if low in _OWNER_YOU_TOKENS:
+        return True
+    if not user_label or not user_label.strip():
+        return False
+    label = user_label.strip().lower()
+    if low == label:
+        return True
+    parts = label.split()
+    return len(parts) > 1 and low == parts[0]
 
 
 def _split_compound_owner(owner_text: str | None) -> list[str]:
@@ -1561,6 +1600,15 @@ def enforce_owed_to_counterparty(
     ("Marlowe/Quill") filter against every part. Only `owed_to` edges are
     touched.
 
+    Known limit, stated rather than papered over: owner and counterparty
+    are compared as STRINGS, so two surface forms of the same third party
+    ("Lockridge" as owner, "Lockridge Chen" as counterparty) are not recognised as
+    one human and the edge survives. Entity aliasing knows that; this
+    sanitizer runs before anything is stored and has only the text in
+    front of it. The self case is exempt because `is_user_reference`
+    covers the first-name form explicitly, and the self case is the one
+    that produces a user-visible lie.
+
     Audit detail in content["_owed_to_enforced"].
     """
     patches = content.get("patches")
@@ -1592,10 +1640,9 @@ def enforce_owed_to_counterparty(
             if not target:
                 dropped.append({"item": value.get("text", ""), "target": target, "why": "empty"})
                 continue
-            if is_placeholder_or_self_person(target, user_label):
-                dropped.append({"item": value.get("text", ""), "target": target, "why": "self_or_placeholder"})
-                continue
-            if target.lower() in _OWNER_YOU_TOKENS:
+            if is_placeholder_or_self_person(target, user_label) or is_user_reference(
+                target, user_label
+            ):
                 dropped.append({"item": value.get("text", ""), "target": target, "why": "self_or_placeholder"})
                 continue
             if target.lower() in owners:

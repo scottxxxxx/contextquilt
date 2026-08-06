@@ -44,9 +44,17 @@ Answer with a person ONLY when the item text itself names them as the recipient:
 - "Get the IP address over to Denby" is owed to Denby.
 - "Introduce her to Marcus for the vendor eval" is owed to Marcus.
 
+The single most important case to get right is the REVERSE one. When the item says the user is WAITING ON somebody, that person owes the USER, which is the opposite of what you are recording. Answer null for every one of these:
+- "Blocked waiting on routing configuration from Pemberly"
+- "Awaiting Pemberly feedback on interim routing"
+- "Depends on Pemberly for the threshold setup"
+- "Awaiting Fenwyck decision on the migration approach"
+Waiting on someone, blocked on someone, depends on someone, and needs something from someone are all the same shape, and none of them is the user owing that person anything. Only name somebody when the USER is the one who has to deliver.
+
 Answer null in every other case, including all of these:
 - The item names nobody ("Finish the migration plan").
 - A person is mentioned but is not the recipient ("Review Lockridge's schema draft", "Update the deck Marcus sent").
+- The person is the SUBJECT of the task rather than its recipient. Ask which way the thing being delivered travels. "Confirm Ashby updated the ticket" is Scott checking on Ashby's work, "talk to VJ to clarify the rollout details" is Scott getting information out of VJ. In both the person supplies something, so neither is owed anything, and both are null.
 - The recipient is a group, a team, a company, or somebody not on the list.
 - You are weighing two candidates and neither is clearly the one.
 
