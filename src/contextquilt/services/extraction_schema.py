@@ -1527,6 +1527,90 @@ def enforce_owner_edge_agreement(
     return content
 
 
+def enforce_owed_to_counterparty(
+    content: dict, user_label: str | None = None
+) -> dict:
+    """
+    Drop `owed_to` edges that name a counterparty who cannot be one.
+
+    `owed_to` runs FROM an action item TO the person waiting on it, and it
+    is the only thing in the vocabulary that can say *you owe it to her*.
+    That makes it the field behind the left column of the People ledger,
+    and two of its failure modes produce a confidently wrong sentence
+    rather than a missing one:
+
+      - **Owed to its own owner.** "Denby will send Denby the IP
+        address" is not a counterparty, it is the model restating the
+        owner in a second slot. Kept, it renders as a person owing
+        themselves.
+      - **Owed to the (you) speaker.** Real relationship, wrong
+        representation. *Lockridge owes you* is already carried by Lockridge's
+        `owns` edge, and the (you) speaker has no person patch by design
+        (see drop_placeholder_and_self_person_patches). An edge pointing
+        at them dangles, and Pass-2 stub synthesis would answer the dangle
+        by re-creating the self person patch that the self gate exists to
+        prevent.
+
+    Diarization placeholders ("Speaker 4") go the same way as the self
+    case: a counterparty CQ cannot name is not a counterparty it can bill
+    a user for.
+
+    Conservative in the same shape as enforce_owner_edge_agreement: an
+    item with no usable stated owner keeps every counterparty edge it has,
+    because with no owner there is nothing to contradict. Compound owners
+    ("Marlowe/Quill") filter against every part. Only `owed_to` edges are
+    touched.
+
+    Audit detail in content["_owed_to_enforced"].
+    """
+    patches = content.get("patches")
+    if not isinstance(patches, list):
+        return content
+
+    dropped: list[dict] = []
+
+    for p in patches:
+        if not isinstance(p, dict):
+            continue
+        edges = p.get("connects_to")
+        if not isinstance(edges, list) or not edges:
+            continue
+
+        value = p.get("value") or {}
+        owners = {
+            name.strip().lower()
+            for name in _split_compound_owner(value.get("owner"))
+            if name and name.strip()
+        }
+
+        kept: list = []
+        for c in edges:
+            if not isinstance(c, dict) or c.get("label") != "owed_to":
+                kept.append(c)
+                continue
+            target = (c.get("target_text") or "").strip()
+            if not target:
+                dropped.append({"item": value.get("text", ""), "target": target, "why": "empty"})
+                continue
+            if is_placeholder_or_self_person(target, user_label):
+                dropped.append({"item": value.get("text", ""), "target": target, "why": "self_or_placeholder"})
+                continue
+            if target.lower() in _OWNER_YOU_TOKENS:
+                dropped.append({"item": value.get("text", ""), "target": target, "why": "self_or_placeholder"})
+                continue
+            if target.lower() in owners:
+                dropped.append({"item": value.get("text", ""), "target": target, "why": "owed_to_own_owner"})
+                continue
+            kept.append(c)
+
+        if len(kept) != len(edges):
+            p["connects_to"] = kept
+
+    if dropped:
+        content["_owed_to_enforced"] = {"dropped": dropped}
+    return content
+
+
 def normalize_owner_in_transcript(
     transcript: str, owner_speaker_label: str | None
 ) -> str:
