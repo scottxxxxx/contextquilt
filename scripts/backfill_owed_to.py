@@ -69,6 +69,21 @@ which carries the `user:` prefix. `profiles.user_id` holds the bare id and
 resolves fine when joined against that. This script strips the prefix and
 the guard is load bearing here.
 
+Approval, and why --apply alone is not enough
+---------------------------------------------
+
+The judge is an LLM, so a second run over the same items can propose a
+different set. That makes "read the dry run, then re-run with --apply" a
+promise the script cannot keep: what gets written is whatever the second
+call happened to say, not what a human read and agreed to.
+
+`--approve <patch_id>=<name>` closes that. When any approval is given the
+run switches to allowlist mode: a proposal is written ONLY if its patch is
+approved AND the judge named the same person the approval does. Anything
+else is skipped and reported, including a proposal the judge invented on
+this run that nobody has seen. So an apply run writes exactly what was
+adjudicated, or it writes less and says why. Never something new.
+
 Read-only by default; `--apply` writes. One transaction per item.
 
 Usage
@@ -76,7 +91,9 @@ Usage
 
     python scripts/backfill_owed_to.py                    # dry run, all users
     python scripts/backfill_owed_to.py --user <uuid>      # one user
-    python scripts/backfill_owed_to.py --apply            # writes
+    python scripts/backfill_owed_to.py --apply            # writes every proposal
+    python scripts/backfill_owed_to.py --apply \
+        --approve 75c63703-...=Garrick --approve 0fd74ccd-...=Cranmore
 """
 
 from __future__ import annotations
@@ -194,7 +211,22 @@ def _survives_sanitizer(item, name, user_label) -> bool:
     return bool(content["patches"][0]["connects_to"])
 
 
-async def run_subject(conn, llm, subject_key, user_label, apply):
+def parse_approvals(raw):
+    """`patch_id=Person Name` pairs into {patch_id: name}.
+
+    Split on the FIRST `=` only, because a person's name can contain one
+    and a patch id cannot.
+    """
+    approvals = {}
+    for entry in raw or ():
+        pid, sep, name = entry.partition("=")
+        if not sep or not pid.strip() or not name.strip():
+            raise SystemExit(f"--approve expects <patch_id>=<name>, got {entry!r}")
+        approvals[pid.strip()] = name.strip()
+    return approvals
+
+
+async def run_subject(conn, llm, subject_key, user_label, apply, approvals):
     items = await conn.fetch(OPEN_ITEMS, subject_key, COMPLETABLES)
     mine = [r for r in items if is_self_owned(r["owner"], user_label)]
     people = await conn.fetch(PERSON_PATCHES, subject_key)
@@ -230,10 +262,23 @@ async def run_subject(conn, llm, subject_key, user_label, apply):
             print(f"  JUDGE FAILED on batch {i}: {type(exc).__name__}: {str(exc)[:160]}")
             verdicts.extend([None] * len(batch))
 
-    written = vetoed = 0
+    written = vetoed = unapproved = 0
     for item, name in zip(mine, verdicts):
         if not name:
             continue
+        if approvals:
+            approved_name = approvals.get(str(item["patch_id"]))
+            if approved_name is None:
+                unapproved += 1
+                print(f"  SKIP   {(item['text'] or '')[:64]!r}")
+                print(f"         judge said {name!r}; patch not in the approved set")
+                continue
+            if approved_name.strip().lower() != name.strip().lower():
+                unapproved += 1
+                print(f"  SKIP   {(item['text'] or '')[:64]!r}")
+                print(f"         approved for {approved_name!r} but the judge said "
+                      f"{name!r} on this run; not writing either")
+                continue
         if not _survives_sanitizer(item, name, user_label):
             vetoed += 1
             print(f"  VETO   {(item['text'] or '')[:64]!r}")
@@ -260,11 +305,12 @@ async def run_subject(conn, llm, subject_key, user_label, apply):
                 )
         written += 1
 
-    print(f"  {'wrote' if apply else 'would write'}: {written}   vetoed: {vetoed}")
-    return written, vetoed
+    print(f"  {'wrote' if apply else 'would write'}: {written}   vetoed: {vetoed}"
+          f"   skipped unapproved: {unapproved}")
+    return written, vetoed, unapproved
 
 
-async def main(apply: bool, only_user: str | None) -> None:
+async def main(apply: bool, only_user: str | None, approvals: dict) -> None:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         print("DATABASE_URL is required", file=sys.stderr)
@@ -284,18 +330,28 @@ async def main(apply: bool, only_user: str | None) -> None:
                 return
 
         print(f"{'APPLY' if apply else 'DRY RUN'}: {len(subjects)} subject(s) with open items")
+        if approvals:
+            print(f"ALLOWLIST MODE: {len(approvals)} approved proposal(s); "
+                  f"anything else is skipped even if the judge proposes it")
+            for pid, name in approvals.items():
+                print(f"  {pid} = {name}")
 
-        total_written = total_vetoed = 0
+        total_written = total_vetoed = total_unapproved = 0
         for s in subjects:
-            w, v = await run_subject(
-                conn, llm, s["subject_key"], s["user_label"], apply
+            w, v, u = await run_subject(
+                conn, llm, s["subject_key"], s["user_label"], apply, approvals
             )
             total_written += w
             total_vetoed += v
+            total_unapproved += u
 
         print("\n" + "-" * 60)
         print(f"edges {'written' if apply else 'that would be written'}: {total_written}")
-        print(f"proposals vetoed:                     {total_vetoed}")
+        print(f"proposals vetoed by the sanitizer:    {total_vetoed}")
+        print(f"proposals skipped, not approved:      {total_unapproved}")
+        if approvals and total_written < len(approvals):
+            print(f"\nNOTE: {len(approvals) - total_written} approved proposal(s) did "
+                  f"not land. The judge did not repeat them on this run.")
         if not apply:
             print("\nDry run. Re-run with --apply to write.")
     finally:
@@ -306,5 +362,10 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true", help="write the edges (default: dry run)")
     ap.add_argument("--user", default=None, help="limit to one user id or subject key")
+    ap.add_argument(
+        "--approve", action="append", default=[], metavar="PATCH_ID=NAME",
+        help="allowlist one adjudicated proposal. Repeatable. When any is given, "
+             "ONLY these are written, and only if the judge names the same person.",
+    )
     args = ap.parse_args()
-    asyncio.run(main(args.apply, args.user))
+    asyncio.run(main(args.apply, args.user, parse_approvals(args.approve)))
