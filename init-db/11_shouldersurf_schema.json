@@ -1,6 +1,6 @@
 {
   "app_id": "shouldersurf",
-  "version": 8,
+  "version": 9,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
@@ -234,7 +234,7 @@
       "self_only": false,
       "extraction_rules": {
         "required_fields": ["text"],
-        "guidance": "Commitments require a SPECIFIC NAMED owner. 'Someone should finalize the deck' (no owner) is a takeaway. Extract the owner exactly as named."
+        "guidance": "Commitments require a SPECIFIC NAMED owner. 'Someone should finalize the deck' (no owner) is a takeaway. Extract the owner exactly as named. When the transcript also names who the commitment is owed TO, add an `owed_to` edge from the commitment to that person. 'I'll send Lockridge the routing diagram' is one commitment owned by the (you) speaker with an `owed_to` edge to Lockridge."
       }
     },
     {
@@ -249,7 +249,7 @@
       "self_only": false,
       "extraction_rules": {
         "required_fields": ["text"],
-        "guidance": "Blockers are current impediments — missing resources, unresolved dependencies, stalled approvals. Distinct from constraints: a constraint is an enduring rule ('cannot use flash'); a blocker is a specific current obstacle ('waiting on venue confirmation')."
+        "guidance": "Blockers are current impediments — missing resources, unresolved dependencies, stalled approvals. Distinct from constraints: a constraint is an enduring rule ('cannot use flash'); a blocker is a specific current obstacle ('waiting on venue confirmation'). When the transcript names who is waiting on the blocker being cleared, add an `owed_to` edge from the blocker to that person."
       }
     },
     {
@@ -305,6 +305,13 @@
       "from_types": ["person"],
       "to_types": ["commitment", "blocker", "decision", "goal"],
       "description": "Person is responsible for or author of this item."
+    },
+    {
+      "label": "owed_to",
+      "role": "informs",
+      "from_types": ["commitment", "blocker"],
+      "to_types": ["person"],
+      "description": "The named person this item is owed TO, the counterparty who is waiting on it. Direction: FROM the item TO the person. This is the opposite side of `owns`: `owns` says who does the work, `owed_to` says who is waiting for it. Emit ONLY when the transcript makes the recipient explicit ('I'll send Lockridge the routing diagram', 'get the IP address over to Denby'). Never emit it as a guess about who might care. Two hard rules: an item is never owed to the person who owns it, and an item owed to the (you) speaker needs no edge at all, because the owner already carries that. The case this exists for is the (you) speaker owing a named person something, which nothing else in the vocabulary can express."
     },
     {
       "label": "blocked_by",

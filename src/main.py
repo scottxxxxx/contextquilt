@@ -55,6 +55,8 @@ from contextquilt.services.people_identity import (
     canonical_pair,
     capability_report,
     choose_surviving_person_patch,
+    is_self_owned,
+    manifest_declares_owed_to,
     merge_project_rollups,
     normalise_merge_request,
     owner_keys,
@@ -3123,7 +3125,47 @@ async def _read_separations(conn, user_id: str, entity_ids: List[str]) -> List[t
     return [(str(r["entity_id_lo"]), str(r["entity_id_hi"])) for r in rows]
 
 
-async def _people_core(conn, user_id: str, entity_ids: Optional[List[str]] = None) -> dict:
+async def _people_owed_to_available(conn, app_id: str) -> bool:
+    """Does the calling app's latest registered manifest declare `owed_to`?
+
+    Per-app, not per-CQ-version. The read logic below can compute a
+    counterparty ledger the moment it ships, but for an app whose
+    extraction never emits the edge the answer would be an empty list for
+    every person, which reads as "nothing outstanding" rather than "not
+    tracked". So the capability follows the schema that produces the data,
+    not the code that reads it.
+
+    Any failure to resolve the manifest, a legacy non-UUID app id, no
+    registered schema, unparseable JSON, degrades to False. False is the
+    conservative direction: the caller gets null and a stated reason.
+    """
+    import uuid as _uuid
+    try:
+        app_uuid = _uuid.UUID(app_id)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    row = await conn.fetchrow(
+        "SELECT manifest FROM app_schemas WHERE app_id = $1 "
+        "ORDER BY version DESC LIMIT 1",
+        app_uuid,
+    )
+    if row is None:
+        return False
+    manifest = row["manifest"]
+    if isinstance(manifest, str):
+        try:
+            manifest = json.loads(manifest)
+        except (ValueError, TypeError):
+            return False
+    return manifest_declares_owed_to(manifest)
+
+
+async def _people_core(
+    conn,
+    user_id: str,
+    entity_ids: Optional[List[str]] = None,
+    owed_to_available: bool = False,
+) -> dict:
     """Everything the list and the detail both need, in set-based queries.
 
     Deliberately not N+1: at 155 people a per-person round trip would be
@@ -3219,6 +3261,44 @@ async def _people_core(conn, user_id: str, entity_ids: Optional[List[str]] = Non
         """,
         subject_key, list(COMPLETABLE_PATCH_TYPES),
     )
+    # The other side of the ledger. `owed_to` runs item -> person, the
+    # mirror of the `owns` edge above, and it is the only thing that can
+    # say the user owes a named person something. Fetched only when the
+    # caller's manifest declares the label: without it the list is
+    # guaranteed empty and an empty list here would mean "none open".
+    owed_rows = (
+        await conn.fetch(
+            """
+            SELECT pc.from_patch_id AS item_patch_id,
+                   pc.to_patch_id AS person_patch_id
+            FROM patch_connections pc
+            JOIN context_patches item ON item.patch_id = pc.from_patch_id
+            JOIN patch_subjects ps ON ps.patch_id = item.patch_id
+            WHERE ps.subject_key = $1
+              AND pc.connection_label = 'owed_to'
+              AND COALESCE(pc.status, 'active') = 'active'
+              AND COALESCE(item.status, 'active') = 'active'
+            """,
+            subject_key,
+        )
+        if owed_to_available
+        else []
+    )
+    owed_by_person: dict = {}
+    for r in owed_rows:
+        owed_by_person.setdefault(str(r["person_patch_id"]), set()).add(
+            str(r["item_patch_id"])
+        )
+
+    # The user's own display name, which is how `is_self_owned` recognises
+    # an action item the extractor labelled with the user's name instead
+    # of leaving the owner null. Absent profile is fine: the predicate
+    # falls back to empty and self-token owners only.
+    profile = await conn.fetchrow(
+        "SELECT display_name FROM profiles WHERE user_id = $1", user_id
+    )
+    user_label = profile["display_name"] if profile else None
+
     stated_rows = await conn.fetch(
         """
         SELECT src.patch_id AS person_patch_id,
@@ -3281,6 +3361,30 @@ async def _people_core(conn, user_id: str, entity_ids: Optional[List[str]] = Non
             or (patch_id and r["owner_patch_id"] and str(r["owner_patch_id"]) == patch_id)
         ]
 
+        # What the USER owes this person: an item pointing here with an
+        # owed_to edge, that the user themselves holds. Both halves are
+        # required. Without the ownership gate, "Lockridge owes Marcus the
+        # shortlist" would render on Marcus's card as something the user
+        # owes him. The edge alone says who is waiting, not who is late.
+        #
+        # Stays null for a person with no person PATCH even when the
+        # capability is on. An owed_to edge targets a patch, so a
+        # patch-less entity cannot be the target of one, and 0 there would
+        # be structurally guaranteed rather than measured: an
+        # unfalsifiable "you owe them nothing" for the largest group on
+        # the list (on prod, 332 person entities against 175 person
+        # patches). `they_owe` degrades gracefully here because it also
+        # matches the free-text value.owner by name; `you_owe` has no such
+        # leg, so it says so instead of guessing.
+        you_owe = None
+        if owed_to_available and patch_id:
+            owed_ids = owed_by_person.get(patch_id) or ()
+            you_owe = [
+                r for r in open_items
+                if str(r["patch_id"]) in owed_ids
+                and is_self_owned(r["owner"], user_label)
+            ]
+
         row = {
             "entity_id": eid,
             "name": p["name"],
@@ -3294,11 +3398,15 @@ async def _people_core(conn, user_id: str, entity_ids: Optional[List[str]] = Non
             "meeting_count": len(appearances),
             "project_count": len(projects),
             "open_they_owe": len(they_owe),
-            # null, never 0 — see READ_CAPABILITIES.you_owe.
-            "open_you_owe": None,
+            # null, never 0, until the caller's manifest declares owed_to.
+            # See READ_CAPABILITIES.you_owe: 0 would read as "you owe this
+            # person nothing", which is a different claim from "CQ cannot
+            # tell". Once the label exists, 0 is honest and this is a count.
+            "open_you_owe": None if you_owe is None else len(you_owe),
             "_appearances": appearances,
             "_projects": projects,
             "_they_owe": they_owe,
+            "_you_owe": you_owe,
             "_mention_count": p["mention_count"] or 0,
             "_alias_sources": alias_sources.get(eid, {}),
             # Newest of the two things that change a person row: another
@@ -3353,9 +3461,18 @@ async def list_people(
     folded away by a merge, so tidying up a roster makes the number go
     down rather than quietly inflating it.
 
-    `open_you_owe` is always null. See the `capabilities` block: CQ has no
-    counterparty on a commitment yet, and answering 0 would read as "you
-    owe this person nothing".
+    `open_you_owe` is a count for callers whose registered manifest
+    declares the `owed_to` connection label, and null for everyone else.
+    See the `capabilities` block: without that label CQ has no counterparty
+    on a commitment, and answering 0 would read as "you owe this person
+    nothing", which is a different claim from "CQ cannot tell".
+
+    It stays null PER PERSON for anyone with a null `patch_id`, even when
+    the capability is on, because an `owed_to` edge targets a person patch
+    and an entity without one cannot be the target of a single edge. So
+    the capability answers "can CQ answer this question at all" and the
+    per-person null answers "can it answer it for this person". Both
+    render the same way: not tracked, rather than nothing outstanding.
 
     **The `query` block echoes what CQ RECEIVED, not what it applied.**
     See the response contract in doc 16 section 8b: raw received values,
@@ -3388,7 +3505,10 @@ async def list_people(
         ignored.append("confirmed")
 
     async with db_pool.acquire() as conn:
-        core = await _people_core(conn, user_id)
+        owed_to_available = await _people_owed_to_available(conn, app_id)
+        core = await _people_core(
+            conn, user_id, owed_to_available=owed_to_available
+        )
         rows = core["people"]
         total_unfiltered = len(rows)
 
@@ -3428,7 +3548,7 @@ async def list_people(
         "total": total,
         "total_unfiltered": total_unfiltered,
         "deleted": deleted,
-        "capabilities": capability_report(),
+        "capabilities": capability_report(owed_to_available),
         "query": {
             "since": since,
             "confirmed": confirmed,
@@ -3457,6 +3577,18 @@ async def get_person(
     `origin_id`. Per the context-flow contract (doc 15 item 5) CQ wins on
     state and the app wins on content: ShoulderSurf joins origin_id to its
     own records for "Atlas cutover checkpoint, Jul 28, 47m".
+
+    `commitments.they_owe` and `commitments.you_owe` are the two sides of
+    the ledger and they are computed differently on purpose. `they_owe` is
+    ownership: items this person owns, matched by name, alias, or `owns`
+    edge. `you_owe` is a counterparty: items the USER owns that carry an
+    `owed_to` edge pointing here. Both halves of that are required. The
+    edge alone says who is waiting, not who is late, so without the
+    ownership gate "Lockridge owes Marcus the shortlist" would appear on
+    Marcus's card as something the user owes him.
+
+    `you_owe` is null, not an empty list, for callers whose registered
+    manifest does not declare `owed_to`. See capabilities.you_owe.
     """
     async with db_pool.acquire() as conn:
         try:
@@ -3468,7 +3600,10 @@ async def get_person(
                 status_code=404, detail=f"Person {entity_id} not found for this user"
             )
         eid = str(resolved["entity_id"])
-        core = await _people_core(conn, user_id, [eid])
+        owed_to_available = await _people_owed_to_available(conn, app_id)
+        core = await _people_core(
+            conn, user_id, [eid], owed_to_available=owed_to_available
+        )
 
     row = core["by_id"].get(eid)
     if row is None:
@@ -3506,9 +3641,13 @@ async def get_person(
         "projects": row["_projects"],
         "commitments": {
             "they_owe": [_item(r) for r in row["_they_owe"]],
-            # Not an empty list: an empty list means "none open", and CQ
-            # cannot tell the difference yet. See capabilities.you_owe.
-            "you_owe": None,
+            # A list once the caller's manifest declares `owed_to`, null
+            # before that. An empty list means "none open"; null means CQ
+            # cannot tell. See capabilities.you_owe.
+            "you_owe": (
+                None if row["_you_owe"] is None
+                else [_item(r) for r in row["_you_owe"]]
+            ),
         },
         "meetings": [
             {
@@ -3532,7 +3671,7 @@ async def get_person(
             "confirmed_mentions": None,
             "assumed_mentions": None,
         },
-        "capabilities": capability_report(),
+        "capabilities": capability_report(owed_to_available),
     })
     return detail
 
