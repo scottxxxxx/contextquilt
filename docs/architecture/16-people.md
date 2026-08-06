@@ -299,7 +299,34 @@ check, not the recipient). Prompt tuning stopped there deliberately. A
 fourth pass against one user's three remaining items is overfitting, and
 adjudicating a meeting the operator attended is what the dry run is for.
 
-#### 4.2.5 The bump, and the decay it costs
+#### 4.2.5 The lock covers the DATA, not just the code
+
+Found by applying two adjudicated edges to prod on 2026-08-06 and then
+looking at what would carry them (rolled back within minutes; prod is
+byte-identical to before, verified against a pre-write snapshot).
+
+Holding the PR is not enough. `/v1/quilt` fetches outgoing connections
+with **no label filter** (`src/main.py`, "Fetch all outgoing connections
+for these patches"), and the backfill bumps `updated_at` on the item,
+which is the from-side. So writing a single `owed_to` row puts a
+connection label ShoulderSurf has never been told about into their very
+next delta, ahead of the ack, whatever the code is doing.
+
+If SS decodes `label` as a plain string this is harmless. If it decodes
+into a closed enum, an unannounced value is the classic strict-decoder
+failure, and it is the same class of additive change the standing rule
+says to verify through GP's proxied path rather than assume. That is not
+a bet to take unilaterally on somebody else's client.
+
+**Rule: a new connection label is live to clients the moment the first
+row exists, not the moment the reader ships.** Any vocabulary addition
+under a lock has to hold the backfill too, not just the endpoint.
+
+Question this adds for SS (section 9): does the connection decoder
+tolerate an unknown `label`, and if so, since which build? The answer
+also settles whether every future vocabulary addition needs this dance.
+
+#### 4.2.6 The bump, and the decay it costs
 
 The backfill bumps `updated_at` on the ITEM, which is the from-side of the edge,
 because quilt connections are fetched outgoing-only and that is the only
