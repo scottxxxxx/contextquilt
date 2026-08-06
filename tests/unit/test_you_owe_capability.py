@@ -145,3 +145,18 @@ def test_report_is_a_copy_not_the_module_constant():
     caps = capability_report(True)
     caps["you_owe"]["available"] = "mutated"
     assert capability_report(True)["you_owe"]["available"] is True
+
+
+def test_is_self_owned_and_the_sanitizer_agree_on_every_form():
+    """These two ran on different rules once and the gap was a live bug:
+    the write path allowed owed_to "Scott" on an item owned by "Scott
+    Guida", and the read path then counted it as the user's own. They
+    share `is_user_reference` now, and this asserts they cannot drift
+    apart again."""
+    from contextquilt.services.extraction_schema import is_user_reference
+    for form in ("Scott", "Scott Guida", "scott", "(you)", "you", "me", "myself"):
+        assert is_self_owned(form, "Scott Guida") is True, form
+        assert is_user_reference(form, "Scott Guida") is True, form
+    for form in ("Lockridge Chen", "Guida", "Speaker 2"):
+        assert is_self_owned(form, "Scott Guida") is False, form
+        assert is_user_reference(form, "Scott Guida") is False, form

@@ -249,7 +249,7 @@
       "self_only": false,
       "extraction_rules": {
         "required_fields": ["text"],
-        "guidance": "Blockers are current impediments — missing resources, unresolved dependencies, stalled approvals. Distinct from constraints: a constraint is an enduring rule ('cannot use flash'); a blocker is a specific current obstacle ('waiting on venue confirmation'). When the transcript names who is waiting on the blocker being cleared, add an `owed_to` edge from the blocker to that person."
+        "guidance": "Blockers are current impediments — missing resources, unresolved dependencies, stalled approvals. Distinct from constraints: a constraint is an enduring rule ('cannot use flash'); a blocker is a specific current obstacle ('waiting on venue confirmation'). A blocker phrased as waiting on a named person ('awaiting Pemberly's feedback') means that person owes the blocker's owner, so set `value.owner` to the person who has to clear it and do NOT add an `owed_to` edge. Add `owed_to` only in the other direction, when the blocker's owner is the one somebody else is waiting on."
       }
     },
     {
@@ -311,7 +311,7 @@
       "role": "informs",
       "from_types": ["commitment", "blocker"],
       "to_types": ["person"],
-      "description": "The named person this item is owed TO, the counterparty who is waiting on it. Direction: FROM the item TO the person. This is the opposite side of `owns`: `owns` says who does the work, `owed_to` says who is waiting for it. Emit ONLY when the transcript makes the recipient explicit ('I'll send Lockridge the routing diagram', 'get the IP address over to Denby'). Never emit it as a guess about who might care. Two hard rules: an item is never owed to the person who owns it, and an item owed to the (you) speaker needs no edge at all, because the owner already carries that. The case this exists for is the (you) speaker owing a named person something, which nothing else in the vocabulary can express."
+      "description": "The named person this item is owed TO, the counterparty who is waiting on it. Direction: FROM the item TO the person. This is the opposite side of `owns`: `owns` says who does the work, `owed_to` says who is waiting for it. Emit ONLY when the transcript makes the recipient explicit ('I'll send Lockridge the routing diagram', 'get the IP address over to Denby'). Never emit it as a guess about who might care. THE REVERSED CASE IS THE ONE TO WATCH: when the item says somebody is WAITING ON another person ('blocked waiting on config from Pemberly', 'awaiting Fenwyck's decision', 'depends on Pemberly for the threshold setup'), that person OWES the item's owner, so the edge does NOT belong on this item at all. Emit an `owed_to` edge only when the item's owner is the one who has to deliver. Two more hard rules: an item is never owed to the person who owns it, and an item owed to the (you) speaker needs no edge at all, because the owner already carries that. The case this exists for is the (you) speaker owing a named person something, which nothing else in the vocabulary can express."
     },
     {
       "label": "blocked_by",

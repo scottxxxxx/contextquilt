@@ -262,7 +262,46 @@ proposed edge is run through the live `enforce_owed_to_counterparty`
 before it is written, so the backfill cannot produce a shape the forward
 path would have refused.
 
-It bumps `updated_at` on the ITEM, which is the from-side of the edge,
+#### 4.2.4 What the first production dry run found
+
+Run against prod on 2026-08-06 (dry, nothing written). 53 of Scott's 230
+open completables are his own; the judge proposed 10 counterparties.
+Reviewing them by hand found two real bugs, neither of which any unit
+test would have caught, because both needed real transcript language.
+
+**Bug 1, the self hole.** "Scott to obtain feature request number",
+`value.owner` "Scott Guida", proposed `owed_to` "Scott". The sanitizer's
+self check required an exact display-name match while the read side's
+ownership check used the first token, so the write path allowed the edge
+and the read path then counted it as the user owing themselves. There is
+a real person patch named "Scott" for this user, so it would have been
+written. Fixed by `is_user_reference`, now shared by both sides with a
+test asserting they agree on every form.
+
+**Bug 2, the direction inversion, four of ten.** Every one was a blocker
+with a null owner: "awaiting Pemberly feedback", "blocked waiting on routing
+configuration from Pemberly", "depends on Pemberly for threshold setup", "awaiting
+Fenwyck decision". All four mean that person owes the USER, which is the
+exact opposite of what `owed_to` records. Fixed with an explicit
+anti-inversion rule in both the judge prompt and the manifest label
+description, since the extractor will meet the same sentences.
+
+Worth keeping: this does NOT argue for dropping `blocker` from
+`from_types` (4.2.1). The four were rejected on their direction, not
+their type, and a blocker whose owner is the one somebody is waiting on
+is still a real `owed_to`. It does argue that "waiting on a person" is
+the dominant blocker shape in this data, and that shape is `they_owe`.
+
+After both fixes the same run proposes 3, of which 2 are unambiguous
+("keep Garrick updated", "reply to Cranmore's email") and 1 is a judgment
+call ("confirm Ashby updated the ticket": she is the subject of the
+check, not the recipient). Prompt tuning stopped there deliberately. A
+fourth pass against one user's three remaining items is overfitting, and
+adjudicating a meeting the operator attended is what the dry run is for.
+
+#### 4.2.5 The bump, and the decay it costs
+
+The backfill bumps `updated_at` on the ITEM, which is the from-side of the edge,
 because quilt connections are fetched outgoing-only and that is the only
 channel the new fact has (the standing rule from the 2026-08-05
 propagation fix). That does extend commitment decay, which anchors on
