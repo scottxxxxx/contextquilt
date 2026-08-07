@@ -371,6 +371,11 @@ async def verify_application_access(
             ))
             return token_data.app_id
         except Exception:
+             # Same reasoning as the token endpoint: the gateway turns our
+             # 401 into a 502, so this log is the only place a bad or expired
+             # bearer token is identifiable as an auth problem rather than as
+             # the gateway being down.
+             logger.warning("auth_bearer_rejected", path=str(request.url.path)[:120])
              raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid authentication credentials",
@@ -1520,6 +1525,20 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
         )
         
         if not row or not auth.verify_password(form_data.password, row['client_secret_hash']):
+            # Logged because CQ is the ONLY place this failure is visible as
+            # an auth failure. The gateway translates our 401 into a 502 at
+            # its edge, deliberately, so a wrong secret reads downstream as
+            # "the gateway is broken" rather than "the credential is wrong".
+            # Nothing downstream can tell those apart; we can.
+            #
+            # Never log the submitted secret. The app id is safe and is the
+            # only field that identifies WHICH credential is wrong, which is
+            # the whole question during a cutover.
+            logger.warning(
+                "auth_token_rejected",
+                client_id=str(form_data.username)[:64],
+                reason="unknown_app" if not row else "secret_mismatch",
+            )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Incorrect client_id or client_secret",
@@ -1530,9 +1549,24 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             data={"sub": str(row['app_id'])},
             expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES),
         )
+        logger.info("auth_token_issued", client_id=str(row['app_id']))
         return {"access_token": access_token, "token_type": "bearer", "expires_in": auth.ACCESS_TOKEN_EXPIRE_MINUTES * 60}
+    except HTTPException:
+        raise
     except Exception as e:
-        # Handle UUID conversion error or other DB errors
+        # KNOWN DEFECT, logged rather than fixed here on purpose: this arm
+        # turns ANY failure into a credential error, so a database outage
+        # currently presents as "Incorrect client_id or client_secret" and
+        # sends everyone hunting the wrong thing. Changing the status code is
+        # a behaviour change on a live auth path and there is a credential
+        # cutover imminent, so it lands separately. The log line is what makes
+        # the difference visible in the meantime.
+        logger.error(
+            "auth_token_backend_error",
+            client_id=str(form_data.username)[:64],
+            error_type=type(e).__name__,
+            error=str(e)[:200],
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect client_id or client_secret",
