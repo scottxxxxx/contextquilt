@@ -84,6 +84,16 @@ else is skipped and reported, including a proposal the judge invented on
 this run that nobody has seen. So an apply run writes exactly what was
 adjudicated, or it writes less and says why. Never something new.
 
+**Same PERSON, not the same string.** The first version compared surface
+forms, which is the wrong question: a human adjudicates a person and CQ
+holds several spellings of one. An operator approved "Pallavi" from a dry
+run, the next run's judge picked "Pallavi Kandanur", and the gate refused
+to write either. Names are now resolved through the entity index and its
+aliases, following `merged_into`, so any surface form of the approved
+human satisfies the approval. A name CQ cannot place, or one shared by two
+different people, falls back to exact string matching rather than
+guessing.
+
 Read-only by default; `--apply` writes. One transaction per item.
 
 Usage
@@ -111,6 +121,7 @@ from contextquilt.services.counterparty import (  # noqa: E402
     COUNTERPARTY_JUDGE_SCHEMA,
     COUNTERPARTY_JUDGE_SYSTEM,
     MAX_JUDGE_ITEMS,
+    approval_satisfied,
     build_counterparty_content,
     parse_counterparty_verdicts,
 )
@@ -226,6 +237,64 @@ def parse_approvals(raw):
     return approvals
 
 
+# Every surface form CQ knows for a person, mapped to the identity that
+# survives. Canonical names and recorded aliases both count, and
+# `merged_into` is followed so two spellings folded into one human resolve
+# to the same key. Same walk the recall entity fetch does; the approval
+# gate and recall now agree on what "the same person" means.
+IDENTITY_INDEX = """
+    WITH RECURSIVE surfaces AS (
+        SELECT e.entity_id, lower(btrim(e.name)) AS surface
+          FROM entities e
+         WHERE e.user_id = $1 AND e.entity_type = 'person'
+        UNION
+        SELECT a.entity_id, lower(btrim(a.alias))
+          FROM entity_aliases a
+          JOIN entities e ON e.entity_id = a.entity_id
+         WHERE a.user_id = $1 AND e.entity_type = 'person'
+    ),
+    walk AS (
+        SELECT s.entity_id AS start_id, s.entity_id AS current_id, 0 AS depth
+          FROM (SELECT DISTINCT entity_id FROM surfaces) s
+        UNION ALL
+        SELECT w.start_id, e.merged_into, w.depth + 1
+          FROM walk w JOIN entities e ON e.entity_id = w.current_id
+         WHERE e.merged_into IS NOT NULL AND w.depth < 8
+    ),
+    survivor AS (
+        SELECT DISTINCT ON (start_id) start_id, current_id
+          FROM walk ORDER BY start_id, depth DESC
+    )
+    SELECT s.surface, v.current_id AS identity
+      FROM surfaces s JOIN survivor v ON v.start_id = s.entity_id
+"""
+
+
+async def build_identity_of(conn, subject_key):
+    """Return a surface-form -> identity-key lookup for `approval_satisfied`.
+
+    A surface CQ knows for two different people (the same first name on
+    two humans) is deliberately mapped to None rather than to one of them:
+    an ambiguous name cannot prove an approval, and the gate falls back to
+    exact string matching there.
+    """
+    user_id = subject_key.split("user:", 1)[-1]
+    rows = await conn.fetch(IDENTITY_INDEX, user_id)
+    by_surface = {}
+    for r in rows:
+        by_surface.setdefault(r["surface"], set()).add(str(r["identity"]))
+    resolved = {k: next(iter(v)) for k, v in by_surface.items() if len(v) == 1}
+    ambiguous = {k for k, v in by_surface.items() if len(v) > 1}
+
+    def identity_of(name):
+        key = (name or "").strip().lower()
+        if key in ambiguous:
+            return None
+        return resolved.get(key)
+
+    return identity_of, len(resolved), len(ambiguous)
+
+
 async def run_subject(conn, llm, subject_key, user_label, apply, approvals):
     items = await conn.fetch(OPEN_ITEMS, subject_key, COMPLETABLES)
     mine = [r for r in items if is_self_owned(r["owner"], user_label)]
@@ -238,6 +307,12 @@ async def run_subject(conn, llm, subject_key, user_label, apply, approvals):
     if not mine or not people:
         print("  nothing to judge")
         return 0, 0
+
+    identity_of = (lambda _n: None)
+    if approvals:
+        identity_of, n_resolved, n_ambiguous = await build_identity_of(conn, subject_key)
+        print(f"  identity index: {n_resolved} surface forms resolve, "
+              f"{n_ambiguous} ambiguous (those fall back to exact match)")
 
     names = [r["name"] for r in people if (r["name"] or "").strip()]
     patch_by_name = {r["name"].strip().lower(): r["patch_id"] for r in people if r["name"]}
@@ -273,12 +348,16 @@ async def run_subject(conn, llm, subject_key, user_label, apply, approvals):
                 print(f"  SKIP   {(item['text'] or '')[:64]!r}")
                 print(f"         judge said {name!r}; patch not in the approved set")
                 continue
-            if approved_name.strip().lower() != name.strip().lower():
+            if not approval_satisfied(approved_name, name, identity_of):
                 unapproved += 1
                 print(f"  SKIP   {(item['text'] or '')[:64]!r}")
                 print(f"         approved for {approved_name!r} but the judge said "
-                      f"{name!r} on this run; not writing either")
+                      f"{name!r} on this run, and they are not the same person; "
+                      f"not writing either")
                 continue
+            if approved_name.strip().lower() != name.strip().lower():
+                print(f"         (approved as {approved_name!r}, judge said {name!r}, "
+                      f"same person by CQ identity)")
         if not _survives_sanitizer(item, name, user_label):
             vetoed += 1
             print(f"  VETO   {(item['text'] or '')[:64]!r}")

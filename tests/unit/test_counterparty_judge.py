@@ -106,3 +106,68 @@ def test_prompt_carries_no_dashes():
     up nowhere near a user, but the house rule is the house rule."""
     assert "—" not in COUNTERPARTY_JUDGE_SYSTEM
     assert "–" not in COUNTERPARTY_JUDGE_SYSTEM
+
+
+# --------------------------------------------------------------------
+# approval_satisfied: the gate confirms a PERSON, not a spelling
+# --------------------------------------------------------------------
+
+from contextquilt.services.counterparty import approval_satisfied  # noqa: E402
+
+# "Pallavi" and "Pallavi Kandanur" are one human; "Marcus" is another.
+IDENTITY = {"pallavi": "e1", "pallavi kandanur": "e1", "marcus": "e2"}
+
+
+def _identity_of(name):
+    return IDENTITY.get((name or "").strip().lower())
+
+
+def test_exact_match_still_satisfies():
+    assert approval_satisfied("Marcus", "Marcus", _identity_of) is True
+    assert approval_satisfied("marcus", "MARCUS", _identity_of) is True
+
+
+def test_a_different_surface_form_of_the_same_person_satisfies():
+    """THE BUG THIS FIXES. An operator approved "Pallavi" from a dry run,
+    the next run's judge said "Pallavi Kandanur", the same human by CQ's
+    own identity data, and the gate refused to write either."""
+    assert approval_satisfied("Pallavi", "Pallavi Kandanur", _identity_of) is True
+    assert approval_satisfied("Pallavi Kandanur", "Pallavi", _identity_of) is True
+
+
+def test_a_different_person_is_still_refused():
+    """The gate still doing its job: the judge picked somebody else."""
+    assert approval_satisfied("Pallavi", "Marcus", _identity_of) is False
+
+
+def test_unresolvable_names_fall_back_to_exact_matching():
+    """If CQ cannot place a name it cannot claim two names are one person,
+    so the strict rule applies rather than a guess."""
+    assert approval_satisfied("Ghost", "Phantom", _identity_of) is False
+    assert approval_satisfied("Ghost", "Ghost", _identity_of) is True
+
+
+def test_one_resolvable_and_one_not_is_refused():
+    assert approval_satisfied("Pallavi", "Ghost", _identity_of) is False
+    assert approval_satisfied("Ghost", "Pallavi", _identity_of) is False
+
+
+def test_an_ambiguous_name_refuses_rather_than_picking():
+    """A resolver returns None for a surface form shared by two different
+    people. That must not become a licence to write."""
+    ambiguous = lambda n: None if n.lower() == "chris" else IDENTITY.get(n.lower())
+    assert approval_satisfied("Chris", "Pallavi", ambiguous) is False
+    assert approval_satisfied("Chris", "Chris", ambiguous) is True
+
+
+def test_blank_input_never_satisfies():
+    for a, b in (("", "Marcus"), ("Marcus", ""), ("", ""), ("  ", "Marcus")):
+        assert approval_satisfied(a, b, _identity_of) is False
+
+
+def test_resolution_is_not_consulted_when_strings_already_match():
+    """Cheapest path first, and it keeps the gate working even if the
+    identity index cannot be built."""
+    def boom(_n):
+        raise AssertionError("identity_of must not be called on an exact match")
+    assert approval_satisfied("Marcus", "marcus", boom) is True
