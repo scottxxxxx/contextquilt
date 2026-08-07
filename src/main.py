@@ -852,16 +852,55 @@ async def recall_context(
     if matched_names:
         t1 = time.monotonic()
         # Alias-aware: a matched name may be a recorded surface form
-        # ("S. Abrams") — resolve it to the canonical entity so graph
-        # traversal sees the full relationship neighborhood. DISTINCT
-        # because a canonical name and one of its aliases can both match
-        # the same query.
+        # ("S. Abrams"), so resolve it to the canonical entity and let
+        # graph traversal see the full relationship neighborhood.
+        #
+        # ALSO merge-aware, and that half was missing until 2026-08-07.
+        # A merge marks the folded entity with a forward pointer instead
+        # of deleting it, and the dead row keeps its own name and its own
+        # description. This query matched that row by name, so after
+        # merging four spellings of one person the header rendered
+        # "People: Vijay Rayudu (...); Vijay R (...); Vijay Rayud" and
+        # the model was told one human was three. That is precisely the
+        # split brain a merge exists to resolve, surviving in the recall
+        # lane because only the WRITE path hopped the pointer
+        # (worker._resolve_merged_forward). Two predicates for one
+        # concept, and only one of them maintained.
+        #
+        # Resolving forward rather than just excluding folded rows: a
+        # merge records the loser's name as an alias on the survivor, so
+        # the canonical usually matches anyway and excluding would be
+        # enough. Usually is not a guarantee. If that alias is ever
+        # missing, excluding silently DROPS the match, while resolving
+        # substitutes the survivor and DISTINCT collapses the pair.
+        #
+        # Depth 8 matches the write path's cap. A cycle cannot outrun it,
+        # and a chain deeper than 8 keeps the last id reached rather than
+        # failing the recall.
         entity_rows = await db_pool.fetch(
             """
+            WITH RECURSIVE matched AS (
+                SELECT DISTINCT e.entity_id
+                FROM entities e
+                LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
+                WHERE e.user_id = $1 AND (e.name = ANY($2) OR a.alias = ANY($2))
+            ),
+            walk AS (
+                SELECT m.entity_id AS start_id, m.entity_id AS current_id, 0 AS depth
+                FROM matched m
+                UNION ALL
+                SELECT w.start_id, e.merged_into, w.depth + 1
+                FROM walk w
+                JOIN entities e ON e.entity_id = w.current_id
+                WHERE e.merged_into IS NOT NULL AND w.depth < 8
+            ),
+            survivor AS (
+                SELECT DISTINCT ON (start_id) start_id, current_id
+                FROM walk ORDER BY start_id, depth DESC
+            )
             SELECT DISTINCT e.entity_id, e.name, e.entity_type, e.description
-            FROM entities e
-            LEFT JOIN entity_aliases a ON a.entity_id = e.entity_id
-            WHERE e.user_id = $1 AND (e.name = ANY($2) OR a.alias = ANY($2))
+            FROM survivor s
+            JOIN entities e ON e.entity_id = s.current_id
             ORDER BY e.entity_id
             """,
             user_id, matched_names

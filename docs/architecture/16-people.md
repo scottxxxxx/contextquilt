@@ -549,11 +549,43 @@ Postgres can lag migrations, and entity storage must not start failing
 there because People shipped here). Step 3's alias-candidate scan
 excludes merged entities.
 
-Recall is deliberately untouched. A merged entity keeps its name in the
-Redis entity index on purpose, because the merge records that name as an
-alias of the canonical and recall must still match it: the alias leg of
-the entity lookup resolves it. The dead row seeds graph traversal with
-an empty neighborhood, which costs nothing and changes no output bytes.
+A merged entity keeps its name in the Redis entity index on purpose,
+because the merge records that name as an alias of the canonical and
+recall must still match it.
+
+> **CORRECTION, 2026-08-07. This section previously said "recall is
+> deliberately untouched" and that a dead row "seeds graph traversal with
+> an empty neighborhood, which costs nothing and changes no output
+> bytes." That was true of graph traversal and FALSE of the rendered
+> output, and the difference was user-visible.**
+>
+> The entity fetch matched by name with no merge awareness, so a folded
+> row came back alongside its survivor carrying its own name and its own
+> description. After merging four spellings of one person, recall
+> rendered `People: Vijay Rayudu (Participant...); Vijay R (Platform and
+> product coordination); Vijay Rayud` and told the model one human was
+> three. That is precisely the split brain a merge exists to resolve,
+> surviving in the recall lane.
+>
+> The cause is the shape worth remembering: **only the WRITE path hopped
+> the pointer** (`_resolve_merged_forward`). One concept, two
+> implementations, one of them maintained. The same asymmetry produced
+> the `owed_to` self-hole on the same day.
+>
+> Fixed by resolving forward in the recall entity fetch itself, so both
+> formatters and the graph traversal all see canonical ids. It
+> **resolves** rather than excluding folded rows: a merge usually records
+> the loser's name as an alias on the survivor, so excluding would
+> usually be enough, and "usually" silently drops the match when that
+> alias is missing. Recursive with a depth cap of 8, matching the write
+> path, so a corrupt cycle terminates instead of spinning.
+>
+> Verified against production (the four Vijay rows collapse to one) and
+> against fabricated chain, cycle, missing-alias and unmerged rows.
+> Output remains byte-stable: ordering is unchanged and two identical
+> calls produce identical bytes. `tests/unit/test_recall_merge_aware.py`
+> is a source-level guard, and it was checked to actually fail when the
+> fix is reverted.
 
 ### 6.2 person_appearances (shipped, migration 30)
 
