@@ -3397,6 +3397,20 @@ async def _people_core(
             "last_seen_at": p["last_seen_at"].isoformat() if p["last_seen_at"] else None,
             "meeting_count": len(appearances),
             "project_count": len(projects),
+            # The one project worth putting in a list-row subtitle, so
+            # rendering "Atlas Migration" under a name does not cost a
+            # detail fetch per row (SS ask 5, 2026-08-06).
+            #
+            # Deliberately `projects[0]` rather than a second selection
+            # rule: merge_project_rollups already orders by meeting_count
+            # descending then name, and a browse surface must not reshuffle
+            # between polls. Reusing that ordering means "top" here and
+            # "first" on the detail route can never disagree. A separate
+            # max() would be a second source of truth for the same claim.
+            #
+            # Same object shape as an entry in `projects`, so a client
+            # decodes one type in both places.
+            "top_project": projects[0] if projects else None,
             "open_they_owe": len(they_owe),
             # null, never 0, until the caller's manifest declares owed_to.
             # See READ_CAPABILITIES.you_owe: 0 would read as "you owe this
@@ -3467,7 +3481,14 @@ async def list_people(
     on a commitment, and answering 0 would read as "you owe this person
     nothing", which is a different claim from "CQ cannot tell".
 
-    It stays null PER PERSON for anyone with a null `patch_id`, even when
+    `top_project` is the highest-signal project for that person, in the
+    same object shape as an entry in the detail route's `projects` array,
+    or null when CQ knows of none. It exists so a list-row subtitle can
+    read "Atlas Migration" without a detail fetch per row. It is the FIRST
+    element of that same ordering, not a separately computed maximum, so
+    the list and the detail can never disagree about which project leads.
+
+    `open_you_owe` stays null PER PERSON for anyone with a null `patch_id`, even when
     the capability is on, because an `owed_to` edge targets a person patch
     and an entity without one cannot be the target of a single edge. So
     the capability answers "can CQ answer this question at all" and the

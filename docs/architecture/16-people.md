@@ -599,6 +599,37 @@ never issued, and `you_owe` stays null everywhere. Merging the code
 should move no number. If one moves, something reads the label from
 somewhere other than the caller's manifest.
 
+### 6.3a SHIPPED: `top_project` on list rows
+
+> **Shipped 2026-08-07**, on SS ask 5. The design puts a project name in
+> the list-row subtitle ("Atlas Migration" under a person). The list
+> carried `project_count` but no names, so that subtitle cost a detail
+> fetch per row.
+
+`top_project` is the highest-signal project for that person, in the SAME
+object shape as an entry in the detail route's `projects` array
+(`project_id`, `project`, `meeting_count`, `observed`, `stated`), or
+`null` when CQ knows of none.
+
+**It is `projects[0]`, not a separately computed maximum, and that is the
+design rather than a shortcut.** `merge_project_rollups` already orders by
+meeting_count descending then name. Reusing that ordering means the list
+row and the detail route can never disagree about which project leads. A
+second `max()` would be a second source of truth for one claim, which is
+the same disease as `value.owner` versus the `owns` edge.
+
+Two properties worth keeping, both tested:
+
+- **Deterministic under a tie.** The tie break is alphabetical, not
+  arbitrary, because a browse surface polled twice must not swap its
+  subtitle.
+- **Observed outranks stated.** A `works_on` edge is somebody SAYING they
+  are on a project, and carries `meeting_count` 0, so a project the person
+  was actually in the room for leads. A stated-only project still produces
+  a subtitle, because "Atlas Migration" beats nothing when that is
+  genuinely all CQ knows, and the `observed` / `stated` flags let the
+  client tell the two apart.
+
 ### 6.4 Honesty over convenience: the `capabilities` block
 
 Every People read carries a `capabilities` map naming what CQ can and
