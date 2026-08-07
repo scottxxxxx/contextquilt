@@ -43,6 +43,7 @@ from contextquilt.services.extraction_schema import (
     enforce_connection_requirements,
     enforce_connection_vocabulary,
     enforce_owner_gate,
+    enforce_owed_to_counterparty,
     enforce_owner_edge_agreement,
     enforce_person_ownership,
     speaker_labels_in,
@@ -3355,6 +3356,25 @@ class ColdPathWorker:
                     user_id=user_id,
                     dropped=len(oe.get("dropped", [])),
                     dropped_detail=oe.get("dropped", []),
+                    model=response.model,
+                )
+
+            # Counterparty agreement, the same idea applied to the other
+            # new edge: `owed_to` is the only label that can say the (you)
+            # speaker owes a named person something, so a wrong one reads
+            # as an obligation the user does not have. Drops edges pointing
+            # at the item's own owner, at the (you) speaker (already
+            # carried by `owns`, and the self person patch is dropped by
+            # design), and at diarization placeholders. Runs after
+            # vocabulary enforcement so reversed edges have already been
+            # flipped onto the item.
+            enforce_owed_to_counterparty(response.content, user_label=user_label)
+            if (ot := response.content.get("_owed_to_enforced")):
+                logger.info(
+                    "owed_to_counterparty_enforced",
+                    user_id=user_id,
+                    dropped=len(ot.get("dropped", [])),
+                    dropped_detail=ot.get("dropped", [])[:20],
                     model=response.model,
                 )
 

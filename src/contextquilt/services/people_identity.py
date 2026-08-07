@@ -18,7 +18,10 @@ from __future__ import annotations
 
 from typing import Iterable, List, Sequence, Set, Tuple
 
-from contextquilt.services.extraction_schema import is_placeholder_or_self_person
+from contextquilt.services.extraction_schema import (
+    is_placeholder_or_self_person,
+    is_user_reference,
+)
 
 # Free-form, but these are the values the apps send today. Recorded so a
 # later audit can tell a user's own answer apart from a heuristic or a
@@ -170,9 +173,10 @@ READ_CAPABILITIES: dict = {
     "you_owe": {
         "available": False,
         "reason": (
-            "Commitments carry a single named owner and no counterparty, "
-            "so CQ cannot tell who a commitment is owed TO. Needs the "
-            "owed_to connection label (docs/architecture/16-people.md 4.2)."
+            "This app's registered manifest declares no owed_to connection "
+            "label, so CQ has no counterparty on a commitment and cannot "
+            "tell who one is owed TO. Register the manifest version that "
+            "declares it (docs/architecture/16-people.md 4.2)."
         ),
     },
     "meeting_counts": {
@@ -190,9 +194,76 @@ READ_CAPABILITIES: dict = {
 }
 
 
-def capability_report() -> dict:
-    """The capabilities block echoed on every People read."""
-    return {name: dict(spec) for name, spec in READ_CAPABILITIES.items()}
+OWED_TO_LABEL = "owed_to"
+
+
+def manifest_declares_owed_to(manifest: object) -> bool:
+    """True when this app's manifest defines the `owed_to` label.
+
+    The capability is a property of the app's registered schema, not of
+    CQ's code. Shipping the read logic does not make a counterparty exist
+    for an app whose extraction never emits one, and `you_owe: []` on an
+    app that cannot produce the edge is exactly the "you owe her nothing"
+    lie the capabilities block was built to avoid.
+    """
+    if not isinstance(manifest, dict):
+        return False
+    labels = manifest.get("connection_labels")
+    if not isinstance(labels, list):
+        return False
+    return any(
+        isinstance(lb, dict) and lb.get("label") == OWED_TO_LABEL
+        for lb in labels
+    )
+
+
+def is_self_owned(owner: object, user_label: "str | None") -> bool:
+    """True when an action item belongs to the submitting user.
+
+    This is the gate on the `you_owe` ledger, and it has to be RIGHT in
+    one specific direction: a third party's obligation must never be shown
+    to the user as their own. "Lockridge owes Marcus the vendor shortlist" has
+    an owed_to edge to Marcus, and it must not surface on Marcus's card as
+    something the USER owes him.
+
+    So the predicate is stated as an inclusion, not an exclusion. An owner
+    string CQ does not recognise ("Speaker 2", a name it cannot resolve)
+    returns False and the item stays out of the user's ledger. Being
+    absent from `you_owe` understates; being present overstates, and only
+    one of those is a lie a memory product can afford.
+
+    Matches: an empty owner (what the prompt asks for), a self token, the
+    user's display name, and the display name's first token on its own
+    ("Scott" for "Scott Guida"), which is how the extractor usually writes
+    it when it writes it at all.
+
+    The name matching itself is `is_user_reference`, shared with the
+    extraction sanitizer on purpose. The two ran on different rules once
+    (exact display name there, first token here) and that gap was a live
+    bug: an item owned by "Scott Guida" kept an owed_to edge to "Scott",
+    which the write path allowed and the read path then counted as the
+    user owing themselves.
+    """
+    if owner is None:
+        return True
+    if not isinstance(owner, str):
+        return False
+    if not owner.strip():
+        return True
+    return is_user_reference(owner, user_label)
+
+
+def capability_report(owed_to_available: bool = False) -> dict:
+    """The capabilities block echoed on every People read.
+
+    `owed_to_available` comes from the CALLER'S manifest, so two apps
+    reading the same user can honestly get different answers: one whose
+    schema declares the counterparty label, one whose does not.
+    """
+    report = {name: dict(spec) for name, spec in READ_CAPABILITIES.items()}
+    if owed_to_available:
+        report["you_owe"] = {"available": True, "reason": None}
+    return report
 
 
 def owner_keys(name: str, aliases: Iterable[str]) -> Set[str]:

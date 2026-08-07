@@ -25,10 +25,13 @@
 > duplicate `person` patches too, so the Memory segment stops showing
 > two Sarahs after a merge in People.
 >
-> **Still proposal only: `owed_to` (4.2).** Commitments have no
-> counterparty, so `you_owe` is structurally unanswerable and every read
-> returns it as `null` with a stated reason in a `capabilities` block,
-> never `0`. Needs SS and GP before it lands.
+> **`owed_to` (4.2) BUILT, HELD FOR THE ACK.** The label, the sanitizer,
+> the read surface and the backfill are written and runtime verified, on
+> branch `feat/people-owed-to`. Nothing is merged and manifest v9 is not
+> registered, because this is the one piece that changes the extraction
+> prompt and the standing rule is that both sides hold or both move.
+> Until v9 registers, `you_owe` stays `null` with a stated reason for
+> every caller, which is exactly today's behavior.
 >
 > **Hard gate before either side calls this integrated:** the GP
 > proxied-path pass (Q4, section 9 item 3), testing `since` specifically.
@@ -174,11 +177,11 @@ CQ can say *Lockridge owes you something*. CQ can say *you owe something*.
 CQ cannot say *you owe it to Lockridge*. That is the entire left column of
 the ledger in both 1a and 1b.
 
-**Proposed fix:** a new connection label `owed_to`, from `commitment`
-to `person`, role `informs`. A connection label rather than a value
-field, because it then rides the existing manifest from/to enforcement
-and `enforce_connection_vocabulary`, instead of becoming free text the
-model gets wrong in a new way.
+**The fix, built and held:** a new connection label `owed_to`, role
+`informs`, running from an action item to a person. A connection label
+rather than a value field, because it then rides the existing manifest
+from/to enforcement and `enforce_connection_vocabulary`, instead of
+becoming free text the model gets wrong in a new way.
 
 Schema note: `patch_connections` is `UNIQUE(from_patch_id,
 to_patch_id, connection_role)`. No existing label runs commitment to
@@ -188,6 +191,150 @@ with `owns` (which runs the other way).
 Cost: a manifest bump to v9 plus prompt guidance, and per the ops rule
 the v9 manifest must be re-registered on prod before the new prompt is
 live.
+
+#### 4.2.1 Deviation from this section: blockers too, not just commitments
+
+This section proposed `commitment` to `person`. As built the label is
+`commitment, blocker` to `person`, because `they_owe` already spans both
+completable types. A `you_owe` that silently covered only half of them
+would make "nothing outstanding either way" wrong on exactly the blocker
+cases, which are the ones where somebody is most visibly waiting. The
+live example from the owner-edge work (2026-07-28: Ellery supplying the
+IP address a whitelisting commitment waits on) is a blocker-shaped
+obligation, not a commitment-shaped one.
+
+#### 4.2.2 What a wrong counterparty costs, and the four guards
+
+`owed_to` is the only label that can assert an obligation the user has.
+A wrong one does not read as missing data, it reads as a debt the user
+does not owe, to a person they may not owe it to. So every path into it
+is stated in the safe direction:
+
+1. **`enforce_owed_to_counterparty`** (extraction sanitizer, runs after
+   `enforce_connection_vocabulary` so directions are already normalized)
+   drops three shapes: owed to the item's own owner, owed to the (you)
+   speaker, owed to a diarization placeholder. The middle one matters
+   most: *Lockridge owes you* is a real relationship carried by Lockridge's
+   `owns` edge, and the (you) speaker has no person patch by design, so
+   an edge pointing at them would dangle and Pass-2 stub synthesis would
+   answer the dangle by re-creating the self person patch the self gate
+   exists to prevent.
+2. **The read side requires BOTH halves.** `you_owe` is items the USER
+   owns that carry an `owed_to` edge here. The edge alone says who is
+   waiting, not who is late: without the ownership gate, "Lockridge owes
+   Marcus the shortlist" would surface on Marcus's card as something the
+   user owes him. `is_self_owned` is an inclusion, so an owner string CQ
+   cannot resolve stays out of the user's ledger. Absent understates,
+   present overstates, and only one of those is affordable.
+3. **The capability follows the app's manifest, not CQ's code.** Shipping
+   the read logic does not make a counterparty exist for an app whose
+   extraction never emits one, and `you_owe: []` for such an app reads as
+   "nothing outstanding". `capabilities.you_owe.available` is therefore
+   computed from whether the CALLER'S latest registered manifest declares
+   the label. Two apps reading the same user can honestly differ.
+4. **Per-person null on top of that.** An `owed_to` edge targets a person
+   PATCH, so an entity with no patch behind it cannot be the target of a
+   single edge and its `0` would be structurally guaranteed rather than
+   measured. Those people keep `you_owe: null` even when the capability
+   is on. On prod that is not a corner case: 332 person entities against
+   175 person patches. `they_owe` degrades gracefully there because it
+   also matches the free-text `value.owner` by name; `you_owe` has no
+   such leg.
+
+So the client rule is unchanged from 6.4 and now applies at two levels:
+**null means not tracked, an empty list means none open.** Check
+`capabilities.you_owe.available` for whether CQ can answer at all, and
+check the per-person value for whether it can answer for that person.
+
+#### 4.2.3 The backfill, and why it is not optional
+
+`owed_to` fills forward only. Everything already stored was extracted
+under a vocabulary with no counterparty, so on the day v9 registers the
+capability flips to available and every person card says the user owes
+them nothing. `scripts/backfill_owed_to.py` closes that: one batched LLM
+call per user over the user's OWN open completables, answering from a
+CLOSED list of that user's known people or null. Dry run by default.
+
+Three properties worth keeping: the candidate list is closed so a
+backfill can never create a person patch; null is the documented default
+answer and every malformed or off-list verdict resolves to it; and every
+proposed edge is run through the live `enforce_owed_to_counterparty`
+before it is written, so the backfill cannot produce a shape the forward
+path would have refused.
+
+#### 4.2.4 What the first production dry run found
+
+Run against prod on 2026-08-06 (dry, nothing written). 53 of Scott's 230
+open completables are his own; the judge proposed 10 counterparties.
+Reviewing them by hand found two real bugs, neither of which any unit
+test would have caught, because both needed real transcript language.
+
+**Bug 1, the self hole.** "Scott to obtain feature request number",
+`value.owner` "Scott Guida", proposed `owed_to` "Scott". The sanitizer's
+self check required an exact display-name match while the read side's
+ownership check used the first token, so the write path allowed the edge
+and the read path then counted it as the user owing themselves. There is
+a real person patch named "Scott" for this user, so it would have been
+written. Fixed by `is_user_reference`, now shared by both sides with a
+test asserting they agree on every form.
+
+**Bug 2, the direction inversion, four of ten.** Every one was a blocker
+with a null owner: "awaiting Pemberly feedback", "blocked waiting on routing
+configuration from Pemberly", "depends on Pemberly for threshold setup", "awaiting
+Fenwyck decision". All four mean that person owes the USER, which is the
+exact opposite of what `owed_to` records. Fixed with an explicit
+anti-inversion rule in both the judge prompt and the manifest label
+description, since the extractor will meet the same sentences.
+
+Worth keeping: this does NOT argue for dropping `blocker` from
+`from_types` (4.2.1). The four were rejected on their direction, not
+their type, and a blocker whose owner is the one somebody is waiting on
+is still a real `owed_to`. It does argue that "waiting on a person" is
+the dominant blocker shape in this data, and that shape is `they_owe`.
+
+After both fixes the same run proposes 3, of which 2 are unambiguous
+("keep Garrick updated", "reply to Cranmore's email") and 1 is a judgment
+call ("confirm Ashby updated the ticket": she is the subject of the
+check, not the recipient). Prompt tuning stopped there deliberately. A
+fourth pass against one user's three remaining items is overfitting, and
+adjudicating a meeting the operator attended is what the dry run is for.
+
+#### 4.2.5 The lock covers the DATA, not just the code
+
+Found by applying two adjudicated edges to prod on 2026-08-06 and then
+looking at what would carry them (rolled back within minutes; prod is
+byte-identical to before, verified against a pre-write snapshot).
+
+Holding the PR is not enough. `/v1/quilt` fetches outgoing connections
+with **no label filter** (`src/main.py`, "Fetch all outgoing connections
+for these patches"), and the backfill bumps `updated_at` on the item,
+which is the from-side. So writing a single `owed_to` row puts a
+connection label ShoulderSurf has never been told about into their very
+next delta, ahead of the ack, whatever the code is doing.
+
+If SS decodes `label` as a plain string this is harmless. If it decodes
+into a closed enum, an unannounced value is the classic strict-decoder
+failure, and it is the same class of additive change the standing rule
+says to verify through GP's proxied path rather than assume. That is not
+a bet to take unilaterally on somebody else's client.
+
+**Rule: a new connection label is live to clients the moment the first
+row exists, not the moment the reader ships.** Any vocabulary addition
+under a lock has to hold the backfill too, not just the endpoint.
+
+Question this adds for SS (section 9): does the connection decoder
+tolerate an unknown `label`, and if so, since which build? The answer
+also settles whether every future vocabulary addition needs this dance.
+
+#### 4.2.6 The bump, and the decay it costs
+
+The backfill bumps `updated_at` on the ITEM, which is the from-side of the edge,
+because quilt connections are fetched outgoing-only and that is the only
+channel the new fact has (the standing rule from the 2026-08-05
+propagation fix). That does extend commitment decay, which anchors on
+`GREATEST(updated_at, deadline_date)`. Accepted deliberately: these are
+the user's own open obligations, they really were modified, and quietly
+decaying something the user still owes somebody is the worse failure.
 
 ### 4.3 Per-person meeting history is unanswerable
 
@@ -433,10 +580,24 @@ identity, not a participant's. A column no writer populates would read
 as "zero confirmed" and become a quiet lie, so the split is reported as
 untracked instead (see 6.4).
 
-### 6.3 Still proposed
+### 6.3 Built and held: manifest v9
 
 Manifest v9 adds the `owed_to` label (4.2) and its extraction guidance,
-plus a backfill so existing commitments gain a counterparty.
+plus `scripts/backfill_owed_to.py` so existing commitments gain a
+counterparty. All of it is written, unit tested and runtime verified
+against a local stack; none of it is merged or registered.
+
+It is held rather than shipped because this is the one piece of the
+People work that touches the extraction prompt, and the standing rule
+after the section 5 process miss is that **both sides hold or both
+move**. What SS and GP owe back is in section 9.
+
+**Deploy invariant while it is held, and after it merges but before v9
+registers:** no registered manifest on prod declares `owed_to`, so
+`owed_to_available` is False for every caller, the counterparty query is
+never issued, and `you_owe` stays null everywhere. Merging the code
+should move no number. If one moves, something reads the label from
+somewhere other than the caller's manifest.
 
 ### 6.4 Honesty over convenience: the `capabilities` block
 
