@@ -125,9 +125,15 @@ async def get_recent_patches(
         
         results = []
         for row in rows:
-            # Extract user_id from subject_key (e.g. "user:123" -> "123")
+            # Extract user_id from subject_key ("user:123" -> "123").
+            #
+            # Strip the PREFIX, do not take the second colon-delimited
+            # segment. The gateway is namespacing subjects per app, so a
+            # subject can legitimately be "user:tr:123", and split(':')[1]
+            # would return "tr" as the user id. `user:` is the invariant;
+            # everything after it is opaque and may contain colons.
             subject = row['subject_key']
-            user_id = subject.split(':')[1] if ':' in subject else subject
+            user_id = subject[5:] if subject.startswith("user:") else subject
             
             results.append(PatchItem(
                 patch_id=str(row['patch_id']),
@@ -2068,7 +2074,7 @@ async def get_memory_health(days: int = 30):
                    cp.patch_type,
                    cp.value->>'text' AS text,
                    COALESCE(cp.project, '') AS project,
-                   replace(ps.subject_key, 'user:', '') AS user_id
+                   regexp_replace(ps.subject_key, '^user:', '') AS user_id
             FROM patch_usage_metrics pum
             JOIN context_patches cp ON cp.patch_id = pum.patch_id
             JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
@@ -2086,7 +2092,7 @@ async def get_memory_health(days: int = 30):
                    cp.value->>'overdue_since' AS overdue_since,
                    COALESCE(cp.value->>'owner', '') AS owner,
                    COALESCE(cp.project, '') AS project,
-                   replace(ps.subject_key, 'user:', '') AS user_id
+                   regexp_replace(ps.subject_key, '^user:', '') AS user_id
             FROM context_patches cp
             JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
             WHERE cp.patch_type IN ('commitment', 'blocker')
