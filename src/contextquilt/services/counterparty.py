@@ -104,6 +104,57 @@ def build_counterparty_content(
     return f"PEOPLE:\n{people_block}\n\nITEMS:\n{item_block}"
 
 
+def approval_satisfied(
+    approved_name: str,
+    judge_name: str,
+    identity_of,
+) -> bool:
+    """Did the judge name the PERSON the human approved?
+
+    The gate exists so an apply run writes only what somebody read and
+    agreed to. Its first version compared the judge's chosen SURFACE FORM
+    against the approved string, which is subtly the wrong question: a
+    human adjudicates a PERSON, and CQ holds several spellings of one.
+
+    That cost a real run. An operator approved "Pallavi" from a dry run;
+    the next run's judge picked "Pallavi Kandanur", the same human by CQ's
+    own identity data, and the gate refused to write either. Strict, but
+    strict about the wrong thing.
+
+    `identity_of` maps a surface form to a stable identity key (the
+    canonical entity id, forward-resolved through merges) or None when CQ
+    cannot place the name. Two names satisfy the approval when they land
+    on the SAME key.
+
+    Deliberately conservative in two directions:
+
+      - **Unresolvable names fall back to exact string equality.** If CQ
+        cannot place either name, it cannot claim they are one person, so
+        the old strict rule applies rather than a guess.
+      - **A resolution MISMATCH is a refusal, not a fallback.** When both
+        names resolve and land on different people, that is the gate
+        working: the judge picked somebody else this run.
+
+    The trade this accepts: the identity data could itself be wrong, and
+    then the gate would accept a target the human did not picture. It is
+    the same identity data the merge machinery already trusts, and the
+    alternative is refusing correct writes over a spelling.
+    """
+    approved = (approved_name or "").strip()
+    judged = (judge_name or "").strip()
+    if not approved or not judged:
+        return False
+    if approved.lower() == judged.lower():
+        return True
+
+    a_key = identity_of(approved)
+    j_key = identity_of(judged)
+    if a_key is None or j_key is None:
+        # Cannot prove they are one person. Keep the strict rule.
+        return False
+    return a_key == j_key
+
+
 def parse_counterparty_verdicts(
     content: Any, n_items: int, people: Sequence[str]
 ) -> List[str | None]:
