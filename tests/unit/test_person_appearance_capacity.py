@@ -167,3 +167,43 @@ class TestTheGateScenario:
         rows = {("u", "x", "m"): dict(_row(eid="x"), capacities=set()),
                 ("u", "y", "m"): dict(_row(eid="y"), capacities=set())}
         assert not self._both_spoke(rows, "x", "y", "m")
+
+
+# --------------------------------------------------------------------
+# Served on the read surface, for SS's duplicate veto (2026-08-07)
+# --------------------------------------------------------------------
+
+from src.contextquilt.services.person_appearances import (  # noqa: E402
+    MENTION, OWNERSHIP, SPEAKER,
+)
+
+def test_capacities_distinguish_label_drift_from_two_people():
+    """The signature the veto needs, restated as a predicate.
+
+    Across the Vijay set's eight co-occurring meetings, exactly one spelling
+    carried `speaker` in each; the other was ownership only. That is label
+    drift. Two genuinely different people show up as BOTH carrying speaker,
+    which is what Ella Srikanth and Joy Srikanth do across six shared
+    meetings.
+    """
+    def both_spoke(a, b):
+        return SPEAKER in set(a or ()) and SPEAKER in set(b or ())
+
+    # Label drift: one spoke, the other was only named as an owner.
+    assert both_spoke([SPEAKER, OWNERSHIP], [OWNERSHIP]) is False
+    assert both_spoke([SPEAKER], [OWNERSHIP]) is False
+    # Two real people in one room.
+    assert both_spoke([SPEAKER], [SPEAKER]) is True
+    assert both_spoke([SPEAKER, OWNERSHIP], [SPEAKER, MENTION]) is True
+
+
+def test_unknown_capacities_do_not_read_as_did_not_speak():
+    """Migration 31's rule. An empty list predates the column, and treating
+    it as "did not speak" would turn missing data into a licence to merge."""
+    def both_spoke(a, b):
+        return SPEAKER in set(a or ()) and SPEAKER in set(b or ())
+
+    assert both_spoke([], [SPEAKER]) is False      # unknown, so no evidence
+    assert both_spoke(None, None) is False
+    # ...and the caller must not invert that into "safe to merge". The veto
+    # is the conservative direction: absence of proof is not proof of absence.

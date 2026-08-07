@@ -3239,7 +3239,7 @@ async def _people_core(
     appearance_rows = await conn.fetch(
         """
         SELECT pa.entity_id, pa.origin_id, pa.origin_type, pa.project_id,
-               pa.last_seen_at, pr.name AS project
+               pa.last_seen_at, pa.capacities, pr.name AS project
         FROM person_appearances pa
         LEFT JOIN projects pr ON pr.project_id = pa.project_id
         WHERE pa.user_id = $1 AND pa.entity_id = ANY($2::uuid[])
@@ -3709,12 +3709,30 @@ async def get_person(
                 else [_item(r) for r in row["_you_owe"]]
             ),
         },
+        # `capacities` says HOW this person turned up in this meeting, not
+        # merely that they did: `speaker` means a diarization label resolved
+        # to them, `ownership` means they were named as the owner of an item
+        # extracted from it, `mention` means the transcript said their name.
+        #
+        # Served because ShoulderSurf's duplicate veto needs it. Their client
+        # cannot see who spoke, so their veto has to suppress a merge
+        # proposal on ANY shared meeting, which fails safe but goes silent on
+        # true duplicates shaped exactly like the Vijay set: five spellings of
+        # one human, co-occurring in eight meetings, and in every one of them
+        # only ONE spelling carried `speaker` while the other was ownership
+        # only. That is the signature of label drift rather than two people,
+        # and without this field it is invisible to them.
+        #
+        # An EMPTY list means unknown, not absent. Migration 31's rule: a row
+        # carrying no capacity predates the column, and dropping unknowns
+        # from a veto would turn "we do not know" into "they did not speak".
         "meetings": [
             {
                 "origin_id": a["origin_id"],
                 "origin_type": a["origin_type"],
                 "project_id": a["project_id"],
                 "last_seen_at": a["last_seen_at"].isoformat() if a["last_seen_at"] else None,
+                "capacities": list(a["capacities"] or []),
             }
             for a in row["_appearances"]
         ],
