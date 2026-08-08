@@ -44,6 +44,7 @@ from contextquilt.config import get_settings
 from dashboard.router import router as dashboard_router
 from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
+from contextquilt.services import decay_model
 from contextquilt.services.recall_formatter import (
     CHARS_PER_TOKEN,
     format_category_grouped,
@@ -1617,6 +1618,11 @@ class QuiltPatchResponse(BaseModel):
     origin_type: Optional[str] = None
     permanence_override: Optional[str] = None
     permanence_override_source: Optional[str] = None
+    # Shelved items STAY in these arrays (they are still active — recall
+    # still knows them); these stamps are how a client's ledger/triage
+    # excludes them. A tombstone would be indistinguishable from decay.
+    shelved_at: Optional[str] = None
+    shelved_source: Optional[str] = None
     connections: List[PatchConnectionResponse] = []
 
 class MeetingGroup(BaseModel):
@@ -1913,6 +1919,8 @@ async def get_user_quilt(
             origin_type=row.get("origin_type"),
             permanence_override=row.get("permanence_override"),
             permanence_override_source=row.get("permanence_override_source"),
+            shelved_at=value.get("shelved_at"),
+            shelved_source=value.get("shelved_source"),
             connections=connections_by_patch.get(pid, []),
         )
 
@@ -2464,6 +2472,205 @@ async def complete_patch(
     }
 
 
+async def _load_open_completable(user_id: str, patch_id: str):
+    """Shared gate for the triage write paths (vouch / shelve / un-shelve).
+
+    Same checks as `complete_patch`: the patch must belong to this user
+    (404), be a completable type (400), and be open (409). Returns the row
+    with the current shelved stamp so callers can enforce their own state
+    transition.
+    """
+    subject_key = f"user:{user_id}"
+    row = await db_pool.fetchrow(
+        """
+        SELECT cp.patch_id, cp.patch_type, cp.completed_at,
+               COALESCE(cp.status, 'active') AS status,
+               cp.value->>'shelved_at' AS shelved_at
+        FROM context_patches cp
+        JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+        WHERE cp.patch_id = $1 AND ps.subject_key = $2
+        """,
+        patch_id, subject_key
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Patch not found for this user")
+    if row["patch_type"] not in COMPLETABLE_PATCH_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Patch type '{row['patch_type']}' is not completable "
+                   f"(completable types: {', '.join(COMPLETABLE_PATCH_TYPES)})",
+        )
+    if row["completed_at"] is not None or row["status"] != "active":
+        raise HTTPException(status_code=409, detail="Patch is already completed or archived")
+    return row
+
+
+async def _check_patch_write_acl(patch_id: str, app_id: str):
+    """Write ACL, same shape as complete/delete (no ACL row = open access)."""
+    import uuid as _uuid
+    try:
+        app_uuid = _uuid.UUID(app_id)
+        acl = await db_pool.fetchrow(
+            "SELECT can_write FROM context_patch_acl WHERE patch_id = $1 AND app_id = $2",
+            patch_id, app_uuid
+        )
+        if acl and not acl["can_write"]:
+            raise HTTPException(status_code=403, detail="Write access denied for this patch")
+    except (ValueError, AttributeError):
+        pass  # Legacy app_id, no ACL enforcement
+
+
+async def _hydrate_refresh(user_id: str):
+    payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
+    await redis_client.xadd("memory_updates", {"data": json.dumps(payload)})
+
+
+@app.post("/v1/quilt/{user_id}/patches/{patch_id}/vouch", tags=["Quilt"])
+async def vouch_patch(
+    user_id: str,
+    patch_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    "Still live": the user deliberately vouches an open item is current.
+
+    Bumps `updated_at`, which extends the item's decay clock (completables
+    anchor on GREATEST(updated_at, deadline_date)) — that extension is the
+    point of the tap. The vouch is ALSO stamped explicitly
+    (`value.last_vouched_at`, `value.vouch_source`) because a plain bump is
+    indistinguishable from an incidental recall touch: without the stamp,
+    the strongest signal in the app's triage would be recorded the same way
+    as a passing glance, and the signal would not survive.
+
+    Vouching does NOT clear a shelf: the two states are orthogonal writes
+    and un-shelving is `DELETE .../shelve`.
+
+    Any request body is accepted and ignored (the gateway forwards bodies
+    untyped).
+    """
+    await _load_open_completable(user_id, patch_id)
+    await _check_patch_write_acl(patch_id, app_id)
+
+    vouched_row = await db_pool.fetchrow(
+        """
+        UPDATE context_patches
+           SET updated_at = NOW(),
+               value = jsonb_set(
+                           jsonb_set(value, '{last_vouched_at}', to_jsonb(to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))),
+                           '{vouch_source}', '"app"'
+                       )
+         WHERE patch_id = $1
+           AND COALESCE(status, 'active') = 'active'
+           AND completed_at IS NULL
+        RETURNING value->>'last_vouched_at' AS last_vouched_at
+        """,
+        patch_id
+    )
+    if not vouched_row:
+        raise HTTPException(status_code=409, detail="Patch is already completed or archived")
+
+    await _hydrate_refresh(user_id)
+    return {
+        "status": "vouched",
+        "patch_id": patch_id,
+        "last_vouched_at": vouched_row["last_vouched_at"],
+    }
+
+
+@app.post("/v1/quilt/{user_id}/patches/{patch_id}/shelve", tags=["Quilt"])
+async def shelve_patch(
+    user_id: str,
+    patch_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    "Let it go": out of the ledger, still known to the assistant,
+    reversible.
+
+    The patch STAYS active — recall still finds it, so the assistant can
+    still answer "did Vijay ever owe me the hardware POC?". What changes:
+    `value.shelved_at` + `value.shelved_source` are stamped, the People
+    ledger and its counts stop carrying the item, and it reaches clients
+    as a normal patch update rather than a tombstone. Archiving instead
+    would flow it through the delta `deleted` array — the same array a
+    DECAYED item flows in — making a deliberate user action
+    indistinguishable from the passage of time.
+
+    Decay still applies: shelving is the user declining to act, not
+    asserting the item is immortal. (The `updated_at` bump this write
+    carries restarts the item's TTL, so a shelved item gets one final
+    grace window from the shelve, then archives on its own.)
+
+    409 when already shelved. Reverse with `DELETE .../shelve`.
+    """
+    row = await _load_open_completable(user_id, patch_id)
+    if row["shelved_at"] is not None:
+        raise HTTPException(status_code=409, detail="Patch is already shelved")
+    await _check_patch_write_acl(patch_id, app_id)
+
+    shelved_row = await db_pool.fetchrow(
+        """
+        UPDATE context_patches
+           SET updated_at = NOW(),
+               value = jsonb_set(
+                           jsonb_set(value, '{shelved_at}', to_jsonb(to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))),
+                           '{shelved_source}', '"app"'
+                       )
+         WHERE patch_id = $1
+           AND COALESCE(status, 'active') = 'active'
+           AND completed_at IS NULL
+           AND value->>'shelved_at' IS NULL
+        RETURNING value->>'shelved_at' AS shelved_at
+        """,
+        patch_id
+    )
+    if not shelved_row:
+        raise HTTPException(status_code=409, detail="Patch is already shelved, completed, or archived")
+
+    await _hydrate_refresh(user_id)
+    return {
+        "status": "shelved",
+        "patch_id": patch_id,
+        "shelved_at": shelved_row["shelved_at"],
+    }
+
+
+@app.delete("/v1/quilt/{user_id}/patches/{patch_id}/shelve", tags=["Quilt"])
+async def unshelve_patch(
+    user_id: str,
+    patch_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Un-shelve: clears the shelved stamps, so the item re-enters the
+    People ledger and its counts on the next read. 409 when the patch is
+    not currently shelved.
+    """
+    row = await _load_open_completable(user_id, patch_id)
+    if row["shelved_at"] is None:
+        raise HTTPException(status_code=409, detail="Patch is not shelved")
+    await _check_patch_write_acl(patch_id, app_id)
+
+    unshelved = await db_pool.fetchrow(
+        """
+        UPDATE context_patches
+           SET updated_at = NOW(),
+               value = value - 'shelved_at' - 'shelved_source'
+         WHERE patch_id = $1
+           AND COALESCE(status, 'active') = 'active'
+           AND completed_at IS NULL
+           AND value->>'shelved_at' IS NOT NULL
+        RETURNING patch_id
+        """,
+        patch_id
+    )
+    if not unshelved:
+        raise HTTPException(status_code=409, detail="Patch is not shelved, or is completed or archived")
+
+    await _hydrate_refresh(user_id)
+    return {"status": "unshelved", "patch_id": patch_id}
+
+
 @app.delete("/v1/quilt/{user_id}/patches/{patch_id}", tags=["Quilt"])
 async def delete_patch(
     user_id: str,
@@ -2712,7 +2919,9 @@ async def create_patch(
             # Lifecycle: "replaces" role archives the target
             if conn.role == "replaces":
                 await db_pool.execute(
-                    "UPDATE context_patches SET status = 'archived', updated_at = NOW() WHERE patch_id = $1",
+                    "UPDATE context_patches SET status = 'archived', updated_at = NOW(), "
+                    "value = jsonb_set(value, '{archive_cause}', '\"replaced\"') "
+                    "WHERE patch_id = $1",
                     conn.target_patch_id
                 )
 
@@ -2777,7 +2986,9 @@ async def create_connection(
     # Lifecycle: "replaces" role archives the target
     if conn.role == "replaces":
         await db_pool.execute(
-            "UPDATE context_patches SET status = 'archived', updated_at = NOW() WHERE patch_id = $1",
+            "UPDATE context_patches SET status = 'archived', updated_at = NOW(), "
+            "value = jsonb_set(value, '{archive_cause}', '\"replaced\"') "
+            "WHERE patch_id = $1",
             conn.to_patch_id
         )
 
@@ -3305,6 +3516,11 @@ async def _people_core(
                cp.value->>'deadline' AS deadline,
                cp.value->>'deadline_date' AS deadline_date,
                cp.value->>'overdue_since' AS overdue_since,
+               cp.value->>'shelved_at' AS shelved_at,
+               cp.value->>'shelved_source' AS shelved_source,
+               cp.value->>'salience' AS salience,
+               cp.updated_at, cp.created_at, cp.permanence_override,
+               pum.last_accessed_at,
                cp.project_id, cp.project, cp.origin_id,
                -- An item can carry more than one `owns` edge when the
                -- extractor had no vocabulary for a person's actual role
@@ -3327,6 +3543,7 @@ async def _people_core(
                  LIMIT 1) AS owner_patch_id
         FROM context_patches cp
         JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+        LEFT JOIN patch_usage_metrics pum ON pum.patch_id = cp.patch_id
         WHERE ps.subject_key = $1
           AND cp.patch_type = ANY($2::text[])
           AND COALESCE(cp.status, 'active') = 'active'
@@ -3334,6 +3551,36 @@ async def _people_core(
         """,
         subject_key, list(COMPLETABLE_PATCH_TYPES),
     )
+    # Registry TTL overrides for the completable types, resolved the same
+    # way the decay loop resolves them, so the decay_state served here and
+    # the archival the worker performs derive from the SAME parameters.
+    registry_ttls: dict = {}
+    for _pt in COMPLETABLE_PATCH_TYPES:
+        try:
+            _ttl_row = await conn.fetchrow(decay_model.TTL_REGISTRY_QUERY, _pt)
+            if _ttl_row and _ttl_row["default_ttl_days"] is not None:
+                registry_ttls[_pt] = _ttl_row["default_ttl_days"]
+        except Exception:
+            pass  # Registry table may not exist yet (matches the worker)
+
+    # asyncpg Records are read-only; re-shape each open item as a dict and
+    # annotate the decay band once, so the ledger arrays, the counts and
+    # `open_by_decay` all read the SAME value for the same row.
+    open_items = [
+        dict(r) | {
+            "decay_state": decay_model.decay_state(
+                r["patch_type"],
+                updated_at=r["updated_at"],
+                created_at=r["created_at"],
+                deadline_date=r["deadline_date"],
+                salience=r["salience"],
+                permanence_override=r["permanence_override"],
+                registry_ttl_days=registry_ttls.get(r["patch_type"]),
+                last_accessed_at=r["last_accessed_at"],
+            ),
+        }
+        for r in open_items
+    ]
     # The other side of the ledger. `owed_to` runs item -> person, the
     # mirror of the `owns` edge above, and it is the only thing that can
     # say the user owes a named person something. Fetched only when the
@@ -3428,10 +3675,16 @@ async def _people_core(
         ]
         projects = merge_project_rollups(observed, stated)
 
+        # Shelved items are excluded from BOTH the arrays and every count
+        # derived from them ("Let it go" removes it from the ledger). The
+        # counting condition SS holds us to: a served count agrees with the
+        # rows it gates, so the exclusion happens HERE, once, before
+        # anything counts anything.
         they_owe = [
             r for r in open_items
-            if (r["owner"] or "").strip().lower() in keys
-            or (patch_id and r["owner_patch_id"] and str(r["owner_patch_id"]) == patch_id)
+            if r["shelved_at"] is None
+            and ((r["owner"] or "").strip().lower() in keys
+                 or (patch_id and r["owner_patch_id"] and str(r["owner_patch_id"]) == patch_id))
         ]
 
         # What the USER owes this person: an item pointing here with an
@@ -3454,7 +3707,8 @@ async def _people_core(
             owed_ids = owed_by_person.get(patch_id) or ()
             you_owe = [
                 r for r in open_items
-                if str(r["patch_id"]) in owed_ids
+                if r["shelved_at"] is None
+                and str(r["patch_id"]) in owed_ids
                 and is_self_owned(r["owner"], user_label)
             ]
 
@@ -3485,6 +3739,19 @@ async def _people_core(
             # decodes one type in both places.
             "top_project": projects[0] if projects else None,
             "open_they_owe": len(they_owe),
+            # Per-band counts over the SAME rows `they_owe` carries (shelved
+            # already excluded), so the chip and the card read one source and
+            # neither invents a number. All three keys always present; the
+            # vocabulary is open per the additive rule, so a client must
+            # tolerate keys it does not know.
+            "open_by_decay": {
+                band: sum(1 for r in they_owe if r["decay_state"] == band)
+                for band in (
+                    decay_model.DECAY_STATE_LIVE,
+                    decay_model.DECAY_STATE_AGING,
+                    decay_model.DECAY_STATE_STALE,
+                )
+            },
             # null, never 0, until the caller's manifest declares owed_to.
             # See READ_CAPABILITIES.you_owe: 0 would read as "you owe this
             # person nothing", which is a different claim from "CQ cannot
@@ -3728,6 +3995,18 @@ async def get_person(
             "project_id": r["project_id"],
             "project": r["project"],
             "origin_id": r["origin_id"],
+            # live | aging | stale, derived from the LIVE decay parameters
+            # (type TTL, salience, deadline anchor, access exemption) and
+            # bucketed to the UTC day. Open vocabulary: pass unknown values
+            # through. This is neglect, not age — a recall access can move
+            # an item from stale back to live with no deliberate user act.
+            "decay_state": r["decay_state"],
+            # Null by construction here (the ledger excludes shelved rows);
+            # the keys exist so this item shape and the quilt's are one
+            # shape, and so a client that un-shelves via
+            # DELETE .../patches/{id}/shelve decodes one type everywhere.
+            "shelved_at": r["shelved_at"],
+            "shelved_source": r["shelved_source"],
         }
 
     detail = _public_person(row)
@@ -4148,6 +4427,7 @@ async def merge_people(
                         value = value
                             || jsonb_build_object('merged_into_patch', $1::text)
                             || jsonb_build_object('merge_source', $2::text)
+                            || jsonb_build_object('archive_cause', 'merge')
                     WHERE patch_id = ANY($3::uuid[])
                     """,
                     str(survivor_id), source, loser_ids,
@@ -4587,7 +4867,9 @@ async def update_project(
         )
         # Cascade: archive all patches belonging to this project
         await db_pool.execute(
-            "UPDATE context_patches SET status = 'archived', updated_at = NOW() WHERE project_id = $1 AND COALESCE(status, 'active') = 'active'",
+            "UPDATE context_patches SET status = 'archived', updated_at = NOW(), "
+            "value = jsonb_set(value, '{archive_cause}', '\"project_archived\"') "
+            "WHERE project_id = $1 AND COALESCE(status, 'active') = 'active'",
             project_id
         )
 

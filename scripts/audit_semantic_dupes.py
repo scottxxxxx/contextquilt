@@ -198,7 +198,8 @@ async def main(apply: bool, limit: int) -> None:
                     newer_created, keep_id,
                 )
                 await conn.execute(
-                    "UPDATE context_patches SET status = 'archived', updated_at = NOW() WHERE patch_id = $1",
+                    "UPDATE context_patches SET status = 'archived', updated_at = NOW(), "
+                    "value = jsonb_set(value, '{archive_cause}', '\"dedup\"') WHERE patch_id = $1",
                     drop_id,
                 )
             merged += 1

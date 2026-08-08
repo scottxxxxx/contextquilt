@@ -80,7 +80,8 @@ WHERE cp.patch_type = 'person'
 ARCHIVE_SQL = """
 UPDATE context_patches
    SET status = 'archived',
-       updated_at = NOW()
+       updated_at = NOW(),
+       value = jsonb_set(value, '{archive_cause}', '"cleanup"')
  WHERE patch_id = $1
 """
 

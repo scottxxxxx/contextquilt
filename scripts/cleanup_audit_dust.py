@@ -95,7 +95,8 @@ AND_JOINED_PERSONS_SQL = """
 
 ARCHIVE_SQL = """
     UPDATE context_patches
-    SET status = 'archived', updated_at = NOW()
+    SET status = 'archived', updated_at = NOW(),
+        value = jsonb_set(value, '{archive_cause}', '"cleanup"')
     WHERE patch_id = ANY($1)
 """
 

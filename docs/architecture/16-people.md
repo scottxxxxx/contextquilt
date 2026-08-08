@@ -411,7 +411,8 @@ Query: `since=` (delta), `limit=`, `confirmed=true|false|all`
       "meeting_count": 9,
       "project_count": 3,
       "open_they_owe": 2,
-      "open_you_owe": null
+      "open_you_owe": null,
+      "open_by_decay": {"live": 1, "aging": 1, "stale": 0}
     }
   ],
   "total": 155,
@@ -448,7 +449,9 @@ before a merge still lands on the right person. Adds to the above:
   "commitments": {
     "they_owe":  [{"patch_id": "…", "type": "commitment", "text": "…",
                    "deadline": "Friday", "deadline_date": "2026-08-04",
-                   "overdue_since": null, "project_id": "…", "origin_id": "…"}],
+                   "overdue_since": null, "project_id": "…", "origin_id": "…",
+                   "decay_state": "aging", "shelved_at": null,
+                   "shelved_source": null}],
     "you_owe": null
   },
   "meetings": [
@@ -523,6 +526,73 @@ and indexes it in Redis so recall can match the name immediately.
 Marks an entity confirmed without merging anything. This is the
 "unconfirmed to confirmed" transition for someone CQ inferred from a
 transcript and the user vouched for.
+
+### 5.7 Triage: `decay_state`, shelve, vouch (shipped 2026-08-08)
+
+Agreed in the 2026-08-07 turn-4 exchange with SS (full reasoning in the
+private ops repo, `2026-08-07-cq-to-ss-turn4-ledger-decay.md`). SS's
+"Let it go" wanted "archives, never deletes: recall still finds it", and
+archiving does not behave that way: recall filters to active, so archive
+and delete are the same disappearance from the user's seat. The state
+that delivers the intent is **shelved**: out of the ledger, still known
+to the assistant, reversible.
+
+**`decay_state`** on every ledger item: `live | aging | stale`, open
+vocabulary (unknown values must pass through). Two conditions CQ imposed
+on itself, both enforced by tests (`test_decay_model.py`):
+
+1. **Derived from the live decay parameters, never hardcoded.** The
+   bands come from `services/decay_model.py`, the SAME module the
+   worker's decay loop consumes for TTLs, anchors, salience multipliers
+   and the access-exemption window. Band boundaries are fractions of the
+   effective TTL remaining, so `stale` means "close to the archival CQ
+   will actually perform" and moves when the parameters move.
+2. **Bucketed to the UTC day**, the same discipline as recall scoring,
+   because upstream prompt caching depends on byte-stable payloads.
+
+`decay_state` is neglect, not age: recall access bumps the exemption
+window, so an item can move from stale back to live because the user
+happened to chat about that person. The shelf reordering itself is the
+semantic working, not a bug.
+
+**`open_by_decay`** on every person row: `{"live": n, "aging": n,
+"stale": n}`, summed over the SAME rows `they_owe` carries, so the chip
+and the card read one source and neither invents a number.
+
+**Write paths** (GP forwards untyped bodies; DELETE for un-shelve):
+
+    POST   .../patches/{patch_id}/vouch     "Still live"
+    POST   .../patches/{patch_id}/shelve    "Let it go", reversible
+    DELETE .../patches/{patch_id}/shelve    un-shelve
+
+* Shelve stamps `value.shelved_at` + `value.shelved_source` and bumps
+  `updated_at`. The patch STAYS active: recall still finds it, and it
+  reaches clients as a normal patch update, never a tombstone. Archiving
+  instead would flow it through the delta `deleted` array, the same
+  array a DECAYED item uses, making a deliberate user act
+  indistinguishable from the passage of time. The ledger arrays and
+  every count derived from them exclude shelved rows; `/v1/quilt`
+  action_items keep them, carrying the stamps, so the app can render or
+  hide them by its own rule (ledger counts stay the authority).
+* Decay still applies to a shelved item: shelving is the user declining
+  to act, not asserting immortality. The `updated_at` bump gives it one
+  final TTL window from the shelve, then it archives on its own.
+* Vouch stamps `value.last_vouched_at` + `value.vouch_source` and bumps
+  `updated_at`; the decay extension is the point of the tap. The
+  explicit stamp is what separates "the user says this is live" from
+  "this happened to surface in a recall". Vouch does NOT clear a shelf.
+* Gates mirror `complete`: 404 wrong user, 400 non-completable type,
+  409 already completed/archived, 409 shelving a shelved item or
+  un-shelving an unshelved one, with the state predicate repeated in
+  the UPDATE so races lose with a 409.
+
+**`value.archive_cause`** ships with this work: every archive site now
+stamps why (`decay`, `replaced`, `corrected`, `merge`,
+`project_archived`, `cleanup`, `dedup`), and completions already carry
+`completion_source`. Before this, 864 archived-without-completion rows
+on prod could not say whether a client deleted them or time did. Old
+rows stay null = unknown; a new archive site that stamps nothing fails
+`test_shelve_triage.py`.
 
 ---
 
