@@ -1679,6 +1679,12 @@ class TierChangeEvent(BaseModel):
 # flags in the registered app manifests: commitments and blockers).
 COMPLETABLE_PATCH_TYPES = ("commitment", "blocker")
 
+# The person-detail history leg serves this many completed items, newest
+# completion first; `total` beside the array counts the WHOLE population
+# so the cap is self-describing rather than silent (the coverage-line
+# rule: a truncated list must say it truncated).
+COMPLETED_HISTORY_CAP = 20
+
 
 @app.post("/v1/users/{user_id}/tier-change", status_code=202, tags=["Lifecycle"])
 async def record_tier_change(
@@ -3546,6 +3552,7 @@ async def _people_core(
     user_id: str,
     entity_ids: Optional[List[str]] = None,
     owed_to_available: bool = False,
+    include_completed: bool = False,
 ) -> dict:
     """Everything the list and the detail both need, in set-based queries.
 
@@ -3659,6 +3666,70 @@ async def _people_core(
                 registry_ttls[_pt] = _ttl_row["default_ttl_days"]
         except Exception:
             pass  # Registry table may not exist yet (matches the worker)
+
+    # Completed history, fetched only for the detail route: the list
+    # assembles every person and would pay for the full completed
+    # population per request while rendering none of it. Everything with
+    # completed_at survives forever, so this is the read surface for
+    # "what did this person actually deliver". Decayed/archived-without-
+    # completion rows are deliberately NOT here: done is a claim, expired
+    # is not.
+    completed_items: list = []
+    completed_owed_by_person: dict = {}
+    if include_completed:
+        completed_rows = await conn.fetch(
+            """
+            SELECT cp.patch_id, cp.patch_type, cp.value->>'text' AS text,
+                   cp.value->>'owner' AS owner,
+                   cp.value->>'deadline' AS deadline,
+                   cp.value->>'deadline_date' AS deadline_date,
+                   cp.value->>'overdue_since' AS overdue_since,
+                   cp.value->>'shelved_at' AS shelved_at,
+                   cp.value->>'shelved_source' AS shelved_source,
+                   cp.value->>'completion_source' AS completion_source,
+                   cp.value->>'completion_evidence' AS completion_evidence,
+                   cp.completed_at,
+                   cp.project_id, cp.project, cp.origin_id,
+                   (SELECT pc.from_patch_id FROM patch_connections pc
+                      JOIN context_patches op ON op.patch_id = pc.from_patch_id
+                     WHERE pc.to_patch_id = cp.patch_id
+                       AND pc.connection_label = 'owns'
+                       AND COALESCE(pc.status, 'active') = 'active'
+                     ORDER BY (lower(btrim(op.value->>'text'))
+                               = lower(btrim(cp.value->>'owner'))) DESC NULLS LAST,
+                              pc.created_at, pc.connection_id
+                     LIMIT 1) AS owner_patch_id
+            FROM context_patches cp
+            JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+            WHERE ps.subject_key = $1
+              AND cp.patch_type = ANY($2::text[])
+              AND cp.completed_at IS NOT NULL
+            ORDER BY cp.completed_at DESC
+            """,
+            subject_key, list(COMPLETABLE_PATCH_TYPES),
+        )
+        # decay_state is None on a completed item: decay no longer applies,
+        # and per the house rule null means "not tracked", not a band.
+        completed_items = [dict(r) | {"decay_state": None} for r in completed_rows]
+        if owed_to_available:
+            completed_owed_rows = await conn.fetch(
+                """
+                SELECT pc.from_patch_id AS item_patch_id,
+                       pc.to_patch_id AS person_patch_id
+                FROM patch_connections pc
+                JOIN context_patches item ON item.patch_id = pc.from_patch_id
+                JOIN patch_subjects ps ON ps.patch_id = item.patch_id
+                WHERE ps.subject_key = $1
+                  AND pc.connection_label = 'owed_to'
+                  AND COALESCE(pc.status, 'active') = 'active'
+                  AND item.completed_at IS NOT NULL
+                """,
+                subject_key,
+            )
+            for r in completed_owed_rows:
+                completed_owed_by_person.setdefault(
+                    str(r["person_patch_id"]), set()
+                ).add(str(r["item_patch_id"]))
 
     # asyncpg Records are read-only; re-shape each open item as a dict and
     # annotate the decay band once, so the ledger arrays, the counts and
@@ -3809,6 +3880,25 @@ async def _people_core(
                 and is_self_owned(r["owner"], user_label)
             ]
 
+        # History legs: same matching predicates as the open ledger (owner
+        # name/alias or owns edge; owed_to edge + self ownership), applied
+        # to the completed population. No shelved filter: done is done,
+        # whatever state preceded it. completed_items arrives newest
+        # completion first, so these stay in that order.
+        completed_they_owe = [
+            r for r in completed_items
+            if (r["owner"] or "").strip().lower() in keys
+            or (patch_id and r["owner_patch_id"] and str(r["owner_patch_id"]) == patch_id)
+        ]
+        completed_you_owe = None
+        if owed_to_available and patch_id and include_completed:
+            c_owed_ids = completed_owed_by_person.get(patch_id) or ()
+            completed_you_owe = [
+                r for r in completed_items
+                if str(r["patch_id"]) in c_owed_ids
+                and is_self_owned(r["owner"], user_label)
+            ]
+
         row = {
             "entity_id": eid,
             "name": p["name"],
@@ -3858,6 +3948,8 @@ async def _people_core(
             "_projects": projects,
             "_they_owe": they_owe,
             "_you_owe": you_owe,
+            "_completed_they_owe": completed_they_owe,
+            "_completed_you_owe": completed_you_owe,
             "_mention_count": p["mention_count"] or 0,
             "_alias_sources": alias_sources.get(eid, {}),
             # Newest of the two things that change a person row: another
@@ -4060,7 +4152,8 @@ async def get_person(
         eid = str(resolved["entity_id"])
         owed_to_available = await _people_owed_to_available(conn, app_id)
         core = await _people_core(
-            conn, user_id, [eid], owed_to_available=owed_to_available
+            conn, user_id, [eid], owed_to_available=owed_to_available,
+            include_completed=True,
         )
 
     row = core["by_id"].get(eid)
@@ -4106,6 +4199,33 @@ async def get_person(
             "shelved_source": r["shelved_source"],
         }
 
+    def _done_item(r):
+        """A completed ledger item: the open shape plus the closure facts.
+
+        `completion_source` is which lane closed it (app tap, extraction
+        auto-close, user chat), and null on completions that predate
+        source stamping. `decay_state` is null: decay no longer applies
+        to a completed row, and null means not tracked, never a band.
+        """
+        return _item(r) | {
+            "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+            "completion_source": r["completion_source"],
+            "completion_evidence": r["completion_evidence"],
+        }
+
+    def _history(rows):
+        """{"total": N, "items": [...capped...]}: the cap self-describes.
+
+        `total` counts the whole matched population; `items` carries the
+        newest COMPLETED_HISTORY_CAP completions. Serving a bare capped
+        array would read as "this is everything", the same silent
+        truncation the quilt coverage line exists to prevent.
+        """
+        return {
+            "total": len(rows),
+            "items": [_done_item(r) for r in rows[:COMPLETED_HISTORY_CAP]],
+        }
+
     detail = _public_person(row)
     detail.update({
         "projects": row["_projects"],
@@ -4117,6 +4237,16 @@ async def get_person(
             "you_owe": (
                 None if row["_you_owe"] is None
                 else [_item(r) for r in row["_you_owe"]]
+            ),
+            # The history legs: what this person actually delivered, and
+            # what the user delivered to them. Completed-only by
+            # construction (completed_at set); decayed items never appear
+            # here, because "expired" is not a claim anyone completed
+            # anything. Same null semantics as the open you_owe.
+            "completed_they_owe": _history(row["_completed_they_owe"]),
+            "completed_you_owe": (
+                None if row["_completed_you_owe"] is None
+                else _history(row["_completed_you_owe"])
             ),
         },
         # `capacities` says HOW this person turned up in this meeting, not

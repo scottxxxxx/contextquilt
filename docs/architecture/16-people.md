@@ -452,7 +452,14 @@ before a merge still lands on the right person. Adds to the above:
                    "overdue_since": null, "project_id": "…", "origin_id": "…",
                    "decay_state": "aging", "shelved_at": null,
                    "shelved_source": null}],
-    "you_owe": null
+    "you_owe": null,
+    "completed_they_owe": {
+      "total": 14,
+      "items": [{"patch_id": "…", "type": "commitment", "text": "…",
+                 "completed_at": "2026-08-09T…Z", "completion_source": "app",
+                 "completion_evidence": null, "decay_state": null, "…": "…"}]
+    },
+    "completed_you_owe": null
   },
   "meetings": [
     {"origin_id": "…", "origin_type": "meeting", "project_id": "…",
@@ -603,6 +610,32 @@ and the card read one source and neither invents a number.
   wrongly completed item restated in a later meeting spawns a fresh
   open copy rather than reviving the archived one. Uncomplete is the
   deliberate path; the dedup behavior is the accidental one.
+
+**Completion history** (added 2026-08-09, detail route only):
+`commitments.completed_they_owe` and `.completed_you_owe`, the answer to
+"what did this person actually deliver". Shape is
+`{"total": N, "items": [...]}` with items capped at 20 newest
+completions, so the cap self-describes instead of a bare array reading
+as "this is everything" (the quilt coverage-line rule). Items are the
+open-item shape plus `completed_at` / `completion_source` /
+`completion_evidence`; `decay_state` is null on them (decay no longer
+applies, and null means not tracked, never a band). Completed-only by
+construction: the population gates on `completed_at`, which all three
+close lanes set and decay never does, so an expired item can never
+appear as a delivery. `completed_you_owe` carries the same null
+semantics as the open `you_owe` (null without the `owed_to` capability
+or a person patch). List rows deliberately serve none of this: the list
+would pay for the full completed population per call while rendering
+none of it.
+
+Why CQ must serve this rather than the app keeping it: SS's delta merge
+keeps no tombstone memory (ids in `deleted` are removed and nothing
+remembers them), so the client structurally cannot reconstruct history;
+and recall filters to active, so chat cannot see it either. This leg is
+currently the ONLY read surface for completion history. A chat-lane
+answer ("what has Vijay completed?") is a separate design: it touches
+recall's byte-stable output, so doc 15 + GP prompt composition territory,
+proposed but not built.
 
 **`value.archive_cause`** ships with this work: every archive site now
 stamps why (`decay`, `replaced`, `corrected`, `merge`,
