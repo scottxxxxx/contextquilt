@@ -2671,6 +2671,103 @@ async def unshelve_patch(
     return {"status": "unshelved", "patch_id": patch_id}
 
 
+@app.post("/v1/quilt/{user_id}/patches/{patch_id}/uncomplete", tags=["Quilt"])
+async def uncomplete_patch(
+    user_id: str,
+    patch_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Reverse a completion: the item was marked done and it is not.
+
+    This is the correction verb for ALL THREE completion lanes, not just a
+    mistapped checkbox: extraction auto-close is an LLM deciding from a
+    transcript that something resolved, and the chat-completion lane is an
+    LLM matching a statement to a patch. Both can be wrong, and before this
+    route the only fix was an operator editing prod by hand. (A wrongly
+    completed item DOES partially self-heal without this: dedup only
+    matches active patches, so restating the item in a later meeting
+    creates a fresh open copy. But that copy has no lineage, the false
+    completion stays on the record, and the user waits for a meeting.)
+
+    Restores `status = 'active'` and clears `completed_at`, so the item
+    re-enters recall, the ledger, and the active quilt, and REAPPEARS in
+    the next delta as a normal patch update (its tombstone stops being
+    served: `deleted[]`/`completed[]` are computed from the current row,
+    not from history). The original completion is preserved for audit as
+    `value.prior_completed_at` / `prior_completion_source` /
+    `prior_completion_evidence`, alongside `uncompleted_at` +
+    `uncompletion_source`, so "completed then reopened" is never
+    indistinguishable from "never completed".
+
+    The `updated_at` bump restarts the decay clock: a restored item gets a
+    full TTL window rather than inheriting the neglect that preceded its
+    wrong completion.
+
+    409 when the patch is not completed. Works on any completed
+    completable regardless of which lane closed it.
+    """
+    subject_key = f"user:{user_id}"
+    row = await db_pool.fetchrow(
+        """
+        SELECT cp.patch_id, cp.patch_type, cp.completed_at,
+               COALESCE(cp.status, 'active') AS status
+        FROM context_patches cp
+        JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+        WHERE cp.patch_id = $1 AND ps.subject_key = $2
+        """,
+        patch_id, subject_key
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Patch not found for this user")
+    if row["patch_type"] not in COMPLETABLE_PATCH_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Patch type '{row['patch_type']}' is not completable "
+                   f"(completable types: {', '.join(COMPLETABLE_PATCH_TYPES)})",
+        )
+    if row["completed_at"] is None:
+        raise HTTPException(status_code=409, detail="Patch is not completed")
+    await _check_patch_write_acl(patch_id, app_id)
+
+    # The audit stamps read the OLD row (RHS expressions see pre-UPDATE
+    # values); `- 'archive_cause'` covers the replaces lifecycle, which
+    # sets completed_at with a cause and no completion_source. A null
+    # prior_completion_source is honest: it means the completion predates
+    # source stamping or came from a lifecycle archive.
+    restored = await db_pool.fetchrow(
+        """
+        UPDATE context_patches
+           SET status = 'active',
+               completed_at = NULL,
+               updated_at = NOW(),
+               value = (value - 'completion_source' - 'completion_evidence' - 'archive_cause')
+                       || jsonb_build_object(
+                              'uncompleted_at', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                              'uncompletion_source', 'app',
+                              'prior_completed_at', to_char(completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+                              'prior_completion_source', value->>'completion_source',
+                              'prior_completion_evidence', value->>'completion_evidence'
+                          )
+         WHERE patch_id = $1
+           AND completed_at IS NOT NULL
+        RETURNING value->>'uncompleted_at' AS uncompleted_at,
+                  value->>'prior_completion_source' AS prior_completion_source
+        """,
+        patch_id
+    )
+    if not restored:
+        raise HTTPException(status_code=409, detail="Patch is not completed")
+
+    await _hydrate_refresh(user_id)
+    return {
+        "status": "uncompleted",
+        "patch_id": patch_id,
+        "uncompleted_at": restored["uncompleted_at"],
+        "prior_completion_source": restored["prior_completion_source"],
+    }
+
+
 @app.delete("/v1/quilt/{user_id}/patches/{patch_id}", tags=["Quilt"])
 async def delete_patch(
     user_id: str,
