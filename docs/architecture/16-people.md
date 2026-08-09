@@ -561,9 +561,10 @@ and the card read one source and neither invents a number.
 
 **Write paths** (GP forwards untyped bodies; DELETE for un-shelve):
 
-    POST   .../patches/{patch_id}/vouch     "Still live"
-    POST   .../patches/{patch_id}/shelve    "Let it go", reversible
-    DELETE .../patches/{patch_id}/shelve    un-shelve
+    POST   .../patches/{patch_id}/vouch       "Still live"
+    POST   .../patches/{patch_id}/shelve      "Let it go", reversible
+    DELETE .../patches/{patch_id}/shelve      un-shelve
+    POST   .../patches/{patch_id}/uncomplete  reverse a wrong completion
 
 * Shelve stamps `value.shelved_at` + `value.shelved_source` and bumps
   `updated_at`. The patch STAYS active: recall still finds it, and it
@@ -585,6 +586,23 @@ and the card read one source and neither invents a number.
   409 already completed/archived, 409 shelving a shelved item or
   un-shelving an unshelved one, with the state predicate repeated in
   the UPDATE so races lose with a 409.
+* **Uncomplete** (added 2026-08-09, after the first real device tap) is
+  the correction verb for all three completion lanes: the app checkbox
+  has a client-side regret window, but extraction auto-close and the
+  chat-completion lane are LLM judgments with no window at all, and a
+  wrong completion previously had no fix short of an operator editing
+  prod. It restores `status = 'active'`, clears `completed_at`, and the
+  item REAPPEARS through the next delta as a normal patch update (the
+  tombstone stops being served because `deleted[]`/`completed[]` are
+  computed from the current row). The original completion moves to
+  `value.prior_completed_at` / `prior_completion_source` /
+  `prior_completion_evidence` beside `uncompleted_at` +
+  `uncompletion_source`, so "completed then reopened" never collapses
+  into "never completed". 409 when the patch is not completed.
+  Related fact worth keeping: dedup only matches ACTIVE patches, so a
+  wrongly completed item restated in a later meeting spawns a fresh
+  open copy rather than reviving the archived one. Uncomplete is the
+  deliberate path; the dedup behavior is the accidental one.
 
 **`value.archive_cause`** ships with this work: every archive site now
 stamps why (`decay`, `replaced`, `corrected`, `merge`,

@@ -105,6 +105,58 @@ def test_race_guards_repeat_the_state_predicate_in_the_update():
 
 
 # --------------------------------------------------------------------
+# uncomplete: the correction verb for all three completion lanes
+# --------------------------------------------------------------------
+
+def _uncomplete_handler() -> str:
+    m = re.search(
+        r'@app\.post\("/v1/quilt/\{user_id\}/patches/\{patch_id\}/uncomplete".*?'
+        r'@app\.delete\("/v1/quilt/\{user_id\}/patches/\{patch_id\}"',
+        MAIN, re.DOTALL,
+    )
+    assert m, "uncomplete handler not found"
+    return m.group(0)
+
+
+def test_uncomplete_route_exists():
+    assert '@app.post("/v1/quilt/{user_id}/patches/{patch_id}/uncomplete"' in MAIN
+
+
+def test_uncomplete_restores_the_row_and_guards_the_race():
+    src = _uncomplete_handler()
+    assert "SET status = 'active'" in src
+    assert "completed_at = NULL" in src
+    # The WHERE re-checks completion so a concurrent uncomplete (or a
+    # never-completed patch reached by a stale client) loses with 409.
+    assert "AND completed_at IS NOT NULL" in src
+
+
+def test_uncomplete_preserves_the_original_completion_for_audit():
+    """"Completed then reopened" must never collapse into "never
+    completed": the prior stamps move to prior_* keys instead of being
+    erased, and the reopen itself is stamped."""
+    src = _uncomplete_handler()
+    for probe in (
+        "'uncompleted_at'",
+        "'uncompletion_source'",
+        "'prior_completed_at'",
+        "'prior_completion_source'",
+        "'prior_completion_evidence'",
+    ):
+        assert probe in src, f"missing audit stamp {probe}"
+    # The live completion keys come OFF the restored row, or every
+    # consumer that reads completion_source would see a completed item.
+    assert "- 'completion_source' - 'completion_evidence'" in src
+
+
+def test_uncomplete_clears_a_lifecycle_archive_cause():
+    """The replaces lifecycle sets completed_at + archive_cause with no
+    completion_source; restoring such a row must not leave it claiming a
+    cause for an archival that no longer holds."""
+    assert "- 'archive_cause'" in _uncomplete_handler()
+
+
+# --------------------------------------------------------------------
 # archive_cause: no archive site without a stated reason
 # --------------------------------------------------------------------
 
