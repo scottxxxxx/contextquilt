@@ -81,6 +81,15 @@ from contextquilt.services.corrections import (
 )
 from contextquilt.services.entity_aliasing import find_alias_candidate
 from contextquilt.services.ingest_modes import is_interaction_allowed
+from contextquilt.services.decay_model import (
+    DEFAULT_TTLS,
+    FRESHNESS_TRACKED_TYPES,
+    DEADLINE_ANCHORED_TYPES,
+    PERMANENCE_CLASS_DAYS,
+    SALIENCE_TTL_SQL,
+    TTL_REGISTRY_QUERY,
+    staleness_anchor_sql,
+)
 from contextquilt.services.llm_client import LLMClient
 from contextquilt.services.semantic_dedup import (
     DEDUP_JUDGE_SCHEMA,
@@ -925,7 +934,9 @@ async def store_connected_patches(
                     # an already-applied replaces shouldn't re-archive.
                     if role == "replaces":
                         await db.execute(
-                            "UPDATE context_patches SET status = 'archived', completed_at = NOW() WHERE patch_id = $1::uuid",
+                            "UPDATE context_patches SET status = 'archived', completed_at = NOW(), "
+                            "value = jsonb_set(value, '{archive_cause}', '\"replaced\"') "
+                            "WHERE patch_id = $1::uuid",
                             to_id
                         )
                 else:
@@ -1733,38 +1744,10 @@ class ColdPathWorker:
             not refresh these.
           - All other types use `updated_at`.
         """
-        # Fallback TTLs by patch_type when registry has no entry.
-        # The four FRESHNESS_TRACKED_TYPES are sticky-self-disclosure
-        # patches; their long horizon reflects that people change but
-        # not weekly. After 540d without re-observation we assume the
-        # preference is stale and let the decay archive collect it.
-        DEFAULT_TTLS = {
-            "takeaway": 14,
-            "blocker": 30,
-            "commitment": 30,
-            "event": 90,
-            "trait": 540,
-            "preference": 540,
-            "goal": 540,
-            "constraint": 540,
-        }
-        # Types whose staleness is measured from `last_observed_at`
-        # rather than `updated_at`. Matches the partial index in
-        # init-db/20_preference_freshness.sql.
-        FRESHNESS_TRACKED_TYPES = {"trait", "preference", "goal", "constraint"}
-        # Deadline-bearing completables anchor on GREATEST(updated_at,
-        # deadline_date) so they never archive before their due date.
-        DEADLINE_ANCHORED_TYPES = {"commitment", "blocker"}
-        # Maps the 7 permanence classes → days. None = never expires.
-        PERMANENCE_CLASS_DAYS = {
-            "permanent": None,
-            "decade": None,
-            "year": 365,
-            "quarter": 90,
-            "month": 30,
-            "week": 14,
-            "day": 1,
-        }
+        # The TTLs, anchors, salience multipliers and SQL fragments live in
+        # services/decay_model.py (module-level imports), because the People
+        # surface serves `decay_state` derived from the SAME parameters.
+        # Changing the predicate there changes both consumers or neither.
         # Run every 6 hours
         DECAY_INTERVAL_SECONDS = 6 * 60 * 60
         # Wait 60 seconds after startup before first run
@@ -1779,9 +1762,13 @@ class ColdPathWorker:
                 for perm_class, ttl_days in PERMANENCE_CLASS_DAYS.items():
                     if ttl_days is None:
                         continue  # permanent/decade never expire
+                    # archive_cause says WHY a row without completed_at is
+                    # archived; without it a decay expiry is indistinguishable
+                    # from every other archival (the 864-unexplained lesson).
                     result = await self.db.execute(
                         """
-                        UPDATE context_patches SET status = 'archived', updated_at = NOW()
+                        UPDATE context_patches SET status = 'archived', updated_at = NOW(),
+                               value = jsonb_set(value, '{archive_cause}', '"decay"')
                         WHERE permanence_override = $1
                           AND COALESCE(status, 'active') = 'active'
                           AND updated_at < NOW() - INTERVAL '1 day' * $2
@@ -1817,13 +1804,7 @@ class ColdPathWorker:
                     # global winner.
                     try:
                         row = await self.db.fetchrow(
-                            """
-                            SELECT default_ttl_days
-                            FROM patch_type_registry
-                            WHERE type_key = $1 AND default_ttl_days IS NOT NULL
-                            ORDER BY (app_id IS NULL) ASC, default_ttl_days ASC
-                            LIMIT 1
-                            """,
+                            TTL_REGISTRY_QUERY,
                             patch_type
                         )
                         if row and row["default_ttl_days"] is not None:
@@ -1831,49 +1812,22 @@ class ColdPathWorker:
                     except Exception:
                         pass  # Registry table may not exist yet
 
-                    # Pick the staleness anchor. Self-typed patches use
-                    # `last_observed_at` (bumped only on re-observation in
-                    # an extraction); everything else uses `updated_at`.
-                    # COALESCE protects against pre-PR rows that may have
-                    # NULL last_observed_at before the backfill runs.
-                    if patch_type in FRESHNESS_TRACKED_TYPES:
-                        staleness_anchor_sql = "COALESCE(last_observed_at, created_at)"
-                    elif patch_type in DEADLINE_ANCHORED_TYPES:
-                        # Deadline-bearing completables must not archive
-                        # before their own due date: a commitment created
-                        # June 1 due Aug 15 used to decay July 1 (30d from
-                        # updated_at). Anchor on whichever is later —
-                        # last touch or the deadline itself — so TTL counts
-                        # as grace AFTER the due date for future-dated
-                        # items. Regex-guarded cast: only sanitizer-valid
-                        # ISO dates participate.
-                        staleness_anchor_sql = (
-                            "GREATEST(updated_at, "
-                            "CASE WHEN value->>'deadline_date' ~ '^\\d{4}-\\d{2}-\\d{2}$' "
-                            "THEN (value->>'deadline_date')::date::timestamptz "
-                            "ELSE updated_at END)"
-                        )
-                    else:
-                        staleness_anchor_sql = "updated_at"
+                    # Anchor selection and the salience multiplier come from
+                    # the shared decay model (self-typed types anchor on
+                    # last_observed_at; deadline-bearing completables on
+                    # GREATEST(updated_at, deadline_date) so they never
+                    # archive before their due date; the access-exemption
+                    # window stays at the UNMODIFIED TTL).
+                    anchor_sql = staleness_anchor_sql(patch_type)
 
-                    # Archive patches older than TTL that haven't been accessed recently
-                    # and have no explicit override. Salience stretches or
-                    # shrinks the effective TTL per patch (high ×1.5, low
-                    # ×0.5, absent = ×1.0) — judgment-weighted encoding's
-                    # lifecycle half; the recall scorer holds the other.
-                    # The access-exemption window stays at the unmodified
-                    # TTL: usage refresh is orthogonal to salience.
-                    salience_ttl_sql = (
-                        "(CASE value->>'salience' "
-                        "WHEN 'high' THEN 1.5 WHEN 'low' THEN 0.5 ELSE 1.0 END)"
-                    )
                     result = await self.db.execute(
                         f"""
-                        UPDATE context_patches SET status = 'archived', updated_at = NOW()
+                        UPDATE context_patches SET status = 'archived', updated_at = NOW(),
+                               value = jsonb_set(value, '{{archive_cause}}', '"decay"')
                         WHERE patch_type = $1
                           AND permanence_override IS NULL
                           AND COALESCE(status, 'active') = 'active'
-                          AND {staleness_anchor_sql} < NOW() - INTERVAL '1 day' * $2 * {salience_ttl_sql}
+                          AND {anchor_sql} < NOW() - INTERVAL '1 day' * $2 * {SALIENCE_TTL_SQL}
                           AND patch_id NOT IN (
                               SELECT patch_id FROM patch_usage_metrics
                               WHERE last_accessed_at > NOW() - INTERVAL '1 day' * $2
@@ -2764,8 +2718,11 @@ class ColdPathWorker:
                             status = 'archived',
                             updated_at = $1,
                             value = jsonb_set(
-                                jsonb_set(value, '{corrected_by}', to_jsonb($2::text)),
-                                '{correction_source}', '"user_chat"'
+                                jsonb_set(
+                                    jsonb_set(value, '{corrected_by}', to_jsonb($2::text)),
+                                    '{correction_source}', '"user_chat"'
+                                ),
+                                '{archive_cause}', '"corrected"'
                             )
                         WHERE patch_id = $3::uuid
                         """,

@@ -82,7 +82,8 @@ async def run(database_url: str, apply: bool) -> int:
             if orphans:
                 archived = await conn.execute(
                     """
-                    UPDATE context_patches SET status = 'archived', updated_at = NOW()
+                    UPDATE context_patches SET status = 'archived', updated_at = NOW(),
+                        value = jsonb_set(value, '{archive_cause}', '"cleanup"')
                     WHERE patch_id = ANY($1::uuid[])
                       AND COALESCE(status, 'active') = 'active'
                     """,
