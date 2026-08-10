@@ -66,6 +66,9 @@ from contextquilt.services.people_identity import (
     resolve_identity_source,
     separation_conflicts,
     validate_person_name,
+    DEFAULT_PEOPLE_VOCABULARY,
+    PeopleVocabulary,
+    people_vocabulary,
 )
 from contextquilt.services.recall_signals import (
     build_coverage_line,
@@ -3517,7 +3520,10 @@ async def _rebuild_entity_index(user_id: str) -> None:
     await redis_client.expire(entity_index_key, 7200)
 
 
-async def _load_active_person(conn, user_id: str, entity_id: str) -> Any:
+async def _load_active_person(
+    conn, user_id: str, entity_id: str,
+    person_entity_type: str = "person",
+) -> Any:
     """Fetch a person entity, following merged_into forward.
 
     A client holding the id of an already-merged entity gets the canonical
@@ -3548,7 +3554,7 @@ async def _load_active_person(conn, user_id: str, entity_id: str) -> Any:
         )
         if row is None:
             return None
-        if row["entity_type"] != "person":
+        if row["entity_type"] != person_entity_type:
             raise IdentityRequestError(
                 "NOT_A_PERSON",
                 f"Entity {current} is a '{row['entity_type']}', not a person",
@@ -3578,39 +3584,44 @@ async def _read_separations(conn, user_id: str, entity_ids: List[str]) -> List[t
     return [(str(r["entity_id_lo"]), str(r["entity_id_hi"])) for r in rows]
 
 
-async def _people_owed_to_available(conn, app_id: str) -> bool:
-    """Does the calling app's latest registered manifest declare `owed_to`?
+async def _people_read_context(conn, app_id: str):
+    """(vocabulary, owed_to_available) for the calling app, one fetch.
 
-    Per-app, not per-CQ-version. The read logic below can compute a
-    counterparty ledger the moment it ships, but for an app whose
-    extraction never emits the edge the answer would be an empty list for
-    every person, which reads as "nothing outstanding" rather than "not
-    tracked". So the capability follows the schema that produces the data,
-    not the code that reads it.
+    Both are properties of the app's registered manifest, not of CQ's
+    code: the vocabulary says WHICH types and labels carry People
+    semantics for this caller (SS-default floor when no `people` block
+    is declared), and the availability says whether a counterparty
+    ledger can honestly be a list rather than null. The read logic can
+    compute a you_owe ledger the moment it ships, but for an app whose
+    extraction never emits the edge the answer would be an empty list
+    for every person, which reads as "nothing outstanding" rather than
+    "not tracked". So the capability follows the schema that produces
+    the data, not the code that reads it.
 
     Any failure to resolve the manifest, a legacy non-UUID app id, no
-    registered schema, unparseable JSON, degrades to False. False is the
-    conservative direction: the caller gets null and a stated reason.
+    registered schema, unparseable JSON, degrades to (default floor,
+    False). False is the conservative direction: the caller gets null
+    and a stated reason.
     """
     import uuid as _uuid
     try:
         app_uuid = _uuid.UUID(app_id)
     except (ValueError, AttributeError, TypeError):
-        return False
+        return DEFAULT_PEOPLE_VOCABULARY, False
     row = await conn.fetchrow(
         "SELECT manifest FROM app_schemas WHERE app_id = $1 "
         "ORDER BY version DESC LIMIT 1",
         app_uuid,
     )
     if row is None:
-        return False
+        return DEFAULT_PEOPLE_VOCABULARY, False
     manifest = row["manifest"]
     if isinstance(manifest, str):
         try:
             manifest = json.loads(manifest)
         except (ValueError, TypeError):
-            return False
-    return manifest_declares_owed_to(manifest)
+            return DEFAULT_PEOPLE_VOCABULARY, False
+    return people_vocabulary(manifest), manifest_declares_owed_to(manifest)
 
 
 async def _people_core(
@@ -3619,6 +3630,7 @@ async def _people_core(
     entity_ids: Optional[List[str]] = None,
     owed_to_available: bool = False,
     include_completed: bool = False,
+    vocab: PeopleVocabulary = DEFAULT_PEOPLE_VOCABULARY,
 ) -> dict:
     """Everything the list and the detail both need, in set-based queries.
 
@@ -3627,8 +3639,8 @@ async def _people_core(
     rows are stitched in Python.
     """
     subject_key = f"user:{user_id}"
-    scope = " AND e.entity_id = ANY($2::uuid[])" if entity_ids else ""
-    args = [user_id] + ([entity_ids] if entity_ids else [])
+    scope = " AND e.entity_id = ANY($3::uuid[])" if entity_ids else ""
+    args = [user_id, vocab.person_entity_type] + ([entity_ids] if entity_ids else [])
 
     # One runtime snapshot for the whole assembly: the ledger's type set,
     # the decay bands' anchor membership, and the registry TTL loop all
@@ -3642,7 +3654,7 @@ async def _people_core(
                e.first_seen_at, e.last_seen_at,
                e.confirmed_at, e.confirmation_source
         FROM entities e
-        WHERE e.user_id = $1 AND e.entity_type = 'person'
+        WHERE e.user_id = $1 AND e.entity_type = $2
           AND e.merged_into IS NULL{scope}
         ORDER BY e.last_seen_at DESC NULLS LAST, e.entity_id
         """,
@@ -3675,10 +3687,10 @@ async def _people_core(
         SELECT cp.patch_id, LOWER(cp.value->>'text') AS text_key
         FROM context_patches cp
         JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
-        WHERE ps.subject_key = $1 AND cp.patch_type = 'person'
+        WHERE ps.subject_key = $1 AND cp.patch_type = $2
           AND COALESCE(cp.status, 'active') = 'active'
         """,
-        subject_key,
+        subject_key, vocab.person_type,
     )
     patch_by_name = {r["text_key"]: str(r["patch_id"]) for r in patch_rows if r["text_key"]}
 
@@ -3711,7 +3723,7 @@ async def _people_core(
                (SELECT pc.from_patch_id FROM patch_connections pc
                   JOIN context_patches op ON op.patch_id = pc.from_patch_id
                  WHERE pc.to_patch_id = cp.patch_id
-                   AND pc.connection_label = 'owns'
+                   AND pc.connection_label = $3
                    AND COALESCE(pc.status, 'active') = 'active'
                  ORDER BY (lower(btrim(op.value->>'text'))
                            = lower(btrim(cp.value->>'owner'))) DESC NULLS LAST,
@@ -3725,7 +3737,7 @@ async def _people_core(
           AND COALESCE(cp.status, 'active') = 'active'
         ORDER BY cp.value->>'deadline_date' NULLS LAST, cp.patch_id
         """,
-        subject_key, list(completable_types),
+        subject_key, list(completable_types), vocab.ownership_label,
     )
     # Registry TTL overrides for the completable types, resolved the same
     # way the decay loop resolves them, so the decay_state served here and
@@ -3765,7 +3777,7 @@ async def _people_core(
                    (SELECT pc.from_patch_id FROM patch_connections pc
                       JOIN context_patches op ON op.patch_id = pc.from_patch_id
                      WHERE pc.to_patch_id = cp.patch_id
-                       AND pc.connection_label = 'owns'
+                       AND pc.connection_label = $3
                        AND COALESCE(pc.status, 'active') = 'active'
                      ORDER BY (lower(btrim(op.value->>'text'))
                                = lower(btrim(cp.value->>'owner'))) DESC NULLS LAST,
@@ -3778,7 +3790,7 @@ async def _people_core(
               AND cp.completed_at IS NOT NULL
             ORDER BY cp.completed_at DESC
             """,
-            subject_key, list(completable_types),
+            subject_key, list(completable_types), vocab.ownership_label,
         )
         # decay_state is None on a completed item: decay no longer applies,
         # and per the house rule null means "not tracked", not a band.
@@ -3792,11 +3804,11 @@ async def _people_core(
                 JOIN context_patches item ON item.patch_id = pc.from_patch_id
                 JOIN patch_subjects ps ON ps.patch_id = item.patch_id
                 WHERE ps.subject_key = $1
-                  AND pc.connection_label = 'owed_to'
+                  AND pc.connection_label = $2
                   AND COALESCE(pc.status, 'active') = 'active'
                   AND item.completed_at IS NOT NULL
                 """,
-                subject_key,
+                subject_key, vocab.counterparty_label,
             )
             for r in completed_owed_rows:
                 completed_owed_by_person.setdefault(
@@ -3837,11 +3849,11 @@ async def _people_core(
             JOIN context_patches item ON item.patch_id = pc.from_patch_id
             JOIN patch_subjects ps ON ps.patch_id = item.patch_id
             WHERE ps.subject_key = $1
-              AND pc.connection_label = 'owed_to'
+              AND pc.connection_label = $2
               AND COALESCE(pc.status, 'active') = 'active'
               AND COALESCE(item.status, 'active') = 'active'
             """,
-            subject_key,
+            subject_key, vocab.counterparty_label,
         )
         if owed_to_available
         else []
@@ -3869,12 +3881,12 @@ async def _people_core(
         JOIN context_patches src ON src.patch_id = pc.from_patch_id
         JOIN context_patches tgt ON tgt.patch_id = pc.to_patch_id
         JOIN patch_subjects ps ON ps.patch_id = src.patch_id
-        WHERE ps.subject_key = $1 AND pc.connection_label = 'works_on'
+        WHERE ps.subject_key = $1 AND pc.connection_label = $2
           AND COALESCE(pc.status, 'active') = 'active'
           AND COALESCE(src.status, 'active') = 'active'
           AND COALESCE(tgt.status, 'active') = 'active'
         """,
-        subject_key,
+        subject_key, vocab.works_on_label,
     )
 
     aliases_by_id: dict = {}
@@ -4129,9 +4141,9 @@ async def list_people(
         ignored.append("confirmed")
 
     async with db_pool.acquire() as conn:
-        owed_to_available = await _people_owed_to_available(conn, app_id)
+        vocab, owed_to_available = await _people_read_context(conn, app_id)
         core = await _people_core(
-            conn, user_id, owed_to_available=owed_to_available
+            conn, user_id, owed_to_available=owed_to_available, vocab=vocab
         )
         rows = core["people"]
         total_unfiltered = len(rows)
@@ -4148,10 +4160,10 @@ async def list_people(
             merged = await conn.fetch(
                 """
                 SELECT entity_id, merged_into FROM entities
-                WHERE user_id = $1 AND entity_type = 'person'
+                WHERE user_id = $1 AND entity_type = $3
                   AND merged_into IS NOT NULL AND merged_at > $2
                 """,
-                user_id, since_dt,
+                user_id, since_dt, vocab.person_entity_type,
             )
             # A merge removes a person from the list, so clients holding
             # the folded id need a tombstone the same way patch deletes do.
@@ -4215,8 +4227,11 @@ async def get_person(
     manifest does not declare `owed_to`. See capabilities.you_owe.
     """
     async with db_pool.acquire() as conn:
+        vocab, owed_to_available = await _people_read_context(conn, app_id)
         try:
-            resolved = await _load_active_person(conn, user_id, entity_id)
+            resolved = await _load_active_person(
+                conn, user_id, entity_id, vocab.person_entity_type
+            )
         except IdentityRequestError as e:
             raise _identity_error(e)
         if resolved is None:
@@ -4224,10 +4239,9 @@ async def get_person(
                 status_code=404, detail=f"Person {entity_id} not found for this user"
             )
         eid = str(resolved["entity_id"])
-        owed_to_available = await _people_owed_to_available(conn, app_id)
         core = await _people_core(
             conn, user_id, [eid], owed_to_available=owed_to_available,
-            include_completed=True,
+            include_completed=True, vocab=vocab,
         )
 
     row = core["by_id"].get(eid)
@@ -4396,9 +4410,12 @@ async def merge_people(
 
     subject_key = f"user:{user_id}"
     async with db_pool.acquire() as conn:
+        vocab, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             try:
-                canonical = await _load_active_person(conn, user_id, canonical_id)
+                canonical = await _load_active_person(
+                    conn, user_id, canonical_id, vocab.person_entity_type
+                )
                 if canonical is None:
                     raise HTTPException(
                         status_code=404,
@@ -4408,7 +4425,9 @@ async def merge_people(
 
                 losers = []
                 for lid in loser_ids:
-                    row = await _load_active_person(conn, user_id, lid)
+                    row = await _load_active_person(
+                        conn, user_id, lid, vocab.person_entity_type
+                    )
                     if row is None:
                         raise HTTPException(
                             status_code=404,
@@ -4652,12 +4671,12 @@ async def merge_people(
                 FROM context_patches cp
                 JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
                 WHERE ps.subject_key = $1
-                  AND cp.patch_type = 'person'
+                  AND cp.patch_type = $3
                   AND COALESCE(cp.status, 'active') = 'active'
                   AND LOWER(cp.value->>'text') = ANY($2::text[])
                 ORDER BY cp.created_at
                 """,
-                subject_key, keys,
+                subject_key, keys, vocab.person_type,
             )]
             survivor, patch_losers = choose_surviving_person_patch(
                 candidates, canonical["name"]
@@ -4798,14 +4817,19 @@ async def keep_people_separate(
     source = resolve_identity_source(req.source)
 
     async with db_pool.acquire() as conn:
+        vocab, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             try:
                 raw_a, raw_b = req.entity_ids
                 # Resolve BEFORE pairing: separating two ids that both
                 # already point at one canonical is the merged case, not a
                 # legitimate pair.
-                a_row = await _load_active_person(conn, user_id, raw_a)
-                b_row = await _load_active_person(conn, user_id, raw_b)
+                a_row = await _load_active_person(
+                    conn, user_id, raw_a, vocab.person_entity_type
+                )
+                b_row = await _load_active_person(
+                    conn, user_id, raw_b, vocab.person_entity_type
+                )
                 if a_row is None or b_row is None:
                     missing = raw_a if a_row is None else raw_b
                     raise HTTPException(
@@ -4878,9 +4902,12 @@ async def confirm_person(
     source = resolve_identity_source(req.source if req else None)
 
     async with db_pool.acquire() as conn:
+        vocab, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             try:
-                row = await _load_active_person(conn, user_id, entity_id)
+                row = await _load_active_person(
+                    conn, user_id, entity_id, vocab.person_entity_type
+                )
             except IdentityRequestError as e:
                 raise _identity_error(e)
             if row is None:
@@ -4968,6 +4995,7 @@ async def rename_person(
 
     subject_key = f"user:{user_id}"
     async with db_pool.acquire() as conn:
+        vocab, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             profile = await conn.fetchrow(
                 "SELECT display_name FROM profiles WHERE user_id = $1", user_id
@@ -4986,7 +5014,9 @@ async def rename_person(
                 )
 
             try:
-                row = await _load_active_person(conn, user_id, entity_id)
+                row = await _load_active_person(
+                    conn, user_id, entity_id, vocab.person_entity_type
+                )
             except IdentityRequestError as e:
                 raise _identity_error(e)
             if row is None:
@@ -5012,12 +5042,12 @@ async def rename_person(
             other_entity = await conn.fetchrow(
                 """
                 SELECT entity_id, name FROM entities
-                WHERE user_id = $1 AND entity_type = 'person'
+                WHERE user_id = $1 AND entity_type = $4
                   AND merged_into IS NULL
                   AND LOWER(name) = LOWER($2)
                   AND entity_id <> $3::uuid
                 """,
-                user_id, new_name, resolved,
+                user_id, new_name, resolved, vocab.person_entity_type,
             )
             alias_owner = None
             alias_row = await conn.fetchrow(
@@ -5027,7 +5057,8 @@ async def rename_person(
             )
             if alias_row is not None:
                 owner_row = await _load_active_person(
-                    conn, user_id, str(alias_row["entity_id"])
+                    conn, user_id, str(alias_row["entity_id"]),
+                    vocab.person_entity_type,
                 )
                 if owner_row is not None and str(owner_row["entity_id"]) != resolved:
                     alias_owner = owner_row
@@ -5100,12 +5131,12 @@ async def rename_person(
                 FROM patch_subjects ps
                 WHERE ps.patch_id = cp.patch_id
                   AND ps.subject_key = $2
-                  AND cp.patch_type = 'person'
+                  AND cp.patch_type = $4
                   AND COALESCE(cp.status, 'active') = 'active'
                   AND LOWER(cp.value->>'text') = ANY($3::text[])
                 RETURNING cp.patch_id
                 """,
-                new_name, subject_key, keys,
+                new_name, subject_key, keys, vocab.person_type,
             )
 
             # A rename vouches, same as merge and keep-separate.
@@ -5170,6 +5201,7 @@ async def create_person(
     created = False
 
     async with db_pool.acquire() as conn:
+        vocab, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             # Exact name, then recorded alias — the same resolution order
             # the worker's store_entities uses, so the API and the
@@ -5177,11 +5209,11 @@ async def create_person(
             row = await conn.fetchrow(
                 """
                 SELECT entity_id FROM entities
-                WHERE user_id = $1 AND entity_type = 'person'
+                WHERE user_id = $1 AND entity_type = $3
                   AND LOWER(name) = LOWER($2)
                 LIMIT 1
                 """,
-                user_id, name,
+                user_id, name, vocab.person_entity_type,
             )
             if row is None:
                 row = await conn.fetchrow(
@@ -5190,14 +5222,16 @@ async def create_person(
                     FROM entity_aliases a
                     JOIN entities e ON e.entity_id = a.entity_id
                     WHERE a.user_id = $1 AND LOWER(a.alias) = LOWER($2)
-                      AND e.entity_type = 'person'
+                      AND e.entity_type = $3
                     LIMIT 1
                     """,
-                    user_id, name,
+                    user_id, name, vocab.person_entity_type,
                 )
 
             if row is not None:
-                resolved = await _load_active_person(conn, user_id, str(row["entity_id"]))
+                resolved = await _load_active_person(
+                    conn, user_id, str(row["entity_id"]), vocab.person_entity_type
+                )
                 entity_uuid = str(resolved["entity_id"])
                 # Answer with the name CQ actually stores, not the caller's
                 # casing — "kinsley raman" resolving to "Kinsley Raman" is
@@ -5220,10 +5254,10 @@ async def create_person(
                     INSERT INTO entities
                         (user_id, name, entity_type, description,
                          confirmed_at, confirmation_source)
-                    VALUES ($1, $2, 'person', $3, NOW(), $4)
+                    VALUES ($1, $2, $5, $3, NOW(), $4)
                     RETURNING entity_id
                     """,
-                    user_id, name, description, source,
+                    user_id, name, description, source, vocab.person_entity_type,
                 ))
 
             # The person patch. Looked up in both branches so the caller
@@ -5235,12 +5269,12 @@ async def create_person(
                 SELECT cp.patch_id FROM context_patches cp
                 JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
                 WHERE ps.subject_key = $1
-                  AND cp.patch_type = 'person'
+                  AND cp.patch_type = $3
                   AND COALESCE(cp.status, 'active') = 'active'
                   AND LOWER(cp.value->>'text') = LOWER($2)
                 LIMIT 1
                 """,
-                subject_key, name,
+                subject_key, name, vocab.person_type,
             )
             patch_id = str(existing_patch["patch_id"]) if existing_patch else None
             patch_created = patch_id is None
@@ -5252,12 +5286,13 @@ async def create_person(
                         patch_id, patch_name, patch_type, value,
                         origin_mode, source_prompt, confidence, persistence,
                         status, created_at, updated_at, last_observed_at
-                    ) VALUES ($1, $2, 'person', $3, 'declared', 'people_create',
+                    ) VALUES ($1, $2, $6, $3, 'declared', 'people_create',
                               1.0, $4, 'active', $5, $5, $5)
                     """,
                     patch_id, f"declared_{patch_id[:8]}",
                     json.dumps({"text": name}),
-                    PATCH_PERSISTENCE.get("person", "decaying"), now,
+                    PATCH_PERSISTENCE.get(vocab.person_type, "decaying"), now,
+                    vocab.person_type,
                 )
                 await conn.execute(
                     "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",

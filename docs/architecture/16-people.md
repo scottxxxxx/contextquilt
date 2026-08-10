@@ -564,6 +564,52 @@ it: alias becomes name, name becomes alias. Case-only renames skip the
 alias insert (an alias equal to the name is dead weight and a LOWER()
 collision).
 
+### 5.9 The `people` manifest block (shipped 2026-08-10, slice 2 of the facet-runtime pass)
+
+The People surface was born speaking SS's dialect as literals: patch
+type `person`, entity type `person`, labels `owns` / `works_on` /
+`owed_to`, in ~14 SQL sites. Nothing in a manifest marked those ROLES,
+so a second app could never have People no matter what it declared
+(TR's vocabulary shares zero of those names). The optional top-level
+manifest block names them per app:
+
+```json
+"people": {
+  "person_type": "contact",            // required; a declared patch type
+  "person_entity_type": "contact",     // optional; defaults to person_type
+  "ownership_label": "assigned_to",    // optional; default "owns"
+  "works_on_label": "engaged_on",      // optional; default "works_on"
+  "counterparty_label": "awaits_from"  // optional; NO default — see below
+}
+```
+
+Rules, each carried by a test (`test_people_vocabulary.py`):
+
+- **Absent block = the SS-default vocabulary.** Every manifest
+  registered before the block existed (ShoulderSurf, GhostPour) behaves
+  byte-identically with no re-registration. For an app with no `person`
+  type the default vocabulary simply matches nothing, which is what
+  having no people means.
+- **`counterparty_label` never defaults.** An explicit block that omits
+  it is the app stating "you owe them" is not tracked, and the
+  `you_owe` capability stays off even if a label named `owed_to`
+  happens to exist in its vocabulary. Same honesty rule as 6.4.
+- **Referential integrity at registration**: every named role must
+  resolve to a declared patch type / entity type / connection label, or
+  validation fails. A block pointing at a type the extraction can never
+  produce would be a capability that lies.
+- The whole read surface and every identity write (merge,
+  keep-separate, confirm, create, rename) resolves the CALLER'S
+  vocabulary per request; `capabilities.you_owe` follows the caller's
+  own counterparty label.
+
+**Known limit, deliberate**: the extraction-lane writers (the
+`person_appearances` recorder and the self-identity write-back) still
+gate on the literal entity type `person`, so an app that names its
+person entity type something else accumulates no appearances until the
+worker slice (slice 4) wires vocabulary into `store_entities`. An app
+that names it `person` gets appearances today.
+
 ### 5.7 Triage: `decay_state`, shelve, vouch (shipped 2026-08-08)
 
 Agreed in the 2026-08-07 turn-4 exchange with SS (full reasoning in the
