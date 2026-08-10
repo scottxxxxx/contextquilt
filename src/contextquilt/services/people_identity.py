@@ -16,6 +16,7 @@ decided.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterable, List, Sequence, Set, Tuple
 
 from contextquilt.services.extraction_schema import (
@@ -197,22 +198,95 @@ READ_CAPABILITIES: dict = {
 OWED_TO_LABEL = "owed_to"
 
 
+@dataclass(frozen=True)
+class PeopleVocabulary:
+    """Which of an app's types and labels carry People semantics.
+
+    The People surface was born speaking SS's dialect: patch type
+    `person`, entity type `person`, labels `owns` / `works_on` /
+    `owed_to`. Nothing in a manifest marked those roles, so a second app
+    could never have People no matter what it declared (TR's vocabulary
+    shares zero of those names). The optional manifest `people` block
+    names them per app; this is its resolved form.
+
+    `counterparty_label` may be None: an app that declares a people
+    block WITHOUT a counterparty is stating it does not track "you owe
+    them", and the you_owe capability stays off, honestly.
+    """
+
+    person_type: str
+    person_entity_type: str
+    ownership_label: str
+    works_on_label: str
+    counterparty_label: "str | None"
+
+
+# The SS floor, and the resolution for every manifest registered before
+# the block existed. Absent block = this, so ShoulderSurf and GhostPour
+# behave byte-identically without a re-registration.
+DEFAULT_PEOPLE_VOCABULARY = PeopleVocabulary(
+    person_type="person",
+    person_entity_type="person",
+    ownership_label="owns",
+    works_on_label="works_on",
+    counterparty_label=OWED_TO_LABEL,
+)
+
+
+def people_vocabulary(manifest: object) -> PeopleVocabulary:
+    """Resolve an app's People vocabulary from its registered manifest.
+
+    Legacy manifests (no `people` block) get the SS-default vocabulary,
+    which is the compat floor, not a claim about the app: for an app
+    with no `person` patch type the default vocabulary simply matches
+    nothing, which is what having no people means. An EXPLICIT block is
+    taken at its word, including the absence of `counterparty_label`.
+    """
+    if not isinstance(manifest, dict):
+        return DEFAULT_PEOPLE_VOCABULARY
+    block = manifest.get("people")
+    if not isinstance(block, dict) or not block:
+        # Missing or empty block: the legacy floor.
+        return DEFAULT_PEOPLE_VOCABULARY
+    person_type = block.get("person_type") or DEFAULT_PEOPLE_VOCABULARY.person_type
+    return PeopleVocabulary(
+        person_type=person_type,
+        # Defaults to the patch type name: most apps use one word for
+        # both, and requiring the repetition would invite drift.
+        person_entity_type=block.get("person_entity_type") or person_type,
+        ownership_label=block.get("ownership_label")
+        or DEFAULT_PEOPLE_VOCABULARY.ownership_label,
+        works_on_label=block.get("works_on_label")
+        or DEFAULT_PEOPLE_VOCABULARY.works_on_label,
+        # Deliberately NOT defaulted: an explicit block without a
+        # counterparty label is the app saying "not tracked".
+        counterparty_label=block.get("counterparty_label"),
+    )
+
+
 def manifest_declares_owed_to(manifest: object) -> bool:
-    """True when this app's manifest defines the `owed_to` label.
+    """True when this app's manifest declares a COUNTERPARTY label.
 
     The capability is a property of the app's registered schema, not of
     CQ's code. Shipping the read logic does not make a counterparty exist
     for an app whose extraction never emits one, and `you_owe: []` on an
     app that cannot produce the edge is exactly the "you owe her nothing"
     lie the capabilities block was built to avoid.
+
+    Vocabulary-aware since the people block shipped: the label checked
+    is the APP'S counterparty label (SS default: `owed_to`), and an
+    explicit block without one answers False.
     """
     if not isinstance(manifest, dict):
+        return False
+    label = people_vocabulary(manifest).counterparty_label
+    if label is None:
         return False
     labels = manifest.get("connection_labels")
     if not isinstance(labels, list):
         return False
     return any(
-        isinstance(lb, dict) and lb.get("label") == OWED_TO_LABEL
+        isinstance(lb, dict) and lb.get("label") == label
         for lb in labels
     )
 

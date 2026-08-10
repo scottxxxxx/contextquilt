@@ -41,6 +41,14 @@ TOP_LEVEL_OPTIONAL = {
     "ingest_mode", "success_signal",
     # Consolidation ("sleep" pass, doc 14). Absent → no consolidation.
     "consolidation_rules",
+    # People semantics (doc 16 §5.9): which types/labels carry the People
+    # surface's roles. Absent → the SS-default vocabulary (compat floor).
+    "people",
+}
+
+PEOPLE_BLOCK_KEYS = {
+    "person_type", "person_entity_type",
+    "ownership_label", "works_on_label", "counterparty_label",
 }
 
 PATCH_TYPE_REQUIRED = {"domain_type", "facet", "permanence", "display_name", "description", "value_shape"}
@@ -134,12 +142,12 @@ def validate_manifest(manifest: Dict[str, Any], app_id: str) -> Tuple[bool, List
             errors.append("Manifest origin_types must be an array of non-empty strings when provided.")
 
     # Entity types (optional array of entity type declarations)
+    declared_entities: set = set()
     entity_types = manifest.get("entity_types")
     if entity_types is not None:
         if not isinstance(entity_types, list):
             errors.append("Manifest entity_types must be an array when provided.")
         else:
-            declared_entities: set = set()
             for idx, et in enumerate(entity_types):
                 errors.extend(_validate_entity_type(et, idx))
                 if isinstance(et, dict) and isinstance(et.get("entity_type"), str):
@@ -148,6 +156,35 @@ def validate_manifest(manifest: Dict[str, Any], app_id: str) -> Tuple[bool, List
                             f"Duplicate entity_types.entity_type: {et['entity_type']!r}."
                         )
                     declared_entities.add(et["entity_type"])
+
+    # People block (optional; doc 16 §5.9). Every named role must resolve
+    # to something the manifest actually declares: a people block pointing
+    # at an undeclared type would turn the People surface on with a
+    # vocabulary the extraction can never produce, which is the
+    # capability-that-lies failure the capabilities block exists to avoid.
+    people = manifest.get("people")
+    if people is not None:
+        if not isinstance(people, dict):
+            errors.append("Manifest people must be an object when provided.")
+        elif people:
+            errors.extend(_check_unknown_keys("people", people, PEOPLE_BLOCK_KEYS))
+            errors.extend(_check_required_keys("people", people, {"person_type"}))
+            pt_name = people.get("person_type")
+            if isinstance(pt_name, str) and declared_types and pt_name not in declared_types:
+                errors.append(
+                    f"people.person_type {pt_name!r} is not a declared patch type."
+                )
+            et_name = people.get("person_entity_type")
+            if isinstance(et_name, str) and declared_entities and et_name not in declared_entities:
+                errors.append(
+                    f"people.person_entity_type {et_name!r} is not a declared entity type."
+                )
+            for key in ("ownership_label", "works_on_label", "counterparty_label"):
+                lb_name = people.get(key)
+                if isinstance(lb_name, str) and declared_labels and lb_name not in declared_labels:
+                    errors.append(
+                        f"people.{key} {lb_name!r} is not a declared connection label."
+                    )
 
     # Consolidation rules (optional; doc 14). Referential integrity against
     # the declared patch types — a rule naming a type the manifest doesn't
