@@ -121,6 +121,7 @@ def format_flat_ranked_with_stats(
     relationship_rows: Sequence[Any],
     max_chars: int = 1600,
     today: Optional[date] = None,
+    person_entity_type: str = "person",
 ) -> Tuple[str, int]:
     """Format patches as a flat relevance-ranked list.
 
@@ -138,8 +139,11 @@ def format_flat_ranked_with_stats(
     """
     sections: List[str] = []
 
-    # Compact header: people and projects matched in the query
-    people = [r for r in entity_rows if (r.get("entity_type") if isinstance(r, dict) else r["entity_type"]) == "person"]
+    # Compact header: people and projects matched in the query. Which
+    # entity type IS "a person" comes from the caller's vocabulary (SS
+    # default "person"); a vocab app's person entities would otherwise
+    # vanish from the header while their relationships still rendered.
+    people = [r for r in entity_rows if (r.get("entity_type") if isinstance(r, dict) else r["entity_type"]) == person_entity_type]
     projects = [r for r in entity_rows if (r.get("entity_type") if isinstance(r, dict) else r["entity_type"]) == "project"]
 
     if projects or people:
@@ -242,6 +246,7 @@ def format_category_grouped(
     relationship_rows: Sequence[Any],
     labels: Optional[Dict[str, str]] = None,
     today: Optional[date] = None,
+    person_entity_type: str = "person",
 ) -> str:
     """Format patches in the pre-PR-4 category-grouped structure.
 
@@ -264,7 +269,7 @@ def format_category_grouped(
     }
     sections: List[str] = []
 
-    people = [r for r in entity_rows if (r.get("entity_type") if isinstance(r, dict) else r["entity_type"]) == "person"]
+    people = [r for r in entity_rows if (r.get("entity_type") if isinstance(r, dict) else r["entity_type"]) == person_entity_type]
     projects = [r for r in entity_rows if (r.get("entity_type") if isinstance(r, dict) else r["entity_type"]) == "project"]
     if projects:
         for p in projects:
