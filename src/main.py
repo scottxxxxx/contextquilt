@@ -45,6 +45,7 @@ from dashboard.router import router as dashboard_router
 from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
 from contextquilt.services import decay_model
+from contextquilt.services import facet_runtime
 from contextquilt.services.extraction_schema import is_user_reference
 from contextquilt.services.recall_formatter import (
     CHARS_PER_TOKEN,
@@ -1676,9 +1677,17 @@ class TierChangeEvent(BaseModel):
     new_tier: Optional[str] = None
     occurred_at: Optional[str] = None
 
-# Patch types that can be marked completed (matches the `completable`
-# flags in the registered app manifests: commitments and blockers).
-COMPLETABLE_PATCH_TYPES = ("commitment", "blocker")
+# The SS floor for completable types. Runtime callers use
+# _completable_types(), which resolves the registered manifests'
+# `completable` flags through the facet runtime (registry-backed) and
+# can only WIDEN this set. The constant remains as the degraded-mode
+# fallback and for error messages when the registry is unreachable.
+COMPLETABLE_PATCH_TYPES = facet_runtime.FALLBACK_COMPLETABLE_TYPES
+
+
+async def _completable_types() -> tuple:
+    """Completable types per the registered manifests (cached snapshot)."""
+    return (await facet_runtime.get_type_runtime(db_pool.fetch)).completable_types
 
 # The person-detail history leg serves this many completed items, newest
 # completion first; `total` beside the array counts the WHOLE population
@@ -1903,6 +1912,7 @@ async def get_user_quilt(
     facts = []
     action_items = []
 
+    completable = await _completable_types()
     for row in rows:
         value = row["value"]
         if isinstance(value, str):
@@ -1931,7 +1941,7 @@ async def get_user_quilt(
             connections=connections_by_patch.get(pid, []),
         )
 
-        if row["patch_type"] in COMPLETABLE_PATCH_TYPES:
+        if row["patch_type"] in completable:
             action_items.append(patch)
         else:
             facts.append(patch)
@@ -2418,11 +2428,12 @@ async def complete_patch(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Patch not found for this user")
-    if row["patch_type"] not in COMPLETABLE_PATCH_TYPES:
+    completable = await _completable_types()
+    if row["patch_type"] not in completable:
         raise HTTPException(
             status_code=400,
             detail=f"Patch type '{row['patch_type']}' is not completable "
-                   f"(completable types: {', '.join(COMPLETABLE_PATCH_TYPES)})",
+                   f"(completable types: {', '.join(completable)})",
         )
     if row["completed_at"] is not None or row["status"] != "active":
         raise HTTPException(status_code=409, detail="Patch is already completed or archived")
@@ -2532,11 +2543,12 @@ async def _load_open_completable(user_id: str, patch_id: str):
     )
     if not row:
         raise HTTPException(status_code=404, detail="Patch not found for this user")
-    if row["patch_type"] not in COMPLETABLE_PATCH_TYPES:
+    completable = await _completable_types()
+    if row["patch_type"] not in completable:
         raise HTTPException(
             status_code=400,
             detail=f"Patch type '{row['patch_type']}' is not completable "
-                   f"(completable types: {', '.join(COMPLETABLE_PATCH_TYPES)})",
+                   f"(completable types: {', '.join(completable)})",
         )
     if row["completed_at"] is not None or row["status"] != "active":
         raise HTTPException(status_code=409, detail="Patch is already completed or archived")
@@ -2759,11 +2771,12 @@ async def uncomplete_patch(
     )
     if not row:
         raise HTTPException(status_code=404, detail="Patch not found for this user")
-    if row["patch_type"] not in COMPLETABLE_PATCH_TYPES:
+    completable = await _completable_types()
+    if row["patch_type"] not in completable:
         raise HTTPException(
             status_code=400,
             detail=f"Patch type '{row['patch_type']}' is not completable "
-                   f"(completable types: {', '.join(COMPLETABLE_PATCH_TYPES)})",
+                   f"(completable types: {', '.join(completable)})",
         )
     if row["completed_at"] is None:
         raise HTTPException(status_code=409, detail="Patch is not completed")
@@ -3617,6 +3630,12 @@ async def _people_core(
     scope = " AND e.entity_id = ANY($2::uuid[])" if entity_ids else ""
     args = [user_id] + ([entity_ids] if entity_ids else [])
 
+    # One runtime snapshot for the whole assembly: the ledger's type set,
+    # the decay bands' anchor membership, and the registry TTL loop all
+    # read the SAME facts (manifest-declared, SS floor fallback).
+    type_runtime = await facet_runtime.get_type_runtime(conn.fetch)
+    completable_types = type_runtime.completable_types
+
     people = await conn.fetch(
         f"""
         SELECT e.entity_id, e.name, e.description, e.mention_count,
@@ -3706,13 +3725,13 @@ async def _people_core(
           AND COALESCE(cp.status, 'active') = 'active'
         ORDER BY cp.value->>'deadline_date' NULLS LAST, cp.patch_id
         """,
-        subject_key, list(COMPLETABLE_PATCH_TYPES),
+        subject_key, list(completable_types),
     )
     # Registry TTL overrides for the completable types, resolved the same
     # way the decay loop resolves them, so the decay_state served here and
     # the archival the worker performs derive from the SAME parameters.
     registry_ttls: dict = {}
-    for _pt in COMPLETABLE_PATCH_TYPES:
+    for _pt in completable_types:
         try:
             _ttl_row = await conn.fetchrow(decay_model.TTL_REGISTRY_QUERY, _pt)
             if _ttl_row and _ttl_row["default_ttl_days"] is not None:
@@ -3759,7 +3778,7 @@ async def _people_core(
               AND cp.completed_at IS NOT NULL
             ORDER BY cp.completed_at DESC
             """,
-            subject_key, list(COMPLETABLE_PATCH_TYPES),
+            subject_key, list(completable_types),
         )
         # decay_state is None on a completed item: decay no longer applies,
         # and per the house rule null means "not tracked", not a band.
@@ -3798,6 +3817,8 @@ async def _people_core(
                 permanence_override=r["permanence_override"],
                 registry_ttl_days=registry_ttls.get(r["patch_type"]),
                 last_accessed_at=r["last_accessed_at"],
+                freshness_types=type_runtime.freshness_tracked_types,
+                deadline_types=type_runtime.deadline_anchored_types,
             ),
         }
         for r in open_items
