@@ -30,15 +30,20 @@ INGEST_MODE_TYPES = {
     "extraction": {
         "meeting_transcript", "meeting_summary", "summary",
         "query", "analysis", "sentiment", "trace", "chat_log",
-        # Contract item 9: prose corrections ride the extraction adapter.
-        "correction",
-        # Contract item 10: chat completions close open completables.
-        "completion",
     },
     "structured": {"structured_patches"},
 }
 
-_ALL_GATED_TYPES = frozenset().union(*INGEST_MODE_TYPES.values())
+# Contract items 9 and 10: corrections and completions are ADAPTER-
+# INDEPENDENT. Their handlers never run extraction (each does its own
+# candidate matching plus one LLM call against stored patches), so a
+# structured-mode app's users can correct and complete exactly like an
+# extraction app's. Before this they were listed under "extraction",
+# which silently locked structured apps (TR) out of both verbs, the
+# facet-pass audit's item 6.
+MODE_INDEPENDENT_TYPES = frozenset({"correction", "completion"})
+
+_ALL_GATED_TYPES = frozenset().union(*INGEST_MODE_TYPES.values()) | MODE_INDEPENDENT_TYPES
 
 
 def is_interaction_allowed(ingest_mode: Optional[str], task_type: Optional[str]) -> bool:
@@ -50,6 +55,8 @@ def is_interaction_allowed(ingest_mode: Optional[str], task_type: Optional[str])
     - Declared mode → task_type must belong to that mode's adapter.
     """
     if not ingest_mode or ingest_mode not in INGEST_MODE_TYPES:
+        return True
+    if task_type in MODE_INDEPENDENT_TYPES:
         return True
     if task_type not in _ALL_GATED_TYPES:
         return True

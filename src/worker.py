@@ -36,6 +36,7 @@ from contextquilt.services.extraction_prompts import (
 )
 from contextquilt.services.deadline_resolver import run_deadline_micropass
 from contextquilt.services.extraction_schema import (
+    PATCH_TYPES,
     extraction_patch_backstop,
     EXTRACTION_SCHEMA,
     drop_placeholder_and_self_person_patches,
@@ -80,6 +81,7 @@ from contextquilt.services.corrections import (
     parse_correction_response,
 )
 from contextquilt.services.entity_aliasing import find_alias_candidate
+from contextquilt.services.people_identity import people_vocabulary
 from contextquilt.services.ingest_modes import is_interaction_allowed
 from contextquilt.services.decay_model import (
     DEFAULT_TTLS,
@@ -998,6 +1000,7 @@ async def store_entities(
     entities: list[dict],
     metadata: dict | None = None,
     speaker_labels: set | None = None,
+    person_entity_type: str = "person",
 ):
     """
     Store extracted entities to Postgres, resolving alternate surface
@@ -1049,7 +1052,7 @@ async def store_entities(
             deployment's Postgres lags migrations, and entity storage must
             not start failing there because People shipped here.
             """
-            if entity_type != "person":
+            if entity_type != person_entity_type:
                 return
             meta = metadata or {}
             origin_id = meta.get("origin_id")
@@ -2618,6 +2621,59 @@ class ColdPathWorker:
 
         await self.hydrate_cache(user_id)
 
+    async def _app_manifest(self, app_id) -> dict | None:
+        """Latest registered manifest for an app, or None. Cold path
+        only; any failure (legacy non-UUID id, no schema) degrades to
+        None = the SS floor everywhere this feeds."""
+        try:
+            app_uuid = str(uuid.UUID(str(app_id)))
+        except (ValueError, AttributeError, TypeError):
+            return None
+        try:
+            row = await self.db.fetchrow(
+                "SELECT manifest FROM app_schemas WHERE app_id = $1::uuid "
+                "ORDER BY version DESC LIMIT 1",
+                app_uuid,
+            )
+        except Exception:
+            return None
+        if row is None:
+            return None
+        manifest = row["manifest"]
+        if isinstance(manifest, str):
+            try:
+                manifest = json.loads(manifest)
+            except (ValueError, TypeError):
+                return None
+        return manifest if isinstance(manifest, dict) else None
+
+    async def _correction_vocabulary(self, app_id) -> tuple[set, str]:
+        """(allowed patch types, unmatched-correction fallback type) for
+        this app. No manifest -> the SS floor (PATCH_TYPES, takeaway).
+        A manifest without `correction_fallback_type` still falls back
+        to takeaway even when off-manifest: a slightly alien type beats
+        losing a user-stated fact, and the warning log names the gap so
+        the app knows to declare the key."""
+        manifest = await self._app_manifest(app_id)
+        if manifest is None:
+            return set(PATCH_TYPES), FALLBACK_PATCH_TYPE
+        declared = {
+            pt.get("domain_type") for pt in manifest.get("patch_types") or []
+            if isinstance(pt, dict) and pt.get("domain_type")
+        }
+        if not declared:
+            return set(PATCH_TYPES), FALLBACK_PATCH_TYPE
+        fallback = manifest.get("correction_fallback_type")
+        if not (isinstance(fallback, str) and fallback in declared):
+            if fallback:
+                logger.warning("correction_fallback_undeclared",
+                               app_id=str(app_id), fallback=fallback)
+            fallback = FALLBACK_PATCH_TYPE
+            if FALLBACK_PATCH_TYPE not in declared:
+                logger.warning("correction_fallback_off_manifest",
+                               app_id=str(app_id))
+        return declared, fallback
+
     async def handle_correction(self, payload: dict[str, Any]):
         """User correction from chat (contract item 9).
 
@@ -2672,6 +2728,7 @@ class ColdPathWorker:
         by_id = {str(r["patch_id"]): r for r in candidates}
 
         today = datetime.utcnow().date()
+        allowed_types, fallback_type = await self._correction_vocabulary(app_id)
         try:
             response = await self.llm.extract(
                 system_prompt=CORRECTION_SYSTEM,
@@ -2681,10 +2738,12 @@ class ColdPathWorker:
                      for r in candidates],
                     today.isoformat(),
                     scope_label=project or project_id,
+                    allowed_types=sorted(allowed_types),
                 ),
             )
             parsed = parse_correction_response(
-                response.content, set(by_id.keys()), meeting_date=today
+                response.content, set(by_id.keys()), meeting_date=today,
+                allowed_types=allowed_types, fallback_type=fallback_type,
             )
         except Exception as exc:
             logger.error("correction_failed", user_id=user_id, reason=str(exc)[:200])
@@ -2694,7 +2753,7 @@ class ColdPathWorker:
                            correction=correction_text[:100])
             return
         matched_id, value = parsed
-        new_type = value.pop("_new_type", FALLBACK_PATCH_TYPE)
+        new_type = value.pop("_new_type", fallback_type)
 
         old = by_id.get(matched_id) if matched_id else None
         if old is not None:
@@ -3044,7 +3103,8 @@ class ColdPathWorker:
                     longitudinal_types=longitudinal_types,
                 )
                 entities_stored = await store_entities(
-                    conn, self.redis, user_id, entities, metadata
+                    conn, self.redis, user_id, entities, metadata,
+                    person_entity_type=people_vocabulary(manifest).person_entity_type,
                 )
                 relationships_stored = await store_relationships(
                     conn, user_id, relationships, metadata
@@ -3497,6 +3557,13 @@ class ColdPathWorker:
                 # the identity gate needs. Read off the same normalized
                 # transcript the extraction saw.
                 speaker_labels=speaker_labels_in(effective_summary, owner_speaker_label),
+                # Which entity type IS a person comes from the app's people
+                # vocabulary (doc 16 5.9); the SS floor when undeclared.
+                # This closes slice 2's recorded limit: a custom-named
+                # person entity type now accumulates appearances.
+                person_entity_type=people_vocabulary(
+                    await self._app_manifest(app_id)
+                ).person_entity_type,
             )
             relationships_stored = await store_relationships(
                 self.db, user_id, relationships, metadata
