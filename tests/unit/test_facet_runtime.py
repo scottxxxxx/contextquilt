@@ -228,3 +228,30 @@ def test_main_gates_read_the_runtime():
         if "COMPLETABLE_PATCH_TYPES" in l and "FALLBACK_COMPLETABLE_TYPES" not in l
     ]
     assert uses == [], f"unwired COMPLETABLE_PATCH_TYPES uses remain: {uses}"
+
+
+# --------------------------------------------------------------------
+# Universal recall types (slice 3)
+# --------------------------------------------------------------------
+
+def test_universal_recall_floor_is_trait_preference():
+    assert fallback_type_runtime().universal_recall_types == ("preference", "trait")
+
+
+def test_non_pinned_self_disclosure_types_join_the_universal_leg():
+    """A no-project recall previously fetched only trait/preference by
+    name, so a coaching app's self-disclosure types never surfaced. A
+    non-pinned type joins when its facet is self-disclosure AND it is
+    not project-scoped; Episodes stay contextual."""
+    rt = build_type_runtime(SS_ROWS + TR_ROWS)
+    for t in ("skill_rating", "strength", "improvement_area"):
+        assert t in rt.universal_recall_types, t
+    assert "session" not in rt.universal_recall_types
+
+
+def test_pinned_ss_types_cannot_join_the_universal_leg():
+    """goal/constraint are Intention/Constraint facets but PINNED: SS's
+    shipped recall keeps them project-gated, and the pin covers this
+    set the same way it covers the decay inventory."""
+    rt = build_type_runtime(SS_ROWS)
+    assert rt.universal_recall_types == ("preference", "trait")

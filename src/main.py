@@ -701,9 +701,14 @@ async def recall_context(
     # upstream prompt caches (Anthropic cache_control) see a byte-stable
     # prefix. timing_ms is rebuilt fresh on every call so the cache is
     # observable in dashboards.
+    recall_vocab = await _people_vocab_cached(app_id)
     cache_key_payload = {
         "text": request.text,
         "metadata": request.metadata or {},
+        # Two apps whose vocabularies disagree about which entity type
+        # is "a person" must not share a rendered header (doc 18 keeps
+        # their subject spaces apart, but the key must not rely on it).
+        "person_entity_type": recall_vocab.person_entity_type,
         "max_hops": request.max_hops if request.max_hops is not None else 2,
         "output_format": request.output_format or "flat",
         "max_patches": request.max_patches if request.max_patches is not None else 15,
@@ -956,6 +961,13 @@ async def recall_context(
     t2 = time.monotonic()
     subject_key = f"user:{user_id}"
 
+    # One runtime snapshot for the whole recall: the universal-leg and
+    # overdue-guarantee type filters and the scorer's facet/freshness/
+    # deadline sets all read the SAME registered-manifest facts (cached;
+    # no per-call registry round trip). For SS every set equals the
+    # pinned floor, so every byte of SS output is unchanged.
+    type_runtime = await facet_runtime.get_type_runtime(db_pool.fetch)
+
     # Step 4a: Flat patch query (works for both V1 and V2 patches)
     # cp.patch_id is the secondary sort everywhere — created_at ties on
     # microsecond-equal inserts (workers batching) gave undefined order,
@@ -968,12 +980,12 @@ async def recall_context(
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
-              AND (cp.project_id = $2 OR cp.project_id IS NULL OR cp.patch_type IN ('trait', 'preference'))
+              AND (cp.project_id = $2 OR cp.project_id IS NULL OR cp.patch_type = ANY($3::text[]))
               AND COALESCE(cp.status, 'active') = 'active'
             ORDER BY cp.created_at DESC, cp.patch_id ASC
             LIMIT 20
             """,
-            subject_key, recall_project_id
+            subject_key, recall_project_id, list(type_runtime.universal_recall_types)
         )
     elif recall_project:
         # Fallback: filter by project display name (backward compat)
@@ -984,12 +996,12 @@ async def recall_context(
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
-              AND (cp.project = $2 OR cp.project IS NULL OR cp.patch_type IN ('trait', 'preference'))
+              AND (cp.project = $2 OR cp.project IS NULL OR cp.patch_type = ANY($3::text[]))
               AND COALESCE(cp.status, 'active') = 'active'
             ORDER BY cp.created_at DESC, cp.patch_id ASC
             LIMIT 20
             """,
-            subject_key, recall_project
+            subject_key, recall_project, list(type_runtime.universal_recall_types)
         )
     else:
         # No project context — only return universal patches (traits, preferences).
@@ -1002,12 +1014,12 @@ async def recall_context(
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1
-              AND cp.patch_type IN ('trait', 'preference')
+              AND cp.patch_type = ANY($2::text[])
               AND COALESCE(cp.status, 'active') = 'active'
             ORDER BY cp.created_at DESC, cp.patch_id ASC
             LIMIT 20
             """,
-            subject_key
+            subject_key, list(type_runtime.universal_recall_types)
         )
 
     # Step 4b: Traverse patch connections from project patches (Connected Quilt V2)
@@ -1082,7 +1094,7 @@ async def recall_context(
             FROM context_patches cp
             JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
             WHERE ps.subject_key = $1 AND {proj_col} = $2
-              AND cp.patch_type IN ('commitment', 'blocker')
+              AND cp.patch_type = ANY($3::text[])
               AND COALESCE(cp.status, 'active') = 'active'
               AND cp.completed_at IS NULL
               AND cp.value->>'deadline_date' ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}$'
@@ -1091,7 +1103,7 @@ async def recall_context(
             ORDER BY cp.value->>'deadline_date' ASC, cp.patch_id ASC
             LIMIT 5
             """,
-            subject_key, proj_val
+            subject_key, proj_val, list(type_runtime.completable_types)
         )
 
     # Cue fetch leg: patches indexed under a matched cue surface directly,
@@ -1145,6 +1157,10 @@ async def recall_context(
     scored = score_patches(
         all_patches, request.text, matched_names,
         cue_matched_patch_ids={str(r["patch_id"]) for r in cue_rows},
+        facet_by_type=type_runtime.facet_by_type,
+        freshness_types=type_runtime.freshness_tracked_types,
+        deadline_types=frozenset(type_runtime.completable_types),
+        completable_types=frozenset(type_runtime.completable_types),
     )
 
     # Metamemory signals (opt-in): explicit gap lines appended below the
@@ -1213,7 +1229,10 @@ async def recall_context(
         locale = request.metadata.get("locale", "en") if request.metadata else "en"
         labels = _recall_labels(locale)
         try:
-            context = format_category_grouped(scored_for_output, entity_rows, rel_rows, labels)
+            context = format_category_grouped(
+                scored_for_output, entity_rows, rel_rows, labels,
+                person_entity_type=recall_vocab.person_entity_type,
+            )
         except Exception as fmt_exc:  # pragma: no cover — defensive; test coverage is flat-mode
             context = ""
     else:
@@ -1232,6 +1251,7 @@ async def recall_context(
             context, rendered_count = format_flat_ranked_with_stats(
                 scored_for_output, entity_rows, rel_rows,
                 max_chars=token_budget * CHARS_PER_TOKEN - trailing_reserve,
+                person_entity_type=recall_vocab.person_entity_type,
             )
             # Contract commitment E — truncation must be visible.
             coverage = build_coverage_line(rendered_count, scoped_total)
@@ -3582,6 +3602,27 @@ async def _read_separations(conn, user_id: str, entity_ids: List[str]) -> List[t
         user_id, entity_ids,
     )
     return [(str(r["entity_id_lo"]), str(r["entity_id_hi"])) for r in rows]
+
+
+_recall_vocab_cache: dict = {}
+
+
+async def _people_vocab_cached(app_id: str) -> "PeopleVocabulary":
+    """The caller's People vocabulary for the recall hot path.
+
+    Same 300s posture as the facet runtime: vocabulary changes only at
+    manifest registration, so the hot path pays a manifest fetch at most
+    once per TTL per app, not per call.
+    """
+    import time as _time
+    now = _time.monotonic()
+    hit = _recall_vocab_cache.get(app_id)
+    if hit and now - hit[1] < 300:
+        return hit[0]
+    async with db_pool.acquire() as conn:
+        vocab, _ = await _people_read_context(conn, app_id)
+    _recall_vocab_cache[app_id] = (vocab, now)
+    return vocab
 
 
 async def _people_read_context(conn, app_id: str):

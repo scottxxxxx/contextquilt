@@ -94,6 +94,14 @@ class TypeRuntime:
     # registry type carrying a TTL. A registry type absent here decays
     # never (permanent/decade), which is a statement, not an oversight.
     decaying_types: tuple
+    # Types a NO-PROJECT recall fetches: self-disclosure that applies
+    # everywhere. SS floor is {trait, preference}; a non-pinned type
+    # joins when its facet is self-disclosure (Attribute/Affinity/
+    # Intention/Constraint) AND it is not project-scoped. Built from
+    # facets directly, not the freshness set, because a completable
+    # Constraint (universal obligation) belongs here even though decay
+    # anchors it on its deadline.
+    universal_recall_types: tuple
 
     def is_completable(self, patch_type: str) -> bool:
         return patch_type in self.completable_types
@@ -105,6 +113,9 @@ class TypeRuntime:
         return frozenset(self.completable_types)
 
 
+FALLBACK_UNIVERSAL_RECALL_TYPES = ("preference", "trait")
+
+
 def fallback_type_runtime() -> TypeRuntime:
     """The SS floor alone: what CQ did before the registry was consulted."""
     return TypeRuntime(
@@ -113,6 +124,7 @@ def fallback_type_runtime() -> TypeRuntime:
         freshness_tracked_types=frozenset(FRESHNESS_TRACKED_TYPES),
         facet_by_type={},
         decaying_types=tuple(sorted(DEFAULT_TTLS)),
+        universal_recall_types=FALLBACK_UNIVERSAL_RECALL_TYPES,
     )
 
 
@@ -131,6 +143,7 @@ def build_type_runtime(rows) -> TypeRuntime:
     freshness = set(FRESHNESS_TRACKED_TYPES)
     facets: dict = {}
     decaying = set(DEFAULT_TTLS)
+    universal = set(FALLBACK_UNIVERSAL_RECALL_TYPES)
 
     for r in rows or []:
         t = r["type_key"]
@@ -159,6 +172,9 @@ def build_type_runtime(rows) -> TypeRuntime:
             completable.add(t)
         if r["project_scoped"]:
             project_scoped.add(t)
+        else:
+            if facet in FRESHNESS_FACETS:
+                universal.add(t)
         if facet in FRESHNESS_FACETS:
             freshness.add(t)
 
@@ -176,6 +192,7 @@ def build_type_runtime(rows) -> TypeRuntime:
         freshness_tracked_types=frozenset(freshness),
         facet_by_type=facets,
         decaying_types=tuple(sorted(decaying)),
+        universal_recall_types=tuple(sorted(universal)),
     )
 
 

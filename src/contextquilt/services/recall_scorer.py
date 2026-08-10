@@ -39,6 +39,24 @@ TYPE_PRIORITY: Dict[str, int] = {
     "takeaway": 5,
 }
 
+# Facet-keyed base priorities for types NOT in TYPE_PRIORITY (a
+# registered app's vocabulary; TR's types scored base 0 before this and
+# sorted below everything). The values sit inside the SS table's own
+# ordering philosophy: intentions and constraints outrank episodes,
+# connections outrank self-disclosure. A COMPLETABLE type outranks its
+# facet default regardless (see score_patches), mirroring
+# commitment/blocker sitting at the top of the SS table. SS names all
+# hit TYPE_PRIORITY first, so this table cannot move an SS score.
+FACET_PRIORITY: Dict[str, int] = {
+    "Intention": 38,
+    "Constraint": 36,
+    "Episode": 30,
+    "Connection": 22,
+    "Attribute": 15,
+    "Affinity": 10,
+}
+COMPLETABLE_DEFAULT_PRIORITY = 45
+
 
 # Self-typed (you)-speaker patches that get a staleness multiplier.
 # Matches the FRESHNESS_TRACKED_TYPES set in src/worker.py:decay_loop
@@ -230,14 +248,17 @@ def _last_observed_at(row: Any) -> float:
     return _created_at(row)
 
 
-def _freshness_multiplier(patch_type: str, last_observed: float, now: float) -> float:
+def _freshness_multiplier(
+    patch_type: str, last_observed: float, now: float,
+    freshness_types: frozenset = FRESHNESS_TRACKED_TYPES,
+) -> float:
     """Multiplicative staleness penalty for self-typed patches.
 
     Returns 1.0 for any patch type outside FRESHNESS_TRACKED_TYPES,
     or for any patch missing a timestamp. Otherwise returns
     `max(FRESHNESS_FLOOR, exp(-days_stale / FRESHNESS_TIME_CONSTANT_DAYS))`.
     """
-    if patch_type not in FRESHNESS_TRACKED_TYPES:
+    if patch_type not in freshness_types:
         return 1.0
     if last_observed <= 0.0 or now <= last_observed:
         return 1.0
@@ -251,6 +272,10 @@ def score_patches(
     query_text: str,
     matched_entity_names: Iterable[str],
     cue_matched_patch_ids: "Optional[set]" = None,
+    facet_by_type: "Optional[Dict[str, str]]" = None,
+    freshness_types: "Optional[frozenset]" = None,
+    deadline_types: "Optional[frozenset]" = None,
+    completable_types: "Optional[frozenset]" = None,
 ) -> List[Tuple[float, Any]]:
     """Score each patch against the query.
 
@@ -274,6 +299,16 @@ def score_patches(
                                      floor of FRESHNESS_FLOOR for very stale
                                      self-typed patches.
     """
+    # The optional sets come from the facet runtime (registered-manifest
+    # facts); the defaults keep every existing caller byte-identical.
+    # For SS the runtime sets equal these constants (pinned floor).
+    facet_by_type = facet_by_type or {}
+    if freshness_types is None:
+        freshness_types = FRESHNESS_TRACKED_TYPES
+    if deadline_types is None:
+        deadline_types = DEADLINE_BOOSTED_TYPES
+    completable_types = completable_types or frozenset()
+
     query_words = set(_keywords(query_text))
     entity_names_lower = [n.lower() for n in matched_entity_names if n]
 
@@ -302,7 +337,13 @@ def score_patches(
         text = _patch_text(row)
         text_lower = text.lower()
 
-        score = float(TYPE_PRIORITY.get(patch_type, 0))
+        if patch_type in TYPE_PRIORITY:
+            base = TYPE_PRIORITY[patch_type]
+        elif patch_type in completable_types:
+            base = COMPLETABLE_DEFAULT_PRIORITY
+        else:
+            base = FACET_PRIORITY.get(facet_by_type.get(patch_type, ""), 0)
+        score = float(base)
 
         # Entity-match boost
         for name in entity_names_lower:
@@ -325,7 +366,7 @@ def score_patches(
         # Deadline urgency boost — overdue/due-today actionable items
         # float above otherwise-equal patches; imminent ones get a
         # smaller bump. Far-future deadlines get nothing.
-        if patch_type in DEADLINE_BOOSTED_TYPES:
+        if patch_type in deadline_types:
             deadline_d = _patch_deadline_date(row)
             if deadline_d is not None:
                 days_until = (deadline_d - today).days
@@ -354,7 +395,7 @@ def score_patches(
         # Freshness multiplier — only affects self-typed patches.
         # Applied last so the multiplier scales the full composite
         # score, not just the recency component.
-        score *= _freshness_multiplier(patch_type, ts, now)
+        score *= _freshness_multiplier(patch_type, ts, now, freshness_types)
 
         scored.append((score, row))
 
