@@ -7,7 +7,7 @@ from fastapi import FastAPI, HTTPException, Depends, Header, Request, Query, sta
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional, Dict, Any, Union
 import asyncio
 import hashlib
@@ -2283,6 +2283,7 @@ async def update_patch(
     Update a fact or action item. User corrects something CQ got wrong.
     Requires write access via ACL.
     """
+    _require_patch_uuid(patch_id)
     # Verify the patch belongs to this user
     subject_key = f"user:{user_id}"
     row = await db_pool.fetchrow(
@@ -2403,6 +2404,7 @@ async def complete_patch(
     and the active quilt, and shows up in the quilt delta's `completed`
     array (distinct from decayed patches in `deleted`).
     """
+    _require_patch_uuid(patch_id)
     subject_key = f"user:{user_id}"
     row = await db_pool.fetchrow(
         """
@@ -2479,6 +2481,34 @@ async def complete_patch(
     }
 
 
+def _require_patch_uuid(patch_id: str) -> None:
+    """422 for a patch id that is not a UUID, before it reaches SQL.
+
+    The hardening promised to GP (2026-08-07): their chat surface mints
+    synthetic `cta:`-prefixed ids for call-to-action rows that never
+    were CQ patches. One of those reaching a patch verb used to die as
+    an asyncpg cast error (a 500 that reads as a CQ outage); now it is a
+    422 that says what actually happened. Applies to every route taking
+    a {patch_id} path segment, so the contract is one rule rather than
+    per-verb trivia.
+    """
+    try:
+        uuid.UUID(patch_id)
+    except (ValueError, AttributeError, TypeError):
+        if patch_id.startswith("cta:"):
+            message = (
+                f"'{patch_id}' is a synthetic call-to-action id, not a CQ patch id. "
+                "CTA rows are not patches; nothing about them can be completed, "
+                "corrected, or triaged here."
+            )
+        else:
+            message = f"'{patch_id}' is not a patch id (expected a UUID)."
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "INVALID_PATCH_ID", "message": message},
+        )
+
+
 async def _load_open_completable(user_id: str, patch_id: str):
     """Shared gate for the triage write paths (vouch / shelve / un-shelve).
 
@@ -2487,6 +2517,7 @@ async def _load_open_completable(user_id: str, patch_id: str):
     with the current shelved stamp so callers can enforce their own state
     transition.
     """
+    _require_patch_uuid(patch_id)
     subject_key = f"user:{user_id}"
     row = await db_pool.fetchrow(
         """
@@ -2714,6 +2745,7 @@ async def uncomplete_patch(
     409 when the patch is not completed. Works on any completed
     completable regardless of which lane closed it.
     """
+    _require_patch_uuid(patch_id)
     subject_key = f"user:{user_id}"
     row = await db_pool.fetchrow(
         """
@@ -2785,6 +2817,7 @@ async def delete_patch(
     Delete a fact or action item. User removes something CQ got wrong.
     Requires delete access via ACL (or no ACL entry = open access).
     """
+    _require_patch_uuid(patch_id)
     subject_key = f"user:{user_id}"
     row = await db_pool.fetchrow(
         """
@@ -2910,6 +2943,15 @@ PROJECT_SCOPED_TYPES = {
 
 
 class PatchConnectionInput(BaseModel):
+    # extra="forbid" is the promise made to GP (2026-08-07): an unknown
+    # key on a CONNECTION object is a 422, never silently dropped. Their
+    # `relationship` -> `label` rename shipped a payload where the real
+    # field name was ignored and the edge landed with label NULL; a
+    # loud contract beats a quiet default. Forbid is scoped to the
+    # connection shapes only — top-level request models stay tolerant so
+    # additive evolution keeps working.
+    model_config = ConfigDict(extra="forbid")
+
     target_patch_id: str
     role: str  # parent, depends_on, resolves, replaces, informs
     label: Optional[str] = None  # belongs_to, blocked_by, owns, works_on, etc.
@@ -3051,6 +3093,11 @@ async def create_patch(
 # ============================================
 
 class ConnectionCreate(BaseModel):
+    # Same forbid contract as PatchConnectionInput (the GP promise): an
+    # unknown key here is a misspelled or renamed field, and dropping it
+    # silently writes an edge missing the thing the caller said.
+    model_config = ConfigDict(extra="forbid")
+
     from_patch_id: str
     to_patch_id: str
     role: str  # parent, depends_on, resolves, replaces, informs
