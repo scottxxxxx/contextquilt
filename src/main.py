@@ -45,6 +45,7 @@ from dashboard.router import router as dashboard_router
 from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
 from contextquilt.services import decay_model
+from contextquilt.services.extraction_schema import is_user_reference
 from contextquilt.services.recall_formatter import (
     CHARS_PER_TOKEN,
     format_category_grouped,
@@ -3428,6 +3429,11 @@ class PersonCreate(BaseModel):
     source: Optional[str] = None
 
 
+class PersonRenameRequest(BaseModel):
+    name: str
+    source: Optional[str] = None
+
+
 def _identity_error(exc: IdentityRequestError) -> HTTPException:
     detail = {"code": exc.code, "message": exc.message}
     detail.update(exc.extra)
@@ -4836,6 +4842,233 @@ async def confirm_person(
         "name": updated["name"],
         "confirmed_at": updated["confirmed_at"].isoformat() if updated["confirmed_at"] else None,
         "confirmation_source": updated["confirmation_source"],
+    }
+
+
+@app.post("/v1/people/{user_id}/{entity_id}/rename", tags=["People"])
+async def rename_person(
+    user_id: str,
+    entity_id: str,
+    req: PersonRenameRequest,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Change a person's display name. A display-name update, not an
+    identity operation: the entity_id is untouched, and everything keyed
+    on it (appearances, relationships, separations) is unaffected.
+
+    Rename is bigger than a column update because person patches join to
+    entities BY NAME (there is no entity_id on context_patches), so a
+    name change that stopped there would orphan the person's patch from
+    its entity. One transaction does all of it:
+
+      1. The OLD name becomes an alias, so recall still matches it and a
+         future transcript saying the old name resolves here instead of
+         minting a duplicate person.
+      2. The entity's name changes.
+      3. Every active person patch matching the old name or any alias is
+         rewritten to the new name, with an `updated_at` bump so the
+         change rides the next delta (SS holds no person patch_ids and
+         re-decodes, so a text change is just an update to them).
+      4. A rename vouches for the person, same reasoning as merge and
+         keep-separate: typing someone's actual name is asserting who
+         they are.
+      5. The Redis entity index rebuilds.
+
+    Deliberately NOT touched: `value.owner` strings on ledger items stay
+    the raw extracted surface form (doc 16 section 8b: raw, never
+    canonicalised; the ledger keeps matching them through the alias).
+
+    Refuses (409 NAME_TAKEN) a name that already belongs to another
+    person, by name or by alias: making two people share a name is a
+    merge question, not a rename, and answering it here would silently
+    overturn any keep-separate the user recorded. Renaming to one of the
+    person's OWN aliases promotes it: the alias becomes the name and the
+    name becomes an alias (swapping display preference between known
+    surface forms).
+
+    422 for placeholder names ("Speaker 3") and for the user's own name
+    (the quilt owner is the root of the graph, not a person node in it;
+    every sanitizer fights self-person patches and rename must not mint
+    one).
+    """
+    try:
+        new_name = validate_person_name(req.name)
+        source = resolve_identity_source(req.source)
+    except IdentityRequestError as e:
+        raise _identity_error(e)
+
+    subject_key = f"user:{user_id}"
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            profile = await conn.fetchrow(
+                "SELECT display_name FROM profiles WHERE user_id = $1", user_id
+            )
+            if is_user_reference(new_name, profile["display_name"] if profile else None):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "code": "SELF_NAME",
+                        "message": (
+                            f"'{new_name}' refers to the quilt owner. The user is not "
+                            "a person node; renaming someone into them would create "
+                            "the self-person every write path filters out."
+                        ),
+                    },
+                )
+
+            try:
+                row = await _load_active_person(conn, user_id, entity_id)
+            except IdentityRequestError as e:
+                raise _identity_error(e)
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Person {entity_id} not found for this user",
+                )
+            resolved = str(row["entity_id"])
+            old_name = row["name"]
+
+            if new_name == old_name:
+                return {
+                    "status": "noop",
+                    "entity_id": resolved,
+                    "name": old_name,
+                    "reason": "name unchanged",
+                }
+
+            # Collision: the new name must not already be another person,
+            # by entity name or by alias. Aliases resolve forward first, so
+            # an alias whose owner merged away compares against the
+            # canonical it became, not the dead row.
+            other_entity = await conn.fetchrow(
+                """
+                SELECT entity_id, name FROM entities
+                WHERE user_id = $1 AND entity_type = 'person'
+                  AND merged_into IS NULL
+                  AND LOWER(name) = LOWER($2)
+                  AND entity_id <> $3::uuid
+                """,
+                user_id, new_name, resolved,
+            )
+            alias_owner = None
+            alias_row = await conn.fetchrow(
+                "SELECT entity_id FROM entity_aliases "
+                "WHERE user_id = $1 AND LOWER(alias) = LOWER($2)",
+                user_id, new_name,
+            )
+            if alias_row is not None:
+                owner_row = await _load_active_person(
+                    conn, user_id, str(alias_row["entity_id"])
+                )
+                if owner_row is not None and str(owner_row["entity_id"]) != resolved:
+                    alias_owner = owner_row
+            taken_by = other_entity or alias_owner
+            if taken_by is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "NAME_TAKEN",
+                        "message": (
+                            f"'{new_name}' already belongs to another person. If they "
+                            "are the same human, that is a merge, not a rename."
+                        ),
+                        "entity_id": str(taken_by["entity_id"]),
+                        "name": taken_by["name"],
+                    },
+                )
+
+            case_only = new_name.lower() == old_name.lower()
+
+            # Promotion: renaming to one of the person's own aliases makes
+            # that alias the name, so the alias row retires (the unique
+            # index on (user_id, LOWER(alias)) would otherwise collide
+            # with the old-name insert below only in the case-only case,
+            # but an alias identical to the display name is dead weight in
+            # every case).
+            await conn.execute(
+                "DELETE FROM entity_aliases "
+                "WHERE user_id = $1 AND entity_id = $2::uuid AND LOWER(alias) = LOWER($3)",
+                user_id, resolved, new_name,
+            )
+
+            # The old name stays reachable as an alias, except on a
+            # case-only rename, where old and new are the same surface
+            # form and an alias would duplicate the name itself.
+            if not case_only:
+                await conn.execute(
+                    """
+                    INSERT INTO entity_aliases (user_id, entity_id, alias, source)
+                    VALUES ($1, $2::uuid, $3, $4)
+                    ON CONFLICT (user_id, LOWER(alias))
+                    DO UPDATE SET entity_id = EXCLUDED.entity_id,
+                                  source = EXCLUDED.source
+                    """,
+                    user_id, resolved, old_name, source,
+                )
+
+            await conn.execute(
+                "UPDATE entities SET name = $1 WHERE entity_id = $2::uuid",
+                new_name, resolved,
+            )
+
+            # Rewrite the person patch(es). The match set is name plus
+            # aliases, the same join _people_core and the merge fold use:
+            # a patch whose text is an old alias is still this person's
+            # patch, and after a rename it should say what the entity
+            # says. updated_at bump = the change rides the next delta.
+            alias_names = [
+                r["alias"] for r in await conn.fetch(
+                    "SELECT alias FROM entity_aliases WHERE user_id = $1 AND entity_id = $2::uuid",
+                    user_id, resolved,
+                )
+            ]
+            keys = list({n.strip().lower() for n in [old_name, *alias_names] if n and n.strip()})
+            renamed = await conn.fetch(
+                """
+                UPDATE context_patches cp
+                SET value = jsonb_set(value, '{text}', to_jsonb($1::text)),
+                    updated_at = NOW()
+                FROM patch_subjects ps
+                WHERE ps.patch_id = cp.patch_id
+                  AND ps.subject_key = $2
+                  AND cp.patch_type = 'person'
+                  AND COALESCE(cp.status, 'active') = 'active'
+                  AND LOWER(cp.value->>'text') = ANY($3::text[])
+                RETURNING cp.patch_id
+                """,
+                new_name, subject_key, keys,
+            )
+
+            # A rename vouches, same as merge and keep-separate.
+            await conn.execute(
+                """
+                UPDATE entities
+                SET confirmed_at = COALESCE(confirmed_at, NOW()),
+                    confirmation_source = COALESCE(confirmation_source, $1)
+                WHERE entity_id = $2::uuid
+                """,
+                source, resolved,
+            )
+
+            alias_rows = await conn.fetch(
+                "SELECT alias FROM entity_aliases WHERE user_id = $1 AND entity_id = $2::uuid ORDER BY alias",
+                user_id, resolved,
+            )
+
+    await _rebuild_entity_index(user_id)
+    logger.info(
+        "person_renamed", user_id=user_id, app_id=str(app_id),
+        entity_id=resolved, old_name=old_name, new_name=new_name, source=source,
+        renamed_patch_count=len(renamed),
+    )
+    return {
+        "status": "renamed",
+        "entity_id": resolved,
+        "name": new_name,
+        "old_name": old_name,
+        "aliases": [r["alias"] for r in alias_rows],
+        "renamed_patch_ids": [str(r["patch_id"]) for r in renamed],
     }
 
 

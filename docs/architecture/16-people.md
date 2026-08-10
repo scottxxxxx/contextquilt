@@ -534,6 +534,36 @@ Marks an entity confirmed without merging anything. This is the
 "unconfirmed to confirmed" transition for someone CQ inferred from a
 transcript and the user vouched for.
 
+### 5.6a `POST /v1/people/{user_id}/{entity_id}/rename` (shipped 2026-08-09)
+
+A display-name update, not an identity operation: the entity_id is
+untouched and everything keyed on it (appearances, relationships,
+separations) is unaffected. SS's ask, sized honestly: person patches
+join to entities BY NAME, so one transaction does the whole set or the
+patch orphans from its entity:
+
+1. the old name becomes an alias (recall keeps matching it; a future
+   transcript saying it resolves here instead of minting a duplicate),
+2. the entity name changes,
+3. every active person patch matching the old name or any alias is
+   rewritten to the new name with an `updated_at` bump (rides the next
+   delta; SS holds no person patch_ids and re-decodes),
+4. the rename vouches for the person (same reasoning as merge and
+   keep-separate: typing someone's actual name asserts who they are),
+5. the Redis entity index rebuilds.
+
+Deliberately untouched: `value.owner` strings on ledger items stay the
+raw extracted surface form (section 8b); the ledger keeps matching them
+through the alias. Refusals: 409 `NAME_TAKEN` when the name is another
+person's name or alias (two people sharing a name is a merge question,
+and answering it in rename would silently overturn a recorded
+keep-separate); 422 for placeholders and for the user's own name
+(checked with `is_user_reference`, the same predicate the sanitizers
+and ledger share). Renaming to one of the person's OWN aliases promotes
+it: alias becomes name, name becomes alias. Case-only renames skip the
+alias insert (an alias equal to the name is dead weight and a LOWER()
+collision).
+
 ### 5.7 Triage: `decay_state`, shelve, vouch (shipped 2026-08-08)
 
 Agreed in the 2026-08-07 turn-4 exchange with SS (full reasoning in the
