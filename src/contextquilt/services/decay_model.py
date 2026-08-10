@@ -93,12 +93,26 @@ TTL_REGISTRY_QUERY = """
 """
 
 
-def staleness_anchor_sql(patch_type: str) -> str:
-    """The staleness anchor for one type, as the decay loop's SQL uses it."""
-    if patch_type in FRESHNESS_TRACKED_TYPES:
-        return "COALESCE(last_observed_at, created_at)"
-    if patch_type in DEADLINE_ANCHORED_TYPES:
+def staleness_anchor_sql(
+    patch_type: str,
+    freshness_types=None,
+    deadline_types=None,
+) -> str:
+    """The staleness anchor for one type, as the decay loop's SQL uses it.
+
+    The optional sets let the facet runtime widen the membership beyond
+    the SS-name floor (facet-derived freshness, manifest completables);
+    the defaults keep every existing caller byte-identical.
+
+    Deadline anchoring is checked FIRST: a type in both sets (a
+    completable whose facet reads as self-disclosure) must keep the
+    never-archived-before-due-date guarantee. For the SS floor the two
+    sets are disjoint, so the order is unobservable there.
+    """
+    if patch_type in (deadline_types if deadline_types is not None else DEADLINE_ANCHORED_TYPES):
         return DEADLINE_ANCHOR_SQL
+    if patch_type in (freshness_types if freshness_types is not None else FRESHNESS_TRACKED_TYPES):
+        return "COALESCE(last_observed_at, created_at)"
     return "updated_at"
 
 
@@ -160,17 +174,26 @@ def archive_after(
     permanence_override: Optional[str] = None,
     registry_ttl_days: Optional[int] = None,
     last_accessed_at: Optional[datetime] = None,
+    freshness_types=None,
+    deadline_types=None,
 ) -> Optional[datetime]:
     """The instant after which the decay loop's predicate holds.
 
     Mirrors the loop exactly: anchor + effective TTL, extended by the
     access-exemption leg (last access + UNMODIFIED TTL). None = never.
+    The optional type sets mirror staleness_anchor_sql's; defaults keep
+    existing callers byte-identical.
     """
     eff = effective_ttl_days(
         patch_type, salience, permanence_override, registry_ttl_days
     )
     if eff is None:
         return None
+
+    if freshness_types is None:
+        freshness_types = FRESHNESS_TRACKED_TYPES
+    if deadline_types is None:
+        deadline_types = DEADLINE_ANCHORED_TYPES
 
     if permanence_override:
         # Step 1 anchors overrides on plain updated_at, whatever the type.
@@ -182,9 +205,10 @@ def archive_after(
             if registry_ttl_days is not None
             else DEFAULT_TTLS[patch_type]
         )
-        if patch_type in FRESHNESS_TRACKED_TYPES:
-            anchor = last_observed_at or created_at or updated_at
-        elif patch_type in DEADLINE_ANCHORED_TYPES:
+        # Deadline before freshness, same precedence as the SQL side: a
+        # type in both sets keeps the never-archived-before-due-date
+        # guarantee. Disjoint for the SS floor, so unobservable there.
+        if patch_type in deadline_types:
             anchor = updated_at
             if deadline_date and _ISO_DATE_RE.match(deadline_date):
                 due = datetime.strptime(deadline_date, "%Y-%m-%d").replace(
@@ -194,6 +218,8 @@ def archive_after(
                     anchor = max(updated_at.replace(tzinfo=timezone.utc), due)
                 else:
                     anchor = max(updated_at.astimezone(timezone.utc), due)
+        elif patch_type in freshness_types:
+            anchor = last_observed_at or created_at or updated_at
         else:
             anchor = updated_at
 
@@ -220,6 +246,8 @@ def decay_state(
     registry_ttl_days: Optional[int] = None,
     last_accessed_at: Optional[datetime] = None,
     now: Optional[datetime] = None,
+    freshness_types=None,
+    deadline_types=None,
 ) -> str:
     """live | aging | stale for one patch, stable within a UTC day.
 
@@ -243,6 +271,8 @@ def decay_state(
         permanence_override=permanence_override,
         registry_ttl_days=registry_ttl_days,
         last_accessed_at=last_accessed_at,
+        freshness_types=freshness_types,
+        deadline_types=deadline_types,
     )
     if until is None:
         return DECAY_STATE_LIVE

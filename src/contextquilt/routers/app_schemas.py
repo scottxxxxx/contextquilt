@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from contextquilt.config import get_settings
+from contextquilt.services.facet_runtime import invalidate_type_runtime
 from contextquilt.services.schema_validator import validate_manifest
 
 
@@ -199,6 +200,12 @@ async def register_schema(
                     json.dumps(et.get("extraction_rules", {})),
                 )
                 entity_count += 1
+
+        # The facet runtime caches a registry snapshot; registration is
+        # the one event that changes it, so drop the cache here and this
+        # process serves the new facts immediately (the worker converges
+        # within the cache TTL).
+        invalidate_type_runtime()
 
         return RegistrationResponse(
             status="registered",

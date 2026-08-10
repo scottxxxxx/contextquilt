@@ -90,6 +90,7 @@ from contextquilt.services.decay_model import (
     TTL_REGISTRY_QUERY,
     staleness_anchor_sql,
 )
+from contextquilt.services.facet_runtime import get_type_runtime
 from contextquilt.services.llm_client import LLMClient
 from contextquilt.services.semantic_dedup import (
     DEDUP_JUDGE_SCHEMA,
@@ -418,10 +419,10 @@ async def store_connected_patches(
     # project/origin metadata alongside the episode types. Function scope —
     # used by inserts, Pass-2 stub synthesis, AND the gray-zone project
     # guard below.
-    project_scoped_types = (
-        "decision", "commitment", "blocker", "takeaway",
-        "goal", "constraint", "event", "deliverable",
-    )
+    # Resolved from the facet runtime (manifest project_scoped flags,
+    # SS floor as fallback), so a registered app's types carry project
+    # context per THEIR manifest instead of the SS episode list.
+    project_scoped_types = (await get_type_runtime(db.fetch)).project_scoped_types
 
     async def _store_cues(patch_id: str, cues: list) -> None:
         """Attach associative-retrieval cues to a patch. Idempotent (PK on
@@ -1692,6 +1693,13 @@ class ColdPathWorker:
         )
         while self.running:
             try:
+                # Which types are deadline-bearing completables comes from
+                # the facet runtime per cycle (manifest is_completable,
+                # SS floor fallback), so a new app's completables get the
+                # overdue stamp without CQ code.
+                sweep_completable = (
+                    await get_type_runtime(self.db.fetch)
+                ).completable_types
                 result = await self.db.execute(
                     f"""
                     UPDATE context_patches
@@ -1700,22 +1708,24 @@ class ColdPathWorker:
                                to_jsonb(to_char((NOW() AT TIME ZONE 'utc')::date, 'YYYY-MM-DD'))
                            ),
                            updated_at = NOW()
-                     WHERE patch_type IN ('commitment', 'blocker')
+                     WHERE patch_type = ANY($1::text[])
                        AND COALESCE(status, 'active') = 'active'
                        AND completed_at IS NULL
                        AND value->>'overdue_since' IS NULL
                        AND {overdue_sql}
-                    """
+                    """,
+                    list(sweep_completable)
                 )
                 stamped = int(result.split()[-1]) if result else 0
                 total = await self.db.fetchval(
                     f"""
                     SELECT count(*) FROM context_patches
-                     WHERE patch_type IN ('commitment', 'blocker')
+                     WHERE patch_type = ANY($1::text[])
                        AND COALESCE(status, 'active') = 'active'
                        AND completed_at IS NULL
                        AND {overdue_sql}
-                    """
+                    """,
+                    list(sweep_completable)
                 )
                 if stamped:
                     logger.info("deadline_sweep_stamped", newly_overdue=stamped, total_overdue=total)
@@ -1757,6 +1767,13 @@ class ColdPathWorker:
             try:
                 total_archived = 0
 
+                # The type inventory and anchor sets come from the facet
+                # runtime (registry-backed, SS floor as fallback), so a
+                # registered app's types decay per THEIR manifest. Before
+                # this, the loop iterated only the SS names: a TR type
+                # with a registry TTL was never visited and never decayed.
+                runtime = await get_type_runtime(self.db.fetch)
+
                 # Step 1: Archive patches with explicit permanence_override.
                 # These run per-class and cross-cut patch_type.
                 for perm_class, ttl_days in PERMANENCE_CLASS_DAYS.items():
@@ -1791,7 +1808,8 @@ class ColdPathWorker:
 
                 # Step 2: Archive patches using their type's default TTL.
                 # Exclude patches with an override (handled in Step 1).
-                for patch_type, ttl_days in DEFAULT_TTLS.items():
+                for patch_type in runtime.decaying_types:
+                    ttl_days = DEFAULT_TTLS.get(patch_type)
                     # Registry is keyed (type_key, app_id) — a global row
                     # (app_id NULL) and zero+ per-app rows can coexist.
                     # Without an ordering, fetchrow's pick was arbitrary and
@@ -1812,13 +1830,27 @@ class ColdPathWorker:
                     except Exception:
                         pass  # Registry table may not exist yet
 
+                    if ttl_days is None:
+                        # In the decaying inventory but no TTL resolvable
+                        # anywhere (registry row went permanent between
+                        # snapshot and now, or cache drift). Skipping is
+                        # the safe direction: never archive on a guess.
+                        continue
+
                     # Anchor selection and the salience multiplier come from
                     # the shared decay model (self-typed types anchor on
                     # last_observed_at; deadline-bearing completables on
                     # GREATEST(updated_at, deadline_date) so they never
                     # archive before their due date; the access-exemption
-                    # window stays at the UNMODIFIED TTL).
-                    anchor_sql = staleness_anchor_sql(patch_type)
+                    # window stays at the UNMODIFIED TTL). Membership comes
+                    # from the runtime: facet-derived freshness, manifest
+                    # completables. For SS names both sets equal the
+                    # module constants, so this is byte-identical for them.
+                    anchor_sql = staleness_anchor_sql(
+                        patch_type,
+                        freshness_types=runtime.freshness_tracked_types,
+                        deadline_types=runtime.deadline_anchored_types,
+                    )
 
                     result = await self.db.execute(
                         f"""
@@ -1845,8 +1877,8 @@ class ColdPathWorker:
                             count=count,
                             ttl_days=ttl_days,
                             anchor=(
-                                "last_observed_at" if patch_type in FRESHNESS_TRACKED_TYPES
-                                else "max(updated_at, deadline)" if patch_type in DEADLINE_ANCHORED_TYPES
+                                "last_observed_at" if patch_type in runtime.freshness_tracked_types
+                                else "max(updated_at, deadline)" if patch_type in runtime.deadline_anchored_types
                                 else "updated_at"
                             ),
                         )
@@ -2784,13 +2816,14 @@ class ColdPathWorker:
         project = metadata.get("project")
         subject_key = f"user:{user_id}"
 
+        completable = (await get_type_runtime(self.db.fetch)).completable_types
         scope_sql = ""
-        params: list = [subject_key]
+        params: list = [subject_key, list(completable)]
         if project_id:
-            scope_sql = "AND (cp.project_id = $2 OR cp.project_id IS NULL)"
+            scope_sql = "AND (cp.project_id = $3 OR cp.project_id IS NULL)"
             params.append(project_id)
         elif project:
-            scope_sql = "AND (cp.project = $2 OR cp.project IS NULL)"
+            scope_sql = "AND (cp.project = $3 OR cp.project IS NULL)"
             params.append(project)
         rows = await self.db.fetch(
             f"""
@@ -2798,7 +2831,7 @@ class ColdPathWorker:
             FROM context_patches cp
             JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
             WHERE ps.subject_key = $1
-              AND cp.patch_type IN ('commitment', 'blocker')
+              AND cp.patch_type = ANY($2::text[])
               AND COALESCE(cp.status, 'active') = 'active'
               AND cp.completed_at IS NULL
               {scope_sql}
