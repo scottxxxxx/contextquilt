@@ -140,13 +140,21 @@ def build_type_runtime(rows) -> TypeRuntime:
         if facet:
             # First non-null wins; per-name rows describe one app's type.
             facets.setdefault(t, facet)
-        # TTLs apply to every type (registry override has always worked
-        # this way for SS); behavior FLAGS apply only to non-pinned
-        # types (see SS_PINNED_TYPES).
+        if t in SS_PINNED_TYPES:
+            # The pin covers the DECAY INVENTORY too, not just the flags.
+            # Learned on prod 2026-08-10, the hard way: SS types outside
+            # DEFAULT_TTLS (project, deliverable, role, decision) carry
+            # registry TTLs from registration, and letting them into the
+            # inventory gave them their FIRST-EVER decay pass, which
+            # archived 63 project + 14 deliverable patches on a live
+            # quilt minutes after deploy (restored, cause-stamped rows
+            # made them findable). "Never decayed" was shipped SS
+            # behavior, not an SS bug to fix silently. Registry TTL
+            # OVERRIDES for types already in DEFAULT_TTLS still apply
+            # inside the loop, as they always have.
+            continue
         if r["default_ttl_days"] is not None:
             decaying.add(t)
-        if t in SS_PINNED_TYPES:
-            continue
         if r["is_completable"]:
             completable.add(t)
         if r["project_scoped"]:

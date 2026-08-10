@@ -67,13 +67,25 @@ TR_ROWS = [
 
 def test_ss_rows_change_nothing_beyond_the_floor():
     """Byte-identity for SS, by construction: SS's vocabulary is PINNED,
-    so its registry flags cannot move the shipped floor at all. Only
-    registry TTLs still apply to pinned types (they always have)."""
+    so its registry rows cannot move the shipped floor at all — flags
+    AND the decay inventory."""
     rt = build_type_runtime(SS_ROWS)
     fb = fallback_type_runtime()
     assert rt.completable_types == fb.completable_types == ("blocker", "commitment")
     assert rt.project_scoped_types == fb.project_scoped_types
     assert rt.freshness_tracked_types == fb.freshness_tracked_types
+    assert rt.decaying_types == fb.decaying_types
+
+
+def test_the_77_patch_incident_cannot_recur():
+    """2026-08-10: SS types outside DEFAULT_TTLS (project, deliverable,
+    role, decision) carry registry TTLs, and admitting them to the decay
+    inventory gave them their first-ever decay pass, archiving 77 live
+    patches minutes after deploy. "Never decayed" was SHIPPED behavior
+    for those types. The pin must cover the inventory."""
+    rt = build_type_runtime(SS_ROWS)
+    for t in ("project", "deliverable", "role", "decision", "person", "org"):
+        assert t not in rt.decaying_types, f"{t} entered the decay inventory"
 
 
 def test_pinning_holds_the_live_role_discrepancy():
