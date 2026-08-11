@@ -103,3 +103,12 @@ def test_presence_grades_and_unknown_capacity_count_as_present():
     assert s["turns_30d"] == 5  # the mention-only row's turns never count
     assert s["first_present_at"] == "2026-08-04"
     assert s["last_present_at"] == "2026-08-10"
+
+
+def test_observed_projects_are_presence_grade():
+    """Source guard for the rollup in _people_core: mention-grade rows
+    never grant project membership; the filter stands on this."""
+    MAIN = (ROOT / "src" / "main.py").read_text()
+    block = MAIN.split("project_counts: dict = {}")[1].split("observed = [")[0]
+    assert 'caps & {"speaker", "ownership"}' in block
+    assert "continue" in block

@@ -4376,6 +4376,15 @@ async def _people_core(
         appearances = appearances_by_id.get(eid, [])
         project_counts: dict = {}
         for a in appearances:
+            # "Where they show up" is a presence claim, and the project
+            # filter stands on it: someone merely NAMED in a Kore room
+            # did not show up in Kore (the second 17a field pass, where
+            # mention-grade rows gave bystanders project membership).
+            # Same predicate as the signals block: empty capacities are
+            # pre-migration-31 rows and count as presence.
+            caps = set(a["capacities"] or [])
+            if caps and not caps & {"speaker", "ownership"}:
+                continue
             if a["project_id"] or a["project"]:
                 k = (a["project_id"], a["project"])
                 project_counts[k] = project_counts.get(k, 0) + 1
