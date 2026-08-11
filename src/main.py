@@ -2970,6 +2970,137 @@ async def uncomplete_patch(
     }
 
 
+FOLLOW_UP_MIN_BASIS = 5
+
+
+@app.get("/v1/quilt/{user_id}/insights", tags=["Quilt"])
+async def quilt_insights(
+    user_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    ABOUT-YOU aggregates for the Memory tab (design 10c) that a client
+    can never reconstruct from sync: completion history leaves the sync
+    surface, so a fresh install has no basis for a follow-up rate.
+
+    `follow_up` is the rate of the USER'S OWN completable items that
+    reached an observable resolution: completed / (completed +
+    open-and-overdue). Items that decayed without an observed resolution
+    are EXCLUDED from the claim, because decay means unobserved, not
+    unfulfilled; they are reported separately as `unresolved` so the
+    exclusion is visible rather than silent.
+
+    "The user's own" resolves through the ego link (entities.self_at,
+    migration 35) with the SAME edge-first owner resolution the quilt
+    action items serve, so this number and the owner chips can never
+    disagree about whose item something is. No self entity, or fewer
+    than FOLLOW_UP_MIN_BASIS resolved items, serves `follow_up: null` —
+    a percentage over two data points is a coin flip wearing a ring
+    chart, and null renders as not-tracked (the house rule: 0 and
+    cannot-tell are different claims).
+
+    Deadline comparisons bucket to the UTC day, so the response is
+    stable within a day for a quiet quilt.
+    """
+    self_entity = await db_pool.fetchval(
+        "SELECT entity_id FROM entities "
+        "WHERE user_id = $1 AND self_at IS NOT NULL",
+        user_id,
+    )
+    if self_entity is None:
+        return {"user_id": user_id, "follow_up": None}
+
+    vocab = await _people_vocab_cached(app_id)
+    rows = await db_pool.fetch(
+        """
+        SELECT cp.patch_id, cp.value, COALESCE(cp.status, 'active') AS status,
+               cp.completed_at,
+               (cp.value->>'deadline_date') AS deadline_date
+        FROM context_patches cp
+        JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+        WHERE ps.subject_key = $1 AND cp.patch_type = 'commitment'
+        """,
+        f"user:{user_id}",
+    )
+    ids = [r["patch_id"] for r in rows]
+    owner_text_by_item: dict = {}
+    if ids:
+        owns_rows = await db_pool.fetch(
+            """
+            SELECT DISTINCT ON (pc.to_patch_id)
+                   pc.to_patch_id, op.value->>'text' AS person_text
+            FROM patch_connections pc
+            JOIN context_patches op ON op.patch_id = pc.from_patch_id
+            JOIN context_patches item ON item.patch_id = pc.to_patch_id
+            WHERE pc.to_patch_id = ANY($1::uuid[])
+              AND pc.connection_label = $2
+              AND COALESCE(pc.status, 'active') = 'active'
+            ORDER BY pc.to_patch_id,
+                     (lower(btrim(op.value->>'text'))
+                      = lower(btrim(item.value->>'owner'))) DESC NULLS LAST,
+                     pc.created_at, pc.connection_id
+            """,
+            ids, vocab.ownership_label,
+        )
+        owner_text_by_item = {
+            str(r["to_patch_id"]): r["person_text"] for r in owns_rows
+        }
+    entity_rows = await db_pool.fetch(
+        "SELECT entity_id, name, merged_into FROM entities "
+        "WHERE user_id = $1 AND entity_type = $2",
+        user_id, vocab.person_entity_type,
+    )
+    alias_rows = await db_pool.fetch(
+        "SELECT a.alias, a.entity_id FROM entity_aliases a "
+        "JOIN entities e ON e.entity_id = a.entity_id "
+        "WHERE a.user_id = $1 AND e.entity_type = $2",
+        user_id, vocab.person_entity_type,
+    )
+    resolve_owner_entity = build_entity_resolver(
+        [dict(r) for r in entity_rows], [dict(r) for r in alias_rows]
+    )
+
+    today = datetime.utcnow().date().isoformat()
+    completed = overdue_open = unresolved = 0
+    for r in rows:
+        value = r["value"]
+        if isinstance(value, str):
+            value = json.loads(value)
+        owner_entity = (
+            resolve_owner_entity(owner_text_by_item.get(str(r["patch_id"])))
+            or resolve_owner_entity(value.get("owner"))
+        )
+        # An ownerless commitment on the user's own quilt is the (you)
+        # speaker's by the extraction contract (owner is stripped on
+        # self-owned items; reassign-speaker to_self clears it the same
+        # way), so it counts as the user's alongside explicit self hits.
+        is_self = owner_entity == str(self_entity) or (
+            owner_entity is None and not value.get("owner")
+        )
+        if not is_self:
+            continue
+        if r["completed_at"] is not None:
+            completed += 1
+        elif r["status"] == "active":
+            if r["deadline_date"] and r["deadline_date"] < today:
+                overdue_open += 1
+        else:
+            unresolved += 1
+
+    basis = completed + overdue_open
+    if basis < FOLLOW_UP_MIN_BASIS:
+        return {"user_id": user_id, "follow_up": None}
+    return {
+        "user_id": user_id,
+        "follow_up": {
+            "completed": completed,
+            "overdue_open": overdue_open,
+            "rate": round(completed / basis, 2),
+            "unresolved": unresolved,
+        },
+    }
+
+
 @app.delete("/v1/quilt/{user_id}/patches/{patch_id}", tags=["Quilt"])
 async def delete_patch(
     user_id: str,
