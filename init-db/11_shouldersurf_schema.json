@@ -1,20 +1,17 @@
 {
   "app_id": "shouldersurf",
-  "version": 9,
+  "version": 10,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
-
   "design_principles": [
     "Schema must work for any meeting type without vertical-specific branching — SS is consumer, not B2B per-vertical.",
     "Every CQ facet is represented by at least one SS domain type, so recall has all six cognitive roles to draw from.",
     "Extraction prompts stay domain-agnostic. Examples in guidance span multiple meeting contexts (legal, coaching, creative, corporate, personal) to prevent overfitting to any one vertical."
   ],
-
   "origin_types": [
     "meeting"
   ],
-
   "entity_types": [
     {
       "entity_type": "person",
@@ -68,7 +65,6 @@
       "indexed": true
     }
   ],
-
   "patch_types": [
     {
       "domain_type": "trait",
@@ -76,12 +72,16 @@
       "permanence": "year",
       "display_name": "Trait",
       "description": "A self-disclosed pattern in HOW the submitting user operates — focus, communication style, decision-making style, working rhythm. Captures the user's mode of operation, not the choices they make.",
-      "value_shape": { "text": "string" },
+      "value_shape": {
+        "text": "string"
+      },
       "completable": false,
       "project_scoped": false,
       "self_only": true,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Traits apply ONLY to the (you) speaker. 'Speaker 3 is meticulous' is NOT a trait. Aim for patterns the user explicitly self-discloses about HOW they operate (e.g., 'I tend to ramble', 'I think in systems', 'I get overwhelmed by long threads'). Statements about WHAT the user prefers, leans toward, chooses, or values — including any 'prefers X', 'prefers X over Y', 'leans toward X', or 'values X' phrasing — are PREFERENCES, not traits, even when habitual or self-disclosed."
       }
     },
@@ -91,12 +91,17 @@
       "permanence": "year",
       "display_name": "Preference",
       "description": "A lean, value, or stylistic choice — WHAT the user (or another named participant) prefers, leans toward, or values. Captures the choice itself, distinct from trait, which captures HOW the user operates.",
-      "value_shape": { "text": "string", "owner": "string?" },
+      "value_shape": {
+        "text": "string",
+        "owner": "string?"
+      },
       "completable": false,
       "project_scoped": false,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Examples: 'prefers async standups', 'values thorough documentation', 'prefers candid over posed', 'prefers phased rollouts over big-bang'. Any statement of the form 'prefers X', 'prefers X over Y', 'leans toward X', or 'values X' is a preference — even when described as a habit or default behavior. Mental model: preferences capture WHAT the user chooses; traits capture HOW the user operates. When a preference is attributed to a NAMED participant other than the (you) speaker (e.g., 'Lockridge prefers candid over posed'), also emit a `held_by` connection from the preference to that person's patch — this lets recall surface the preference under that person's context."
       }
     },
@@ -106,12 +111,18 @@
       "permanence": "year",
       "display_name": "Goal",
       "description": "A forward-looking target the subject (person, team, or project) is steering toward. May have a time horizon. Not a commitment (nobody is on the hook for execution yet) and not a decision (nothing has been decided).",
-      "value_shape": { "text": "string", "owner": "string?", "target_date": "string?" },
+      "value_shape": {
+        "text": "string",
+        "owner": "string?",
+        "target_date": "string?"
+      },
       "completable": false,
       "project_scoped": true,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Examples: 'retire at 62', 'raise $500k by year-end', 'land a Martha Stewart Weddings feature this year', 'settle matter by Q3', '10% awareness lift', 'close by end of summer'. Distinguish from commitment (promise with owner) and decision (call already made). A goal is an aspirational target."
       }
     },
@@ -121,12 +132,17 @@
       "permanence": "year",
       "display_name": "Constraint",
       "description": "A hard rule, limit, or boundary applying to the user, a project, or a decision. Not a preference (a hard rule, not a lean) and not a blocker (an enduring boundary, not a current impediment).",
-      "value_shape": { "text": "string", "scope": "string?" },
+      "value_shape": {
+        "text": "string",
+        "scope": "string?"
+      },
       "completable": false,
       "project_scoped": true,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Examples: 'no flash during ceremony', 'legal prohibits guaranteed in ad copy', 'ethics wall on Acme Holdings', 'max budget $650k', '30-min session cap', 'must comply with Regulation X', 'non-compete covers direct competitors for 6 months'. A constraint is non-negotiable within its scope."
       }
     },
@@ -136,12 +152,16 @@
       "permanence": "decade",
       "display_name": "Person",
       "description": "A named individual in the user's world.",
-      "value_shape": { "text": "string" },
+      "value_shape": {
+        "text": "string"
+      },
       "completable": false,
       "project_scoped": false,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Only emit for specifically named individuals. Unnamed speakers (Speaker 4, Speaker 16) must NOT become person patches. The person patch text may include brief role-agnostic context like 'spouse', 'mentor', 'former colleague' when the relationship is personal rather than project-scoped."
       }
     },
@@ -151,12 +171,17 @@
       "permanence": "decade",
       "display_name": "Organization",
       "description": "Any organizational entity in the user's world — company, team, committee, firm, practice group, school, charity, venue, brokerage, agency, foundation.",
-      "value_shape": { "text": "string", "kind": "string?" },
+      "value_shape": {
+        "text": "string",
+        "kind": "string?"
+      },
       "completable": false,
       "project_scoped": false,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Emit for any named organizational entity. Optional 'kind' can specify 'firm', 'school', 'committee', 'charity', 'client', 'venue', 'regulator', etc. Do NOT emit for generic role groups ('the backend team') unless they have a proper name."
       }
     },
@@ -166,12 +191,17 @@
       "permanence": "quarter",
       "display_name": "Project",
       "description": "The top-level container of ongoing work the user tracks across meetings — the client, matter, campaign, account, engagement, case, listing, or initiative the user has named. Projects hold deliverables, episodes, and roles.",
-      "value_shape": { "text": "string", "status": "string?" },
+      "value_shape": {
+        "text": "string",
+        "status": "string?"
+      },
       "completable": false,
       "project_scoped": false,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Reserved for the TOP-LEVEL container the (you) speaker is working under — the client, matter, case, campaign, or account. Examples: 'ABM' (client), 'TechCorp v. DataSys' (case), 'Mayfield Wedding' (engagement), 'Johnson home search' (listing). If the transcript is tagged with a project name (metadata.project), trust that tag — do not emit a new project patch for a sub-scope under it. For named products/features/systems being BUILT inside the project (e.g., 'IT helpdesk chatbot' within 'ABM'), use `deliverable` instead. Rule of thumb: one `project` patch per named client/case/engagement, not per named deliverable."
       }
     },
@@ -181,13 +211,20 @@
       "permanence": "quarter",
       "display_name": "Deliverable",
       "description": "A concrete product, feature, system, artifact, or workstream being built as part of a project. Sits between the top-level `project` container and the specific episodes (commitments, blockers, decisions, takeaways, events) that drive its delivery. A single project often contains multiple deliverables. **When a deliverable is emitted in the same extraction as episode patches, those episodes should parent to the deliverable, not to the top-level project** — this preserves the two-level hierarchy the user cares about.",
-      "value_shape": { "text": "string", "status": "string?" },
+      "value_shape": {
+        "text": "string",
+        "status": "string?"
+      },
       "completable": false,
       "project_scoped": true,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
-        "required_connections": ["belongs_to"],
+        "required_fields": [
+          "text"
+        ],
+        "required_connections": [
+          "belongs_to"
+        ],
         "guidance": "Emit when the transcript describes a named product, feature, system, workstream, or artifact that the (you) speaker is helping build INSIDE a broader project. Must connect via `belongs_to` to its parent project. Once a deliverable is emitted, **every episode patch from that same meeting that is specifically about building THIS deliverable must `belongs_to` the deliverable, not the project**. Reserve `belongs_to → project` for patches that apply to the engagement as a whole (e.g., a goal spanning multiple deliverables, a constraint that applies to the entire client relationship). Examples: 'IT helpdesk chatbot' (within 'ABM') → CORS blocker, CORS enablement commitment, and the sample-app decision all `belongs_to` the chatbot deliverable. 'Customer onboarding flow' (within 'Kaiser rollout') → its own onboarding commitments and blockers `belongs_to` the deliverable, while a project-wide 'maintain HIPAA compliance' constraint `belongs_to` the project. 'Pre-trial motion bundle' (within 'TechCorp v. DataSys') → motion-specific deadlines `belongs_to` the deliverable. 'Reception photo sequence' (within 'Mayfield Wedding') → sequence-specific shot-list commitments `belongs_to` the deliverable. If the concept IS the whole project (the user's top-level named thing), use `project` instead."
       }
     },
@@ -197,13 +234,20 @@
       "permanence": "year",
       "display_name": "Role",
       "description": "A person's specific function on a specific project. Scoped to the (person, project) pair via connections — role is immutable for the life of the project and cascades on project archival.",
-      "value_shape": { "text": "string" },
+      "value_shape": {
+        "text": "string"
+      },
       "completable": false,
       "project_scoped": true,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
-        "required_connections": ["belongs_to", "describes"],
+        "required_fields": [
+          "text"
+        ],
+        "required_connections": [
+          "belongs_to",
+          "describes"
+        ],
         "guidance": "Emit when someone is stated or clearly implied to have a specific function on a specific project: 'Stanhope is backend lead on the Benefits App MVP', 'Lockridge Liu is opposing counsel on TechCorp v. DataSys', 'CRO chairs the Risk Committee', 'I'm the buyer's agent on 123 Oak'. Must connect to both the project (belongs_to) and the person (describes). Skip unnamed speakers, generic participation, and project-agnostic identity claims (those are traits)."
       }
     },
@@ -213,12 +257,17 @@
       "permanence": "year",
       "display_name": "Decision",
       "description": "A call that was made during the meeting, with optional rationale.",
-      "value_shape": { "text": "string", "rationale": "string?" },
+      "value_shape": {
+        "text": "string",
+        "rationale": "string?"
+      },
       "completable": false,
       "project_scoped": true,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Decisions are durable statements that stay true until superseded. 'Will use Nova 3 for June release', 'approved $2M budget', 'going with direction B'. Exploratory discussion without a conclusion is NOT a decision."
       }
     },
@@ -228,12 +277,18 @@
       "permanence": "month",
       "display_name": "Commitment",
       "description": "A promise with a named owner and optional deadline.",
-      "value_shape": { "text": "string", "owner": "string?", "deadline": "string?" },
+      "value_shape": {
+        "text": "string",
+        "owner": "string?",
+        "deadline": "string?"
+      },
       "completable": true,
       "project_scoped": true,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Commitments require a SPECIFIC NAMED owner. 'Someone should finalize the deck' (no owner) is a takeaway. Extract the owner exactly as named. When the transcript also names who the commitment is owed TO, add an `owed_to` edge from the commitment to that person. 'I'll send Lockridge the routing diagram' is one commitment owned by the (you) speaker with an `owed_to` edge to Lockridge."
       }
     },
@@ -243,12 +298,17 @@
       "permanence": "week",
       "display_name": "Blocker",
       "description": "Something currently preventing progress on a project or commitment.",
-      "value_shape": { "text": "string", "owner": "string?" },
+      "value_shape": {
+        "text": "string",
+        "owner": "string?"
+      },
       "completable": true,
       "project_scoped": true,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Blockers are current impediments — missing resources, unresolved dependencies, stalled approvals. Distinct from constraints: a constraint is an enduring rule ('cannot use flash'); a blocker is a specific current obstacle ('waiting on venue confirmation'). A blocker phrased as waiting on a named person ('awaiting Pemberly's feedback') means that person owes the blocker's owner, so set `value.owner` to the person who has to clear it and do NOT add an `owed_to` edge. Add `owed_to` only in the other direction, when the blocker's owner is the one somebody else is waiting on."
       }
     },
@@ -258,12 +318,16 @@
       "permanence": "week",
       "display_name": "Takeaway",
       "description": "An evaluative lesson or insight worth remembering, with decision implications.",
-      "value_shape": { "text": "string" },
+      "value_shape": {
+        "text": "string"
+      },
       "completable": false,
       "project_scoped": true,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Takeaways are EVALUATIVE observations with decision implications — 'Flux introduces churn risk', 'board wants measurable outcomes in reports', 'buyers prioritize schools over commute', 'Liu's motion patterns suggest fishing'. Restated facts, procedural statements, and plot summaries are NOT takeaways. Hard cap: 3 per meeting."
       }
     },
@@ -273,104 +337,193 @@
       "permanence": "quarter",
       "display_name": "Event",
       "description": "An external occurrence with context implications — something that happened which affects the subject's work but isn't itself a commitment, decision, blocker, or evaluative lesson.",
-      "value_shape": { "text": "string", "occurred_at": "string?" },
+      "value_shape": {
+        "text": "string",
+        "occurred_at": "string?"
+      },
       "completable": false,
       "project_scoped": true,
       "self_only": false,
       "extraction_rules": {
-        "required_fields": ["text"],
+        "required_fields": [
+          "text"
+        ],
         "guidance": "Examples: 'court ruled in our favor on March 3', 'client team restructured last week', 'SEC released new guidance last month', 'engagement session held', 'market dropped 12% this week'. Events are historical/external; they explain why other patches exist but are not themselves choices or promises."
+      }
+    },
+    {
+      "domain_type": "insight",
+      "facet": "Attribute",
+      "permanence": "year",
+      "display_name": "Insight",
+      "description": "A derived behavioral pattern about a person the user works with, synthesized by the profile pass across at least three distinct meetings. Carries the lens, the claim, and an actionable do line, with full provenance to its source patches.",
+      "value_shape": {
+        "text": "string"
+      },
+      "completable": false,
+      "project_scoped": false,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": [
+          "text"
+        ],
+        "guidance": "Never extract this type from a transcript. Insights are derived exclusively by the consolidation profile pass; the extractor must not emit them."
       }
     }
   ],
-
   "connection_labels": [
     {
       "label": "belongs_to",
       "role": "parent",
-      "from_types": ["role", "decision", "commitment", "blocker", "takeaway", "goal", "constraint", "event", "deliverable", "project"],
-      "to_types": ["project", "deliverable"],
+      "from_types": [
+        "role",
+        "decision",
+        "commitment",
+        "blocker",
+        "takeaway",
+        "goal",
+        "constraint",
+        "event",
+        "deliverable",
+        "project"
+      ],
+      "to_types": [
+        "project",
+        "deliverable"
+      ],
       "description": "Child patch belongs inside a parent container. Valid parents are `project` (top-level) and `deliverable` (sub-scope inside a project). Archival cascades to children. **Rule: pick the NARROWEST valid parent.** If a deliverable exists in the same extraction that this patch is specifically about, parent to the deliverable — NOT the top-level project. Hierarchy: project ← deliverable ← episode/role. A `project` may belong_to another `project` only when the user explicitly models nested engagements (e.g., 'ABM Q2 rollout' within 'ABM'). Role patches require both `belongs_to → project` AND `describes → person`."
     },
     {
       "label": "works_on",
       "role": "informs",
-      "from_types": ["person"],
-      "to_types": ["project"],
+      "from_types": [
+        "person"
+      ],
+      "to_types": [
+        "project"
+      ],
       "description": "Person is actively involved in a project."
     },
     {
       "label": "owns",
       "role": "informs",
-      "from_types": ["person"],
-      "to_types": ["commitment", "blocker", "decision", "goal"],
+      "from_types": [
+        "person"
+      ],
+      "to_types": [
+        "commitment",
+        "blocker",
+        "decision",
+        "goal"
+      ],
       "description": "Person is responsible for or author of this item."
     },
     {
       "label": "owed_to",
       "role": "informs",
-      "from_types": ["commitment", "blocker"],
-      "to_types": ["person"],
+      "from_types": [
+        "commitment",
+        "blocker"
+      ],
+      "to_types": [
+        "person"
+      ],
       "description": "The named person this item is owed TO, the counterparty who is waiting on it. Direction: FROM the item TO the person. This is the opposite side of `owns`: `owns` says who does the work, `owed_to` says who is waiting for it. Emit ONLY when the transcript makes the recipient explicit ('I'll send Lockridge the routing diagram', 'get the IP address over to Denby'). Never emit it as a guess about who might care. THE REVERSED CASE IS THE ONE TO WATCH: when the item says somebody is WAITING ON another person ('blocked waiting on config from Pemberly', 'awaiting Fenwyck's decision', 'depends on Pemberly for the threshold setup'), that person OWES the item's owner, so the edge does NOT belong on this item at all. Emit an `owed_to` edge only when the item's owner is the one who has to deliver. Two more hard rules: an item is never owed to the person who owns it, and an item owed to the (you) speaker needs no edge at all, because the owner already carries that. The case this exists for is the (you) speaker owing a named person something, which nothing else in the vocabulary can express."
     },
     {
       "label": "blocked_by",
       "role": "depends_on",
-      "from_types": ["commitment"],
-      "to_types": ["blocker"],
+      "from_types": [
+        "commitment"
+      ],
+      "to_types": [
+        "blocker"
+      ],
       "description": "Commitment cannot be completed until the blocker is resolved."
     },
     {
       "label": "motivated_by",
       "role": "informs",
-      "from_types": ["decision"],
-      "to_types": ["preference", "takeaway"],
+      "from_types": [
+        "decision"
+      ],
+      "to_types": [
+        "preference",
+        "takeaway"
+      ],
       "description": "Backward-looking: decision was driven by this preference or prior lesson."
     },
     {
       "label": "aims_for",
       "role": "informs",
-      "from_types": ["commitment", "decision", "project"],
-      "to_types": ["goal"],
+      "from_types": [
+        "commitment",
+        "decision",
+        "project"
+      ],
+      "to_types": [
+        "goal"
+      ],
       "description": "Forward-looking: this commitment/decision/project advances toward a goal."
     },
     {
       "label": "bound_by",
       "role": "informs",
-      "from_types": ["commitment", "decision", "project"],
-      "to_types": ["constraint"],
+      "from_types": [
+        "commitment",
+        "decision",
+        "project"
+      ],
+      "to_types": [
+        "constraint"
+      ],
       "description": "This action or project is bound by a hard rule that must be respected."
     },
     {
       "label": "describes",
       "role": "informs",
-      "from_types": ["role"],
-      "to_types": ["person"],
+      "from_types": [
+        "role"
+      ],
+      "to_types": [
+        "person"
+      ],
       "description": "Role patch describes a specific person's function on its parent project."
     },
     {
       "label": "member_of",
       "role": "informs",
-      "from_types": ["person"],
-      "to_types": ["org"],
+      "from_types": [
+        "person"
+      ],
+      "to_types": [
+        "org"
+      ],
       "description": "Person is a member, employee, or affiliate of an organization."
     },
     {
       "label": "reports_to",
       "role": "informs",
-      "from_types": ["person"],
-      "to_types": ["person"],
+      "from_types": [
+        "person"
+      ],
+      "to_types": [
+        "person"
+      ],
       "description": "Person A reports to Person B in an organizational hierarchy. Emit only when the transcript explicitly states the relationship."
     },
     {
       "label": "held_by",
       "role": "informs",
-      "from_types": ["preference"],
-      "to_types": ["person"],
+      "from_types": [
+        "preference"
+      ],
+      "to_types": [
+        "person"
+      ],
       "description": "Preference is held by a specific named person other than the (you) speaker. Emit only when the transcript attributes the preference to a named participant (e.g., 'Lockridge prefers candid over posed'). Preferences from the (you) speaker do NOT need this connection — their attribution is implicit via patch ownership. Lets recall surface 'preferences held by Lockridge' when Lockridge's name is in the query."
     }
   ],
-
   "extraction_prompt_guidance": {
     "role_context": "You are extracting typed memory patches from a diarized meeting transcript for ShoulderSurf. SS is a consumer iOS app used for all kinds of meetings — work, coaching, legal, creative, personal. Your output grounds future LLM conversations with the user.",
     "speaker_conventions": "Use the (you) marker convention to identify the submitting user. Traits apply ONLY to the (you) speaker. Ownership/authorship can be attributed to any named speaker. Unnamed speakers (Speaker 4, Speaker 16) must never become person patches or entities.",
@@ -390,10 +543,11 @@
       "Takeaways — evaluative lessons only (max 3 per meeting)"
     ],
     "hard_caps": {
-      
       "entities_per_meeting": 15,
       "relationships_per_meeting": 15,
-      "per_type_caps": { "takeaway": 3 }
+      "per_type_caps": {
+        "takeaway": 3
+      }
     },
     "exclusion_examples": [
       "Scheduling logistics ('let's move this to Tuesday')",
@@ -408,16 +562,35 @@
   },
   "consolidation_rules": [
     {
-      "from_types": ["blocker", "decision", "commitment"],
+      "from_types": [
+        "blocker",
+        "decision",
+        "commitment"
+      ],
       "produce_type": "takeaway",
       "min_patches": 3,
       "guidance": "Synthesize the current state of ONE issue thread that these patches all describe: what is blocked, what was decided about it, and who owns the next step. Only consolidate when the sources clearly concern the same underlying issue; skip mixed clusters that merely share a topic word. The statement should read as a status brief a colleague could act on."
     },
     {
-      "from_types": ["takeaway"],
+      "from_types": [
+        "takeaway"
+      ],
       "produce_type": "constraint",
       "min_patches": 3,
       "guidance": "Only durable working patterns or standing facts about an account, team, or system that keep recurring across meetings (recurring scope creep, a standing approval chain, an always-slow environment). Never one-off status notes, moods, or anything tied to a single meeting."
+    },
+    {
+      "cluster": "person",
+      "from_types": [
+        "commitment",
+        "blocker",
+        "decision",
+        "takeaway"
+      ],
+      "produce_type": "insight",
+      "min_patches": 4,
+      "min_meetings": 3,
+      "guidance": "Profile how this person works, not what they did. The pattern must recur across different meetings: how they reach and keep decisions, or what kinds of framing they respond to. Skip status, skip one-off events, skip anything a single meeting could explain."
     }
   ]
 }
