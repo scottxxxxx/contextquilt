@@ -9,6 +9,7 @@ Default: Mistral Small 3.1 via OpenRouter ($0.03/$0.11 per M tokens).
 import asyncio
 import json
 import os
+import re
 import sys
 import time
 import uuid
@@ -49,6 +50,7 @@ from contextquilt.services.extraction_schema import (
     enforce_owner_edge_agreement,
     enforce_person_ownership,
     speaker_labels_in,
+    self_speaker_label,
     is_placeholder_or_self_person,
     normalize_cue_list,
     normalize_owner_in_transcript,
@@ -1042,6 +1044,7 @@ async def store_entities(
     speaker_labels: set | None = None,
     person_entity_type: str = "person",
     speaker_turns: dict | None = None,
+    self_label: str | None = None,
 ):
     """
     Store extracted entities to Postgres, resolving alternate surface
@@ -1066,10 +1069,18 @@ async def store_entities(
         return 0
 
     stored = 0
+    self_key = self_label.strip().lower() if self_label else None
     for ent in entities:
         name = ent.get("name", "").strip()
         entity_type = ent.get("type", "").strip()
         description = ent.get("description", "")
+        # The (you) marker belongs to transcripts, never to entity names:
+        # sanitize_you_marker_from_patches covers the patch lane, and prod
+        # grew a literal "Scott (you)" entity through this one. Strip it
+        # here so the marked form resolves to the canonical row (and gets
+        # the self stamp) instead of fragmenting the graph.
+        if "(you)" in name.lower():
+            name = re.sub(r"\(you\)", "", name, flags=re.IGNORECASE).strip()
         if not name or not entity_type:
             continue
         # Defensive sink guard (same dual-layer pattern as cues): the
@@ -1157,6 +1168,67 @@ async def store_entities(
             except Exception as e:
                 logger.debug("person_appearance_skipped", error=str(e)[:120])
 
+        async def _maybe_stamp_self(entity_id) -> None:
+            """Record that this entity IS the submitting user (the ego
+            link the 13b orbit graph excludes).
+
+            Keep-first: at most one self entity per user (partial unique
+            index, migration 35), and an already-stamped DIFFERENT entity
+            wins over this observation — a moving ego would silently
+            re-shape every graph read, so a conflict is logged for a
+            human, never resolved by the write path. Suppressed rows
+            never qualify: "not a person" and "is the user" cannot both
+            be true, and the durable-no must not be weakened.
+
+            Degrades silently where the columns are absent (the MCP
+            deployment's Postgres lags migrations, same contract as
+            appearances).
+            """
+            if not self_key or entity_type != person_entity_type:
+                return
+            if name.strip().lower() != self_key:
+                return
+            try:
+                stamped = await db.fetchval(
+                    """
+                    UPDATE entities SET
+                        self_at = NOW(),
+                        self_source = 'you_marker'
+                    WHERE entity_id = $1
+                      AND self_at IS NULL
+                      AND suppressed_at IS NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM entities
+                          WHERE user_id = $2 AND self_at IS NOT NULL
+                            AND entity_id <> $1
+                      )
+                    RETURNING entity_id
+                    """,
+                    entity_id, user_id,
+                )
+                if stamped:
+                    logger.info(
+                        "self_entity_stamped",
+                        user_id=user_id, entity_id=str(entity_id),
+                        source="you_marker",
+                    )
+                else:
+                    other = await db.fetchval(
+                        "SELECT entity_id FROM entities "
+                        "WHERE user_id = $1 AND self_at IS NOT NULL "
+                        "  AND entity_id <> $2",
+                        user_id, entity_id,
+                    )
+                    if other is not None:
+                        logger.warning(
+                            "self_entity_conflict",
+                            user_id=user_id,
+                            stamped_entity_id=str(other),
+                            observed_entity_id=str(entity_id),
+                        )
+            except Exception as e:
+                logger.debug("self_entity_stamp_skipped", error=str(e)[:120])
+
         async def _reobserve(entity_id) -> None:
             await db.execute(
                 """
@@ -1170,6 +1242,7 @@ async def store_entities(
                 description, metadata_json, entity_id,
             )
             await _record_appearance(entity_id)
+            await _maybe_stamp_self(entity_id)
 
         # 1. Exact match, case-insensitive (the old ON CONFLICT only
         #    caught exact case, so "lockridge abrams" vs "Lockridge Abrams"
@@ -1284,6 +1357,7 @@ async def store_entities(
         )
         if new_entity_id is not None:
             await _record_appearance(new_entity_id)
+            await _maybe_stamp_self(new_entity_id)
         stored += 1
 
     # Update Redis entity name index for this user
@@ -3632,6 +3706,13 @@ class ColdPathWorker:
                 person_entity_type=people_vocabulary(
                     await self._app_manifest(app_id)
                 ).person_entity_type,
+                # The ego link (13b): whichever identity signal named the
+                # user — structured metadata or the inline (you) marker —
+                # stamps their resolved entity as self. Both land here as
+                # a plain name; the marker parse is the fallback because
+                # the metadata path is the stronger, gated signal.
+                self_label=owner_speaker_label
+                or self_speaker_label(effective_summary),
             )
             relationships_stored = await store_relationships(
                 self.db, user_id, relationships, metadata

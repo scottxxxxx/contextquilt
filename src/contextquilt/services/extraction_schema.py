@@ -1262,6 +1262,32 @@ def speaker_turn_counts(text: object, user_label: "str | None" = None) -> dict:
     return counts
 
 
+def self_speaker_label(text: object) -> "str | None":
+    """The (you)-marked speaker's name from a transcript, lowercased, or
+    None when no marker is present.
+
+    Single source of truth for "which speaker IS the submitting user"
+    when the marker arrives inline (SS injects "[Scott (you)]" client
+    side after voice match) and metadata carries no owner_speaker_label.
+    Feeds the self-entity stamp in store_entities: the ego link the 13b
+    orbit graph excludes.
+
+    Placeholders never qualify: "[Speaker 2 (you)]" is a diarization
+    artifact wearing the marker, and stamping it would pin the ego to a
+    row the placeholder gate exists to keep out of identity decisions.
+    """
+    if not isinstance(text, str) or not text:
+        return None
+    for raw in SPEAKER_LABEL.findall(text):
+        if "(you)" not in raw.lower():
+            continue
+        name = re.sub(r"\(you\)", "", raw, flags=re.IGNORECASE).strip()
+        if not name or is_placeholder_or_self_person(name):
+            continue
+        return name.lower()
+    return None
+
+
 def speaker_labels_in(text: object, user_label: "str | None" = None) -> set:
     """Lowercased speaker labels appearing in a transcript.
 
