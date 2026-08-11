@@ -68,8 +68,11 @@ from contextquilt.services.consolidation import (
     MAX_CLUSTERS_PER_USER_PER_CYCLE,
     MAX_SOURCE_TEXTS,
     MAX_USERS_PER_APP_PER_CYCLE,
+    PROFILE_SYSTEM,
+    build_profile_content,
     build_synthesis_content,
     parse_consolidation_rules,
+    parse_profile_response,
     parse_synthesis_response,
 )
 from contextquilt.services.corrections import (
@@ -2110,6 +2113,12 @@ class ColdPathWorker:
         for rule in rules:
             if created >= MAX_CLUSTERS_PER_USER_PER_CYCLE:
                 break
+            if rule.get("cluster") == "person":
+                created += await self._consolidate_user_people(
+                    subject_key, app_id, rule,
+                    MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
+                )
+                continue
             clusters = await self.db.fetch(
                 f"""
                 SELECT pc.cue,
@@ -2151,6 +2160,190 @@ class ColdPathWorker:
                 if made:
                     created += 1
         return created
+
+    async def _consolidate_user_people(
+        self, subject_key: str, app_id: str, rule: dict, budget: int
+    ) -> int:
+        """The profile pass (16a / 12a): person-keyed clusters.
+
+        A cluster is (user, app, person patch) whose owns-edge items of
+        rule.from_types span >= min_meetings DISTINCT meetings (the
+        receipts gate) with >= min_patches members. Three deliberate
+        differences from the cue pass:
+
+        - The idempotency check ignores status: a user-deleted insight
+          (hold-to-suppress rides DELETE /patches, archive_cause
+          user_delete) is a durable no, never re-derived.
+        - The SELF person is excluded: 16a's lenses are about the
+          counterparty; insights about the user belong to the self-typed
+          machinery.
+        - Sources must carry origin_ids, because the receipts ARE the
+          meetings.
+        """
+        if budget <= 0:
+            return 0
+        vocab = people_vocabulary(await self._app_manifest(app_id))
+        user_id = subject_key.split(":", 1)[1] if ":" in subject_key else subject_key
+        try:
+            self_name = await self.db.fetchval(
+                "SELECT name FROM entities WHERE user_id = $1 AND self_at IS NOT NULL",
+                user_id,
+            )
+        except Exception:
+            self_name = None  # pre-migration-35 DB: no exclusion basis
+        clusters = await self.db.fetch(
+            f"""
+            SELECT op.patch_id AS person_patch_id,
+                   op.value->>'text' AS person_name,
+                   array_agg(DISTINCT cp.patch_id) AS patch_ids,
+                   count(DISTINCT cp.origin_id) AS meeting_count
+            FROM patch_connections pc
+            JOIN context_patches op ON op.patch_id = pc.from_patch_id
+            JOIN context_patches cp ON cp.patch_id = pc.to_patch_id
+            JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+            JOIN context_patch_acl acl ON acl.patch_id = cp.patch_id
+            WHERE ps.subject_key = $1
+              AND acl.app_id = $2::uuid
+              AND pc.connection_label = $7
+              AND COALESCE(pc.status, 'active') = 'active'
+              AND op.patch_type = $8
+              AND COALESCE(op.status, 'active') = 'active'
+              AND cp.patch_type = ANY($3::text[])
+              AND COALESCE(cp.status, 'active') = 'active'
+              AND cp.origin_id IS NOT NULL
+              AND cp.created_at > NOW() - INTERVAL '{CLUSTER_WINDOW_DAYS} days'
+              AND ($9::text IS NULL
+                   OR lower(btrim(op.value->>'text')) <> lower(btrim($9)))
+              -- durable-no idempotency: ANY prior derived insight for this
+              -- person, INCLUDING archived (user-deleted), blocks re-derivation
+              AND NOT EXISTS (
+                  SELECT 1 FROM context_patches d
+                  JOIN patch_subjects dps ON dps.patch_id = d.patch_id
+                  WHERE dps.subject_key = $1
+                    AND d.patch_type = $4
+                    AND d.origin_mode = 'derived'
+                    AND d.value->>'source_person' = op.patch_id::text
+              )
+            GROUP BY op.patch_id, op.value->>'text'
+            HAVING count(DISTINCT cp.patch_id) >= $5
+               AND count(DISTINCT cp.origin_id) >= $6
+            ORDER BY count(DISTINCT cp.origin_id) DESC, op.patch_id ASC
+            LIMIT $10
+            """,
+            subject_key, app_id, rule["from_types"], rule["produce_type"],
+            rule["min_patches"], rule["min_meetings"],
+            vocab.ownership_label, vocab.person_type, self_name, budget,
+        )
+        created = 0
+        for cluster in clusters:
+            made = await self._synthesize_person_cluster(
+                subject_key, app_id, rule,
+                str(cluster["person_patch_id"]), cluster["person_name"],
+                [str(p) for p in cluster["patch_ids"]],
+            )
+            if made:
+                created += 1
+        return created
+
+    async def _synthesize_person_cluster(
+        self, subject_key: str, app_id: str, rule: dict,
+        person_patch_id: str, person_name: str, source_patch_ids: list,
+    ) -> bool:
+        """One profile call + provenance write. The receipts gate is
+        re-checked here against the fetched sources (sanitizer-style
+        second layer): the claim never ships on fewer distinct meetings
+        than the rule demands, whatever the cluster query said."""
+        rows = await self.db.fetch(
+            """
+            SELECT value->>'text' AS text, origin_id, created_at
+            FROM context_patches
+            WHERE patch_id = ANY($1::uuid[])
+            ORDER BY created_at ASC
+            """,
+            source_patch_ids,
+        )
+        dated = [
+            (r["created_at"].date().isoformat(), r["text"])
+            for r in rows if r["text"]
+        ]
+        distinct_origins = {r["origin_id"] for r in rows if r["origin_id"]}
+        if len(dated) < rule["min_patches"] or len(distinct_origins) < rule["min_meetings"]:
+            return False
+        try:
+            response = await self.llm.extract(
+                system_prompt=PROFILE_SYSTEM,
+                user_content=build_profile_content(
+                    person_name, dated, rule.get("guidance")
+                ),
+            )
+            profile = parse_profile_response(response.content)
+        except Exception as exc:
+            logger.warning("profile_synthesis_failed",
+                           subject=subject_key, person=person_name,
+                           reason=str(exc)[:200])
+            return False
+        if not profile:
+            logger.debug("profile_declined", subject=subject_key, person=person_name)
+            return False
+
+        patch_id = str(uuid.uuid4())
+        now = datetime.utcnow()
+        value_json = json.dumps({
+            "text": profile["text"],
+            "do": profile["do"],
+            "lens": profile["lens"],
+            "source_person": person_patch_id,
+            "about_person": person_name,
+        })
+        async with self.db.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    INSERT INTO context_patches (
+                        patch_id, patch_name, patch_type, value,
+                        origin_mode, source_prompt, confidence, persistence,
+                        status, created_at, updated_at, last_observed_at,
+                        source_patch_ids
+                    ) VALUES ($1, $2, $3, $4, 'derived', 'profile_pass', 0.7,
+                              $5, 'active', $6, $6, $6, $7)
+                    """,
+                    patch_id, f"profile_{patch_id[:8]}",
+                    rule["produce_type"], value_json,
+                    DEFAULT_PERSISTENCE.get(rule["produce_type"], "sticky"),
+                    now, source_patch_ids,
+                )
+                await conn.execute(
+                    "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
+                    patch_id, subject_key,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO patch_usage_metrics (patch_id, access_count, last_accessed_at, current_decay_score)
+                    VALUES ($1, 1, $2, 1.0)
+                    """,
+                    patch_id, now,
+                )
+                await conn.execute(
+                    "INSERT INTO context_patch_acl (patch_id, app_id, can_read, can_write, can_delete) VALUES ($1, $2::uuid, TRUE, TRUE, TRUE)",
+                    patch_id, app_id,
+                )
+                for src in source_patch_ids:
+                    await conn.execute(
+                        """
+                        INSERT INTO patch_connections
+                            (from_patch_id, to_patch_id, connection_role, connection_label, context)
+                        VALUES ($1::uuid, $2::uuid, 'informs', 'consolidated_into', 'profile source')
+                        ON CONFLICT (from_patch_id, to_patch_id, connection_role) DO NOTHING
+                        """,
+                        src, patch_id,
+                    )
+        logger.info(
+            "profile_insight_created",
+            subject=subject_key, person=person_name,
+            lens=profile["lens"], sources=len(source_patch_ids),
+            meetings=len(distinct_origins),
+        )
+        return True
 
     async def _synthesize_cluster(
         self, subject_key: str, app_id: str, rule: dict,

@@ -4753,8 +4753,65 @@ async def get_person(
             "items": [_done_item(r) for r in rows[:COMPLETED_HISTORY_CAP]],
         }
 
+    # Profile insights (16a): derived patches from the person-keyed
+    # consolidation pass, keyed by value.source_person = this person's
+    # patch id. Active-only on the READ (a suppressed insight disappears
+    # from the surface) while the pass's idempotency check ignores
+    # status, which together make hold-to-suppress a durable no through
+    # the existing DELETE /patches route. Evidence is the source
+    # patches' meetings: the receipts the 12a design demands. Empty list
+    # = none derived yet; insights need a person PATCH, so a patchless
+    # entity honestly has none.
+    insights: list = []
+    if row.get("patch_id"):
+        try:
+            ins_rows = await conn.fetch(
+                """
+                SELECT cp.patch_id, cp.value, cp.created_at, cp.source_patch_ids
+                FROM context_patches cp
+                JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                WHERE ps.subject_key = $1
+                  AND cp.origin_mode = 'derived'
+                  AND cp.value->>'source_person' = $2
+                  AND COALESCE(cp.status, 'active') = 'active'
+                ORDER BY cp.created_at DESC
+                """,
+                f"user:{user_id}", str(row["patch_id"]),
+            )
+            for ir in ins_rows:
+                iv = ir["value"]
+                if isinstance(iv, str):
+                    iv = json.loads(iv)
+                evidence: list = []
+                if ir["source_patch_ids"]:
+                    ev_rows = await conn.fetch(
+                        """
+                        SELECT DISTINCT origin_id, min(created_at)::date AS met_on
+                        FROM context_patches
+                        WHERE patch_id = ANY($1::uuid[]) AND origin_id IS NOT NULL
+                        GROUP BY origin_id ORDER BY met_on ASC
+                        """,
+                        ir["source_patch_ids"],
+                    )
+                    evidence = [
+                        {"origin_id": e["origin_id"],
+                         "date": e["met_on"].isoformat()}
+                        for e in ev_rows
+                    ]
+                insights.append({
+                    "patch_id": str(ir["patch_id"]),
+                    "lens": iv.get("lens"),
+                    "text": iv.get("text", ""),
+                    "do": iv.get("do"),
+                    "derived_at": ir["created_at"].isoformat() if ir["created_at"] else None,
+                    "evidence": evidence,
+                })
+        except Exception:
+            insights = []  # serving must never fail the detail route
+
     detail = _public_person(row)
     detail.update({
+        "insights": insights,
         "projects": row["_projects"],
         "commitments": {
             "they_owe": [_item(r) for r in row["_they_owe"]],
