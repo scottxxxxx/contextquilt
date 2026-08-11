@@ -4774,7 +4774,12 @@ async def get_person(
     insights: list = []
     if row.get("patch_id"):
         try:
-            ins_rows = await conn.fetch(
+            # db_pool, NOT the _people_core conn: that connection's
+            # acquire block has already closed by this point in the
+            # function, and the first live derivation proved it (insight
+            # in DB, zero served, the guard swallowing the closed-conn
+            # error).
+            ins_rows = await db_pool.fetch(
                 """
                 SELECT cp.patch_id, cp.value, cp.created_at, cp.source_patch_ids
                 FROM context_patches cp
@@ -4793,7 +4798,7 @@ async def get_person(
                     iv = json.loads(iv)
                 evidence: list = []
                 if ir["source_patch_ids"]:
-                    ev_rows = await conn.fetch(
+                    ev_rows = await db_pool.fetch(
                         """
                         SELECT DISTINCT origin_id, min(created_at)::date AS met_on
                         FROM context_patches
