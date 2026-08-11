@@ -37,6 +37,7 @@ from contextquilt.services.extraction_prompts import (
 from contextquilt.services.deadline_resolver import run_deadline_micropass
 from contextquilt.services.extraction_schema import (
     PATCH_TYPES,
+    speaker_turn_counts,
     extraction_patch_backstop,
     EXTRACTION_SCHEMA,
     drop_placeholder_and_self_person_patches,
@@ -464,6 +465,8 @@ async def store_connected_patches(
         )
         new_dd = value.get("deadline_date")
         if new_dd:
+            # Fill a missing date (unchanged behavior): "I'll ship it"
+            # followed by "ship it by Friday" is one fact gaining a date.
             await db.execute(
                 """
                 UPDATE context_patches
@@ -475,6 +478,43 @@ async def store_connected_patches(
                    AND value->>'deadline_date' IS NULL
                 """,
                 new_dd, value.get("deadline") or new_dd, existing_id,
+            )
+            # A DIFFERENT date supersedes (new 2026-08-11, the 12a
+            # capture signals). Before this, a rescheduled deadline was
+            # silently ignored: the fill above only ran when the date was
+            # missing, so the patch stayed overdue against the stale date
+            # forever. Now the latest statement wins, the displaced date
+            # goes to value.deadline_history (capped at 10, oldest
+            # dropped) so slip-counting has something to count, and a
+            # stale overdue_since clears (the sweep re-stamps if the new
+            # date passes too).
+            await db.execute(
+                """
+                UPDATE context_patches
+                   SET value = (
+                           jsonb_set(
+                               jsonb_set(
+                                   value,
+                                   '{deadline_history}',
+                                   CASE WHEN jsonb_array_length(
+                                            COALESCE(value->'deadline_history', '[]'::jsonb)) >= 10
+                                        THEN (COALESCE(value->'deadline_history', '[]'::jsonb) - 0)
+                                        ELSE COALESCE(value->'deadline_history', '[]'::jsonb)
+                                   END || jsonb_build_object(
+                                           'deadline', value->'deadline',
+                                           'deadline_date', value->'deadline_date',
+                                           'superseded_at', to_jsonb($4::text))
+                               ),
+                               '{deadline_date}', to_jsonb($1::text)
+                           )
+                       ) - 'overdue_since'
+                       || jsonb_build_object('deadline', $2::text)
+                 WHERE patch_id = $3::uuid
+                   AND value->>'deadline_date' IS NOT NULL
+                   AND value->>'deadline_date' <> $1
+                """,
+                new_dd, value.get("deadline") or new_dd, existing_id,
+                created_at.isoformat() if hasattr(created_at, "isoformat") else str(created_at),
             )
         # Salience merges forward like deadline detail: a re-observation
         # flagged high UPGRADES the surviving patch; nothing ever
@@ -1001,6 +1041,7 @@ async def store_entities(
     metadata: dict | None = None,
     speaker_labels: set | None = None,
     person_entity_type: str = "person",
+    speaker_turns: dict | None = None,
 ):
     """
     Store extracted entities to Postgres, resolving alternate surface
@@ -1068,8 +1109,13 @@ async def store_entities(
             # ingest that only mentions someone must not erase the fact
             # that they spoke.
             capacities = ["mention"]
-            if speaker_labels and name.strip().lower() in speaker_labels:
+            name_key = name.strip().lower()
+            if speaker_labels and name_key in speaker_labels:
                 capacities.append("speaker")
+            # Turn count: captured at the only moment it exists (the
+            # transcript is derive-then-discard; no backfill is possible,
+            # ever). NULL = unknown, never "spoke zero turns".
+            turn_count = (speaker_turns or {}).get(name_key)
             try:
                 # A suppressed entity ("not a person") accumulates no
                 # meeting history: SS's condition that appearances stop
@@ -1086,18 +1132,27 @@ async def store_entities(
                 await db.execute(
                     """
                     INSERT INTO person_appearances
-                        (user_id, entity_id, origin_id, origin_type, project_id, capacities)
-                    VALUES ($1, $2, $3, $4, $5, $6::text[])
+                        (user_id, entity_id, origin_id, origin_type, project_id, capacities, turn_count)
+                    VALUES ($1, $2, $3, $4, $5, $6::text[], $7)
                     ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
                         last_seen_at = NOW(),
                         project_id = COALESCE(EXCLUDED.project_id, person_appearances.project_id),
                         capacities = ARRAY(SELECT DISTINCT unnest(
-                            person_appearances.capacities || EXCLUDED.capacities))
+                            person_appearances.capacities || EXCLUDED.capacities)),
+                        -- A re-ingest of the same meeting keeps the MAX,
+                        -- never sums (five mentions of one meeting stay one
+                        -- meeting; two counts of one meeting stay one
+                        -- count). NULL never clobbers a known value.
+                        turn_count = CASE
+                            WHEN EXCLUDED.turn_count IS NULL THEN person_appearances.turn_count
+                            ELSE GREATEST(COALESCE(person_appearances.turn_count, 0), EXCLUDED.turn_count)
+                        END
                     """,
                     user_id, entity_id, str(origin_id),
                     meta.get("origin_type") or "meeting",
                     meta.get("project_id"),
                     capacities,
+                    turn_count,
                 )
             except Exception as e:
                 logger.debug("person_appearance_skipped", error=str(e)[:120])
@@ -3569,6 +3624,7 @@ class ColdPathWorker:
                 # the identity gate needs. Read off the same normalized
                 # transcript the extraction saw.
                 speaker_labels=speaker_labels_in(effective_summary, owner_speaker_label),
+                speaker_turns=speaker_turn_counts(effective_summary, owner_speaker_label),
                 # Which entity type IS a person comes from the app's people
                 # vocabulary (doc 16 5.9); the SS floor when undeclared.
                 # This closes slice 2's recorded limit: a custom-named
