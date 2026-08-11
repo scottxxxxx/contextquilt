@@ -92,6 +92,10 @@ async def main() -> None:
     # in BOTH modes: a dry run must predict what --apply would stamp, and
     # apply folds before counting, so the dry count has to fold too.
     fold_map: dict = {}
+    # user_id -> entity_id proven to be the ego by a historical marker
+    # leak; consulted before the coverage heuristic (evidence beats
+    # inference).
+    marker_evidence: dict = {}
     for s in strays:
         clean = re.sub(r"\(you\)", "", s["name"], flags=re.IGNORECASE).strip()
         canonical = await conn.fetchval(
@@ -103,6 +107,14 @@ async def main() -> None:
         if canonical:
             print(f"fold stray: {s['name']!r} -> {clean!r} ({canonical})")
             fold_map[s["entity_id"]] = canonical
+            # A marker-bearing NAME is direct evidence of the ego: "(you)"
+            # names the submitting user by the marker's own contract, so
+            # the fold target IS that user's self entity. This matters
+            # because coverage cannot identify the real user: the self
+            # gate drops their label from speaker counts whenever
+            # metadata identifies them, so their own appearance record is
+            # structurally sparse (prod: 152/289 for the primary user).
+            marker_evidence.setdefault(s["user_id"], canonical)
             if args.apply:
                 await conn.execute(
                     "UPDATE person_appearances src SET entity_id = $1 "
@@ -122,6 +134,7 @@ async def main() -> None:
                 )
         else:
             print(f"rename stray in place: {s['name']!r} -> {clean!r}")
+            marker_evidence.setdefault(s["user_id"], s["entity_id"])
             if args.apply:
                 await conn.execute(
                     "UPDATE entities SET name = $1 WHERE entity_id = $2",
@@ -142,6 +155,30 @@ async def main() -> None:
         if already:
             print(f"{u['user_id']}: already stamped ({already}), keep-first")
             skipped += 1
+            continue
+        if u["user_id"] in marker_evidence:
+            entity_id = marker_evidence[u["user_id"]]
+            sup = await conn.fetchval(
+                "SELECT suppressed_at FROM entities WHERE entity_id = $1",
+                entity_id,
+            )
+            if sup is not None:
+                print(f"{u['user_id']}: marker evidence points at a "
+                      f"suppressed row ({entity_id}), REFUSED")
+                refused += 1
+                continue
+            name = await conn.fetchval(
+                "SELECT name FROM entities WHERE entity_id = $1", entity_id
+            )
+            print(f"{u['user_id']}: stamp {name!r} ({entity_id}) "
+                  f"via marker evidence")
+            if args.apply:
+                await conn.execute(
+                    "UPDATE entities SET self_at = NOW(), self_source = 'backfill' "
+                    "WHERE entity_id = $1 AND self_at IS NULL AND suppressed_at IS NULL",
+                    entity_id,
+                )
+            stamped += 1
             continue
         pairs = await conn.fetch(
             "SELECT pa.entity_id, pa.origin_id "

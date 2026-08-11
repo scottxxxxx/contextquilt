@@ -136,3 +136,16 @@ def test_backfill_is_dry_run_by_default():
 def test_backfill_keeps_first_and_skips_suppressed():
     assert "already stamped" in BACKFILL
     assert "suppressed_at IS NULL" in BACKFILL
+
+
+def test_backfill_prefers_marker_evidence_over_coverage():
+    """A "(you)"-marked entity name is direct evidence of the ego, and
+    coverage structurally cannot identify the real user (the self gate
+    drops their label from speaker counts, so their own appearance
+    record is sparse: 152/289 on prod). Evidence must be consulted
+    before the heuristic, and it must still refuse a suppressed row."""
+    assert "marker_evidence" in BACKFILL
+    assert BACKFILL.index("marker_evidence[u[\"user_id\"]]") < BACKFILL.index(
+        "pick_self_candidate("
+    ) or "via marker evidence" in BACKFILL
+    assert "suppressed row" in BACKFILL
