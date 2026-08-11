@@ -142,3 +142,51 @@ def test_recall_handler_resolves_the_runtime_once():
     # The render cache must not share a header between two apps whose
     # vocabularies disagree about which entity type is a person.
     assert '"person_entity_type": recall_vocab.person_entity_type,' in src
+
+
+# --------------------------------------------------------------------
+# People-scoped recall (boundary piece 4)
+# --------------------------------------------------------------------
+
+def test_people_scope_renders_the_tab_and_nothing_else():
+    from contextquilt.services.recall_formatter import format_people_scope
+    import datetime as dt
+    people = [{
+        "entity_id": "e1", "name": "Vijay Rayudu",
+        "_they_owe": [
+            {"patch_id": f"p{i}", "patch_type": "commitment",
+             "text": f"item {i}", "owner": "Vijay", "deadline": None,
+             "deadline_date": None, "overdue_since": None}
+            for i in range(12)
+        ],
+        "_you_owe": None,
+        "_completed_they_owe": [
+            {"patch_id": "d1", "patch_type": "commitment", "text": "done thing",
+             "owner": "Vijay", "deadline": None, "deadline_date": None,
+             "overdue_since": None,
+             "completed_at": dt.datetime(2026, 8, 9, tzinfo=dt.timezone.utc)},
+        ],
+    }]
+    entities = [{"entity_type": "person", "name": "Vijay Rayudu", "description": None}]
+    ctx, ids, total = format_people_scope(people, entities, [])
+    assert "People: Vijay Rayudu" in ctx
+    assert "Vijay Rayudu owes you (12 open):" in ctx
+    # The cap self-describes: a truncated ledger never reads as whole.
+    assert "(showing 10 of 12 open)" in ctx
+    assert "Recently completed by Vijay Rayudu (1 total):" in ctx
+    assert "[done 2026-08-09]" in ctx
+    assert len(ids) == 11 and total == 13
+
+
+def test_people_scope_lane_skips_every_memory_leg():
+    src = (SRC / "main.py").read_text()
+    m = __import__("re").search(
+        r'recall_scope"\) == "people":(.*?)return RecallResponse',
+        src, __import__("re").DOTALL,
+    )
+    assert m, "people-scope lane not found"
+    lane = m.group(1)
+    assert "_people_core" in lane
+    assert "communication_style=None" not in lane  # set in the response call below the slice
+    for forbidden in ("fact_rows", "cue_rows", "score_patches", "signal_lines"):
+        assert forbidden not in lane, f"memory leg {forbidden} leaked into people scope"

@@ -48,6 +48,7 @@ from contextquilt.services import decay_model
 from contextquilt.services import facet_runtime
 from contextquilt.services.extraction_schema import is_user_reference
 from contextquilt.services.recall_formatter import (
+    format_people_scope,
     CHARS_PER_TOKEN,
     format_category_grouped,
     format_flat_ranked_with_stats,
@@ -1274,6 +1275,68 @@ async def recall_context(
         context = f"{context}\n\n{signal_block}" if context else signal_block
     timings["score_and_format_ms"] = round((time.monotonic() - t3) * 1000, 2)
     t4 = time.monotonic()
+
+    # People-scoped lane (boundary piece 4, decision 2026-08-11): the
+    # free-tier render. GP passes metadata.recall_scope="people" per
+    # entitlement (GP owns tiering; CQ serves capability). The render is
+    # EXACTLY what the People tab shows, assembled by the same
+    # _people_core the tab is served from: header, relations, and each
+    # matched person's ledger. Every memory leg is skipped: no fact
+    # fetch, no cues, no metamemory, no communication profile (the
+    # style model is memory-derived and on no free screen). The render
+    # cache key includes metadata, so scoped and full renders never
+    # share a body. Unknown scope values fall through to the full lane
+    # (open vocabulary, additive rule).
+    if (request.metadata or {}).get("recall_scope") == "people":
+        p_vocab, p_owed = await _people_read_context(db_pool, app_id)
+        person_ids = [
+            str(r["entity_id"]) for r in entity_rows
+            if r["entity_type"] == p_vocab.person_entity_type
+        ]
+        people_rows = []
+        if person_ids:
+            p_core = await _people_core(
+                db_pool, user_id, person_ids,
+                owed_to_available=p_owed, include_completed=True,
+                vocab=p_vocab,
+            )
+            people_rows = p_core["people"]
+        context, ledger_ids, ledger_total = format_people_scope(
+            people_rows, entity_rows, rel_rows,
+            person_entity_type=p_vocab.person_entity_type,
+        )
+        t5 = time.monotonic()
+        if context:
+            try:
+                await redis_client.set(
+                    render_cache_key,
+                    json.dumps({
+                        "context": context,
+                        "matched_entities": matched_names,
+                        "matched_patch_ids": ledger_ids,
+                        "matched_cues": [],
+                        "patch_count": ledger_total,
+                        "communication_style": None,
+                    }),
+                    ex=RECALL_RENDER_CACHE_TTL,
+                )
+            except Exception:
+                pass
+        timings["render_cache_write_ms"] = round((time.monotonic() - t5) * 1000, 2)
+        timings["total"] = round((time.monotonic() - t0) * 1000, 2)
+        timings["render_cache_hit"] = 0
+        # Served ledger items count as recall access (decay exemption),
+        # same as the full lane.
+        asyncio.create_task(_bump_patch_access(ledger_ids))
+        return RecallResponse(
+            context=context,
+            matched_entities=matched_names,
+            matched_patch_ids=ledger_ids,
+            matched_cues=[],
+            patch_count=ledger_total,
+            communication_style=None,
+            timing_ms=timings,
+        )
 
     # Look up communication profile and format as a natural language hint.
     # The calling gateway decides whether to inject this (e.g., only for chat modes).

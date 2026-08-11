@@ -30,11 +30,17 @@ def test_history_is_completed_only():
     )
 
 
-def test_only_the_detail_route_pays_for_history():
+def test_only_entity_scoped_callers_pay_for_history():
     """The list assembles every person; fetching the full completed
-    population there would cost every list call for data no row renders.
-    Exactly one _people_core call site opts in."""
-    assert MAIN.count("include_completed=True") == 1
+    population there would cost every list call for data no row
+    renders. The opt-in sites are both ENTITY-SCOPED: the person detail
+    route and the people-scoped recall lane (each passes explicit
+    entity ids into _people_core). The list route must never opt in."""
+    assert MAIN.count("include_completed=True") == 2
+    list_body = re.search(
+        r"async def list_people\(.*?\nasync def ", MAIN, re.DOTALL
+    )
+    assert list_body and "include_completed" not in list_body.group(0)
 
 
 def test_the_cap_self_describes():
