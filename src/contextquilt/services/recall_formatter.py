@@ -197,6 +197,50 @@ def _entity_name_with_desc(row: Any) -> str:
     return name
 
 
+# The age marker (the Vijay lesson, 2026-08-11): recall serves durable
+# memory with no time scope, and an episodic claim five weeks old reads
+# exactly like yesterday's unless the line SAYS when it was observed. A
+# report asked for "the last two weeks" prominently repeated a July
+# "unreachable since" blocker about a person who had been in six
+# meetings that fortnight; the model was faithful to an undated line.
+#
+# Presentation only, deliberately simpler than the decay model: the
+# bands need registry TTLs and update anchors the hot path neither
+# fetches nor may query, while the observation date is already on every
+# recall row. Self-typed types are exempt (their freshness model
+# already penalizes rank, and a durable trait wearing an old date would
+# invite doubt the type does not deserve). Dates only, so output stays
+# byte-stable within a UTC day; a marker appears once, on the day the
+# threshold crosses, the same rhythm as the deadline markers.
+AGE_MARKER_DAYS = 28
+AGE_MARKER_EXEMPT_TYPES = frozenset(
+    {"trait", "preference", "goal", "constraint", "identity"}
+)
+
+
+def _render_observed_age(
+    row: Any, ptype: str, today: date
+) -> str:
+    if ptype in AGE_MARKER_EXEMPT_TYPES:
+        return ""
+    ts = None
+    for key in ("last_observed_at", "created_at"):
+        try:
+            ts = row[key] if isinstance(row, dict) else row.get(key)
+        except (KeyError, TypeError):
+            ts = None
+        if ts is not None:
+            break
+    if ts is None:
+        return ""
+    observed = ts.date() if isinstance(ts, datetime) else ts
+    if not isinstance(observed, date):
+        return ""
+    if (today - observed).days < AGE_MARKER_DAYS:
+        return ""
+    return f"last observed {observed.isoformat()}"
+
+
 def _format_patch_line(row: Any, today: Optional[date] = None) -> str:
     """One-line representation of a patch for flat output."""
     ptype = row["patch_type"] if isinstance(row, dict) else row.get("patch_type")
@@ -207,6 +251,7 @@ def _format_patch_line(row: Any, today: Optional[date] = None) -> str:
 
     owner = (v.get("owner") or "").strip()
     deadline_fragment = _render_deadline(v, today or _today_utc())
+    age_fragment = _render_observed_age(row, ptype, today or _today_utc())
 
     prefix_map = {
         "trait": "about you",
@@ -230,6 +275,8 @@ def _format_patch_line(row: Any, today: Optional[date] = None) -> str:
         detail_parts.append(f"owner: {owner}")
     if deadline_fragment:
         detail_parts.append(deadline_fragment)
+    if age_fragment:
+        detail_parts.append(age_fragment)
     suffix = f" [{', '.join(detail_parts)}]" if detail_parts else ""
 
     return f"[{prefix}] {text}{suffix}"
