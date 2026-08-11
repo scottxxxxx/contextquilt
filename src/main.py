@@ -1725,6 +1725,16 @@ class QuiltPatchResponse(BaseModel):
     # its own (SS's ask, boundary decision 2026-08-11). Null = CQ
     # cannot tell, never "no owner"; `owner` remains the raw string.
     owner_entity_id: Optional[str] = None
+    # Whether the item is the SUBMITTING USER'S OWN obligation, computed
+    # once here with the canonical rule (owns-edge resolution first,
+    # owner text fallback, ownerless-on-own-quilt counts as theirs per
+    # reassign-speaker's to_self contract) against the ego link
+    # (entities.self_at), so clients can never drift from the server on
+    # whose item something is. Null = CQ cannot tell (no self entity, or
+    # not a completable); false = someone else's. The obligation-surfacing
+    # design (2026-08-11 amendment) renders null as absence, never as
+    # "you owe 0".
+    owned_by_self: Optional[bool] = None
     connections: List[PatchConnectionResponse] = []
 
 class MeetingGroup(BaseModel):
@@ -2057,6 +2067,32 @@ async def get_user_quilt(
     resolve_owner_entity = build_entity_resolver(
         [dict(r) for r in entity_rows], [dict(r) for r in alias_rows]
     )
+    try:
+        _self_row = await db_pool.fetchval(
+            "SELECT entity_id FROM entities "
+            "WHERE user_id = $1 AND self_at IS NOT NULL",
+            user_id,
+        )
+        self_entity_id = str(_self_row) if _self_row else None
+    except Exception:
+        # Pre-migration-35 DB (the MCP deployment lags migrations):
+        # owned_by_self serves null everywhere, the honest answer, and
+        # the quilt route itself must never fail over this column.
+        self_entity_id = None
+
+    def _owned_by_self(pid, value, patch_type):
+        """Null when CQ cannot tell (no ego link, or not a completable);
+        otherwise the same verdict the insights follow-up rate uses, so
+        the quilt chips and the Memory-tab aggregates can never disagree
+        about whose item something is."""
+        if self_entity_id is None or patch_type not in completable:
+            return None
+        owner_entity = resolve_owner_entity(
+            owner_text_by_item.get(pid)
+        ) or resolve_owner_entity(value.get("owner"))
+        if owner_entity is not None:
+            return owner_entity == self_entity_id
+        return not value.get("owner")
 
     for row in rows:
         value = row["value"]
@@ -2088,6 +2124,7 @@ async def get_user_quilt(
                 or resolve_owner_entity(value.get("owner"))
                 if row["patch_type"] in completable else None
             ),
+            owned_by_self=_owned_by_self(pid, value, row["patch_type"]),
             connections=connections_by_patch.get(pid, []),
         )
 
@@ -3008,7 +3045,7 @@ async def quilt_insights(
         user_id,
     )
     if self_entity is None:
-        return {"user_id": user_id, "follow_up": None}
+        return {"user_id": user_id, "self_entity_id": None, "follow_up": None}
 
     vocab = await _people_vocab_cached(app_id)
     rows = await db_pool.fetch(
@@ -3089,9 +3126,14 @@ async def quilt_insights(
 
     basis = completed + overdue_open
     if basis < FOLLOW_UP_MIN_BASIS:
-        return {"user_id": user_id, "follow_up": None}
+        return {
+            "user_id": user_id,
+            "self_entity_id": str(self_entity),
+            "follow_up": None,
+        }
     return {
         "user_id": user_id,
+        "self_entity_id": str(self_entity),
         "follow_up": {
             "completed": completed,
             "overdue_open": overdue_open,
