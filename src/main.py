@@ -54,6 +54,11 @@ from contextquilt.services.recall_formatter import (
     format_flat_ranked_with_stats,
     resolve_token_budget,
 )
+from contextquilt.services.people_network import (
+    MIN_SHARED_MEETINGS as NETWORK_MIN_SHARED,
+    NODE_CAP as NETWORK_NODE_CAP,
+    SNAPSHOT_VERSION as NETWORK_SNAPSHOT_VERSION,
+)
 from contextquilt.services.people_identity import (
     IdentityRequestError,
     canonical_pair,
@@ -4510,6 +4515,48 @@ async def _people_core(
 
 def _public_person(row: dict) -> dict:
     return {k: v for k, v in row.items() if not k.startswith("_")}
+
+
+@app.get("/v1/people/{user_id}/network", tags=["People"])
+async def people_network(
+    user_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    The orbit graph (design 13b, contract ratified 2026-08-11): person
+    to person co-presence with the ego excluded, precomputed daily by
+    the worker and served as stored bytes (no computation here; the
+    zero-latency rule, and the design's own build note that nobody runs
+    a force simulation at render time).
+
+    Envelope: version, computed_at, caps (stated, never implied), nodes
+    (list-identical name, meeting_count, nullable cluster_id), edges
+    (a < b pinned, weight = distinct shared meetings), clusters
+    (dominant_project_id for the client's local name mapping,
+    member_count), positions (unit square; letterboxing is the
+    client's). computed_at null = no snapshot yet (a new user before
+    the first daily cycle); every array empty, which renders as an
+    empty sky, not an error.
+    """
+    try:
+        row = await db_pool.fetchrow(
+            "SELECT payload FROM people_network_snapshots WHERE user_id = $1",
+            user_id,
+        )
+    except Exception:
+        row = None  # table not yet migrated (MCP lag): empty envelope
+    if row:
+        payload = row["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        return payload
+    return {
+        "version": NETWORK_SNAPSHOT_VERSION,
+        "computed_at": None,
+        "caps": {"nodes": NETWORK_NODE_CAP,
+                 "min_shared_meetings": NETWORK_MIN_SHARED},
+        "nodes": [], "edges": [], "clusters": [], "positions": [],
+    }
 
 
 @app.get("/v1/people/{user_id}", tags=["People"])

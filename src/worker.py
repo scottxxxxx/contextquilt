@@ -62,6 +62,17 @@ from contextquilt.services.extraction_schema import (
     strip_owner_on_self_typed_patches,
     strip_prose_from_person_names,
 )
+from contextquilt.services.people_network import (
+    NODE_CAP as _NETWORK_NODE_CAP,
+    build_snapshot as build_network_snapshot,
+)
+
+
+def network_node_cap() -> int:
+    """Indirection so the SQL LIMIT and the service cap can never drift."""
+    return _NETWORK_NODE_CAP
+
+
 from contextquilt.services.consolidation import (
     CONSOLIDATION_SYSTEM,
     CLUSTER_WINDOW_DAYS,
@@ -1615,6 +1626,7 @@ class ColdPathWorker:
             self.check_queues_loop(),
             self.decay_loop(),
             self.consolidation_loop(),
+            self.people_network_loop(),
             self.backup_failure_watch_loop(),
             self.provider_health_loop(),
             self.tier_signals_loop(),
@@ -2160,6 +2172,101 @@ class ColdPathWorker:
                 if made:
                     created += 1
         return created
+
+    async def people_network_loop(self):
+        """The 13b orbit graph precompute (daily): one snapshot per user
+        with appearances, written whole so the read path serves stored
+        bytes. Deterministic end to end (services/people_network), so a
+        quiet day rewrites identical positions: the ratified soft goal.
+        Degrades to a skipped cycle on lagging DBs (missing table or
+        self_at column)."""
+        # Coroutine-local on purpose — the worker constants gotcha.
+        NETWORK_INTERVAL_SECONDS = 24 * 60 * 60
+        await asyncio.sleep(180)
+
+        while self.running:
+            try:
+                users = await self.db.fetch(
+                    "SELECT DISTINCT user_id FROM person_appearances"
+                )
+                built = 0
+                for u in users:
+                    try:
+                        built += await self._build_network_snapshot(u["user_id"])
+                    except Exception as e:
+                        logger.warning("network_snapshot_failed",
+                                       user_id=u["user_id"], error=str(e)[:150])
+                logger.info("network_cycle_complete", snapshots=built)
+            except Exception as e:
+                logger.error("network_cycle_error", error=str(e)[:200])
+            await asyncio.sleep(NETWORK_INTERVAL_SECONDS)
+
+    async def _build_network_snapshot(self, user_id: str) -> int:
+        node_rows = await self.db.fetch(
+            f"""
+            SELECT e.entity_id::text AS entity_id, e.name,
+                   count(DISTINCT pa.origin_id) AS meeting_count
+            FROM person_appearances pa
+            JOIN entities e ON e.entity_id = pa.entity_id
+            WHERE pa.user_id = $1
+              AND e.merged_into IS NULL AND e.suppressed_at IS NULL
+              AND e.self_at IS NULL
+            GROUP BY e.entity_id, e.name
+            ORDER BY count(DISTINCT pa.origin_id) DESC, e.entity_id
+            LIMIT {network_node_cap()}
+            """,
+            user_id,
+        )
+        if not node_rows:
+            return 0
+        ids = [r["entity_id"] for r in node_rows]
+        pair_rows = await self.db.fetch(
+            """
+            SELECT a.entity_id::text AS a, b.entity_id::text AS b,
+                   count(DISTINCT a.origin_id) AS weight
+            FROM person_appearances a
+            JOIN person_appearances b
+              ON a.origin_id = b.origin_id AND a.user_id = b.user_id
+             AND a.entity_id < b.entity_id
+            WHERE a.user_id = $1
+              AND a.entity_id = ANY($2::uuid[])
+              AND b.entity_id = ANY($2::uuid[])
+            GROUP BY a.entity_id, b.entity_id
+            HAVING count(DISTINCT a.origin_id) >= 2
+            """,
+            user_id, ids,
+        )
+        proj_rows = await self.db.fetch(
+            """
+            SELECT entity_id::text AS entity_id, project_id, count(*) AS n
+            FROM person_appearances
+            WHERE user_id = $1 AND entity_id = ANY($2::uuid[])
+              AND project_id IS NOT NULL
+            GROUP BY entity_id, project_id
+            """,
+            user_id, ids,
+        )
+        project_by_node: dict = {}
+        for r in proj_rows:
+            project_by_node.setdefault(r["entity_id"], {})[r["project_id"]] = r["n"]
+
+        snapshot = build_network_snapshot(
+            [dict(r) for r in node_rows],
+            [dict(r) for r in pair_rows],
+            project_by_node,
+            datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        )
+        await self.db.execute(
+            """
+            INSERT INTO people_network_snapshots (user_id, computed_at, version, payload)
+            VALUES ($1, NOW(), $2, $3)
+            ON CONFLICT (user_id) DO UPDATE SET
+                computed_at = NOW(), version = EXCLUDED.version,
+                payload = EXCLUDED.payload
+            """,
+            user_id, snapshot["version"], json.dumps(snapshot),
+        )
+        return 1
 
     async def _consolidate_user_people(
         self, subject_key: str, app_id: str, rule: dict, budget: int
