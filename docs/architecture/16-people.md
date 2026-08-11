@@ -603,12 +603,24 @@ Rules, each carried by a test (`test_people_vocabulary.py`):
   vocabulary per request; `capabilities.you_owe` follows the caller's
   own counterparty label.
 
-**Known limit, deliberate**: the extraction-lane writers (the
-`person_appearances` recorder and the self-identity write-back) still
-gate on the literal entity type `person`, so an app that names its
-person entity type something else accumulates no appearances until the
-worker slice (slice 4) wires vocabulary into `store_entities`. An app
-that names it `person` gets appearances today.
+**Limit CLOSED by slice 4 (2026-08-10)**: both entity-storage lanes
+(extraction and structured ingest) now pass the app's
+`person_entity_type` into `store_entities`, so a custom-named person
+entity type accumulates appearances. The one remaining literal is the
+self-identity write-back (the SS voice-enrollment `display_name` flow),
+which is SS-specific by nature and stays on the floor until a second
+app has an equivalent flow.
+
+Slice 4 also made corrections and completions ADAPTER-INDEPENDENT in
+the ingest-mode gate (they never run extraction; each is its own
+candidate-match plus one LLM call), so a structured-mode app's users
+can correct and complete. An unmatched correction lands in the APP'S
+vocabulary: the prompt offers the app's declared types, the parse
+validates against them, and the landing type for a no-better-choice
+correction is the manifest's optional `correction_fallback_type`
+(validated as a declared type; absent falls back to `takeaway` even
+off-manifest, because a slightly alien type beats losing a user-stated
+fact, with a warning log naming the gap).
 
 ### 5.7 Triage: `decay_state`, shelve, vouch (shipped 2026-08-08)
 

@@ -44,6 +44,10 @@ TOP_LEVEL_OPTIONAL = {
     # People semantics (doc 16 §5.9): which types/labels carry the People
     # surface's roles. Absent → the SS-default vocabulary (compat floor).
     "people",
+    # Where an UNMATCHED user correction lands (contract item 9). Absent →
+    # 'takeaway' (the SS floor), even when off-manifest: a slightly alien
+    # type beats losing a user-stated fact. Structured apps should declare.
+    "correction_fallback_type",
 }
 
 PEOPLE_BLOCK_KEYS = {
@@ -156,6 +160,18 @@ def validate_manifest(manifest: Dict[str, Any], app_id: str) -> Tuple[bool, List
                             f"Duplicate entity_types.entity_type: {et['entity_type']!r}."
                         )
                     declared_entities.add(et["entity_type"])
+
+    # Correction fallback (optional). Must be a declared patch type: an
+    # unmatched correction landing as a type the app never declared would
+    # be invisible to every read keyed on its vocabulary.
+    cft = manifest.get("correction_fallback_type")
+    if cft is not None:
+        if not isinstance(cft, str) or not cft:
+            errors.append("Manifest correction_fallback_type must be a non-empty string when provided.")
+        elif declared_types and cft not in declared_types:
+            errors.append(
+                f"correction_fallback_type {cft!r} is not a declared patch type."
+            )
 
     # People block (optional; doc 16 §5.9). Every named role must resolve
     # to something the manifest actually declares: a people block pointing

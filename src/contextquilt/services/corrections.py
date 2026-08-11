@@ -77,6 +77,8 @@ def parse_correction_response(
     content: Any,
     valid_patch_ids: set,
     meeting_date=None,
+    allowed_types: Optional[set] = None,
+    fallback_type: str = FALLBACK_PATCH_TYPE,
 ) -> Optional[Tuple[Optional[str], Dict[str, Any]]]:
     """Returns (matched_patch_id_or_None, corrected_fact_value) or None
     when the response is unusable. A hallucinated patch_id (not in the
@@ -122,7 +124,8 @@ def parse_correction_response(
         value["deadline_date"] = dd
 
     ptype = fact.get("patch_type")
-    new_type = ptype if isinstance(ptype, str) and ptype in PATCH_TYPES else FALLBACK_PATCH_TYPE
+    type_set = allowed_types if allowed_types else PATCH_TYPES
+    new_type = ptype if isinstance(ptype, str) and ptype in type_set else fallback_type
     value["_new_type"] = new_type  # popped by the caller; not persisted
 
     return matched, value
