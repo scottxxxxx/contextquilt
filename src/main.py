@@ -4345,7 +4345,16 @@ async def _people_core(
     # when it does not. False and cannot-tell are different claims: the
     # graph excludes the ego, and excluding nobody because the link is
     # absent must be visible to the client, not silent.
-    has_self = any(p["_is_self_row"] for p in people)
+    #
+    # A USER-level fact, never derived from the fetched rows: the detail
+    # route scopes this query to one entity, and the first live check
+    # proved the scoped version serves null-for-false on every non-self
+    # detail.
+    has_self = await conn.fetchval(
+        "SELECT EXISTS(SELECT 1 FROM entities "
+        "WHERE user_id = $1 AND self_at IS NOT NULL)",
+        user_id,
+    )
 
     by_id = {}
     for p in people:
