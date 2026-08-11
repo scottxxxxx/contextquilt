@@ -351,3 +351,90 @@ def format_category_grouped(
     render_bucket("key_facts", ("takeaway", "person", "org"))
 
     return "\n\n".join(sections)
+
+
+# ============================================================
+# People-scoped recall (boundary piece 4, decision 2026-08-11)
+# ============================================================
+
+def format_people_scope(
+    people_rows: Sequence[Dict[str, Any]],
+    entity_rows: Sequence[Any],
+    relationship_rows: Sequence[Any],
+    today: Optional[date] = None,
+    person_entity_type: str = "person",
+    max_open_per_person: int = 10,
+    max_completed_per_person: int = 5,
+) -> Tuple[str, List[str], int]:
+    """The free-tier recall render: exactly what the People tab shows.
+
+    The screens rule made concrete: identity and relations (the header
+    the flat mode already renders), then each matched person's ledger,
+    open items with the same [todo]/[blocker] lines and deadline markers
+    the paid render uses, the you_owe side when the app's manifest
+    tracks it, and recently completed items. NOTHING memory-side: no
+    universal facts, no cues, no metamemory, no synthesis.
+
+    `people_rows` are _people_core rows (the same assembly the People
+    tab is served from, which is what makes the equivalence true rather
+    than aspirational). Deterministic: people sorted by name, items in
+    the core's stable order, caps self-describing so a truncated ledger
+    never reads as the whole ledger.
+
+    Returns (context, rendered_patch_ids, total_ledger_items).
+    """
+    today = today or _today_utc()
+
+    header, _ = format_flat_ranked_with_stats(
+        [], entity_rows, relationship_rows,
+        today=today, person_entity_type=person_entity_type,
+    )
+    sections: List[str] = [header] if header else []
+    rendered_ids: List[str] = []
+    total_items = 0
+
+    def _line(r: Dict[str, Any]) -> str:
+        return _format_patch_line(
+            {"patch_type": r["patch_type"], "value": {
+                "text": r["text"], "owner": r["owner"],
+                "deadline": r["deadline"], "deadline_date": r["deadline_date"],
+                "overdue_since": r["overdue_since"],
+            }},
+            today,
+        )
+
+    for person in sorted(people_rows, key=lambda p: (p["name"] or "", p["entity_id"])):
+        name = person["name"]
+        they = person.get("_they_owe") or []
+        total_items += len(they)
+        if they:
+            shown = they[:max_open_per_person]
+            lines = [f"{name} owes you ({len(they)} open):"]
+            lines += [_line(r) for r in shown]
+            if len(they) > len(shown):
+                lines.append(f"(showing {len(shown)} of {len(they)} open)")
+            sections.append("\n".join(lines))
+            rendered_ids += [str(r["patch_id"]) for r in shown]
+
+        you = person.get("_you_owe")
+        if you:
+            total_items += len(you)
+            lines = [f"You owe {name} ({len(you)} open):"]
+            lines += [_line(r) for r in you[:max_open_per_person]]
+            sections.append("\n".join(lines))
+            rendered_ids += [str(r["patch_id"]) for r in you[:max_open_per_person]]
+
+        done = person.get("_completed_they_owe") or []
+        total_items += len(done)
+        if done:
+            shown = done[:max_completed_per_person]
+            lines = [f"Recently completed by {name} ({len(done)} total):"]
+            for r in shown:
+                stamp = (r.get("completed_at").date().isoformat()
+                         if r.get("completed_at") else "")
+                suffix = f" [done {stamp}]" if stamp else " [done]"
+                lines.append(_line(r) + suffix)
+            sections.append("\n".join(lines))
+            rendered_ids += [str(r["patch_id"]) for r in shown]
+
+    return "\n\n".join(s for s in sections if s), rendered_ids, total_items
