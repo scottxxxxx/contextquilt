@@ -249,10 +249,17 @@ ENTITY_INDEX_TTL = 7200  # 2 hours
 # query mentioning a surface form ("S. Abrams") still matches the
 # canonical entity ("Lockridge Abrams"). Every entity_index builder must use
 # this — a name-only rebuild silently breaks alias matching.
+# Suppressed entities ("not a person") are excluded along with their
+# aliases: their names must stop matching in recall, or the assistant
+# keeps greeting ASR garbage the user explicitly disowned. Merged
+# entities stay IN the index on purpose (their names are aliases of a
+# canonical); suppression is the opposite claim.
 ENTITY_INDEX_NAMES_SQL = """
-    SELECT name FROM entities WHERE user_id = $1
+    SELECT name FROM entities WHERE user_id = $1 AND suppressed_at IS NULL
     UNION
-    SELECT alias FROM entity_aliases WHERE user_id = $1
+    SELECT a.alias FROM entity_aliases a
+    JOIN entities e ON e.entity_id = a.entity_id
+    WHERE a.user_id = $1 AND e.suppressed_at IS NULL
 """
 
 # Cue index contents: distinct active-patch cues (associative-retrieval
@@ -3655,7 +3662,8 @@ async def _load_active_person(
             """
             SELECT entity_id, name, entity_type, description, metadata,
                    first_seen_at, last_seen_at, mention_count,
-                   confirmed_at, confirmation_source, merged_into
+                   confirmed_at, confirmation_source, merged_into,
+                   suppressed_at
             FROM entities
             WHERE user_id = $1 AND entity_id = $2::uuid
             """,
@@ -3668,6 +3676,16 @@ async def _load_active_person(
                 "NOT_A_PERSON",
                 f"Entity {current} is a '{row['entity_type']}', not a person",
                 entity_id=current, entity_type=row["entity_type"],
+            )
+        if row["suppressed_at"] is not None:
+            # The user disowned this entity ("not a person"). Every
+            # identity verb treats it as gone; the lift handler reads
+            # the row directly rather than through this loader.
+            raise IdentityRequestError(
+                "SUPPRESSED",
+                f"Entity {current} was marked not-a-person. Lift the "
+                "suppression (DELETE .../not-a-person) to act on it.",
+                entity_id=current,
             )
         if row["merged_into"] is None:
             return row
@@ -3785,7 +3803,7 @@ async def _people_core(
                e.confirmed_at, e.confirmation_source
         FROM entities e
         WHERE e.user_id = $1 AND e.entity_type = $2
-          AND e.merged_into IS NULL{scope}
+          AND e.merged_into IS NULL AND e.suppressed_at IS NULL{scope}
         ORDER BY e.last_seen_at DESC NULLS LAST, e.entity_id
         """,
         *args,
@@ -4289,9 +4307,10 @@ async def list_people(
         if since_dt:
             merged = await conn.fetch(
                 """
-                SELECT entity_id, merged_into FROM entities
+                SELECT entity_id FROM entities
                 WHERE user_id = $1 AND entity_type = $3
-                  AND merged_into IS NOT NULL AND merged_at > $2
+                  AND ((merged_into IS NOT NULL AND merged_at > $2)
+                       OR suppressed_at > $2)
                 """,
                 user_id, since_dt, vocab.person_entity_type,
             )
@@ -5298,6 +5317,180 @@ async def rename_person(
         "old_name": old_name,
         "aliases": [r["alias"] for r in alias_rows],
         "renamed_patch_ids": [str(r["patch_id"]) for r in renamed],
+    }
+
+
+@app.post("/v1/people/{user_id}/{entity_id}/not-a-person", tags=["People"])
+async def suppress_person(
+    user_id: str,
+    entity_id: str,
+    req: Optional[ConfirmPersonRequest] = None,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    "This was never a person": suppress an entity the extractor minted
+    from ASR garbage ("Horm Hel"), the missing verb once Delete Memory
+    left person rows (boundary piece 3, 2026-08-11).
+
+    The SUPPRESSED ROW IS THE NEGATIVE RECORD: the entity survives,
+    marked, so the next transcript emitting the same surface form
+    exact-matches the suppressed row instead of minting the garbage
+    again (the durable-no lesson keep-separate taught). What changes:
+
+    - excluded from /v1/people (with a tombstone in the list delta's
+      `deleted` array, same as a merge),
+    - its names and aliases leave the recall entity index,
+    - appearance recording stops (the row absorbs re-observations,
+      nothing it absorbs is served),
+    - its person patches archive with archive_cause 'not_a_person' and
+      ride the quilt delta's `deleted` array,
+    - every identity verb refuses it with code SUPPRESSED until lifted.
+
+    Idempotent. Reversible via DELETE (ASR garbage and a real person
+    with an unfortunate transcription can collide; an unfixable wrong
+    answer is worse than a reversible one).
+    """
+    source = resolve_identity_source(req.source if req else None)
+    subject_key = f"user:{user_id}"
+    async with db_pool.acquire() as conn:
+        vocab, _ = await _people_read_context(conn, app_id)
+        async with conn.transaction():
+            try:
+                row = await _load_active_person(
+                    conn, user_id, entity_id, vocab.person_entity_type
+                )
+            except IdentityRequestError as e:
+                if e.code == "SUPPRESSED":
+                    return {"status": "suppressed", "entity_id": e.extra.get("entity_id"),
+                            "already": True, "archived_patch_ids": []}
+                raise _identity_error(e)
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Person {entity_id} not found for this user",
+                )
+            resolved = str(row["entity_id"])
+
+            await conn.execute(
+                "UPDATE entities SET suppressed_at = NOW(), suppressed_source = $1 "
+                "WHERE entity_id = $2::uuid",
+                source, resolved,
+            )
+
+            # Archive the person patches behind the entity (name and
+            # alias match, the same fold set the merge uses), so the
+            # Memory side converges through the normal delta.
+            alias_names = [
+                r["alias"] for r in await conn.fetch(
+                    "SELECT alias FROM entity_aliases WHERE user_id = $1 AND entity_id = $2::uuid",
+                    user_id, resolved,
+                )
+            ]
+            keys = list({n.strip().lower() for n in [row["name"], *alias_names] if n and n.strip()})
+            archived = await conn.fetch(
+                """
+                UPDATE context_patches cp
+                SET status = 'archived', updated_at = NOW(),
+                    value = jsonb_set(value, '{archive_cause}', '"not_a_person"')
+                FROM patch_subjects ps
+                WHERE ps.patch_id = cp.patch_id
+                  AND ps.subject_key = $1
+                  AND cp.patch_type = $2
+                  AND COALESCE(cp.status, 'active') = 'active'
+                  AND LOWER(cp.value->>'text') = ANY($3::text[])
+                RETURNING cp.patch_id
+                """,
+                subject_key, vocab.person_type, keys,
+            )
+
+    await _rebuild_entity_index(user_id)
+    logger.info(
+        "person_suppressed", user_id=user_id, app_id=str(app_id),
+        entity_id=resolved, name=row["name"], source=source,
+        archived_patches=len(archived),
+    )
+    return {
+        "status": "suppressed",
+        "entity_id": resolved,
+        "name": row["name"],
+        "already": False,
+        "archived_patch_ids": [str(r["patch_id"]) for r in archived],
+    }
+
+
+@app.delete("/v1/people/{user_id}/{entity_id}/not-a-person", tags=["People"])
+async def unsuppress_person(
+    user_id: str,
+    entity_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Lift a suppression: the entity was a real person after all. Restores
+    the entity to every surface and un-archives exactly the person
+    patches this suppression archived (guarded on archive_cause, so a
+    patch archived by decay or merge is never resurrected by accident).
+    409 when the entity is not suppressed.
+    """
+    subject_key = f"user:{user_id}"
+    async with db_pool.acquire() as conn:
+        vocab, _ = await _people_read_context(conn, app_id)
+        async with conn.transaction():
+            # Direct read: the standard loader refuses suppressed rows.
+            row = await conn.fetchrow(
+                "SELECT entity_id, name, suppressed_at FROM entities "
+                "WHERE user_id = $1 AND entity_id = $2::uuid AND entity_type = $3",
+                user_id, entity_id, vocab.person_entity_type,
+            )
+            if row is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Person {entity_id} not found for this user",
+                )
+            if row["suppressed_at"] is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "NOT_SUPPRESSED",
+                            "message": "Entity is not marked not-a-person."},
+                )
+            resolved = str(row["entity_id"])
+            await conn.execute(
+                "UPDATE entities SET suppressed_at = NULL, suppressed_source = NULL "
+                "WHERE entity_id = $1::uuid",
+                resolved,
+            )
+            alias_names = [
+                r["alias"] for r in await conn.fetch(
+                    "SELECT alias FROM entity_aliases WHERE user_id = $1 AND entity_id = $2::uuid",
+                    user_id, resolved,
+                )
+            ]
+            keys = list({n.strip().lower() for n in [row["name"], *alias_names] if n and n.strip()})
+            restored = await conn.fetch(
+                """
+                UPDATE context_patches cp
+                SET status = 'active', updated_at = NOW(),
+                    value = value - 'archive_cause'
+                FROM patch_subjects ps
+                WHERE ps.patch_id = cp.patch_id
+                  AND ps.subject_key = $1
+                  AND cp.patch_type = $2
+                  AND cp.value->>'archive_cause' = 'not_a_person'
+                  AND LOWER(cp.value->>'text') = ANY($3::text[])
+                RETURNING cp.patch_id
+                """,
+                subject_key, vocab.person_type, keys,
+            )
+
+    await _rebuild_entity_index(user_id)
+    logger.info(
+        "person_unsuppressed", user_id=user_id, app_id=str(app_id),
+        entity_id=resolved, restored_patches=len(restored),
+    )
+    return {
+        "status": "unsuppressed",
+        "entity_id": resolved,
+        "name": row["name"],
+        "restored_patch_ids": [str(r["patch_id"]) for r in restored],
     }
 
 

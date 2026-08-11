@@ -1071,6 +1071,18 @@ async def store_entities(
             if speaker_labels and name.strip().lower() in speaker_labels:
                 capacities.append("speaker")
             try:
+                # A suppressed entity ("not a person") accumulates no
+                # meeting history: SS's condition that appearances stop
+                # counting the moment the user disowns the row. The
+                # entity row itself keeps absorbing re-observations,
+                # which is the point (the durable negative record), but
+                # nothing it absorbs is served or counted.
+                sup = await db.fetchval(
+                    "SELECT suppressed_at FROM entities WHERE entity_id = $1",
+                    entity_id,
+                )
+                if sup is not None:
+                    return
                 await db.execute(
                     """
                     INSERT INTO person_appearances
