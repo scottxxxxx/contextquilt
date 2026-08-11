@@ -54,6 +54,7 @@ from contextquilt.services.recall_formatter import (
     format_flat_ranked_with_stats,
     resolve_token_budget,
 )
+from contextquilt.services.people_signals import compute_person_signals
 from contextquilt.services.people_network import (
     MIN_SHARED_MEETINGS as NETWORK_MIN_SHARED,
     NODE_CAP as NETWORK_NODE_CAP,
@@ -4457,6 +4458,12 @@ async def _people_core(
             "first_seen_at": p["first_seen_at"].isoformat() if p["first_seen_at"] else None,
             "last_seen_at": p["last_seen_at"].isoformat() if p["last_seen_at"] else None,
             "meeting_count": len(appearances),
+            # The 17a list intelligence: recent-interaction weights, the
+            # cadence behind DRIFTING, and the open-ledger summary that
+            # writes the row sentence. Served inputs, client-owned
+            # situation assignment; every count agrees with the ledger
+            # arrays because it is computed from the SAME filtered rows.
+            "signals": compute_person_signals(appearances, they_owe, you_owe),
             "project_count": len(projects),
             # The one project worth putting in a list-row subtitle, so
             # rendering "Atlas Migration" under a name does not cost a
