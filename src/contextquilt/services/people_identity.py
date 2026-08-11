@@ -450,6 +450,53 @@ def choose_surviving_person_patch(
     return (survivor, losers)
 
 
+def build_entity_resolver(entity_rows: Sequence[dict], alias_rows: Sequence[dict]):
+    """A callable mapping a person surface form -> canonical entity_id.
+
+    Built once per request from the user's person entities and aliases
+    (set-based, no per-item queries), for stamping `owner_entity_id`
+    onto quilt action items: the server resolution SS asked for so the
+    client does zero entity matching (re-implementing it client-side is
+    the doc 16 duplication).
+
+    Resolution: case-insensitive exact name, then recorded alias, then
+    None — the same order store_entities and the create endpoint use.
+    NO heuristic leg on purpose: a wrong link on a served item is worse
+    than a null, and null already means "CQ cannot tell". Merged
+    entities resolve forward to their canonical (capped walk, same as
+    every other forward resolution).
+    """
+    forward: dict = {}
+    for r in entity_rows:
+        forward[str(r["entity_id"])] = (
+            str(r["merged_into"]) if r.get("merged_into") else None
+        )
+
+    def canonical(eid: str) -> str:
+        seen = set()
+        while forward.get(eid) and eid not in seen and len(seen) < 8:
+            seen.add(eid)
+            eid = forward[eid]
+        return eid
+
+    by_name: dict = {}
+    for r in entity_rows:
+        name = (r.get("name") or "").strip().lower()
+        if name:
+            by_name.setdefault(name, canonical(str(r["entity_id"])))
+    for r in alias_rows:
+        alias = (r.get("alias") or "").strip().lower()
+        if alias:
+            by_name.setdefault(alias, canonical(str(r["entity_id"])))
+
+    def resolve(surface_form: "str | None") -> "str | None":
+        if not surface_form or not isinstance(surface_form, str):
+            return None
+        return by_name.get(surface_form.strip().lower())
+
+    return resolve
+
+
 def resolve_identity_source(source: str | None) -> str:
     """Normalise the caller's `source`, defaulting to user_confirmation.
 
