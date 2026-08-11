@@ -2852,6 +2852,28 @@ async def delete_patch(
     """
     Delete a fact or action item. User removes something CQ got wrong.
     Requires delete access via ACL (or no ACL entry = open access).
+
+    ARCHIVES rather than hard-deleting (boundary decision, 2026-08-11).
+    The old hard delete had no tombstone: `deleted[]` is computed from
+    archived rows, so a deletion never reached other devices until the
+    daily full sync, and for a person patch it silently cascaded every
+    owns/works_on/owed_to edge away. Now the row archives with
+    `archive_cause: "user_delete"`, the `updated_at` bump puts it in the
+    next delta's `deleted[]`, and edges stay in place but stop being
+    served (every read filters to active patches).
+
+    CONTRACT (SS's condition, stated so it cannot drift): a patch
+    archived by user delete is excluded from recall and EVERY serving
+    path, not just the tab. Deletion must be real from the user's seat
+    even though the row survives until account purge. Today that holds
+    because every serving read filters `COALESCE(status,'active') =
+    'active'`; any future read that relaxes that filter must exclude
+    `archive_cause = 'user_delete'` rows explicitly.
+
+    Idempotent: deleting an already-archived patch returns the same
+    success without overwriting the original archive cause. Hard
+    deletion remains only on the account-purge paths, where leaving
+    rows behind defeats the purpose.
     """
     _require_patch_uuid(patch_id)
     subject_key = f"user:{user_id}"
@@ -2880,11 +2902,21 @@ async def delete_patch(
     except (ValueError, AttributeError):
         pass  # Legacy app_id, no ACL enforcement
 
-    # Delete patch and related records
-    await db_pool.execute("DELETE FROM patch_usage_metrics WHERE patch_id = $1", patch_id)
-    await db_pool.execute("DELETE FROM context_patch_acl WHERE patch_id = $1", patch_id)
-    await db_pool.execute("DELETE FROM patch_subjects WHERE patch_id = $1", patch_id)
-    await db_pool.execute("DELETE FROM context_patches WHERE patch_id = $1", patch_id)
+    # Archive, never hard-delete. patch_subjects is deliberately KEPT:
+    # the delta's `deleted[]` query joins through it, so removing the
+    # subject row would orphan the tombstone this change exists to
+    # serve. The WHERE guard keeps a second delete (or a delete racing
+    # decay) from overwriting the original archive cause.
+    await db_pool.execute(
+        """
+        UPDATE context_patches
+           SET status = 'archived', updated_at = NOW(),
+               value = jsonb_set(value, '{archive_cause}', '"user_delete"')
+         WHERE patch_id = $1
+           AND COALESCE(status, 'active') = 'active'
+        """,
+        patch_id,
+    )
 
     # Trigger cache refresh
     stream_key = "memory_updates"
