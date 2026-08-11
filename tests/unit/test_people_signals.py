@@ -73,3 +73,33 @@ def test_empty_person_serves_measured_zeroes():
 def test_list_rows_carry_signals():
     MAIN = (ROOT / "src" / "main.py").read_text()
     assert '"signals": compute_person_signals(appearances, they_owe, you_owe)' in MAIN
+
+
+def test_mentions_are_not_meetings():
+    """The RV/Raj field report: a person only NAMED in a room did not
+    attend it. Mention-only appearances feed no presence number and the
+    presence anchors stay null, which renders as never-met, not
+    met-recently."""
+    apps = [
+        {"last_seen_at": datetime(2026, 8, 11, 14, tzinfo=timezone.utc),
+         "turn_count": None, "capacities": ["mention"]},
+    ]
+    s = compute_person_signals(apps, [], None, today=TODAY)
+    assert s["meetings_7d"] == 0 and s["meetings_30d"] == 0
+    assert s["first_present_at"] is None and s["last_present_at"] is None
+
+
+def test_presence_grades_and_unknown_capacity_count_as_present():
+    apps = [
+        {"last_seen_at": datetime(2026, 8, 10, tzinfo=timezone.utc),
+         "turn_count": 5, "capacities": ["speaker", "mention"]},
+        {"last_seen_at": datetime(2026, 8, 4, tzinfo=timezone.utc),
+         "turn_count": None, "capacities": []},  # pre-migration-31: unknown = present
+        {"last_seen_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+         "turn_count": 9, "capacities": ["mention"]},  # excluded
+    ]
+    s = compute_person_signals(apps, [], None, today=TODAY)
+    assert s["meetings_30d"] == 2
+    assert s["turns_30d"] == 5  # the mention-only row's turns never count
+    assert s["first_present_at"] == "2026-08-04"
+    assert s["last_present_at"] == "2026-08-10"

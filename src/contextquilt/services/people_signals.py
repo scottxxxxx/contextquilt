@@ -46,7 +46,23 @@ def compute_person_signals(
     """
     today = today or datetime.now(timezone.utc).date()
 
-    days = sorted({d for a in appearances if (d := _day(a.get("last_seen_at")))})
+    # A mention is not a meeting (the RV/Raj field report, 2026-08-11):
+    # someone NAMED in a room did not attend it, and "met 2 hours ago"
+    # is a presence claim. Presence-grade = speaker or ownership
+    # capacity; EMPTY capacities are pre-migration-31 rows and count as
+    # presence per that migration's own rule (unknown must not become
+    # "did not attend"). Mention-only rows still exist on the person
+    # (the directory knows the name) but never feed a presence number.
+    def _present(a) -> bool:
+        caps = set(a.get("capacities") or [])
+        return not caps or bool(caps & {"speaker", "ownership"})
+
+    present = [a for a in appearances if _present(a)]
+    present_days = sorted(
+        {d for a in present if (d := _day(a.get("last_seen_at")))}
+    )
+    appearances = present
+    days = present_days
     meetings_7d = sum(1 for d in days if (today - d).days < 7)
     meetings_30d = sum(1 for d in days if (today - d).days < 30)
     turns = [
@@ -103,6 +119,11 @@ def compute_person_signals(
         "meetings_30d": meetings_30d,
         "turns_30d": turns_30d,
         "cadence": cadence,
+        # Presence anchors for "met X ago" copy and NEW FACES gating:
+        # null = never actually present (mention-only person), which is
+        # a different claim from "met long ago" and must render as one.
+        "first_present_at": days[0].isoformat() if days else None,
+        "last_present_at": days[-1].isoformat() if days else None,
         "open_between": {
             "they_owe_open": len(they_owe),
             "they_owe_overdue": sum(1 for i in they_owe if _overdue(i)),
