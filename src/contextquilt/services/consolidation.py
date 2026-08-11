@@ -48,6 +48,17 @@ MAX_USERS_PER_APP_PER_CYCLE = 20
 CLUSTER_WINDOW_DAYS = 180
 MAX_SOURCE_TEXTS = 10  # prompt size cap per synthesis call
 
+# The profile pass (design 16a / 12a): person-keyed clustering. The
+# receipts gate is the 12a audit's invariant: a claim about a person
+# must be supported across at least this many DISTINCT meetings, or it
+# is an anecdote wearing a pattern's clothes.
+MIN_MEETINGS_FLOOR = 2
+DEFAULT_MIN_MEETINGS = 3
+CLUSTER_KEYS = {"cue", "person"}
+# The 12b lens vocabulary v1. A response naming any other lens is
+# declined, never coerced: the model does not get to invent lenses.
+PROFILE_LENSES = {"how_they_decide", "what_moves_them"}
+
 
 def parse_consolidation_rules(manifest: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Extract well-formed consolidation rules from a manifest.
@@ -75,10 +86,18 @@ def parse_consolidation_rules(manifest: Optional[Dict[str, Any]]) -> List[Dict[s
         min_patches = raw.get("min_patches", DEFAULT_MIN_PATCHES)
         if not isinstance(min_patches, int) or min_patches < MIN_CLUSTER_SIZE_FLOOR:
             min_patches = DEFAULT_MIN_PATCHES
+        cluster = raw.get("cluster", "cue")
+        if cluster not in CLUSTER_KEYS:
+            continue
+        min_meetings = raw.get("min_meetings", DEFAULT_MIN_MEETINGS)
+        if not isinstance(min_meetings, int) or min_meetings < MIN_MEETINGS_FLOOR:
+            min_meetings = DEFAULT_MIN_MEETINGS
         rules.append({
             "from_types": from_types,
             "produce_type": produce_type,
             "min_patches": min_patches,
+            "cluster": cluster,
+            "min_meetings": min_meetings,
             "guidance": raw.get("guidance") if isinstance(raw.get("guidance"), str) else None,
         })
     return rules
@@ -114,6 +133,72 @@ def build_synthesis_content(
     for i, text in enumerate(source_texts[:MAX_SOURCE_TEXTS], 1):
         lines.append(f"{i}. {text}")
     return "\n".join(lines)
+
+
+PROFILE_SYSTEM = """You are the memory-consolidation stage of ContextQuilt, a persistent memory system. You are shown dated observations about ONE person, gathered across several different meetings. Your job is the profile pass: decide whether these observations, taken together, reveal ONE durable behavioral pattern about this person, and describe it if so.
+
+Rules:
+- The pattern must hold ACROSS meetings, not within one. A single meeting, however vivid, is an anecdote; decline it.
+- Choose the one lens the evidence actually supports: "how_they_decide" (how this person reaches and keeps decisions) or "what_moves_them" (what kinds of framing or evidence they respond to). If neither fits, decline.
+- The claim is one plain sentence about the person, no hedging prefixes.
+- The do line is one short imperative sentence telling the user how to work with this pattern in their next meeting.
+- Write in the same language as the observations.
+- Never invent specifics (names, dates, numbers) that appear in no observation.
+- Decline freely: a wrong profile is worse than none.
+
+Respond with EXACTLY this raw JSON shape and nothing else:
+{"skip": <true|false>, "lens": "<how_they_decide|what_moves_them|null>", "text": "<the pattern claim, or empty string when skip is true>", "do": "<the actionable line, or empty string when skip is true>", "reason": "<one short sentence>"}"""
+
+
+def build_profile_content(
+    person_name: str,
+    dated_texts: List[tuple],
+    guidance: Optional[str] = None,
+) -> str:
+    """User-content block for one person cluster's profile call.
+    dated_texts is [(iso_date_str, text), ...] in chronological order;
+    the dates matter because a pattern is a claim about time."""
+    lines = [f"Person: {person_name}"]
+    if guidance:
+        lines.append(f"App guidance: {guidance}")
+    lines.append("")
+    lines.append("Observations (dated, oldest first):")
+    for date_s, text in dated_texts[:MAX_SOURCE_TEXTS]:
+        lines.append(f"- [{date_s}] {text}")
+    return "\n".join(lines)
+
+
+def parse_profile_response(content: Any) -> Optional[Dict[str, str]]:
+    """{"lens", "text", "do"} or None for skip/refusal/garbage.
+
+    Same acceptance posture as the cue pass, plus the lens whitelist:
+    the model does not get to invent lenses, and a claim without an
+    actionable line is declined (16a renders both or neither)."""
+    obj = content
+    if isinstance(obj, str):
+        m = re.search(r"\{.*\}", obj, re.DOTALL)
+        if not m:
+            return None
+        try:
+            obj = json.loads(m.group())
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("skip") is not False and obj.get("skip") is not None:
+        return None
+    lens = obj.get("lens")
+    if lens not in PROFILE_LENSES:
+        return None
+    text = obj.get("text")
+    do = obj.get("do")
+    if not isinstance(text, str) or not isinstance(do, str):
+        return None
+    text = " ".join(text.split())
+    do = " ".join(do.split())
+    if not (10 <= len(text) <= 500) or not (5 <= len(do) <= 200):
+        return None
+    return {"lens": lens, "text": text, "do": do}
 
 
 def parse_synthesis_response(content: Any) -> Optional[str]:

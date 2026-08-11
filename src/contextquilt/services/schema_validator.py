@@ -217,8 +217,16 @@ def validate_manifest(manifest: Dict[str, Any], app_id: str) -> Tuple[bool, List
                     continue
                 errors.extend(_check_required_keys(prefix, r, {"from_types", "produce_type"}))
                 errors.extend(_check_unknown_keys(
-                    prefix, r, {"from_types", "produce_type", "min_patches", "guidance"}
+                    prefix, r,
+                    {"from_types", "produce_type", "min_patches", "guidance",
+                     "cluster", "min_meetings"}
                 ))
+                cl = r.get("cluster")
+                if cl is not None and cl not in ("cue", "person"):
+                    errors.append(f"{prefix}.cluster must be 'cue' or 'person'.")
+                mm = r.get("min_meetings")
+                if mm is not None and (not isinstance(mm, int) or isinstance(mm, bool) or mm < 2):
+                    errors.append(f"{prefix}.min_meetings must be an integer >= 2.")
                 ft = r.get("from_types")
                 if not (isinstance(ft, list) and ft and all(isinstance(t, str) for t in ft)):
                     errors.append(f"{prefix}.from_types must be a non-empty array of strings.")
