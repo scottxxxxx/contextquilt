@@ -1227,11 +1227,17 @@ def is_placeholder_or_self_person(text: object, user_label: "str | None" = None)
 SPEAKER_LABEL = re.compile(r"^\s*\[([^\]]{1,60})\]", re.MULTILINE)
 
 
-def speaker_labels_in(text: object, user_label: "str | None" = None) -> set:
-    """Lowercased speaker labels appearing in a transcript.
+def speaker_turn_counts(text: object, user_label: "str | None" = None) -> dict:
+    """Lowercased speaker label -> number of turns in a transcript.
 
-    Single source of truth for "who actually spoke", shared by the worker's
-    appearance writer and the appearance backfill so the two cannot drift.
+    Single source of truth for "who actually spoke, and how much". The
+    transcript is in hand exactly once (ingest); derive-then-discard,
+    because transcripts are not retained and this signal can never be
+    backfilled (the design-12a audit's hardest constraint). Turn counts
+    feed per-appearance metrics: the capacity-gate turn-count refinement
+    (a 1-turn label against a 41-turn label in one meeting is a
+    diarization artifact, not a second person) and, eventually, the
+    briefing's engagement lens.
 
     Measured on the ABM meeting of 2026-07-28: speaker labels are clean and
     consistent (Ellery appears as a label 23 times, spelled correctly every
@@ -1245,14 +1251,26 @@ def speaker_labels_in(text: object, user_label: "str | None" = None) -> set:
     dropped: they are not people and must never gate an identity decision.
     """
     if not isinstance(text, str) or not text:
-        return set()
-    labels = set()
+        return {}
+    counts: dict = {}
     for raw in SPEAKER_LABEL.findall(text):
         name = raw.replace("(you)", "").strip()
         if not name or is_placeholder_or_self_person(name, user_label):
             continue
-        labels.add(name.lower())
-    return labels
+        key = name.lower()
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def speaker_labels_in(text: object, user_label: "str | None" = None) -> set:
+    """Lowercased speaker labels appearing in a transcript.
+
+    Derived from speaker_turn_counts so the two can NEVER disagree about
+    who spoke (one parser, one placeholder gate — the shared-predicate
+    rule). Kept for the appearance writer and backfill call sites that
+    only need membership.
+    """
+    return set(speaker_turn_counts(text, user_label))
 
 
 def is_user_reference(name: object, user_label: "str | None" = None) -> bool:

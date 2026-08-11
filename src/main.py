@@ -3883,7 +3883,7 @@ async def _people_core(
     appearance_rows = await conn.fetch(
         """
         SELECT pa.entity_id, pa.origin_id, pa.origin_type, pa.project_id,
-               pa.last_seen_at, pa.capacities, pr.name AS project
+               pa.last_seen_at, pa.capacities, pa.turn_count, pr.name AS project
         FROM person_appearances pa
         LEFT JOIN projects pr ON pr.project_id = pa.project_id
         WHERE pa.user_id = $1 AND pa.entity_id = ANY($2::uuid[])
@@ -4573,6 +4573,12 @@ async def get_person(
                 "project_id": a["project_id"],
                 "last_seen_at": a["last_seen_at"].isoformat() if a["last_seen_at"] else None,
                 "capacities": list(a["capacities"] or []),
+                # Null = unknown (pre-metric rows, or not a speaker),
+                # never "spoke zero turns". Enables the turn-count veto
+                # refinement the Vijay set proved right: a 1-turn label
+                # against a 41-turn label in one meeting is a diarization
+                # artifact, not a second person.
+                "turn_count": a["turn_count"],
             }
             for a in row["_appearances"]
         ],
@@ -4761,9 +4767,11 @@ async def merge_people(
                     """
                     INSERT INTO person_appearances
                         (user_id, entity_id, origin_id, origin_type,
-                         project_id, first_seen_at, last_seen_at, capacities)
+                         project_id, first_seen_at, last_seen_at, capacities,
+                         turn_count)
                     SELECT user_id, $1::uuid, origin_id, origin_type,
-                           project_id, first_seen_at, last_seen_at, capacities
+                           project_id, first_seen_at, last_seen_at, capacities,
+                           turn_count
                     FROM person_appearances
                     WHERE user_id = $2 AND entity_id = $3::uuid
                     ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
@@ -4773,6 +4781,13 @@ async def merge_people(
                                                  EXCLUDED.last_seen_at),
                         project_id    = COALESCE(person_appearances.project_id,
                                                  EXCLUDED.project_id),
+                        -- Same-meeting fold keeps the MAX turn count (one
+                        -- human, two labels: 41 turns + 1 turn is a 41-turn
+                        -- human, not 42); NULL never clobbers a known value.
+                        turn_count    = CASE
+                            WHEN EXCLUDED.turn_count IS NULL THEN person_appearances.turn_count
+                            ELSE GREATEST(COALESCE(person_appearances.turn_count, 0), EXCLUDED.turn_count)
+                        END,
                         -- Union rather than replace. If the loser was a
                         -- speaker in a meeting where the canonical was only
                         -- mentioned, the merged person was demonstrably in
