@@ -148,3 +148,13 @@ def test_detail_serves_active_insights_only_with_evidence():
 def test_serving_never_fails_the_detail_route():
     body = MAIN.split("insights: list = []")[1].split("detail = _public_person")[0]
     assert "except Exception" in body
+
+
+# --- is_self on the People rows (13b ratification answer 2) ------------
+
+def test_people_rows_carry_tri_state_is_self():
+    """True on the ego row, false on others when an ego link exists,
+    null everywhere when it does not: the graph excludes the ego, and
+    excluding nobody must be visible, never silent."""
+    assert "e.self_at IS NOT NULL AS _is_self_row" in MAIN
+    assert '"is_self": p["_is_self_row"] if has_self else None' in MAIN

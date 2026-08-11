@@ -4090,7 +4090,8 @@ async def _people_core(
         f"""
         SELECT e.entity_id, e.name, e.description, e.mention_count,
                e.first_seen_at, e.last_seen_at,
-               e.confirmed_at, e.confirmation_source
+               e.confirmed_at, e.confirmation_source,
+               e.self_at IS NOT NULL AS _is_self_row
         FROM entities e
         WHERE e.user_id = $1 AND e.entity_type = $2
           AND e.merged_into IS NULL AND e.suppressed_at IS NULL{scope}
@@ -4339,6 +4340,13 @@ async def _people_core(
         appearances_by_id.setdefault(str(r["entity_id"]), []).append(r)
 
     assembled = []
+    # is_self (13b ratification answer 2): true on the ego-linked row,
+    # false on every other row WHEN an ego link exists, null everywhere
+    # when it does not. False and cannot-tell are different claims: the
+    # graph excludes the ego, and excluding nobody because the link is
+    # absent must be visible to the client, not silent.
+    has_self = any(p["_is_self_row"] for p in people)
+
     by_id = {}
     for p in people:
         eid = str(p["entity_id"])
@@ -4426,6 +4434,7 @@ async def _people_core(
         row = {
             "entity_id": eid,
             "name": p["name"],
+            "is_self": p["_is_self_row"] if has_self else None,
             "aliases": aliases,
             "patch_id": patch_id,
             "description": p["description"] or None,
@@ -4765,7 +4774,12 @@ async def get_person(
     insights: list = []
     if row.get("patch_id"):
         try:
-            ins_rows = await conn.fetch(
+            # db_pool, NOT the _people_core conn: that connection's
+            # acquire block has already closed by this point in the
+            # function, and the first live derivation proved it (insight
+            # in DB, zero served, the guard swallowing the closed-conn
+            # error).
+            ins_rows = await db_pool.fetch(
                 """
                 SELECT cp.patch_id, cp.value, cp.created_at, cp.source_patch_ids
                 FROM context_patches cp
@@ -4784,7 +4798,7 @@ async def get_person(
                     iv = json.loads(iv)
                 evidence: list = []
                 if ir["source_patch_ids"]:
-                    ev_rows = await conn.fetch(
+                    ev_rows = await db_pool.fetch(
                         """
                         SELECT DISTINCT origin_id, min(created_at)::date AS met_on
                         FROM context_patches
