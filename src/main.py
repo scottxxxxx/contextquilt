@@ -68,6 +68,7 @@ from contextquilt.services.people_identity import (
     validate_person_name,
     DEFAULT_PEOPLE_VOCABULARY,
     PeopleVocabulary,
+    build_entity_resolver,
     people_vocabulary,
 )
 from contextquilt.services.recall_signals import (
@@ -1648,6 +1649,12 @@ class QuiltPatchResponse(BaseModel):
     # excludes them. A tombstone would be indistinguishable from decay.
     shelved_at: Optional[str] = None
     shelved_source: Optional[str] = None
+    # Server-resolved person entity for the item's owner (owns-edge
+    # person first, then value.owner by name/alias), so a client links
+    # an owner chip into the People tab with zero entity matching of
+    # its own (SS's ask, boundary decision 2026-08-11). Null = CQ
+    # cannot tell, never "no owner"; `owner` remains the raw string.
+    owner_entity_id: Optional[str] = None
     connections: List[PatchConnectionResponse] = []
 
 class MeetingGroup(BaseModel):
@@ -1936,6 +1943,51 @@ async def get_user_quilt(
     action_items = []
 
     completable = await _completable_types()
+
+    # owner_entity_id inputs, all set-based: the owns-edge person text
+    # per item (same deterministic pick as the People surface), and the
+    # user's person entities + aliases for the name resolver.
+    vocab = await _people_vocab_cached(app_id)
+    completable_ids = [
+        row["patch_id"] for row in rows if row["patch_type"] in completable
+    ]
+    owner_text_by_item: dict = {}
+    if completable_ids:
+        owns_rows = await db_pool.fetch(
+            """
+            SELECT DISTINCT ON (pc.to_patch_id)
+                   pc.to_patch_id, op.value->>'text' AS person_text
+            FROM patch_connections pc
+            JOIN context_patches op ON op.patch_id = pc.from_patch_id
+            JOIN context_patches item ON item.patch_id = pc.to_patch_id
+            WHERE pc.to_patch_id = ANY($1::uuid[])
+              AND pc.connection_label = $2
+              AND COALESCE(pc.status, 'active') = 'active'
+            ORDER BY pc.to_patch_id,
+                     (lower(btrim(op.value->>'text'))
+                      = lower(btrim(item.value->>'owner'))) DESC NULLS LAST,
+                     pc.created_at, pc.connection_id
+            """,
+            completable_ids, vocab.ownership_label,
+        )
+        owner_text_by_item = {
+            str(r["to_patch_id"]): r["person_text"] for r in owns_rows
+        }
+    entity_rows = await db_pool.fetch(
+        "SELECT entity_id, name, merged_into FROM entities "
+        "WHERE user_id = $1 AND entity_type = $2",
+        user_id, vocab.person_entity_type,
+    )
+    alias_rows = await db_pool.fetch(
+        "SELECT a.alias, a.entity_id FROM entity_aliases a "
+        "JOIN entities e ON e.entity_id = a.entity_id "
+        "WHERE a.user_id = $1 AND e.entity_type = $2",
+        user_id, vocab.person_entity_type,
+    )
+    resolve_owner_entity = build_entity_resolver(
+        [dict(r) for r in entity_rows], [dict(r) for r in alias_rows]
+    )
+
     for row in rows:
         value = row["value"]
         if isinstance(value, str):
@@ -1961,6 +2013,11 @@ async def get_user_quilt(
             permanence_override_source=row.get("permanence_override_source"),
             shelved_at=value.get("shelved_at"),
             shelved_source=value.get("shelved_source"),
+            owner_entity_id=(
+                resolve_owner_entity(owner_text_by_item.get(pid))
+                or resolve_owner_entity(value.get("owner"))
+                if row["patch_type"] in completable else None
+            ),
             connections=connections_by_patch.get(pid, []),
         )
 
