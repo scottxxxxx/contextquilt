@@ -49,6 +49,30 @@ def test_quilt_route_survives_a_pre_migration_db():
     assert "self_entity_id = None" in guard
 
 
+def test_quilt_decay_state_uses_the_shared_module():
+    """The triage band on quilt completables must derive from the SAME
+    decay_model the worker archival and the People ledger use, with the
+    same inputs (registry TTLs, salience, deadline anchor, access
+    exemption), or a project triage queue and a person card could show
+    different bands for the same row."""
+    body = MAIN.split("def _decay_state")[1].split("def _owned_by_self")[0]
+    assert "decay_model.decay_state(" in body
+    assert "registry_ttls.get" in body
+    assert "last_accessed_by_id.get" in body
+    assert 'value.get("salience")' in body
+
+
+def test_quilt_decay_state_null_for_non_completables_and_degrades():
+    """Null = decay does not apply (not a completable). The registry and
+    usage-metrics lookups are guarded so a lagging DB (MCP) serves bands
+    without those refinements or null, never a 500 on the core route."""
+    body = MAIN.split("def _decay_state")[1].split("def _owned_by_self")[0]
+    assert "not in completable" in body
+    assert "return None" in body
+    guarded = MAIN.split("registry_ttls: dict = {}")[1].split("def _decay_state")[0]
+    assert guarded.count("except Exception") == 2
+
+
 def test_insights_serves_the_self_entity_id():
     """SS asked for one bit of knowledge the client lacks: which entity
     is the user. Every insights return carries it explicitly, null only

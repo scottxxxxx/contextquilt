@@ -1735,6 +1735,12 @@ class QuiltPatchResponse(BaseModel):
     # design (2026-08-11 amendment) renders null as absence, never as
     # "you owe 0".
     owned_by_self: Optional[bool] = None
+    # live | aging | stale for completables, from the SAME decay_model
+    # the worker's archival and the People ledger consume, so a triage
+    # queue on any surface (person card, project detail) reads the same
+    # band for the same row. Null = decay does not apply here (not a
+    # completable). Day-bucketed: stable within a UTC day.
+    decay_state: Optional[str] = None
     connections: List[PatchConnectionResponse] = []
 
 class MeetingGroup(BaseModel):
@@ -1933,7 +1939,8 @@ async def get_user_quilt(
 
     query = f"""
         SELECT cp.patch_id, cp.patch_name, cp.patch_type, cp.value,
-               cp.origin_mode, cp.source_prompt, cp.created_at, cp.project,
+               cp.origin_mode, cp.source_prompt, cp.created_at, cp.updated_at,
+               cp.project,
                cp.project_id, cp.origin_id, cp.origin_type,
                cp.permanence_override, cp.permanence_override_source, cp.status
         FROM context_patches cp
@@ -2080,6 +2087,52 @@ async def get_user_quilt(
         # the quilt route itself must never fail over this column.
         self_entity_id = None
 
+    # Decay-band inputs for completables, guarded so a lagging DB (the
+    # MCP deployment misses tables and columns) degrades to bands
+    # without registry TTLs or access exemption rather than failing the
+    # core quilt route. Same parameters the worker archival and the
+    # People ledger use (services/decay_model.py is the single source).
+    registry_ttls: dict = {}
+    for _pt in completable:
+        try:
+            _ttl_row = await db_pool.fetchrow(
+                decay_model.TTL_REGISTRY_QUERY, _pt
+            )
+            if _ttl_row and _ttl_row["default_ttl_days"] is not None:
+                registry_ttls[_pt] = _ttl_row["default_ttl_days"]
+        except Exception:
+            pass
+    last_accessed_by_id: dict = {}
+    if completable_ids:
+        try:
+            _acc_rows = await db_pool.fetch(
+                "SELECT patch_id, last_accessed_at FROM patch_usage_metrics "
+                "WHERE patch_id = ANY($1::uuid[])",
+                completable_ids,
+            )
+            last_accessed_by_id = {
+                str(r["patch_id"]): r["last_accessed_at"] for r in _acc_rows
+            }
+        except Exception:
+            pass
+
+    def _decay_state(pid, value, row):
+        if row["patch_type"] not in completable:
+            return None
+        try:
+            return decay_model.decay_state(
+                row["patch_type"],
+                updated_at=row["updated_at"],
+                created_at=row["created_at"],
+                deadline_date=value.get("deadline_date"),
+                salience=value.get("salience"),
+                permanence_override=row.get("permanence_override"),
+                registry_ttl_days=registry_ttls.get(row["patch_type"]),
+                last_accessed_at=last_accessed_by_id.get(pid),
+            )
+        except Exception:
+            return None
+
     def _owned_by_self(pid, value, patch_type):
         """Null when CQ cannot tell (no ego link, or not a completable);
         otherwise the same verdict the insights follow-up rate uses, so
@@ -2125,6 +2178,7 @@ async def get_user_quilt(
                 if row["patch_type"] in completable else None
             ),
             owned_by_self=_owned_by_self(pid, value, row["patch_type"]),
+            decay_state=_decay_state(pid, value, row),
             connections=connections_by_patch.get(pid, []),
         )
 
