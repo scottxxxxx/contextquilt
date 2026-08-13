@@ -1071,6 +1071,86 @@ specific version of "not yet".
 
 ---
 
+### 5.9a The primitive is not a commitment
+
+Read this before the field names in 5.10, because the names are the
+smaller half and they only make sense once this is settled.
+
+The thing worth tracking is **an object that keeps coming back without
+resolving**. A commitment is one kind of such object. A question nobody
+answers, a decision that keeps getting revisited and a concern nobody
+owns are others, and mechanically they are IDENTICAL: an object,
+restated across meetings, its state unchanged. Nothing about the
+machinery cares which it is.
+
+Two independent findings forced this, and neither came from the design.
+
+The single most valuable object in the test corpus is an ownership
+question raised in three consecutive meetings and never assigned. It is
+not a commitment. Nobody owes it. It has no due date. The USER raised it
+himself. A ledger built on commitments would not hold it at all, and it
+beat every commitment finding in testing.
+
+Separately, the persona work landed on the same point: three of the four
+people most likely to install this app do not have action items in any
+meaningful sense. A fundraiser has a topic that keeps surfacing. A new
+manager has a concern their report raises every fortnight. Neither is a
+deliverable that slipped, and a product that only sees deliverables is
+invisible to three quarters of its likely users.
+
+So the contract is written for the general object. **Nothing in the wire
+shape assumes a commitment**: the module is `services/item_ledger.py`,
+the served blocks are `item_ledger` and `item_ledger_rollup`, every entry
+carries its own `object_type`, and the one commitment-specific mode
+(`re_dated`) is declared as such in a published vocabulary rather than
+left for a client to discover. The contract does not need renegotiating
+with the client when questions arrive.
+
+**Day one coverage is still commitments and blockers only.** Extraction
+is unchanged and no manifest declares anything new. The point of doing
+this before merge is that the wire shape is the expensive thing to change
+later, not the coverage.
+
+#### Eligibility: `ledger_tracked`, and why completability was the wrong gate
+
+Which types the ledger holds resolves from the facet runtime
+(`TypeRuntime.ledger_tracked_types`), never from a list in CQ code, so a
+manifest can widen coverage without a CQ deploy.
+
+It is deliberately NOT the completable set alone. In this schema
+`is_completable` means a type can be CLOSED by the completion machinery,
+and it drags two other behaviors with it: deadline anchoring in the decay
+loop (an item with a due date must never archive before it, see 5.7) and
+membership of the People `commitments.they_owe` ledger. A recurring
+question has no due date and is not something a person OWES, so declaring
+its type completable to get it into the ledger would be wrong in both
+directions at once.
+
+So eligibility is a UNION of two declarations that say different things:
+
+| half | says | who arrives through it |
+| --- | --- | --- |
+| `is_completable` | this can be FINISHED | SS's commitment and blocker, with no manifest change at all |
+| `ledger_tracked: true` (migration 38) | this can be UNFINISHED | a question, an unowned concern, a decision that keeps being revisited |
+
+Only the second generalises past commitments, which is why it could not
+be folded into the first.
+
+The write path and the read path consume the same set, so capture and
+serving widen together: the worker records restatement history for
+ledger-tracked types, and `_people_core` fetches the wider population
+while every `commitments` array filters back down to completables
+**explicitly**. That explicit filter is the load-bearing line. Day one the
+two sets are equal, so it is a no-op, which is exactly the condition
+under which an omission would go unnoticed until the first question
+appeared on somebody's card as an outstanding obligation.
+
+The runtime reads the new column through `to_jsonb` rather than as a bare
+column, so a database that has not applied migration 38 returns "not
+declared" instead of failing the whole snapshot. Losing project scoping
+and completability because a NEW column is missing would be a wildly
+disproportionate degradation.
+
 ### 5.10 The closure ledger: what happened to an item, not whether it is open
 
 An action item tracker answers one question, open or closed, and that
@@ -1089,8 +1169,8 @@ Two halves, a write and a read.
 detected a restatement: a trigram match over 0.6 bumps `updated_at`,
 `last_observed_at` and the usage counters, and a different
 `deadline_date` displaces the old one into `value.deadline_history`. What
-it never recorded was WHAT was restated. It now appends, FOR COMPLETABLES
-ONLY, to `value.restatements` (capped at 10, the deadline_history rule):
+it never recorded was WHAT was restated. It now appends, FOR
+LEDGER-TRACKED TYPES ONLY (5.9a), to `value.restatements` (capped at 10, the deadline_history rule):
 `observed_at`, the `text` as spoken in this meeting, the `owner` as
 spoken, the `deadline` as spoken, `deadline_date`, and `origin_id`.
 `value.restatement_count` is a monotonic counter that survives the cap,
@@ -1107,14 +1187,14 @@ item once. A re-ingest of one transcript, or a second extracted phrasing
 of one sentence landing on the same patch, is not a second hop months
 later, and an item first stated in this meeting has not come back yet.
 
-**Read (`commitment_ledger` on the detail route).** A pure classifier,
-`services/commitment_ledger.py`, no database, unit tested the way
+**Read (`item_ledger` on the detail route).** A pure classifier,
+`services/item_ledger.py`, no database, unit tested the way
 `follow_through.py` is. Per item, one headline `mode` plus every other
 mode that is also true in `modes`:
 
 | mode | meaning |
 | --- | --- |
-| `delivered` | completed, with the existing completion stamps |
+| `resolved` | finished, with the existing completion stamps: delivery for a commitment, an answer for a question, a decision for an open decision |
 | `absorbed_by_user` | the owner changed TO the user |
 | `reassigned` | the owner changed to somebody else |
 | `not_raised_since` | open, past its date, and not raised across the last 2 meetings the user actually had with that person |
@@ -1200,7 +1280,7 @@ object in different words, and the seam for a cold path judge is a
   float is produced anywhere in the module (GP serializes with
   `allow_nan=False`).
 
-### 5.11 `commitment_pressure`: the across-people read, which is about the user
+### 5.11 `item_ledger_rollup`: the across-people read, which is about the user
 
 On the person LIST route. The finding it exists for is about the person
 running the meetings, not the people in them: follow up pressure can run
@@ -1221,78 +1301,129 @@ denominators to be assumed equal with the detail route's.
 
 **Counts on the list, receipts on the detail.** `summarize()` produces
 patch id arrays alongside its counts, and the list strips that whole
-family (`commitment_ledger.RECEIPT_KEYS`) rather than one key by name, so
+family (`item_ledger.RECEIPT_KEYS`) rather than one key by name, so
 a receipt key added later cannot quietly start growing a browse payload
 polled for every person the user has. The ids are only useful once the
 user has chosen somebody, and the detail route serves them there next to
 each item's own restatements.
 
-### 5.12 Chases that produced no advance
+### 5.12 `raised_without_advance`: the follow up metric, after two corrections
 
-**This replaced a metric that did not survive measurement, and the
-correction is worth keeping.** The finding was that follow up pressure
-runs inversely to the delivery record: the person generating risk gets
-warmth, the one who never misses gets interrogated. The obvious metric
-was questions RECEIVED. Computed by hand against the transcripts, it does
-not hold: the volume is twelve questions to one person and ten to the
-other, nearly level, and a card built on it would have asserted something
-the data contradicts.
+**Both corrections are worth keeping, because each was a claim that did
+not survive contact.**
+
+FIRST, the finding was that follow up pressure runs inversely to the
+delivery record: the person generating risk gets warmth, the one who
+never misses gets interrogated. The obvious metric was questions
+RECEIVED. Computed by hand against the transcripts, it does not hold. The
+volume is twelve questions to one person and ten to the other, nearly
+level, and a card built on it would have asserted something the data
+contradicts.
 
 What separates the two sets is the KIND of question. One person's twelve
-are chases on items already in the ledger that produced no advance, three
-of them on the same item across three meetings. The other's ten are
-substantive probes to somebody already ahead of the user. A chase and a
-probe both count as one question, which is exactly why volume cannot see
-the difference.
+are items already in the ledger coming up again and not moving, three
+times on one item across three meetings. The other's ten are substantive
+probes to somebody already ahead of the user. Both kinds count as one
+question each, which is exactly why volume cannot see the difference. So
+the metric counts occasions that produced no advance, and **question
+volume stays its own separate count** (`questions`, section 6.6).
+Conflating them is what produced the false claim.
 
-So the metric is chases that produced no advance, and **question volume
-stays its own separate count** (`questions`, section 6.6). Conflating
-them is what produced the false claim; they answer different questions
-and are served as different numbers.
+SECOND, the replacement was called `chases` until review, and it did not
+survive the rule in 5.13 either. "Chase" asserts pursuit. What is
+observed is thinner: a restatement records that THIS item came up in a
+specific meeting (`origin_id`), and `person_appearances` records, for
+that same meeting, how many questions the user asked THIS person. Both
+halves were already stored, but **the join is MEETING level, not question
+level**, because CQ holds no link from a question to an item. An occasion
+where the item came up while the user asked about something else counts,
+so a name asserting pursuit would report a motive off a coincidence of
+timing. "Pressed" would have been the same assertion said more quietly.
+RAISED is the observation with nothing added.
 
-Both halves of the join were already stored. A restatement records that
-THIS item came up in a specific meeting (`origin_id`), and
-`person_appearances` records, for that same meeting, how many questions
-the user asked THIS person. An occasion where both are true is a chase.
+That rule biting its own author is the correct outcome of having a rule.
 
-**Known boundary, published as `CHASE_DEFINITION` rather than documented
-here alone.** That join is MEETING level, not question level: CQ stores
-no link from a question to an item, so an occasion where the item came up
-and the user asked about something else counts. The word "chase" is
-therefore doing a little inference the evidence does not carry, which is
-a milder form of the defect that renamed `silently_dropped`. Until a
-question-to-item link exists the mitigation is to say exactly what was
-seen, on the wire, so a client that only trusts observations can read the
-definition and decide for itself.
+`RAISED_DEFINITION` ships on the wire
+(`item_raised_in_a_meeting_where_the_user_asked_this_person_a_question`)
+so the boundary travels with the number instead of living in a docstring.
 
-Per chase there are three outcomes, and the third is why this cannot
-collapse into one number:
+Three outcomes per occasion, and the third is why this cannot collapse
+into one number:
 
 | outcome | meaning |
 | --- | --- |
 | `without_advance` | there was a later meeting with this person and the item had not closed by it |
 | `with_advance` | it closed by that next meeting |
-| `unresolved` | the chase was in the most recent meeting, so nothing has had a chance to happen |
+| `unresolved` | it was raised in the most recent meeting, so nothing has had a chance to happen |
 
 Plus `unmeasurable`: the item came up in a meeting carrying no question
-metric, so whether it was a chase is unknowable. On the day this ships
-that is every meeting there has ever been, and a client rendering the
-chase count without this one is reporting a floor as a total.
+metric, so whether the user asked anything is unknowable. On the day this
+ships that is every meeting there has ever been, and a client rendering
+the count without this one is reporting a floor as a total.
 
-`ADVANCE_DEFINITION` is published on the wire next to the counts
-(`closed_by_the_next_meeting_with_this_person`) because it is deliberately
-narrow and nobody should have to guess. **A fresh restatement is not an
-advance and a moved due date is not an advance.** Motion that reads as
-progress at every checkpoint is the illusion this whole surface exists to
-break, so only closing counts. `unresolved` exists for the same reason in
-the other direction: counting a chase from the latest meeting as a
-failure would manufacture the finding out of recency.
+`ADVANCE_DEFINITION` is published the same way
+(`closed_by_the_next_meeting_with_this_person`) because it is
+deliberately narrow. **A fresh restatement is not an advance and a moved
+due date is not an advance.** Motion that reads as progress at every
+checkpoint is the illusion this whole surface exists to break, so only
+resolution counts. `unresolved` exists for the same reason pointed the
+other way: counting an occasion from the latest meeting as a failure
+would manufacture the finding out of recency.
 
-The summary carries `chases`, `chases_without_advance`,
-`items_chased_without_advance`,
-`max_chases_without_advance_on_one_item` (the number behind "three of
-them on the same item"), `chases_unmeasurable`, both definitions, and the
+The summary carries `raised_with_a_question`, `raised_without_advance`,
+`items_raised_without_advance`,
+`max_raised_without_advance_on_one_item` (the number behind "three of
+them on the same item"), `raised_unmeasurable`, both definitions, and the
 patch ids, which are receipts and therefore detail-route only.
+
+### 5.12a The extraction seam, and what it would actually cost
+
+**Explicit non-goal: CQ does not extract questions today, and nothing in
+this pass built toward it beyond leaving the seam clean.** Day one
+coverage is commitments and blockers, exactly as before.
+
+The seam is the point of 5.9a: because eligibility is a manifest
+declaration resolved through the runtime, turning on a recurring-question
+ledger needs NO CQ code. What it needs, in order:
+
+1. **A patch type in the app's manifest.** `open_question` (or whatever
+   the app calls it) with `facet: Episode`, `project_scoped: true`,
+   `ledger_tracked: true`, a permanence, and a `value_shape` carrying at
+   minimum `text`. Registration writes the registry row and invalidates
+   the runtime cache, and the ledger picks it up within the cache TTL.
+   Zero CQ changes. This part is done and tested.
+2. **Extraction guidance for it**, which is the real work and is entirely
+   in the manifest's `extraction_rules` plus the schema prompt builder
+   that already renders them. The hard part is not the prompt, it is the
+   PRECISION: an extractor that emits every interrogative sentence would
+   bury the ledger, because most questions in a meeting are answered in
+   the next breath and are not objects at all. The target is the narrow
+   case the corpus proved valuable: a question that is RAISED AND LEFT
+   OPEN, with nobody named to answer it.
+3. **Dedup thresholds for it.** This is the one place a question is
+   genuinely harder than a commitment. The ledger's whole premise is that
+   the same object restated in different words collapses onto one patch,
+   and questions are restated much more loosely than commitments ("Who
+   owns the vendor relationship?" then "We still have not sorted out
+   ownership"). The trigram fast path will miss that pair; the gray zone
+   judge is the mechanism that catches it, and its prompt is written for
+   facts rather than for questions.
+
+**Estimate.** Steps 1 and 3 are small: a manifest version bump and a
+registration, plus a judge prompt variant and an eval over the existing
+transcripts, call it two days including the eval. Step 2 is the whole
+cost and it is not a coding cost: writing the extraction rule is perhaps
+half a day, and measuring whether it fires on the right sentences needs
+a labelled pass over the benchmark transcripts, which is where the time
+goes. Three to four days end to end to a number worth trusting, with the
+risk concentrated entirely in precision rather than in plumbing.
+
+**What would make it worth doing now:** the recurring-question case beat
+every commitment finding in testing, and three of the four likely
+personas have no action items at all (5.9a). What would make it worth
+waiting: the ledger's value on questions cannot be measured until
+questions exist in the corpus, and nothing that ships before then can
+tell us whether the extraction precision is good enough.
 
 ### 5.13 The vocabulary audit
 
@@ -1303,16 +1434,18 @@ was observed.** Two names failed and one is on the line.
 | name | verdict |
 | --- | --- |
 | `silently_dropped` | FAILED, renamed `not_raised_since` (5.10) |
-| `chases` | ON THE LINE, kept, boundary published as `CHASE_DEFINITION` (5.12) |
-| `delivered` | kept, see below |
+| `chases` | FAILED, renamed `raised_without_advance`, boundary published as `RAISED_DEFINITION` (5.12) |
+| `delivered` | kept through the naming audit, then renamed `resolved` when the primitive widened, see below |
 | `re_dated`, `restated`, `reassigned`, `absorbed_by_user`, `open` | pass: each is a thing somebody said, on a date, in a meeting |
 | `hop_count`, `deadline_moves`, `days_open`, `first_stated_on`, `last_stated_on`, `meetings_since_last_statement`, `owner_change` | pass: all counts of stored observations |
 | `received_explicit` / `received_inferred` | pass, and the split is itself the honesty: the inferred half names its own uncertainty |
 | `unresolved`, `unmeasurable` | pass: both exist precisely to keep an unknown out of a count |
 | `object_regression` | pass by being null, and by asking about the restatement TEXTS (the conversation) rather than about the work |
 
-`delivered` is worth stating rather than waving through. It does assert
-more than the record strictly holds: `completed_at` is when CQ LEARNED an
+`resolved` (which was `delivered` through the naming audit, and was
+renamed when the primitive widened rather than because the audit failed
+it) is worth stating rather than waving through. It does assert more
+than the record strictly holds: `completed_at` is when CQ LEARNED an
 item closed, not when the work landed, and the same caveat is already
 written into `follow_through.py`. It is kept because it differs in KIND
 from the failed name: PRESENCE does the work, not absence. A closure is
@@ -1320,7 +1453,9 @@ an affirmative act by a person or the user, and it arrives with
 `completion_source` and `completion_evidence` attached, so the claim
 carries its own receipt and a reader can check it. `not_raised_since` had
 nothing to check, which is exactly why it could not keep a name that
-asserted a cause.
+asserted a cause. The later rename to `resolved` preserved that property
+exactly: it is the same affirmative act with the same stamps, said in a
+word that is still true when the object is a question somebody answered.
 
 ---
 
@@ -1469,11 +1604,12 @@ no string naming a pattern. Served per meeting in `meetings[].questions`
 and aggregated per person as `questions`.
 
 **Volume is not the follow up finding.** It is nearly level across people
-whose follow up is nothing alike, because a chase and a substantive probe
-each count as one question. Section 5.12 is the metric that carries it,
-and it CONSUMES these columns (the from_user pair is what makes a
-restatement a chase) without replacing them. Two counts, two questions,
-both served, never folded together.
+whose follow up is nothing alike, because an item being raised again and
+a substantive probe each count as one question. Section 5.12 is the
+metric that carries it, and it CONSUMES these columns (the from_user
+pair is what turns a restatement into a counted occasion) without
+replacing them. Two counts, two questions, both served, never folded
+together.
 
 ### 6.3 Built and held: manifest v9
 

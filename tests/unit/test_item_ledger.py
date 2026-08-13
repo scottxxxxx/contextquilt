@@ -29,9 +29,12 @@ import pytest
 
 MAIN = (Path(__file__).resolve().parents[2] / "src" / "main.py").read_text()
 
-from contextquilt.services.commitment_ledger import (
+from contextquilt.services.item_ledger import (
     ABSORBED_BY_USER,
-    DELIVERED,
+    UNIVERSAL_MODES,
+    modes_for_object_type,
+    vocabulary,
+    RESOLVED,
     MODE_PRECEDENCE,
     OPEN,
     REASSIGNED,
@@ -209,7 +212,7 @@ class TestDroppedVersusReDated:
             item(deadline_date="2026-06-20", completed_at=datetime(2026, 7, 1)),
             TODAY, meeting_days=self.TWO_MEETINGS,
         )
-        assert got["mode"] == DELIVERED
+        assert got["mode"] == RESOLVED
 
 
 class TestTheMolt:
@@ -366,8 +369,8 @@ class TestOwnership:
             ),
             TODAY, user_label="Scott Guida",
         )
-        assert got["mode"] == DELIVERED
-        assert got["modes"][0] == DELIVERED
+        assert got["mode"] == RESOLVED
+        assert got["modes"][0] == RESOLVED
         assert REASSIGNED in got["modes"]
 
 
@@ -480,9 +483,9 @@ class TestSummary:
         s = summarize(items)
         assert s["items"] == 3
         assert s["by_mode"][RESTATED] == 2
-        assert s["by_mode"][DELIVERED] == 1
+        assert s["by_mode"][RESOLVED] == 1
         assert sorted(s["patch_ids_by_mode"][RESTATED]) == ["a", "b"]
-        assert s["patch_ids_by_mode"][DELIVERED] == ["c"]
+        assert s["patch_ids_by_mode"][RESOLVED] == ["c"]
         # Every mode key is present, so a client decodes one shape.
         assert set(s["by_mode"]) == set(MODE_PRECEDENCE)
         # The counts add up to the denominator: nothing is double
@@ -612,7 +615,7 @@ class TestChases:
                 (7, 1, 2, 0, "m2"), (7, 20, 0, 0, "m3"),
             ),
         )
-        c = got[0]["chases"]
+        c = got[0]["raised_with_a_question"]
         assert c["total"] == 1
         assert c["without_advance"] == 1
         assert c["with_advance"] == 0
@@ -629,7 +632,7 @@ class TestChases:
             TODAY,
             appearances=self._appearances((7, 1, 1, 0, "m2"), (7, 20, 0, 0, "m3")),
         )
-        c = got[0]["chases"]
+        c = got[0]["raised_with_a_question"]
         assert c["with_advance"] == 1
         assert c["without_advance"] == 0
         assert c["occasions"][0]["advanced"] is True
@@ -645,7 +648,7 @@ class TestChases:
             TODAY,
             appearances=self._appearances((7, 1, 1, 0, "m2"), (7, 20, 0, 0, "m3")),
         )
-        assert got[0]["chases"]["without_advance"] == 1
+        assert got[0]["raised_with_a_question"]["without_advance"] == 1
 
     def test_a_re_date_is_not_an_advance(self):
         # The whole point. Motion that reads as progress at a checkpoint
@@ -662,8 +665,8 @@ class TestChases:
             TODAY,
             appearances=self._appearances((7, 1, 3, 0, "m2"), (7, 20, 0, 0, "m3")),
         )
-        assert got[0]["chases"]["without_advance"] == 1
-        assert got[0]["chases"]["advance_definition"] == (
+        assert got[0]["raised_with_a_question"]["without_advance"] == 1
+        assert got[0]["raised_with_a_question"]["advance_definition"] == (
             "closed_by_the_next_meeting_with_this_person"
         )
 
@@ -675,7 +678,7 @@ class TestChases:
             TODAY,
             appearances=self._appearances((7, 1, 0, 0, "m2"), (7, 20, 2, 0, "m3")),
         )
-        c = got[0]["chases"]
+        c = got[0]["raised_with_a_question"]
         assert c["total"] == 1
         assert c["unresolved"] == 1
         assert c["without_advance"] == 0
@@ -687,7 +690,7 @@ class TestChases:
             TODAY,
             appearances=self._appearances((7, 1, 0, 0, "m2"), (7, 20, 0, 0, "m3")),
         )
-        c = got[0]["chases"]
+        c = got[0]["raised_with_a_question"]
         assert c["total"] == 0
         assert c["unmeasurable"] == 0
 
@@ -702,7 +705,7 @@ class TestChases:
                 (7, 1, None, None, "m2"), (7, 20, None, None, "m3"),
             ),
         )
-        c = got[0]["chases"]
+        c = got[0]["raised_with_a_question"]
         assert c["unmeasurable"] == 1
         assert c["total"] == 0
         assert c["without_advance"] == 0
@@ -713,7 +716,7 @@ class TestChases:
             TODAY,
             appearances=self._appearances((7, 20, 5, 0, "m3")),
         )
-        c = got[0]["chases"]
+        c = got[0]["raised_with_a_question"]
         assert c["total"] == 0
         assert c["unmeasurable"] == 0
 
@@ -731,13 +734,13 @@ class TestChases:
                 (7, 20, 3, 0, "m3"), (8, 5, 0, 0, "m4"),
             ),
         )
-        c = got[0]["chases"]
+        c = got[0]["raised_with_a_question"]
         assert c["total"] == 3
         assert c["without_advance"] == 3
         s = summarize(got)
-        assert s["chases_without_advance"] == 3
-        assert s["items_chased_without_advance"] == 1
-        assert s["max_chases_without_advance_on_one_item"] == 3
+        assert s["raised_without_advance"] == 3
+        assert s["items_raised_without_advance"] == 1
+        assert s["max_raised_without_advance_on_one_item"] == 3
 
     def test_both_definitions_travel_with_the_counts(self):
         # A number whose definition lives in a docstring is a number
@@ -750,16 +753,16 @@ class TestChases:
             TODAY,
             appearances=self._appearances((7, 1, 2, 0, "m2"), (7, 20, 0, 0, "m3")),
         )
-        c = got[0]["chases"]
-        assert c["chase_definition"] == (
+        c = got[0]["raised_with_a_question"]
+        assert c["raised_definition"] == (
             "item_raised_in_a_meeting_where_the_user_asked_this_person_a_question"
         )
         assert c["advance_definition"] == (
             "closed_by_the_next_meeting_with_this_person"
         )
         s = summarize(got)
-        assert s["chase_definition"] == c["chase_definition"]
-        assert s["chase_advance_definition"] == c["advance_definition"]
+        assert s["raised_definition"] == c["raised_definition"]
+        assert s["advance_definition"] == c["advance_definition"]
 
     def test_the_summary_totals_and_names_the_definition(self):
         items = classify_items(
@@ -774,19 +777,19 @@ class TestChases:
             appearances=self._appearances((7, 1, 4, 0, "m2"), (7, 20, 0, 0, "m3")),
         )
         s = summarize(items)
-        assert s["chases"] == 2
-        assert s["chases_without_advance"] == 2
-        assert sorted(s["patch_ids_chased_without_advance"]) == ["a", "b"]
-        assert s["chase_advance_definition"] == (
+        assert s["raised_with_a_question"] == 2
+        assert s["raised_without_advance"] == 2
+        assert sorted(s["patch_ids_raised_without_advance"]) == ["a", "b"]
+        assert s["advance_definition"] == (
             "closed_by_the_next_meeting_with_this_person"
         )
 
     def test_no_chases_leaves_the_peak_null_never_zero(self):
         s = summarize(classify_items([item()], TODAY))
-        assert s["chases"] == 0
-        assert s["chases_without_advance"] == 0
-        assert s["max_chases_without_advance_on_one_item"] is None
-        assert s["patch_ids_chased_without_advance"] == []
+        assert s["raised_with_a_question"] == 0
+        assert s["raised_without_advance"] == 0
+        assert s["max_raised_without_advance_on_one_item"] is None
+        assert s["patch_ids_raised_without_advance"] == []
 
     def test_production_data_produces_no_chases_and_says_so(self):
         # Today: no restatement has ever been recorded and no meeting
@@ -803,8 +806,8 @@ class TestChases:
                  "capacities": ["speaker"]},
             ],
         )
-        assert got[0]["chases"]["total"] == 0
-        assert got[0]["chases"]["unmeasurable"] == 0
+        assert got[0]["raised_with_a_question"]["total"] == 0
+        assert got[0]["raised_with_a_question"]["unmeasurable"] == 0
         # The modes that do not need a restatement still work.
         assert got[0]["mode"] == NOT_RAISED_SINCE
 
@@ -829,8 +832,132 @@ class TestChases:
             ),
         )
         # Identical volume, 12 questions each.
-        assert summarize(chased)["chases_without_advance"] == 2
-        assert summarize(ahead)["chases_without_advance"] == 0
+        assert summarize(chased)["raised_without_advance"] == 2
+        assert summarize(ahead)["raised_without_advance"] == 0
+
+
+class TestThePrimitiveIsNotACommitment:
+    """The widening, tested on the object that forced it.
+
+    The most valuable thing in the test corpus is an ownership question
+    raised in three consecutive meetings and never assigned. The user
+    raised it himself, nobody owns it, it has no due date, and no action
+    item tracker would hold it. It is the same mechanical object as a
+    molted commitment: restated across meetings, state unchanged.
+    """
+
+    def question(self, **over):
+        row = item(**over)
+        row["patch_type"] = "question"
+        row["owner"] = None
+        row["deadline_date"] = None
+        return row
+
+    def test_a_question_raised_three_times_is_the_molt(self):
+        got = classify_item(
+            self.question(restatements=[
+                restatement((6, 1), "Who owns the vendor relationship?", owner=None),
+                restatement((7, 1), "Still not clear who owns it", owner=None),
+                restatement((7, 20), "We should decide who owns this", owner=None),
+            ]),
+            TODAY,
+        )
+        assert got["mode"] == RESTATED
+        assert got["hop_count"] == 3
+        assert got["object_type"] == "question"
+
+    def test_an_answered_question_is_resolved_not_delivered(self):
+        # The general act is resolution: delivery for a commitment, an
+        # answer for a question, a decision for an open decision. CQ
+        # serves the state and the client picks the verb.
+        got = classify_item(
+            self.question(
+                completed_at=datetime(2026, 7, 5),
+                completion_source="user_chat",
+                completion_evidence="Priya owns it",
+            ),
+            TODAY,
+        )
+        assert got["mode"] == RESOLVED
+        # The property that let this mode survive the naming audit:
+        # presence does the work, and the claim ships with its receipt.
+        assert got["completion_source"] == "user_chat"
+        assert got["completion_evidence"] == "Priya owns it"
+
+    def test_a_question_that_someone_takes_on_is_absorbed(self):
+        got = classify_item(
+            self.question(restatements=[
+                restatement((7, 1), "I will figure out who owns it", owner="Scott"),
+            ]),
+            TODAY, user_label="Scott Guida",
+        )
+        assert got["mode"] == ABSORBED_BY_USER
+
+    def test_a_dateless_question_can_never_be_re_dated(self):
+        # Not by suppression: there is no date to move, so the mode is
+        # structurally unreachable, and the vocabulary says so.
+        got = classify_item(self.question(), TODAY)
+        assert RE_DATED not in got["modes"]
+        assert RE_DATED not in modes_for_object_type("question", dated_types=("commitment",))
+        assert RE_DATED in modes_for_object_type("commitment", dated_types=("commitment",))
+
+    def test_a_question_never_needs_an_owner_to_be_held(self):
+        # An unowned concern is exactly the case the personas produced:
+        # a fundraiser's recurring topic, a new manager's fortnightly
+        # concern. Neither is a deliverable that slipped.
+        got = classify_item(
+            self.question(restatements=[restatement((7, 1), "Came up again", owner=None)]),
+            TODAY,
+        )
+        assert got["owner"] is None
+        assert got["owner_change"] is None
+        assert got["mode"] == RESTATED
+
+    def test_the_vocabulary_is_open_in_both_directions(self):
+        v = vocabulary(
+            ["commitment", "question", "some_type_that_does_not_exist_yet"],
+            dated_types=("commitment",),
+        )
+        assert v["object_types"] == [
+            "commitment", "question", "some_type_that_does_not_exist_yet",
+        ]
+        # A type nobody has declared yet still gets a mode list, so its
+        # arrival needs no contract change.
+        assert v["modes_by_object_type"]["some_type_that_does_not_exist_yet"] == [
+            m for m in MODE_PRECEDENCE if m != RE_DATED
+        ]
+        assert v["modes_by_object_type"]["commitment"] == list(MODE_PRECEDENCE)
+        assert v["modes"] == list(MODE_PRECEDENCE)
+
+    def test_every_universal_mode_is_reachable_without_a_date(self):
+        for mode in UNIVERSAL_MODES:
+            assert mode in modes_for_object_type("question", dated_types=())
+
+    def test_no_served_name_in_the_shape_says_commitment(self):
+        # The contract must read correctly when the object is a question
+        # nobody answered. That is the whole point of the rename.
+        got = classify_item(
+            self.question(restatements=[restatement((7, 1), "Again", owner=None)]),
+            TODAY,
+        )
+        blob = " ".join(got.keys()) + " " + " ".join(summarize([got]).keys())
+        for word in ("commitment", "deliverable", "delivered", "task", "action_item"):
+            assert word not in blob
+
+    def test_mixed_object_types_classify_side_by_side(self):
+        items = classify_items(
+            [
+                item(patch_id="c1", restatement_count=2),
+                self.question(patch_id="q1", restatement_count=3),
+            ],
+            TODAY,
+        )
+        by_id = {i["patch_id"]: i for i in items}
+        assert by_id["c1"]["object_type"] == "commitment"
+        assert by_id["q1"]["object_type"] == "question"
+        s = summarize(items)
+        assert s["items"] == 2
+        assert s["by_mode"][RESTATED] == 2
 
 
 class TestServedSurface:
@@ -841,16 +968,43 @@ class TestServedSurface:
     def test_the_ledger_is_computed_from_the_same_rows_the_arrays_carry(self):
         # If this ever drifts onto a separate fetch, a count could
         # disagree with the list it opens, which is the one thing SS
-        # holds CQ to on this surface.
-        block = MAIN.split("ledger_items = commitment_ledger.classify_items(")[1]
-        assert "they_owe + completed_they_owe" in block.split(")")[0]
+        # holds CQ to on this surface. `owned_open` is the same fetch
+        # `they_owe` is filtered out of, one row shape, one source.
+        block = MAIN.split("ledger_items = item_ledger.classify_items(")[1]
+        assert "owned_open + owned_completed" in block.split(")")[0]
         assert "appearances=appearances" in block.split(")")[0]
 
+    def test_a_question_can_never_arrive_as_something_a_person_owes(self):
+        """The load-bearing separation of the widening.
+
+        The ledger holds anything that can be UNRESOLVED. `commitments`
+        holds what a person OWES. The fetch uses the wider set, so every
+        owed array has to filter back down to completables explicitly or
+        a recurring question lands on somebody's card as an outstanding
+        obligation. Day one the two sets are equal and this is a no-op,
+        which is exactly when it would go unnoticed."""
+        assert 'r["patch_type"] in completable_set' in MAIN
+        # All four owed legs, open and completed, both directions.
+        assert MAIN.count('r["patch_type"] in completable_set') == 4
+        assert "they_owe = [r for r in owned_open" in MAIN
+
+    def test_the_populations_are_fetched_on_the_wider_set(self):
+        # The ledger cannot classify what was never fetched.
+        assert MAIN.count("subject_key, list(ledger_types), vocab.ownership_label") == 2
+        assert "ledger_types = tuple(sorted(type_runtime.ledger_tracked_types))" in MAIN
+
+    def test_the_detail_route_publishes_the_mode_contract(self):
+        block = MAIN.split('"item_ledger": {')[1].split("},")[0]
+        assert '"vocabulary": row["_ledger_vocabulary"]' in block
+        vocab = MAIN.split('"_ledger_vocabulary": item_ledger.vocabulary(')[1]
+        assert 'i["object_type"] for i in ledger_items' in vocab
+        assert "dated_types=type_runtime.deadline_anchored_types" in vocab
+
     def test_the_detail_route_serves_the_ledger_with_its_scope(self):
-        block = MAIN.split('"commitment_ledger": {')[1].split("},")[0]
+        block = MAIN.split('"item_ledger": {')[1].split("},")[0]
         assert '"scope": row["_ledger_scope"]' in block
         assert '"items": row["_ledger_items"]' in block
-        assert "commitment_ledger.summarize(row[\"_ledger_items\"])" in block
+        assert "item_ledger.summarize(row[\"_ledger_items\"])" in block
 
     def test_the_private_keys_never_leak_onto_a_public_row(self):
         # _public_person strips underscore keys, which is why the raw
@@ -863,7 +1017,7 @@ class TestServedSurface:
     def test_the_aggregate_is_computed_over_the_unfiltered_population(self):
         # A user-level number must not move when a caller pages or
         # filters the list.
-        block = MAIN.split("commitment_pressure = {")[1].split("\n    }")[0]
+        block = MAIN.split("item_ledger_rollup = {")[1].split("\n    }")[0]
         assert 'for r in core["people"]' in block
         assert "for r in rows" not in block
         assert '"scope": "open_only"' in block
@@ -872,26 +1026,26 @@ class TestServedSurface:
     def test_the_list_serves_counts_and_the_detail_serves_receipts(self):
         # Stripped by FAMILY, so a receipt key added later cannot quietly
         # start growing a browse payload.
-        block = MAIN.split("def _counts_only")[1].split("commitment_pressure = {")[0]
-        assert "k not in commitment_ledger.RECEIPT_KEYS" in block
-        pressure = MAIN.split("commitment_pressure = {")[1].split("\n    }")[0]
+        block = MAIN.split("def _counts_only")[1].split("item_ledger_rollup = {")[0]
+        assert "k not in item_ledger.RECEIPT_KEYS" in block
+        pressure = MAIN.split("item_ledger_rollup = {")[1].split("\n    }")[0]
         assert "_counts_only(all_ledger_items)" in pressure
         assert "_counts_only(r[\"_ledger_items\"])" in pressure
         assert "patch_ids" not in pressure
         # The detail route keeps the full summary, ids included.
-        detail = MAIN.split('"commitment_ledger": {')[1].split("},")[0]
-        assert "commitment_ledger.summarize(" in detail
+        detail = MAIN.split('"item_ledger": {')[1].split("},")[0]
+        assert "item_ledger.summarize(" in detail
         assert "RECEIPT_KEYS" not in detail
 
     def test_every_receipt_key_the_service_produces_is_declared(self):
         # The guard on the guard: a receipt key that never made it into
         # RECEIPT_KEYS would leak onto the list silently.
-        from contextquilt.services.commitment_ledger import RECEIPT_KEYS
+        from contextquilt.services.item_ledger import RECEIPT_KEYS
         s = summarize(classify_items([item(patch_id="a")], TODAY))
         assert {k for k in s if k.startswith("patch_ids")} == set(RECEIPT_KEYS)
 
     def test_the_aggregate_serves_no_ratio(self):
-        block = MAIN.split("commitment_pressure = {")[1].split("\n    }")[0]
+        block = MAIN.split("item_ledger_rollup = {")[1].split("\n    }")[0]
         assert not re.search(r"(percent|ratio|_rate|score)", block)
 
     def test_the_open_item_query_selects_the_molt_columns(self):

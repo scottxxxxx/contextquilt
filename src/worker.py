@@ -478,10 +478,18 @@ async def store_connected_patches(
     # context per THEIR manifest instead of the SS episode list.
     _type_runtime = await get_type_runtime(db.fetch)
     project_scoped_types = _type_runtime.project_scoped_types
-    # Which types can be closed, from the same runtime. Only a completable
-    # can be MOLTED (restated as a fresh commitment while its state never
-    # changes), so only a completable records restatement history below.
-    completable_types = frozenset(_type_runtime.completable_types)
+    # Which types the item ledger holds, from the same runtime: every
+    # completable, plus any type whose manifest declares `ledger_tracked`.
+    # Only these record restatement history below, because only an object
+    # that can be UNRESOLVED can be molted (restated in a fresh shape
+    # while its state never changes).
+    #
+    # Deliberately not `completable_types`, which is the narrower "a
+    # person can owe this" set. The primitive is a thing that keeps
+    # coming back without resolving, and a question nobody answered is
+    # one of those without being anything anybody owes. Day one the two
+    # sets are equal, so this changes no byte of what SS writes.
+    ledger_types = frozenset(_type_runtime.ledger_tracked_types)
 
     async def _store_cues(patch_id: str, cues: list) -> None:
         """Attach associative-retrieval cues to a patch. Idempotent (PK on
@@ -594,12 +602,12 @@ async def store_connected_patches(
                 """,
                 existing_id,
             )
-        # The restatement record. Completables only: everything else that
-        # dedups is a fact being observed again ("she is based in
-        # Lisbon"), where a second observation carries no obligation and
-        # no state to fail to change. Non-completable types take exactly
-        # the writes they took before this shipped.
-        if patch_type in completable_types:
+        # The restatement record. Ledger-tracked types only: everything
+        # else that dedups is a fact being observed again ("she is based
+        # in Lisbon"), where a second observation is corroboration and
+        # there is no state that could fail to change. Types outside the
+        # ledger take exactly the writes they took before this shipped.
+        if patch_type in ledger_types:
             observed_at = (
                 created_at.isoformat() if hasattr(created_at, "isoformat")
                 else str(created_at)

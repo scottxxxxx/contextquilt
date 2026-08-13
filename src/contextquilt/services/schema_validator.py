@@ -80,6 +80,15 @@ PATCH_TYPE_OPTIONAL = {
     # lands with a null origin and is unclusterable by the profile pass,
     # which counts distinct origins as meetings.
     "collapse_duplicates", "origin_scoped",
+    # `ledger_tracked: true` puts this type's objects in the item ledger:
+    # things that can be UNRESOLVED and are therefore worth holding
+    # across meetings to see whether they keep coming back. A completable
+    # type is already in (the runtime unions the completables), so this
+    # key exists for the objects completability cannot describe: a
+    # question nobody answered, a decision that keeps being revisited, an
+    # unowned concern. Absent means not declared, which is today's
+    # behavior. See doc 16 section 5.9a and migration 38.
+    "ledger_tracked",
 }
 
 LABEL_REQUIRED = {"label", "role", "from_types", "to_types", "description"}

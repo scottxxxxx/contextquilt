@@ -192,7 +192,7 @@ READ_CAPABILITIES: dict = {
     # shipped, and no backfill can invent one. An item that carries no
     # restatements is not a quiet item, it is an item CQ was not
     # watching for this yet.
-    "commitment_ledger": {
+    "item_ledger": {
         "available": True,
         "reason": None,
     },

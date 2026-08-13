@@ -44,7 +44,7 @@ from contextquilt.config import get_settings
 from dashboard.router import router as dashboard_router
 from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
-from contextquilt.services import commitment_ledger
+from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import facet_runtime
 from contextquilt.services.consolidation import (
@@ -4187,10 +4187,29 @@ async def _people_core(
     # read the SAME facts (manifest-declared, SS floor fallback).
     type_runtime = await facet_runtime.get_type_runtime(conn.fetch)
     completable_types = type_runtime.completable_types
+    # Two sets, and the difference between them is load bearing.
+    #
+    # COMPLETABLE is what a person can OWE, and it is the only thing the
+    # `commitments` block may ever contain. LEDGER TRACKED is what the
+    # item ledger holds across meetings: every completable, plus any type
+    # whose manifest declares `ledger_tracked` (a question nobody
+    # answered, a decision that keeps being revisited). The ledger's
+    # primitive is a thing that keeps coming back without resolving, and
+    # a recurring question is emphatically NOT something the person owes
+    # the user.
+    #
+    # Day one the two sets are equal, so every byte of the existing
+    # People surface is unchanged. They stop being equal the moment a
+    # manifest declares a non-completable type, which is exactly when
+    # `they_owe` must not widen. The fetch below uses the superset and
+    # every ledger array filters back down to completables explicitly,
+    # so the widening cannot leak by omission.
+    ledger_types = tuple(sorted(type_runtime.ledger_tracked_types))
+    completable_set = frozenset(completable_types)
     # One UTC day for the whole assembly, so two people in one response
     # can never be classified against different todays, and the response
     # stays byte stable within a day (the upstream prompt cache rule).
-    ledger_today = commitment_ledger.today_utc()
+    ledger_today = item_ledger.today_utc()
 
     people = await conn.fetch(
         f"""
@@ -4296,13 +4315,13 @@ async def _people_core(
           AND COALESCE(cp.status, 'active') = 'active'
         ORDER BY cp.value->>'deadline_date' NULLS LAST, cp.patch_id
         """,
-        subject_key, list(completable_types), vocab.ownership_label,
+        subject_key, list(ledger_types), vocab.ownership_label,
     )
     # Registry TTL overrides for the completable types, resolved the same
     # way the decay loop resolves them, so the decay_state served here and
     # the archival the worker performs derive from the SAME parameters.
     registry_ttls: dict = {}
-    for _pt in completable_types:
+    for _pt in ledger_types:
         try:
             _ttl_row = await conn.fetchrow(decay_model.TTL_REGISTRY_QUERY, _pt)
             if _ttl_row and _ttl_row["default_ttl_days"] is not None:
@@ -4352,7 +4371,7 @@ async def _people_core(
               AND cp.completed_at IS NOT NULL
             ORDER BY cp.completed_at DESC
             """,
-            subject_key, list(completable_types), vocab.ownership_label,
+            subject_key, list(ledger_types), vocab.ownership_label,
         )
         # decay_state is None on a completed item: decay no longer applies,
         # and per the house rule null means "not tracked", not a band.
@@ -4521,12 +4540,24 @@ async def _people_core(
         # counting condition SS holds us to: a served count agrees with the
         # rows it gates, so the exclusion happens HERE, once, before
         # anything counts anything.
-        they_owe = [
+        # Everything of this person's that the LEDGER holds: any
+        # ledger-tracked type they own, shelved rows already gone. This
+        # is the wider set, and it is the one the item ledger classifies,
+        # because a recurring question belongs in the ledger.
+        owned_open = [
             r for r in open_items
             if r["shelved_at"] is None
             and ((r["owner"] or "").strip().lower() in keys
                  or (patch_id and r["owner_patch_id"] and str(r["owner_patch_id"]) == patch_id))
         ]
+
+        # What this person OWES, which is the narrower set and is
+        # COMPLETABLE ONLY. Filtered explicitly rather than inherited
+        # from the fetch, so the day a manifest declares a
+        # non-completable ledger type, a question cannot arrive on
+        # somebody's card as an outstanding obligation. Day one the two
+        # sets are identical and this is a no-op.
+        they_owe = [r for r in owned_open if r["patch_type"] in completable_set]
 
         # What the USER owes this person: an item pointing here with an
         # owed_to edge, that the user themselves holds. Both halves are
@@ -4549,6 +4580,7 @@ async def _people_core(
             you_owe = [
                 r for r in open_items
                 if r["shelved_at"] is None
+                and r["patch_type"] in completable_set
                 and str(r["patch_id"]) in owed_ids
                 and is_self_owned(r["owner"], user_label)
             ]
@@ -4558,17 +4590,21 @@ async def _people_core(
         # to the completed population. No shelved filter: done is done,
         # whatever state preceded it. completed_items arrives newest
         # completion first, so these stay in that order.
-        completed_they_owe = [
+        owned_completed = [
             r for r in completed_items
             if (r["owner"] or "").strip().lower() in keys
             or (patch_id and r["owner_patch_id"] and str(r["owner_patch_id"]) == patch_id)
+        ]
+        completed_they_owe = [
+            r for r in owned_completed if r["patch_type"] in completable_set
         ]
         completed_you_owe = None
         if owed_to_available and patch_id and include_completed:
             c_owed_ids = completed_owed_by_person.get(patch_id) or ()
             completed_you_owe = [
                 r for r in completed_items
-                if str(r["patch_id"]) in c_owed_ids
+                if r["patch_type"] in completable_set
+                and str(r["patch_id"]) in c_owed_ids
                 and is_self_owned(r["owner"], user_label)
             ]
 
@@ -4579,8 +4615,8 @@ async def _people_core(
         # The completed leg is present only on the detail route, which is
         # why the served block states its own scope rather than letting a
         # client assume the denominators match across the two surfaces.
-        ledger_items = commitment_ledger.classify_items(
-            they_owe + completed_they_owe,
+        ledger_items = item_ledger.classify_items(
+            owned_open + owned_completed,
             today=ledger_today,
             appearances=appearances,
             user_label=user_label,
@@ -4645,6 +4681,15 @@ async def _people_core(
             "questions": compute_question_totals(appearances),
             "_appearances": appearances,
             "_ledger_items": ledger_items,
+            # Which modes can occur for the object types in THIS
+            # person's ledger, so a client never guesses. Dated types
+            # come from the runtime's deadline-anchored set, which is
+            # what makes `re_dated` impossible for an object that never
+            # had a date.
+            "_ledger_vocabulary": item_ledger.vocabulary(
+                {i["object_type"] for i in ledger_items},
+                dated_types=type_runtime.deadline_anchored_types,
+            ),
             "_ledger_scope": "open_and_completed" if include_completed else "open_only",
             "_projects": projects,
             "_they_owe": they_owe,
@@ -4865,11 +4910,11 @@ async def list_people(
         name, so a receipt key added later cannot quietly land here.
         """
         return {
-            k: v for k, v in commitment_ledger.summarize(items).items()
-            if k not in commitment_ledger.RECEIPT_KEYS
+            k: v for k, v in item_ledger.summarize(items).items()
+            if k not in item_ledger.RECEIPT_KEYS
         }
 
-    commitment_pressure = {
+    item_ledger_rollup = {
         "scope": "open_only",
         "people_considered": total_unfiltered,
         "people_with_items": sum(1 for r in core["people"] if r["_ledger_items"]),
@@ -4900,7 +4945,7 @@ async def list_people(
         "people": [_public_person(r) for r in rows],
         "total": total,
         "total_unfiltered": total_unfiltered,
-        "commitment_pressure": commitment_pressure,
+        "item_ledger_rollup": item_ledger_rollup,
         "deleted": deleted,
         "capabilities": capability_report(owed_to_available, insights_available),
         "query": {
@@ -4944,7 +4989,7 @@ async def get_person(
     `you_owe` is null, not an empty list, for callers whose registered
     manifest does not declare `owed_to`. See capabilities.you_owe.
 
-    `commitment_ledger` is the closure lens over those same items (doc 16
+    `item_ledger` is the closure lens over those same items (doc 16
     section 5.10): per item, WHAT happened to it rather than whether it is
     open. `delivered` is the only mode that is delivery; `restated` is the
     molt (said again, with the date never moving), `re_dated` is an item
@@ -4979,7 +5024,7 @@ async def get_person(
     Measured against real transcripts it runs nearly level across people
     whose follow up is nothing alike, because a chase and a substantive
     probe both count as one question. The metric that carries it is
-    `commitment_ledger.summary.chases_without_advance`: an item already
+    `item_ledger.summary.raised_without_advance`: an item already
     in the ledger came up in a meeting where the user asked this person
     something, and it had not closed by their next meeting. The two are
     served as separate counts and stay separate.
@@ -5322,13 +5367,19 @@ async def get_person(
         # count opens into the exact patches behind it, which is the
         # difference between "three times, here they are" and a verdict.
         # No ratio is served at any denominator.
-        "commitment_ledger": {
+        "item_ledger": {
             # open_and_completed here; the person LIST serves the same
             # classifier over open items only and says so, because the
             # two denominators are not the same number.
             "scope": row["_ledger_scope"],
             "items": row["_ledger_items"],
-            "summary": commitment_ledger.summarize(row["_ledger_items"]),
+            "summary": item_ledger.summarize(row["_ledger_items"]),
+            # The mode contract for the object types actually present.
+            # Open in both directions: a type that does not exist yet
+            # appears the day it appears in the data, with no contract
+            # change, and a client meeting a mode it does not know skips
+            # that row rather than guessing.
+            "vocabulary": row["_ledger_vocabulary"],
         },
         # `capacities` says HOW this person turned up in this meeting, not
         # merely that they did: `speaker` means a diarization label resolved

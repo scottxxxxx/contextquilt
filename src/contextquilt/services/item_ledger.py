@@ -1,23 +1,45 @@
-"""Closure mode: how an item actually left the conversation, not whether
-it is open.
+"""Closure mode: how an object actually left the conversation, not
+whether it is open.
+
+THE PRIMITIVE IS NOT A COMMITMENT. It is A THING THAT KEEPS COMING BACK
+WITHOUT RESOLVING, and that distinction is the reason this module is
+named for items rather than for commitments.
+
+A commitment is one kind of such thing. A question nobody answers, a
+decision that keeps getting revisited and a concern nobody owns are
+others, and mechanically they are IDENTICAL: an object, restated across
+meetings, state unchanged. The evidence forced the widening twice over.
+The single most valuable object in the test corpus is an ownership
+question raised in three consecutive meetings and never assigned, which
+the user raised himself and which no action item tracker would hold.
+Independently, three of the four people most likely to install this app
+have no action items in any meaningful sense: a fundraiser has a topic
+that keeps surfacing, a new manager has a concern their report raises
+every fortnight. Neither is a deliverable that slipped.
 
 An action item tracker answers one question, open or closed, and that
-question is blind to the failure mode that matters most. Some items are
-never failed, they are MOLTED: the same object comes back at the next
-meeting as a differently shaped fresh commitment, the language stays
-strong, and the state never changes. Motion reads as progress at every
-checkpoint, which is exactly why it survives every accountability system
-a user already has. It is visible only by holding one object across
-months, which is the one thing CQ can do and a task list cannot.
+question is blind to the failure mode that matters most. Some objects
+are never failed, they are MOLTED: the same object comes back at the
+next meeting in a different shape, the language stays strong, and the
+state never changes. Motion reads as progress at every checkpoint, which
+is exactly why it survives every accountability system a user already
+has. It is visible only by holding one object across months, which is
+the one thing CQ can do and a task list cannot.
 
 The real shape, from transcripts: one thread ran "Yeah, absolutely, end
 of next week, easy", then "So, partial, I have been trying to get on
 Renata's calendar", then "I have a request in with legal, honestly?
 Weeks." Three meetings, three commitments, zero state change. A second
 ran "That is a good question", then "Let me think about who the right
-person is", then "I have a shortlist". Note what degrades. The
-commitment LANGUAGE holds; the OBJECT regresses, from a name, to a
-person to identify, to a shortlist that still needs cleaning up.
+person is", then "I have a shortlist". Note what degrades. The LANGUAGE
+holds; the OBJECT regresses, from a name, to a person to identify, to a
+shortlist that still needs cleaning up.
+
+Which types are eligible is resolved from the facet runtime
+(`ledger_tracked_types`), never from a list in here: every completable
+type, plus any type whose manifest declares `ledger_tracked`. Day one
+that is commitments and blockers and nothing else, and no name in the
+served shape assumes it.
 
 What this module will and will not say:
 
@@ -51,10 +73,26 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 from .people_identity import is_self_owned
 from .people_signals import is_presence_grade
 
-# The closure modes. Exactly one of them is delivery. Open vocabulary
-# downstream, the same rule `decay_state` carries: a client that does not
-# know a mode passes it through, it never guesses at it.
-DELIVERED = "delivered"
+# The closure modes. Exactly one of them is the object being finished.
+# Open vocabulary downstream, the same rule `decay_state` carries: a
+# client that does not know a mode passes it through, it never guesses.
+#
+# `resolved` was `delivered` until the primitive widened, and delivery
+# was the wrong word rather than a wrong idea: the general act is
+# RESOLUTION, which is delivery for a commitment, an answer for a
+# question, and a decision for an open decision. The property that made
+# `delivered` survive the naming audit is preserved exactly, and it is
+# the reason this rename is safe: PRESENCE does the work here, not
+# absence. A resolution is an affirmative act by a person or the user
+# and it arrives with `completion_source` and `completion_evidence`
+# attached, so the claim ships with the thing a reader checks it
+# against. CQ serves the state; the client picks the verb its object
+# type deserves, which is the doc 15 split (CQ owns state, the app owns
+# wording) rather than CQ shipping seven synonyms.
+RESOLVED = "resolved"
+# The one COMMITMENT-SPECIFIC mode, and the shape says so rather than
+# leaving a client to discover it: a due date that moved is meaningless
+# for an object that never had one. See `modes_for_object_type`.
 RE_DATED = "re_dated"
 RESTATED = "restated"
 REASSIGNED = "reassigned"
@@ -88,8 +126,16 @@ OPEN = "open"
 # the point of not_raised_since is that it stopped being managed OUT
 # LOUD. Everything an item also qualifies for is served alongside in
 # `modes`, so nothing is hidden by the choice.
+# Modes that mean the same thing whatever the object is. A question can
+# be restated, handed to somebody else, taken on by the user, go
+# unraised for three meetings, be answered, or still be open. Only the
+# date mode is specific to objects that carry dates.
+UNIVERSAL_MODES = (
+    RESOLVED, ABSORBED_BY_USER, REASSIGNED, NOT_RAISED_SINCE, RESTATED, OPEN,
+)
+
 MODE_PRECEDENCE = (
-    DELIVERED,
+    RESOLVED,
     ABSORBED_BY_USER,
     REASSIGNED,
     NOT_RAISED_SINCE,
@@ -117,31 +163,71 @@ RESTATEMENT_RECEIPT_CAP = 10
 # a receipt key later must not silently start growing a list payload.
 # Counts on the list, receipts on the detail, where the user has already
 # chosen the person.
-RECEIPT_KEYS = ("patch_ids_by_mode", "patch_ids_chased_without_advance")
+RECEIPT_KEYS = ("patch_ids_by_mode", "patch_ids_raised_without_advance")
 
 # What counts as an item ADVANCING between one meeting and the next.
-# Deliberately narrow, and this is the load bearing choice in the chase
-# metric: an item advanced only if it CLOSED. A fresh restatement is not
+# Deliberately narrow, and this is the load bearing choice in the metric
+# below: an item advanced only if it CLOSED. A fresh restatement is not
 # an advance and a moved due date is not an advance, because motion that
 # reads as progress at every checkpoint is the exact illusion this whole
 # module exists to break. Published on the wire next to the counts so
 # nobody has to guess which definition produced them.
 ADVANCE_DEFINITION = "closed_by_the_next_meeting_with_this_person"
 
-# What was actually OBSERVED to make an occasion a chase, published on
-# the wire for the same reason ADVANCE_DEFINITION is: a number whose
+# What was actually OBSERVED to make an occasion count, published on the
+# wire for the same reason ADVANCE_DEFINITION is: a number whose
 # definition lives in a docstring is a number nobody can safely reuse.
 #
-# It matters more here than it looks, because the word "chase" is doing
-# inference the evidence does not quite carry. CQ stores no link from a
-# QUESTION to an ITEM: the join is meeting level (this item was restated
-# in meeting X, and in meeting X the user asked this person N questions),
-# so an occasion where the item came up and the user asked about
-# something else entirely counts here. That is the same defect shape as
-# the mode formerly called `silently_dropped`, in a milder form, and the
-# honest mitigation until a question-to-item link exists is to say
-# exactly what was seen rather than what it probably means.
-CHASE_DEFINITION = "item_raised_in_a_meeting_where_the_user_asked_this_person_a_question"
+# This metric was called `chases` until review, and the rename came from
+# applying the rule to its own author's name. "Chase" asserts pursuit,
+# and the evidence does not carry that: CQ stores no link from a QUESTION
+# to an ITEM, so the join is meeting level (this item was restated in
+# meeting X, and in meeting X the user asked this person N questions),
+# and an occasion where the item came up while the user asked about
+# something else entirely counts here. "Pressed" would have been the same
+# assertion said more quietly. RAISED is the observation with nothing
+# added: the item came up, and by the next meeting it had not closed.
+RAISED_DEFINITION = "item_raised_in_a_meeting_where_the_user_asked_this_person_a_question"
+
+
+def modes_for_object_type(object_type: str, dated_types: Iterable[str] = ()) -> List[str]:
+    """Which modes can occur for one object type, in precedence order.
+
+    Served so a client can tell which modes apply to which object type
+    WITHOUT GUESSING, which is the whole reason the vocabulary is
+    published rather than documented. Guessing would mean either
+    rendering a "due date moved" affordance on a question that can never
+    have one, or hiding a mode CQ does emit.
+
+    `dated_types` is the runtime's deadline-anchored set. A type outside
+    it can never produce `re_dated`, because a date that moved needs a
+    date. Everything else is universal.
+    """
+    dated = set(dated_types or ())
+    modes = set(UNIVERSAL_MODES)
+    if object_type in dated:
+        modes.add(RE_DATED)
+    return [m for m in MODE_PRECEDENCE if m in modes]
+
+
+def vocabulary(
+    object_types: Iterable[str], dated_types: Iterable[str] = ()
+) -> Dict[str, Any]:
+    """The mode contract for the object types actually in this payload.
+
+    Open vocabulary in both directions, per CQ's additive rules: a type
+    that does not exist yet appears here the day it appears in the data,
+    with no contract change, and a client meeting a mode it does not
+    know passes it through rather than guessing at it.
+    """
+    types = sorted({t for t in object_types if t})
+    return {
+        "modes": list(MODE_PRECEDENCE),
+        "object_types": types,
+        "modes_by_object_type": {
+            t: modes_for_object_type(t, dated_types) for t in types
+        },
+    }
 
 
 def _as_date(value: Any) -> Optional[date]:
@@ -327,7 +413,7 @@ def _meeting_days(appearances: Iterable[Mapping[str, Any]]) -> List[date]:
     return sorted(days)
 
 
-def _chase_meetings(appearances: Iterable[Mapping[str, Any]]) -> Dict[str, dict]:
+def _question_meetings(appearances: Iterable[Mapping[str, Any]]) -> Dict[str, dict]:
     """origin_id -> {day, asked_by_user} for this person's meetings.
 
     `asked_by_user` is None when the meeting carried no question metric
@@ -351,41 +437,40 @@ def _chase_meetings(appearances: Iterable[Mapping[str, Any]]) -> Dict[str, dict]
     return out
 
 
-def _chases(
+def _raised_occasions(
     row: Mapping[str, Any],
     restatements: Sequence[dict],
     meeting_days: Sequence[date],
-    chase_meetings: Mapping[str, dict],
+    question_meetings: Mapping[str, dict],
     completed_at: Optional[date],
 ) -> Dict[str, Any]:
-    """How often this item was chased, and how often the chase moved it.
+    """How often this item was RAISED with a question, and how often it
+    then moved.
 
-    The metric this replaced was questions RECEIVED, and it was wrong.
-    Measured by hand against the transcripts, the volume is nearly level
-    (twelve questions to one person, ten to another) while the two sets
-    are not the same act: one set is chases on items already in the
-    ledger that produced no advance, three of them on one item across
-    three meetings, and the other is substantive probing of somebody
-    already ahead of the user. A card built on volume would have
-    asserted something the data contradicts. So the count is chases that
+    Two corrections are baked into that sentence and both are worth
+    knowing, because each one was a claim that did not survive contact.
+
+    FIRST, the metric this replaced was questions RECEIVED, and it was
+    wrong. Measured by hand against the transcripts, volume is nearly
+    level (twelve questions to one person, ten to another) while the two
+    sets are not the same act: one set is items already in the ledger
+    coming up again and not moving, three times on one item across three
+    meetings, and the other is substantive probing of somebody already
+    ahead of the user. A card built on volume would have asserted
+    something the data contradicts. So the count is occasions that
     produced no advance, and questions received stays a separate number
     because the two answer different questions.
 
-    Both halves of the join are already stored. A restatement records
-    that THIS item came up in a specific meeting (`origin_id`), and
-    `person_appearances` records, for the same meeting, how many
-    questions the user asked THIS person. An occasion where both are
-    true is a chase.
-
-    Known boundary, published as CHASE_DEFINITION rather than left in
-    this docstring: that join is MEETING level, not question level. CQ
-    stores no link from a question to an item, so an occasion where the
-    item came up and the user asked about something else counts. The
-    word "chase" is therefore doing a little inference the evidence does
-    not carry, which is the same defect that renamed `silently_dropped`,
-    milder. Naming the observation on the wire is the mitigation until a
-    question-to-item link exists; a client that only trusts what was
-    seen can read the definition and decide.
+    SECOND, the replacement was called `chases` until review, and
+    "chase" asserts pursuit. What is observed is thinner: a restatement
+    records that THIS item came up in a specific meeting (`origin_id`),
+    and `person_appearances` records, for the same meeting, how many
+    questions the user asked THIS person. Both halves were already
+    stored, but the join is MEETING level, not question level, because
+    CQ holds no link from a question to an item. So an occasion where
+    the item came up while the user asked about something else counts
+    here, and a name asserting pursuit would be reporting a motive off
+    a coincidence of timing. RAISED is what was seen.
 
     Three outcomes, and the third is why this cannot be one number:
 
@@ -393,9 +478,9 @@ def _chases(
       person and the item had not closed by it.
     - resolved and advanced: it closed by that next meeting. See
       ADVANCE_DEFINITION for how narrow that is, deliberately.
-    - unresolved: the chase happened in the most recent meeting, so
-      nothing has had a chance to happen yet. Counting it as "no
-      advance" would manufacture the finding out of recency.
+    - unresolved: it was raised in the most recent meeting, so nothing
+      has had a chance to happen yet. Counting it as "no advance" would
+      manufacture the finding out of recency.
 
     `unmeasurable` is the fourth number and the honest one: the item
     came up in a meeting whose question metric does not exist. On the
@@ -407,7 +492,7 @@ def _chases(
 
     for e in restatements:
         origin = e.get("origin_id")
-        meeting = chase_meetings.get(str(origin)) if origin else None
+        meeting = question_meetings.get(str(origin)) if origin else None
         if meeting is None:
             # Restated in a room this person was not in. The user did not
             # chase THEM, whatever else happened to the item.
@@ -451,7 +536,7 @@ def _chases(
         # question level, so `total` counts occasions where the item came
         # up and the user asked SOMETHING, not occasions CQ saw the user
         # ask about this item.
-        "chase_definition": CHASE_DEFINITION,
+        "raised_definition": RAISED_DEFINITION,
         "advance_definition": ADVANCE_DEFINITION,
         "occasions": occasions[:RESTATEMENT_RECEIPT_CAP],
     }
@@ -464,7 +549,7 @@ def classify_item(
     user_label: Optional[str] = None,
     min_meetings_not_raised: int = MIN_MEETINGS_NOT_RAISED,
     regression: Optional[bool] = None,
-    chase_meetings: Optional[Mapping[str, dict]] = None,
+    question_meetings: Optional[Mapping[str, dict]] = None,
 ) -> Dict[str, Any]:
     """One item's closure mode, with the receipts behind it.
 
@@ -497,7 +582,7 @@ def classify_item(
 
     modes: List[str] = []
     if completed_at is not None:
-        modes.append(DELIVERED)
+        modes.append(RESOLVED)
     if change is not None:
         modes.append(ABSORBED_BY_USER if change["to_user"] else REASSIGNED)
     # An OPEN item's mode only, and it needs three things at once: a date
@@ -533,7 +618,13 @@ def classify_item(
 
     return {
         "patch_id": str(row.get("patch_id")) if row.get("patch_id") else None,
-        "type": row.get("patch_type"),
+        # WHAT KIND OF OBJECT THIS IS, and the reason the rest of this
+        # shape can stay neutral. Open vocabulary: the patch type as
+        # declared by the app's manifest, so a `question` or an
+        # `open_concern` appears here the day a manifest declares one,
+        # with no contract change. `vocabulary.modes_by_object_type`
+        # says which modes can occur for it.
+        "object_type": row.get("patch_type"),
         "text": row.get("text"),
         # The RAW extracted surface form, never canonicalized, the same
         # rule the ledger item carries (doc 16 section 8d): it is the
@@ -562,8 +653,8 @@ def classify_item(
         # _chases: this is the metric that carries the follow up finding,
         # and questions RECEIVED is kept separate rather than folded in
         # because measuring the two as one produced a false claim.
-        "chases": _chases(
-            row, restatements, meeting_days, chase_meetings or {}, completed_at
+        "raised_with_a_question": _raised_occasions(
+            row, restatements, meeting_days, question_meetings or {}, completed_at
         ),
         # Null is CANNOT TELL and is the only value this ships with. See
         # object_regression() for exactly what would be needed to answer
@@ -597,7 +688,7 @@ def classify_items(
     """
     appearances = list(appearances or ())
     days = _meeting_days(appearances)
-    chase_meetings = _chase_meetings(appearances)
+    question_meetings = _question_meetings(appearances)
     verdicts = regressions or {}
     items = [
         classify_item(
@@ -606,7 +697,7 @@ def classify_items(
             user_label=user_label,
             min_meetings_not_raised=min_meetings_not_raised,
             regression=verdicts.get(str(r.get("patch_id"))),
-            chase_meetings=chase_meetings,
+            question_meetings=question_meetings,
         )
         for r in rows or ()
     ]
@@ -635,8 +726,8 @@ def summarize(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     by_mode = {m: 0 for m in MODE_PRECEDENCE}
     ids: Dict[str, List[str]] = {m: [] for m in MODE_PRECEDENCE}
     hops: List[int] = []
-    chased_ids: List[str] = []
-    chases = chases_without_advance = chases_unmeasurable = 0
+    raised_ids: List[str] = []
+    chases = raised_without_advance = raised_unmeasurable = 0
     per_item_without_advance: List[int] = []
     for i in items or ():
         mode = i.get("mode") or OPEN
@@ -645,13 +736,13 @@ def summarize(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         h = i.get("hop_count")
         if isinstance(h, int):
             hops.append(h)
-        c = i.get("chases") or {}
+        c = i.get("raised_with_a_question") or {}
         chases += c.get("total", 0)
-        chases_unmeasurable += c.get("unmeasurable", 0)
+        raised_unmeasurable += c.get("unmeasurable", 0)
         no_advance = c.get("without_advance", 0)
-        chases_without_advance += no_advance
+        raised_without_advance += no_advance
         if no_advance:
-            chased_ids.append(i.get("patch_id"))
+            raised_ids.append(i.get("patch_id"))
             per_item_without_advance.append(no_advance)
     return {
         "items": len(items or ()),
@@ -687,23 +778,23 @@ def summarize(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         # a claim the data contradicts (near level volume, opposite
         # kinds of question). This one is chases on items already in the
         # ledger that moved nothing.
-        "chases": chases,
-        "chases_without_advance": chases_without_advance,
-        "items_chased_without_advance": len(chased_ids),
+        "raised_with_a_question": chases,
+        "raised_without_advance": raised_without_advance,
+        "items_raised_without_advance": len(raised_ids),
         # "Three of them on the same item across three meetings" is the
         # sentence the finding is actually made of, so the number behind
         # it is served rather than left to be recomputed.
-        "max_chases_without_advance_on_one_item": (
+        "max_raised_without_advance_on_one_item": (
             max(per_item_without_advance) if per_item_without_advance else None
         ),
         # Chases CQ cannot see: the item came up in a meeting with no
         # question metric. On the day this ships this is every meeting,
         # and a client that renders the count above without this one is
         # reporting a floor as a total.
-        "chases_unmeasurable": chases_unmeasurable,
-        "chase_definition": CHASE_DEFINITION,
-        "chase_advance_definition": ADVANCE_DEFINITION,
-        "patch_ids_chased_without_advance": chased_ids,
+        "raised_unmeasurable": raised_unmeasurable,
+        "raised_definition": RAISED_DEFINITION,
+        "advance_definition": ADVANCE_DEFINITION,
+        "patch_ids_raised_without_advance": raised_ids,
     }
 
 
