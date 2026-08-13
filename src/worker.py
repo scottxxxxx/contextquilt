@@ -14,7 +14,7 @@ import sys
 import time
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Optional
 
 import asyncpg
 import httpx
@@ -79,7 +79,7 @@ from contextquilt.services.consolidation import (
     MAX_CLUSTERS_PER_USER_PER_CYCLE,
     MAX_SOURCE_TEXTS,
     MAX_USERS_PER_APP_PER_CYCLE,
-    PROFILE_LENSES,
+    MODEL_CHOSEN_LENSES,
     PROFILE_SYSTEM,
     build_profile_content,
     build_synthesis_content,
@@ -87,6 +87,17 @@ from contextquilt.services.consolidation import (
     parse_profile_response,
     parse_synthesis_response,
     remaining_lenses,
+    spread_sample,
+)
+from contextquilt.services.follow_through import (
+    FOLLOW_THROUGH_LENS,
+    FOLLOW_THROUGH_SYSTEM,
+    MAX_FACT_EXAMPLES,
+    MIN_JUDGED_ITEMS,
+    allowed_numbers,
+    build_follow_through_content,
+    parse_follow_through_response,
+    summarize_follow_through,
 )
 from contextquilt.services.corrections import (
     COMPLETION_SYSTEM,
@@ -2128,7 +2139,18 @@ class ColdPathWorker:
             if created >= MAX_CLUSTERS_PER_USER_PER_CYCLE:
                 break
             if rule.get("cluster") == "person":
+                # Two passes over the same rule, sharing one budget. The
+                # model-chosen lenses go first because they are the older
+                # contract; the computed lens takes whatever slots are
+                # left, so a cycle spends at most
+                # MAX_CLUSTERS_PER_USER_PER_CYCLE calls per user either
+                # way and neither pass can starve the other of more than
+                # one cycle's worth.
                 created += await self._consolidate_user_people(
+                    subject_key, app_id, rule,
+                    MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
+                )
+                created += await self._derive_follow_through(
                     subject_key, app_id, rule,
                     MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
                 )
@@ -2337,7 +2359,13 @@ class ColdPathWorker:
               -- stamped for this person counts, INCLUDING archived
               -- (user-deleted) ones, so a suppressed lens stays
               -- suppressed. The person leaves the candidate set only
-              -- once the stamps cover the whole lens vocabulary.
+              -- once the stamps cover this call's lens vocabulary.
+              --
+              -- MODEL-CHOSEN lenses only. A computed lens is derived by
+              -- its own pass and can never come out of this call, so
+              -- counting its stamp here would hold a person in the
+              -- candidate set for a lens this query cannot produce, and
+              -- burn a cluster slot every cycle to decline it.
               AND (
                   SELECT count(DISTINCT d.value->>'lens')
                   FROM context_patches d
@@ -2345,6 +2373,7 @@ class ColdPathWorker:
                   WHERE dps.subject_key = $1
                     AND d.patch_type = $4
                     AND d.origin_mode = 'derived'
+                    AND d.value->>'lens' = ANY($12::text[])
                     AND d.value->>'source_person' = op.patch_id::text
               ) < $11
             GROUP BY op.patch_id, op.value->>'text'
@@ -2356,7 +2385,7 @@ class ColdPathWorker:
             subject_key, app_id, rule["from_types"], rule["produce_type"],
             rule["min_patches"], rule["min_meetings"],
             vocab.ownership_label, vocab.person_type, self_name, budget,
-            len(PROFILE_LENSES),
+            len(MODEL_CHOSEN_LENSES), sorted(MODEL_CHOSEN_LENSES),
         )
         created = 0
         for cluster in clusters:
@@ -2428,6 +2457,7 @@ class ColdPathWorker:
         )
         if not remaining_lenses(taken_lenses):
             return False
+        defects: list = []
         try:
             response = await self.llm.extract(
                 system_prompt=PROFILE_SYSTEM,
@@ -2436,14 +2466,25 @@ class ColdPathWorker:
                     taken_lenses=taken_lenses,
                 ),
             )
-            profile = parse_profile_response(response.content)
+            profile = parse_profile_response(
+                response.content, person_name=person_name, defects=defects,
+            )
         except Exception as exc:
             logger.warning("profile_synthesis_failed",
                            subject=subject_key, person=person_name,
                            reason=str(exc)[:200])
             return False
         if not profile:
-            logger.debug("profile_declined", subject=subject_key, person=person_name)
+            # A rejected FORMAT is not a model declining, it is a model
+            # answering in a shape the card cannot hold, and a run of
+            # them would silently stop the pass. Different level, so the
+            # difference is visible without reading every debug line.
+            if defects:
+                logger.info("profile_card_rejected", subject=subject_key,
+                            person=person_name, defect=defects[0])
+            else:
+                logger.debug("profile_declined", subject=subject_key,
+                             person=person_name)
             return False
 
         # The post-check. Re-read rather than trusting the pre-call set:
@@ -2459,15 +2500,48 @@ class ColdPathWorker:
             )
             return False
 
+        await self._write_person_insight(
+            subject_key, app_id, rule, person_patch_id, person_name,
+            source_patch_ids, profile["lens"], profile["text"], profile["do"],
+        )
+        logger.info(
+            "profile_insight_created",
+            subject=subject_key, person=person_name,
+            lens=profile["lens"], sources=len(source_patch_ids),
+            meetings=len(distinct_origins),
+        )
+        return True
+
+    async def _write_person_insight(
+        self, subject_key: str, app_id: str, rule: dict,
+        person_patch_id: str, person_name: str, source_patch_ids: list,
+        lens: str, text: str, do: str, facts: Optional[dict] = None,
+    ) -> str:
+        """The provenance-carrying write, shared by every lens pass.
+
+        One write path on purpose: the model-chosen lenses and the
+        computed one differ in how they reach a claim and in nothing
+        else. Both are derived patches with source_patch_ids, an
+        `informs` edge from every source, and a lens stamp, because the
+        durable no, the receipts read and the decay band all key on
+        those and would drift the moment a second writer existed.
+
+        `facts` is the computed lens's arithmetic, stored beside the
+        claim so the numbers behind a sentence stay auditable after the
+        fact, and null for a lens that has none.
+        """
         patch_id = str(uuid.uuid4())
         now = datetime.utcnow()
-        value_json = json.dumps({
-            "text": profile["text"],
-            "do": profile["do"],
-            "lens": profile["lens"],
+        value: dict = {
+            "text": text,
+            "do": do,
+            "lens": lens,
             "source_person": person_patch_id,
             "about_person": person_name,
-        })
+        }
+        if facts:
+            value["facts"] = facts
+        value_json = json.dumps(value)
         async with self.db.acquire() as conn:
             async with conn.transaction():
                 await conn.execute(
@@ -2510,11 +2584,217 @@ class ColdPathWorker:
                         """,
                         src, patch_id,
                     )
+        return patch_id
+
+    async def _derive_follow_through(
+        self, subject_key: str, app_id: str, rule: dict, budget: int
+    ) -> int:
+        """The computed lens (16a lens 3): a delivery record, then a call.
+
+        Everything that decides the verdict happens before the model is
+        involved. For each candidate person the pass fetches the items
+        they own that carried a due date which has come due, computes on
+        time / late / still open / due date moves in
+        services/follow_through.py, and declines IN CODE when the counts
+        are too thin. Only then does a call happen, and its only job is
+        writing the numbers up in the house voice.
+
+        That ordering is the point. The model-chosen lenses decline on
+        this corpus because they are asked to find interaction style in
+        records of task assignment; arithmetic over the same records
+        cannot decline, and what it produces is more useful before a
+        meeting anyway.
+
+        Two gates hold the line, same shape as the other pass:
+        min_meetings distinct meetings behind the counts (the receipts
+        invariant) and MIN_JUDGED_ITEMS judged items. The durable no is
+        the same machinery too: a stamp for this lens in ANY status
+        removes the person from the candidate set forever.
+        """
+        if budget <= 0:
+            return 0
+        vocab = people_vocabulary(await self._app_manifest(app_id))
+        # Which of the rule's types can even carry a due date is the
+        # facet runtime's answer, not a hardcoded pair of SS type names:
+        # a completable is a completable because a manifest said so.
+        completables = (
+            await get_type_runtime(self.db.fetch)
+        ).completable_types
+        source_types = [t for t in rule["from_types"] if t in completables]
+        if not source_types:
+            return 0
+        user_id = subject_key.split(":", 1)[1] if ":" in subject_key else subject_key
+        try:
+            self_name = await self.db.fetchval(
+                "SELECT name FROM entities WHERE user_id = $1 AND self_at IS NOT NULL",
+                user_id,
+            )
+        except Exception:
+            self_name = None  # pre-migration-35 DB: no exclusion basis
+        # The candidate query counts the judged set the same way
+        # follow_through.judge_item does, so the SQL gate and the Python
+        # gate agree; the Python one is still the authority, sanitizer
+        # style, and can only ever shrink the set (an unparseable date,
+        # a row the fetch no longer sees).
+        judged_sql = """
+            cp.value->>'deadline_date' ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+            AND cp.origin_id IS NOT NULL
+            AND (
+                cp.completed_at IS NOT NULL
+                OR (COALESCE(cp.status, 'active') = 'active'
+                    AND cp.value->>'shelved_at' IS NULL
+                    AND (cp.value->>'deadline_date')::date
+                        < (NOW() AT TIME ZONE 'utc')::date)
+            )
+        """
+        candidates = await self.db.fetch(
+            f"""
+            SELECT op.patch_id AS person_patch_id,
+                   op.value->>'text' AS person_name
+            FROM patch_connections pc
+            JOIN context_patches op ON op.patch_id = pc.from_patch_id
+            JOIN context_patches cp ON cp.patch_id = pc.to_patch_id
+            JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+            JOIN context_patch_acl acl ON acl.patch_id = cp.patch_id
+            WHERE ps.subject_key = $1
+              AND acl.app_id = $2::uuid
+              AND pc.connection_label = $6
+              AND COALESCE(pc.status, 'active') = 'active'
+              AND op.patch_type = $7
+              AND COALESCE(op.status, 'active') = 'active'
+              AND cp.patch_type = ANY($3::text[])
+              AND cp.created_at > NOW() - INTERVAL '{CLUSTER_WINDOW_DAYS} days'
+              AND {judged_sql}
+              AND ($8::text IS NULL
+                   OR lower(btrim(op.value->>'text')) <> lower(btrim($8)))
+              -- The durable no, this lens only. Status-blind, like the
+              -- model pass: an archived card is the record of a claim
+              -- the user rejected and it never comes back.
+              AND NOT EXISTS (
+                  SELECT 1 FROM context_patches d
+                  JOIN patch_subjects dps ON dps.patch_id = d.patch_id
+                  WHERE dps.subject_key = $1
+                    AND d.patch_type = $4
+                    AND d.origin_mode = 'derived'
+                    AND d.value->>'lens' = $9
+                    AND d.value->>'source_person' = op.patch_id::text
+              )
+            GROUP BY op.patch_id, op.value->>'text'
+            HAVING count(DISTINCT cp.patch_id) >= $10
+               AND count(DISTINCT cp.origin_id) >= $5
+            ORDER BY count(DISTINCT cp.patch_id) DESC, op.patch_id ASC
+            LIMIT $11
+            """,
+            subject_key, app_id, source_types, rule["produce_type"],
+            rule["min_meetings"], vocab.ownership_label, vocab.person_type,
+            self_name, FOLLOW_THROUGH_LENS, MIN_JUDGED_ITEMS, budget,
+        )
+        created = 0
+        for candidate in candidates:
+            made = await self._derive_person_follow_through(
+                subject_key, app_id, rule, source_types,
+                vocab.ownership_label,
+                str(candidate["person_patch_id"]), candidate["person_name"],
+            )
+            if made:
+                created += 1
+        return created
+
+    async def _derive_person_follow_through(
+        self, subject_key: str, app_id: str, rule: dict, source_types: list,
+        ownership_label: str, person_patch_id: str, person_name: str,
+    ) -> bool:
+        """One person's delivery record: compute, gate, write it up."""
+        rows = await self.db.fetch(
+            f"""
+            SELECT cp.patch_id, cp.origin_id, cp.completed_at,
+                   COALESCE(cp.status, 'active') AS status,
+                   cp.value->>'text' AS text,
+                   cp.value->>'deadline_date' AS deadline_date,
+                   cp.value->>'overdue_since' AS overdue_since,
+                   cp.value->>'shelved_at' AS shelved_at,
+                   jsonb_array_length(
+                       COALESCE(cp.value->'deadline_history', '[]'::jsonb)
+                   ) AS deadline_history
+            FROM patch_connections pc
+            JOIN context_patches cp ON cp.patch_id = pc.to_patch_id
+            JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+            WHERE ps.subject_key = $1
+              AND pc.from_patch_id = $2::uuid
+              AND pc.connection_label = $3
+              AND COALESCE(pc.status, 'active') = 'active'
+              AND cp.patch_type = ANY($4::text[])
+              AND cp.created_at > NOW() - INTERVAL '{CLUSTER_WINDOW_DAYS} days'
+            """,
+            subject_key, person_patch_id, ownership_label, source_types,
+        )
+        summary = summarize_follow_through(
+            [dict(r) for r in rows],
+            today=datetime.utcnow().date(),
+            min_items=MIN_JUDGED_ITEMS,
+            min_meetings=rule["min_meetings"],
+        )
+        if summary is None:
+            # The decline that costs nothing. No call was spent, because
+            # the thing being judged was never a judgement call.
+            logger.debug("follow_through_below_gate",
+                         subject=subject_key, person=person_name)
+            return False
+        facts, items = summary["facts"], summary["items"]
+        defects: list = []
+        try:
+            response = await self.llm.extract(
+                system_prompt=FOLLOW_THROUGH_SYSTEM,
+                user_content=build_follow_through_content(
+                    person_name, facts,
+                    # A spread across the record, not its oldest slice.
+                    spread_sample(items, MAX_FACT_EXAMPLES),
+                ),
+            )
+            claim = parse_follow_through_response(
+                response.content, allowed_numbers(facts),
+                person_name=person_name, defects=defects,
+            )
+        except Exception as exc:
+            logger.warning("follow_through_failed", subject=subject_key,
+                           person=person_name, reason=str(exc)[:200])
+            return False
+        if not claim:
+            # This lens has the tightest brief (a real count inside the
+            # claim ceiling), so a run of format rejections is the thing
+            # most likely to stall it. It says which one, at a level that
+            # shows up.
+            if defects:
+                logger.info("follow_through_card_rejected",
+                            subject=subject_key, person=person_name,
+                            defect=defects[0])
+            else:
+                logger.debug("follow_through_declined",
+                             subject=subject_key, person=person_name)
+            return False
+        # The post-check, for the same reason the model pass has one: the
+        # call is seconds of wall clock and the durable no is the thing
+        # that must not lose a race with a suppression.
+        if FOLLOW_THROUGH_LENS in await self._taken_lenses(
+            subject_key, rule["produce_type"], person_patch_id
+        ):
+            logger.debug("follow_through_lens_already_taken",
+                         subject=subject_key, person=person_name)
+            return False
+        # The receipts ARE the counted items: every source id here is a
+        # row the arithmetic actually counted, so tapping through from
+        # the card lands on the meetings behind the number.
+        await self._write_person_insight(
+            subject_key, app_id, rule, person_patch_id, person_name,
+            [i["patch_id"] for i in items],
+            FOLLOW_THROUGH_LENS, claim["text"], claim["do"], facts=facts,
+        )
         logger.info(
-            "profile_insight_created",
+            "follow_through_insight_created",
             subject=subject_key, person=person_name,
-            lens=profile["lens"], sources=len(source_patch_ids),
-            meetings=len(distinct_origins),
+            items=facts["judged_items"], meetings=facts["meetings"],
+            on_time=facts["closed_on_time"], late=facts["closed_late"],
+            open_past_due=facts["open_past_due"],
         )
         return True
 

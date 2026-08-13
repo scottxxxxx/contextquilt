@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from contextquilt.services.consolidation import (
     DEFAULT_MIN_MEETINGS,
+    MODEL_CHOSEN_LENSES,
     PROFILE_LENSES,
     PROFILE_SYSTEM,
     build_profile_content,
@@ -36,9 +37,15 @@ TAKEN_BODY = WORKER.split("async def _taken_lenses")[1].split(
     "async def _synthesize_person_cluster"
 )[0]
 SYNTH_BODY = WORKER.split("async def _synthesize_person_cluster")[1].split(
-    "async def _synthesize_cluster"
+    "async def _write_person_insight"
 )[0]
-SERVE_BODY = MAIN.split("insights: Optional[list] = None")[1].split(
+# The write is shared by every lens pass now, so the provenance guards
+# point at the one writer rather than at the model pass that used to
+# inline it.
+WRITE_BODY = WORKER.split("async def _write_person_insight")[1].split(
+    "async def _derive_follow_through"
+)[0]
+SERVE_BODY = MAIN.split("insights: Optional[list] = []")[1].split(
     "detail = _public_person"
 )[0]
 
@@ -120,9 +127,13 @@ def test_content_carries_dates_because_patterns_are_about_time():
 
 # --- the lens stack ----------------------------------------------------
 
-def test_remaining_lenses_is_the_whole_vocabulary_when_nothing_is_taken():
-    assert remaining_lenses() == sorted(PROFILE_LENSES)
-    assert remaining_lenses([]) == sorted(PROFILE_LENSES)
+def test_remaining_lenses_offers_the_model_chosen_half_only():
+    """The profile call picks between the lenses a model is allowed to
+    pick between. A computed lens is derived by its own pass and must
+    never be on offer here, in either direction of the subtraction."""
+    assert remaining_lenses() == sorted(MODEL_CHOSEN_LENSES)
+    assert remaining_lenses([]) == sorted(MODEL_CHOSEN_LENSES)
+    assert set(remaining_lenses()) < PROFILE_LENSES
 
 
 def test_one_taken_lens_leaves_the_others_open():
@@ -130,17 +141,18 @@ def test_one_taken_lens_leaves_the_others_open():
     candidate for the rest of the vocabulary."""
     left = remaining_lenses(["how_they_decide"])
     assert left == ["what_moves_them"]
-    assert left  # a two-lens vocabulary must not close on the first card
+    assert left  # the vocabulary must not close on the first card
 
 
 def test_a_full_stack_leaves_nothing_open():
+    assert remaining_lenses(MODEL_CHOSEN_LENSES) == []
     assert remaining_lenses(PROFILE_LENSES) == []
 
 
 def test_a_drifted_stamp_cannot_retire_a_real_lens():
     """An unknown lens value counts for nothing: it must never be able
     to close a lens the vocabulary actually holds."""
-    assert remaining_lenses(["charisma", None, ""]) == sorted(PROFILE_LENSES)
+    assert remaining_lenses(["charisma", None, ""]) == sorted(MODEL_CHOSEN_LENSES)
 
 
 def test_prompt_names_the_taken_lenses_and_stays_dash_free():
@@ -176,8 +188,11 @@ def test_idempotency_is_a_durable_no_per_lens():
     assert "source_person" in gate
     assert "status" not in gate
     assert "< $11" in gate
-    # The ceiling is the vocabulary itself, never a literal.
-    assert "len(PROFILE_LENSES)," in PERSON_BODY
+    # The ceiling is the vocabulary itself, never a literal, and it is
+    # the MODEL-CHOSEN half: this call cannot produce a computed lens, so
+    # counting one would hold the person in the candidate set forever.
+    assert "len(MODEL_CHOSEN_LENSES)," in PERSON_BODY
+    assert "d.value->>'lens' = ANY($12::text[])" in gate
 
 
 def test_suppressing_one_lens_does_not_bar_the_others():
@@ -216,9 +231,9 @@ def test_receipts_gate_in_sql_and_recheck_in_code():
 
 
 def test_provenance_matches_the_cue_pass():
-    assert "'derived', 'profile_pass'" in SYNTH_BODY
-    assert "source_patch_ids" in SYNTH_BODY
-    assert "'informs', 'consolidated_into'" in SYNTH_BODY
+    assert "'derived', 'profile_pass'" in WRITE_BODY
+    assert "source_patch_ids" in WRITE_BODY
+    assert "'informs', 'consolidated_into'" in WRITE_BODY
 
 
 # --- serving guards ----------------------------------------------------
@@ -280,13 +295,14 @@ def test_decay_state_is_null_when_the_type_carries_no_ttl():
     assert "ins_state = None" in SERVE_BODY
 
 
-def test_insights_are_null_when_cq_cannot_answer():
-    """A patchless entity can never have insights derived for it, and a
-    swallowed fetch error is not evidence of an empty stack. Both are
-    null; [] is reserved for "the pass produced nothing yet"."""
-    assert "insights: Optional[list] = None" in MAIN
-    assert "insights = None" in SERVE_BODY
-    assert "insights = []" in SERVE_BODY  # the honest empty, after a fetch
+def test_only_a_failed_fetch_is_a_cannot_tell():
+    """A patchless person is the thinnest NOT YET, not a cannot-tell: an
+    entity accumulates a person patch as it is observed. Serving null
+    there rendered nothing for the exact case the not-yet card exists
+    for, so [] is the default and null is reserved for a failed fetch."""
+    assert "insights: Optional[list] = []" in MAIN
+    assert "insights = None" in SERVE_BODY   # the swallowed error only
+    assert "insights = []" in SERVE_BODY
 
 
 # --- the capabilities entry -------------------------------------------

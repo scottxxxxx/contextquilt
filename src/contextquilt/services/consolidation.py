@@ -38,7 +38,15 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, List, Optional
+from datetime import date
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
+
+from .follow_through import (
+    FOLLOW_THROUGH_LENS,
+    MIN_JUDGED_ITEMS,
+    judge_items,
+)
+from .insight_cards import CARD_SHAPE_RULES, card_defect
 
 # Bounds — cost and blast-radius caps, not tunables to chase.
 MIN_CLUSTER_SIZE_FLOOR = 2
@@ -55,15 +63,22 @@ MAX_SOURCE_TEXTS = 10  # prompt size cap per synthesis call
 MIN_MEETINGS_FLOOR = 2
 DEFAULT_MIN_MEETINGS = 3
 CLUSTER_KEYS = {"cue", "person"}
-# The 12b lens vocabulary v1. A response naming any other lens is
-# declined, never coerced: the model does not get to invent lenses.
+# The 12b lens vocabulary, in two halves that are produced by two
+# different kinds of pass.
 #
-# The vocabulary size is also the per-person insight ceiling: 16a stacks
-# up to one card per lens, and the profile pass stops considering a
-# person once every lens carries a stamp (see
-# `worker._consolidate_user_people`). Adding a lens here therefore
-# reopens every person for one more derivation, which is intended.
-PROFILE_LENSES = {"how_they_decide", "what_moves_them"}
+# MODEL_CHOSEN_LENSES are the ones a model reads observations and picks
+# between. A response naming anything outside this set is declined, never
+# coerced: the model does not get to invent lenses, and it does not get
+# to reach for a lens whose verdict is not its to make.
+MODEL_CHOSEN_LENSES = {"how_they_decide", "what_moves_them"}
+# COMPUTED_LENSES are decided by arithmetic before any call happens. The
+# model writes the sentence; it never chooses the lens or the verdict.
+# services/follow_through.py has the whole argument for why the third
+# lens had to be built this way round.
+COMPUTED_LENSES = {FOLLOW_THROUGH_LENS}
+# The whole vocabulary: what a person's stack can hold, what a lens stamp
+# may say, and what the readiness surface reports on.
+PROFILE_LENSES = MODEL_CHOSEN_LENSES | COMPUTED_LENSES
 
 
 def parse_consolidation_rules(manifest: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -162,8 +177,8 @@ PROFILE_SYSTEM = """You are the memory-consolidation stage of ContextQuilt, a pe
 Rules:
 - The pattern must hold ACROSS meetings, not within one. A single meeting, however vivid, is an anecdote; decline it.
 - Choose the one lens the evidence actually supports: "how_they_decide" (how this person reaches and keeps decisions) or "what_moves_them" (what kinds of framing or evidence they respond to). If neither fits, decline.
-- The claim is one plain sentence about the person, no hedging prefixes.
-- The do line is one short imperative sentence telling the user how to work with this pattern in their next meeting.
+""" + CARD_SHAPE_RULES + """
+- No hedging prefixes like "It seems".
 - Write in the same language as the observations.
 - Never invent specifics (names, dates, numbers) that appear in no observation.
 - Decline freely: a wrong profile is worse than none.
@@ -173,16 +188,42 @@ Respond with EXACTLY this raw JSON shape and nothing else:
 
 
 def remaining_lenses(taken: Optional[Any] = None) -> List[str]:
-    """The lenses still underived for a person, sorted for stable prompts.
+    """The MODEL-CHOSEN lenses still underived for a person, sorted.
 
     `taken` is every lens already stamped for this person in ANY status,
     because a suppressed card is a durable no for that lens (see
     `worker._consolidate_user_people`). Values outside the vocabulary
     are ignored rather than trusted: a drifted stamp must not silently
     retire a real lens.
+
+    Computed lenses are deliberately absent from both sides of the
+    subtraction. They are never offered to the profile call, so a person
+    whose only open lens is a computed one has nothing left for that call
+    and it returns [] rather than spending one.
     """
-    taken_set = {t for t in (taken or ()) if t in PROFILE_LENSES}
-    return sorted(PROFILE_LENSES - taken_set)
+    taken_set = {t for t in (taken or ()) if t in MODEL_CHOSEN_LENSES}
+    return sorted(MODEL_CHOSEN_LENSES - taken_set)
+
+
+def spread_sample(items: Sequence[Any], k: int) -> List[Any]:
+    """At most k items spread evenly across an ordered sequence.
+
+    The pass used to hand the model `items[:k]`, which for a person with
+    39 qualifying sources meant the OLDEST 10 and nothing from the last
+    two months: durable behavior only, recent behavior structurally
+    invisible. A spread keeps both ends of the window, always includes
+    the first and last item, and is deterministic, so a rerun on an
+    unchanged corpus builds identical prompt bytes.
+    """
+    n = len(items)
+    if k <= 0:
+        return []
+    if n <= k:
+        return list(items)
+    if k == 1:
+        return [items[-1]]  # one slot goes to the most recent behavior
+    idx = sorted({round(i * (n - 1) / (k - 1)) for i in range(k)})
+    return [items[i] for i in idx]
 
 
 def build_profile_content(
@@ -209,7 +250,7 @@ def build_profile_content(
         lines.append(
             "Lenses already recorded for this person (do not choose these "
             "again): " + ", ".join(sorted(
-                t for t in taken_lenses if t in PROFILE_LENSES
+                t for t in taken_lenses if t in MODEL_CHOSEN_LENSES
             ))
         )
         lines.append(
@@ -218,17 +259,31 @@ def build_profile_content(
         )
     lines.append("")
     lines.append("Observations (dated, oldest first):")
-    for date_s, text in dated_texts[:MAX_SOURCE_TEXTS]:
+    # A spread across the window, not the oldest slice of it. The cap is
+    # prompt size; which items it drops is a quality decision, and
+    # dropping everything recent was the wrong one.
+    for date_s, text in spread_sample(dated_texts, MAX_SOURCE_TEXTS):
         lines.append(f"- [{date_s}] {text}")
     return "\n".join(lines)
 
 
-def parse_profile_response(content: Any) -> Optional[Dict[str, str]]:
+def parse_profile_response(
+    content: Any,
+    person_name: Optional[str] = None,
+    defects: Optional[List[str]] = None,
+) -> Optional[Dict[str, str]]:
     """{"lens", "text", "do"} or None for skip/refusal/garbage.
 
     Same acceptance posture as the cue pass, plus the lens whitelist:
     the model does not get to invent lenses, and a claim without an
-    actionable line is declined (16a renders both or neither)."""
+    actionable line is declined (16a renders both or neither).
+
+    The card shape (both ceilings, and the person's own name banned from
+    the opening) is enforced here rather than requested in the prompt,
+    because a claim the UI cannot render is worse than no claim. Pass
+    `defects` to collect the reason: a rejected FORMAT is a different
+    event from a model choosing to skip, and only one of them is worth
+    waking up for."""
     obj = content
     if isinstance(obj, str):
         m = re.search(r"\{.*\}", obj, re.DOTALL)
@@ -243,7 +298,9 @@ def parse_profile_response(content: Any) -> Optional[Dict[str, str]]:
     if obj.get("skip") is not False and obj.get("skip") is not None:
         return None
     lens = obj.get("lens")
-    if lens not in PROFILE_LENSES:
+    # MODEL_CHOSEN, not the whole vocabulary: a computed lens is not on
+    # offer here, so naming one is as invalid as inventing one.
+    if lens not in MODEL_CHOSEN_LENSES:
         return None
     text = obj.get("text")
     do = obj.get("do")
@@ -251,9 +308,124 @@ def parse_profile_response(content: Any) -> Optional[Dict[str, str]]:
         return None
     text = " ".join(text.split())
     do = " ".join(do.split())
-    if not (10 <= len(text) <= 500) or not (5 <= len(do) <= 200):
+    defect = card_defect(text, do, person_name)
+    if defect:
+        if defects is not None:
+            defects.append(defect)
         return None
     return {"lens": lens, "text": text, "do": do}
+
+
+def person_insight_rule(manifest: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The app's person-clustered rule, or None if it declares none.
+
+    The read surface needs the same thresholds the pass runs on, because
+    "two more meetings" is only honest if it counts toward the number
+    that actually gates the derivation.
+    """
+    for rule in parse_consolidation_rules(manifest):
+        if rule["cluster"] == "person":
+            return rule
+    return None
+
+
+# The readiness vocabulary. Open, like `decay_state` and `lens`: a client
+# that meets a state it does not know must render NOTHING for that lens,
+# never the not-yet copy, because the not-yet copy is a promise.
+#
+# Only the two `pending_` states invite waiting. `suppressed` and
+# `retired` both mean the pass will not produce this card again (the
+# durable no ignores status, so any stamp closes the lens), and telling a
+# user to keep meeting someone so a claim they permanently rejected can
+# come back is the one thing this surface must never do. Clients that do
+# not want to reason about the vocabulary can read `more_meetings_help`,
+# which answers exactly that question and nothing else.
+READINESS_AVAILABLE = "available"
+READINESS_SUPPRESSED = "suppressed"
+READINESS_RETIRED = "retired"
+READINESS_PENDING_EVIDENCE = "pending_evidence"
+READINESS_PENDING_PATTERN = "pending_pattern"
+READINESS_WAITING_STATES = {READINESS_PENDING_EVIDENCE, READINESS_PENDING_PATTERN}
+
+# The archive cause DELETE /v1/patches stamps. Any other cause on an
+# archived insight means the system retired the card, not the user.
+USER_SUPPRESSION_CAUSE = "user_delete"
+
+
+def _lens_state(stamps: List[Mapping[str, Any]], gate_met: bool) -> str:
+    for stamp in stamps:
+        if (stamp.get("status") or "active") == "active":
+            return READINESS_AVAILABLE
+    if any(stamp.get("archive_cause") == USER_SUPPRESSION_CAUSE for stamp in stamps):
+        return READINESS_SUPPRESSED
+    if stamps:
+        return READINESS_RETIRED
+    return READINESS_PENDING_PATTERN if gate_met else READINESS_PENDING_EVIDENCE
+
+
+def build_insight_readiness(
+    source_rows: Iterable[Mapping[str, Any]],
+    stamp_rows: Iterable[Mapping[str, Any]],
+    today: date,
+    min_patches: int,
+    min_meetings: int,
+) -> Dict[str, Any]:
+    """Per lens: where this person stands, and whether waiting helps.
+
+    Serving this is what lets a client say "two more meetings with Priya"
+    instead of "check back later", and it is what stops it saying either
+    one about a lens the user already threw away. Both halves matter: the
+    numbers make the empty state specific, the state makes it honest.
+
+    `source_rows` are the person's owns-edge items of the rule's types,
+    ACTIVE and COMPLETED alike, because the two lens families count
+    different things. The model lenses count what their cluster SQL
+    counts: active items carrying a meeting. The computed lens counts
+    items whose due date has come due, which is mostly items that already
+    closed, and closing archives the row.
+
+    Every entry carries every sibling key (doc 17 section 6): a number is
+    null only when it is genuinely unknown, never merely inapplicable,
+    and every count here is an int, so nothing on this surface can reach
+    a strict JSON serializer as NaN or Infinity.
+    """
+    rows = list(source_rows or ())
+    by_lens: Dict[str, List[Mapping[str, Any]]] = {}
+    for stamp in stamp_rows or ():
+        lens = stamp.get("lens")
+        if lens:
+            by_lens.setdefault(lens, []).append(stamp)
+
+    # The model-lens gate, counted exactly as the cluster query counts it.
+    live = [r for r in rows
+            if (r.get("status") or "active") == "active" and r.get("origin_id")]
+    model_items = len(live)
+    model_meetings = len({str(r["origin_id"]) for r in live})
+    # The computed-lens gate, from the same arithmetic the pass runs on.
+    computed = judge_items(rows, today)["facts"]
+
+    lenses = []
+    for lens in sorted(PROFILE_LENSES):
+        if lens in COMPUTED_LENSES:
+            items, meetings = computed["judged_items"], computed["meetings"]
+            need_items = MIN_JUDGED_ITEMS
+        else:
+            items, meetings = model_items, model_meetings
+            need_items = min_patches
+        gate_met = items >= need_items and meetings >= min_meetings
+        state = _lens_state(by_lens.get(lens, []), gate_met)
+        lenses.append({
+            "lens": lens,
+            "state": state,
+            "more_meetings_help": state in READINESS_WAITING_STATES,
+            "items_observed": items,
+            "items_required": need_items,
+            "items_remaining": max(0, need_items - items),
+            "meetings_observed": meetings,
+            "meetings_required": min_meetings,
+            "meetings_remaining": max(0, min_meetings - meetings),
+        })
+    return {"lenses": lenses}
 
 
 def parse_synthesis_response(content: Any) -> Optional[str]:
