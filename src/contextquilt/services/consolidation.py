@@ -57,6 +57,12 @@ DEFAULT_MIN_MEETINGS = 3
 CLUSTER_KEYS = {"cue", "person"}
 # The 12b lens vocabulary v1. A response naming any other lens is
 # declined, never coerced: the model does not get to invent lenses.
+#
+# The vocabulary size is also the per-person insight ceiling: 16a stacks
+# up to one card per lens, and the profile pass stops considering a
+# person once every lens carries a stamp (see
+# `worker._consolidate_user_people`). Adding a lens here therefore
+# reopens every person for one more derivation, which is intended.
 PROFILE_LENSES = {"how_they_decide", "what_moves_them"}
 
 
@@ -101,6 +107,22 @@ def parse_consolidation_rules(manifest: Optional[Dict[str, Any]]) -> List[Dict[s
             "guidance": raw.get("guidance") if isinstance(raw.get("guidance"), str) else None,
         })
     return rules
+
+
+def manifest_declares_person_insights(manifest: Optional[Dict[str, Any]]) -> bool:
+    """Whether this app's manifest can ever produce a person insight.
+
+    The profile pass only runs for apps that declare a person-clustered
+    consolidation rule, so for anyone else the insight stack is not
+    empty, it is unavailable. The People `capabilities` block reports
+    that difference (doc 16 section 6.4), on the same principle as
+    `you_owe`: the capability follows the schema that produces the data,
+    not the code that reads it.
+    """
+    return any(
+        rule["cluster"] == "person"
+        for rule in parse_consolidation_rules(manifest)
+    )
 
 
 CONSOLIDATION_SYSTEM = """You are the memory-consolidation stage of ContextQuilt, a persistent memory system. You are shown several stored memory observations about ONE topic, all concerning the same person. Your job is what sleep does for human memory: decide whether these observations, taken together, support ONE durable higher-order statement — and write it if so.
@@ -150,17 +172,50 @@ Respond with EXACTLY this raw JSON shape and nothing else:
 {"skip": <true|false>, "lens": "<how_they_decide|what_moves_them|null>", "text": "<the pattern claim, or empty string when skip is true>", "do": "<the actionable line, or empty string when skip is true>", "reason": "<one short sentence>"}"""
 
 
+def remaining_lenses(taken: Optional[Any] = None) -> List[str]:
+    """The lenses still underived for a person, sorted for stable prompts.
+
+    `taken` is every lens already stamped for this person in ANY status,
+    because a suppressed card is a durable no for that lens (see
+    `worker._consolidate_user_people`). Values outside the vocabulary
+    are ignored rather than trusted: a drifted stamp must not silently
+    retire a real lens.
+    """
+    taken_set = {t for t in (taken or ()) if t in PROFILE_LENSES}
+    return sorted(PROFILE_LENSES - taken_set)
+
+
 def build_profile_content(
     person_name: str,
     dated_texts: List[tuple],
     guidance: Optional[str] = None,
+    taken_lenses: Optional[Any] = None,
 ) -> str:
     """User-content block for one person cluster's profile call.
     dated_texts is [(iso_date_str, text), ...] in chronological order;
-    the dates matter because a pattern is a claim about time."""
+    the dates matter because a pattern is a claim about time.
+
+    `taken_lenses` names the lenses this person already has, so the call
+    is not spent re-deriving one that will be refused on the way in. It
+    is a hint for cost, never the invariant: the post-check in
+    `_synthesize_person_cluster` is what actually holds the line, since
+    the model is free to ignore anything in a prompt.
+    """
     lines = [f"Person: {person_name}"]
     if guidance:
         lines.append(f"App guidance: {guidance}")
+    open_lenses = remaining_lenses(taken_lenses)
+    if taken_lenses:
+        lines.append(
+            "Lenses already recorded for this person (do not choose these "
+            "again): " + ", ".join(sorted(
+                t for t in taken_lenses if t in PROFILE_LENSES
+            ))
+        )
+        lines.append(
+            "Lenses still open: "
+            + (", ".join(open_lenses) if open_lenses else "none, decline")
+        )
     lines.append("")
     lines.append("Observations (dated, oldest first):")
     for date_s, text in dated_texts[:MAX_SOURCE_TEXTS]:

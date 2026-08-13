@@ -2,10 +2,11 @@
 
 The same machinery as the cue pass with the cluster key changed, and
 three deliberate differences these guards pin: the durable-no
-idempotency (a user-deleted insight is never re-derived), the self
-exclusion (lenses are about the counterparty), and the receipts gate
-(a claim spans >= min_meetings DISTINCT meetings, checked in SQL and
-re-checked against the fetched sources).
+idempotency PER LENS (a user-deleted insight is never re-derived for
+the lens it carried, while the person's other lenses stay open), the
+self exclusion (lenses are about the counterparty), and the receipts
+gate (a claim spans >= min_meetings DISTINCT meetings, checked in SQL
+and re-checked against the fetched sources).
 """
 
 import sys
@@ -19,17 +20,26 @@ from contextquilt.services.consolidation import (
     PROFILE_LENSES,
     PROFILE_SYSTEM,
     build_profile_content,
+    manifest_declares_person_insights,
     parse_consolidation_rules,
     parse_profile_response,
+    remaining_lenses,
 )
+from contextquilt.services.people_identity import capability_report
 
 WORKER = (ROOT / "src" / "worker.py").read_text()
 MAIN = (ROOT / "src" / "main.py").read_text()
 PERSON_BODY = WORKER.split("async def _consolidate_user_people")[1].split(
+    "async def _taken_lenses"
+)[0]
+TAKEN_BODY = WORKER.split("async def _taken_lenses")[1].split(
     "async def _synthesize_person_cluster"
 )[0]
 SYNTH_BODY = WORKER.split("async def _synthesize_person_cluster")[1].split(
     "async def _synthesize_cluster"
+)[0]
+SERVE_BODY = MAIN.split("insights: Optional[list] = None")[1].split(
+    "detail = _public_person"
 )[0]
 
 
@@ -108,15 +118,90 @@ def test_content_carries_dates_because_patterns_are_about_time():
     assert "[2026-06-17]" in c and "[2026-07-29]" in c
 
 
+# --- the lens stack ----------------------------------------------------
+
+def test_remaining_lenses_is_the_whole_vocabulary_when_nothing_is_taken():
+    assert remaining_lenses() == sorted(PROFILE_LENSES)
+    assert remaining_lenses([]) == sorted(PROFILE_LENSES)
+
+
+def test_one_taken_lens_leaves_the_others_open():
+    """The point of the change: a person with one card is still a
+    candidate for the rest of the vocabulary."""
+    left = remaining_lenses(["how_they_decide"])
+    assert left == ["what_moves_them"]
+    assert left  # a two-lens vocabulary must not close on the first card
+
+
+def test_a_full_stack_leaves_nothing_open():
+    assert remaining_lenses(PROFILE_LENSES) == []
+
+
+def test_a_drifted_stamp_cannot_retire_a_real_lens():
+    """An unknown lens value counts for nothing: it must never be able
+    to close a lens the vocabulary actually holds."""
+    assert remaining_lenses(["charisma", None, ""]) == sorted(PROFILE_LENSES)
+
+
+def test_prompt_names_the_taken_lenses_and_stays_dash_free():
+    c = build_profile_content(
+        "Suresh", [("2026-06-17", "a")], taken_lenses={"how_they_decide"},
+    )
+    assert "how_they_decide" in c
+    assert "what_moves_them" in c  # named as still open
+    assert "—" not in c and "–" not in c
+
+
+def test_prompt_is_unchanged_when_nothing_is_taken():
+    """No hint, no wasted tokens, and the pre-stack prompt byte for byte."""
+    dated = [("2026-06-17", "a"), ("2026-07-29", "b")]
+    assert build_profile_content("Suresh", dated, taken_lenses=None) == \
+        build_profile_content("Suresh", dated)
+
+
 # --- worker guards -----------------------------------------------------
 
-def test_idempotency_is_a_durable_no():
-    """The NOT EXISTS must ignore status: a user-deleted (archived)
-    insight blocks re-derivation forever, which is what makes
-    hold-to-suppress via the existing DELETE route a durable no."""
-    ne = PERSON_BODY.split("NOT EXISTS")[1].split(")")[0] + ")"
-    assert "source_person" in ne
-    assert "status" not in ne
+def test_idempotency_is_a_durable_no_per_lens():
+    """The SQL gate must ignore status: a user-deleted (archived)
+    insight is a permanent no for the lens it carried, which is what
+    makes hold-to-suppress via the existing DELETE route durable.
+
+    It is now keyed on the LENS COUNT rather than on existence, because
+    the model picks the lens after the call. A person leaves the
+    candidate set only once the stamps cover the whole vocabulary.
+    """
+    gate = PERSON_BODY.split("count(DISTINCT d.value->>'lens')")[1].split(
+        "GROUP BY"
+    )[0]
+    assert "source_person" in gate
+    assert "status" not in gate
+    assert "< $11" in gate
+    # The ceiling is the vocabulary itself, never a literal.
+    assert "len(PROFILE_LENSES)," in PERSON_BODY
+
+
+def test_suppressing_one_lens_does_not_bar_the_others():
+    """The old gate was NOT EXISTS on ANY prior insight, which made a
+    second card structurally impossible. It must be gone."""
+    assert "NOT EXISTS" not in PERSON_BODY
+
+
+def test_taken_lenses_lookup_ignores_status():
+    """The set the post-check reads is the durable no itself, so it must
+    see archived rows."""
+    sql = TAKEN_BODY.split("SELECT DISTINCT")[1].split('"""')[0]
+    assert "d.value->>'lens'" in sql
+    assert "origin_mode = 'derived'" in sql
+    assert "status" not in sql
+
+
+def test_the_post_check_declines_a_taken_lens_without_writing():
+    """A prompt hint is never an invariant: the lens is re-read after
+    the call and a repeat is declined before any INSERT."""
+    pre_insert = SYNTH_BODY.split("INSERT INTO context_patches")[0]
+    assert 'if profile["lens"] in taken_lenses:' in pre_insert
+    assert pre_insert.index('if profile["lens"] in taken_lenses:') > \
+        pre_insert.index("parse_profile_response")
 
 
 def test_self_is_excluded_and_degrades_without_the_ego_link():
@@ -139,15 +224,97 @@ def test_provenance_matches_the_cue_pass():
 # --- serving guards ----------------------------------------------------
 
 def test_detail_serves_active_insights_only_with_evidence():
-    body = MAIN.split("insights: list = []")[1].split("detail = _public_person")[0]
-    assert "source_person" in body
-    assert "COALESCE(cp.status, 'active') = 'active'" in body
-    assert '"evidence": evidence' in body
+    assert "source_person" in SERVE_BODY
+    assert "COALESCE(cp.status, 'active') = 'active'" in SERVE_BODY
+    assert '"evidence": evidence' in SERVE_BODY
 
 
 def test_serving_never_fails_the_detail_route():
-    body = MAIN.split("insights: list = []")[1].split("detail = _public_person")[0]
-    assert "except Exception" in body
+    assert "except Exception" in SERVE_BODY
+
+
+def test_evidence_carries_the_source_text_and_its_patch_ids():
+    """The design shows a sentence per moment. The source patch's own
+    text is CQ state, so serving it does not cross the doc 15 line."""
+    assert '"text": e["text"]' in SERVE_BODY
+    assert '"patch_ids"' in SERVE_BODY
+
+
+def test_evidence_is_one_row_per_meeting_with_a_deterministic_pick():
+    """Distinct meetings, and a total order for the representative, so
+    two identical calls render identically."""
+    ev = SERVE_BODY.split("SELECT origin_id,")[1].split('"""')[0]
+    assert "GROUP BY origin_id" in ev
+    assert "ORDER BY created_at, patch_id" in ev
+    assert "ORDER BY met_on ASC, origin_id ASC" in ev
+
+
+def test_archived_sources_are_not_live_receipts():
+    ev = SERVE_BODY.split("SELECT origin_id,")[1].split('"""')[0]
+    assert "COALESCE(status, 'active') = 'active'" in ev
+
+
+def test_the_evidence_date_is_named_for_what_it_is():
+    """min(created_at) is the INGEST date. CQ persists no meeting date
+    and must not imply one; `date` survives as the legacy alias because
+    the served surface is additive only."""
+    assert '"ingested_on"' in SERVE_BODY
+    assert '"date"' in SERVE_BODY
+
+
+def test_insight_decay_comes_from_the_shared_model_not_a_confidence_float():
+    """decay_state on the insight patch itself, from the same module the
+    worker's decay loop reads. A per-source confidence fraction would
+    report a threshold the decay loop never acts on."""
+    assert "decay_model.decay_state(" in SERVE_BODY
+    assert "freshness_types=ins_runtime.freshness_tracked_types" in SERVE_BODY
+    served_keys = [ln for ln in SERVE_BODY.splitlines()
+                   if ln.strip().startswith('"')]
+    assert not any("confidence" in ln for ln in served_keys)
+
+
+def test_decay_state_is_null_when_the_type_carries_no_ttl():
+    """Null means not tracked. Reporting `live` for a type outside the
+    decay model would be a band CQ cannot stand behind."""
+    assert "decay_model.effective_ttl_days(" in SERVE_BODY
+    assert "ins_state = None" in SERVE_BODY
+
+
+def test_insights_are_null_when_cq_cannot_answer():
+    """A patchless entity can never have insights derived for it, and a
+    swallowed fetch error is not evidence of an empty stack. Both are
+    null; [] is reserved for "the pass produced nothing yet"."""
+    assert "insights: Optional[list] = None" in MAIN
+    assert "insights = None" in SERVE_BODY
+    assert "insights = []" in SERVE_BODY  # the honest empty, after a fetch
+
+
+# --- the capabilities entry -------------------------------------------
+
+def test_insights_capability_is_off_by_default_with_a_reason():
+    caps = capability_report()
+    assert caps["insights"]["available"] is False
+    assert "consolidation" in caps["insights"]["reason"]
+
+
+def test_insights_capability_flips_on_a_person_clustered_rule():
+    caps = capability_report(insights_available=True)
+    assert caps["insights"] == {"available": True, "reason": None}
+
+
+def test_capability_flags_are_independent():
+    assert capability_report(True, False)["insights"]["available"] is False
+    assert capability_report(False, True)["you_owe"]["available"] is False
+
+
+def test_manifest_declares_person_insights_follows_the_cluster_key():
+    person_rule = {"from_types": ["takeaway"], "produce_type": "insight",
+                   "cluster": "person"}
+    assert manifest_declares_person_insights(_manifest([person_rule])) is True
+    assert manifest_declares_person_insights(_manifest([
+        {"from_types": ["takeaway"], "produce_type": "insight"},
+    ])) is False
+    assert manifest_declares_person_insights(None) is False
 
 
 # --- is_self on the People rows (13b ratification answer 2) ------------

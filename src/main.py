@@ -46,6 +46,7 @@ from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
 from contextquilt.services import decay_model
 from contextquilt.services import facet_runtime
+from contextquilt.services.consolidation import manifest_declares_person_insights
 from contextquilt.services.extraction_schema import is_user_reference
 from contextquilt.services.recall_formatter import (
     format_people_scope,
@@ -1294,7 +1295,7 @@ async def recall_context(
     # share a body. Unknown scope values fall through to the full lane
     # (open vocabulary, additive rule).
     if (request.metadata or {}).get("recall_scope") == "people":
-        p_vocab, p_owed = await _people_read_context(db_pool, app_id)
+        p_vocab, p_owed, _ = await _people_read_context(db_pool, app_id)
         person_ids = [
             str(r["entity_id"]) for r in entity_rows
             if r["entity_type"] == p_vocab.person_entity_type
@@ -4023,49 +4024,57 @@ async def _people_vocab_cached(app_id: str) -> "PeopleVocabulary":
     if hit and now - hit[1] < 300:
         return hit[0]
     async with db_pool.acquire() as conn:
-        vocab, _ = await _people_read_context(conn, app_id)
+        vocab, _, _ = await _people_read_context(conn, app_id)
     _recall_vocab_cache[app_id] = (vocab, now)
     return vocab
 
 
 async def _people_read_context(conn, app_id: str):
-    """(vocabulary, owed_to_available) for the calling app, one fetch.
+    """(vocabulary, owed_to_available, insights_available), one fetch.
 
-    Both are properties of the app's registered manifest, not of CQ's
-    code: the vocabulary says WHICH types and labels carry People
+    All three are properties of the app's registered manifest, not of
+    CQ's code: the vocabulary says WHICH types and labels carry People
     semantics for this caller (SS-default floor when no `people` block
-    is declared), and the availability says whether a counterparty
-    ledger can honestly be a list rather than null. The read logic can
-    compute a you_owe ledger the moment it ships, but for an app whose
-    extraction never emits the edge the answer would be an empty list
-    for every person, which reads as "nothing outstanding" rather than
-    "not tracked". So the capability follows the schema that produces
-    the data, not the code that reads it.
+    is declared), and the two availabilities say whether a counterparty
+    ledger and a lens stack can honestly be lists rather than null. The
+    read logic can compute a you_owe ledger the moment it ships, but for
+    an app whose extraction never emits the edge the answer would be an
+    empty list for every person, which reads as "nothing outstanding"
+    rather than "not tracked". Insights are the same shape of claim: an
+    app declaring no person-clustered consolidation rule never runs the
+    profile pass, so an empty stack there would read as "nothing to say
+    about this person" rather than "this app does not do that". So the
+    capability follows the schema that produces the data, not the code
+    that reads it.
 
     Any failure to resolve the manifest, a legacy non-UUID app id, no
     registered schema, unparseable JSON, degrades to (default floor,
-    False). False is the conservative direction: the caller gets null
-    and a stated reason.
+    False, False). False is the conservative direction: the caller gets
+    null and a stated reason.
     """
     import uuid as _uuid
     try:
         app_uuid = _uuid.UUID(app_id)
     except (ValueError, AttributeError, TypeError):
-        return DEFAULT_PEOPLE_VOCABULARY, False
+        return DEFAULT_PEOPLE_VOCABULARY, False, False
     row = await conn.fetchrow(
         "SELECT manifest FROM app_schemas WHERE app_id = $1 "
         "ORDER BY version DESC LIMIT 1",
         app_uuid,
     )
     if row is None:
-        return DEFAULT_PEOPLE_VOCABULARY, False
+        return DEFAULT_PEOPLE_VOCABULARY, False, False
     manifest = row["manifest"]
     if isinstance(manifest, str):
         try:
             manifest = json.loads(manifest)
         except (ValueError, TypeError):
-            return DEFAULT_PEOPLE_VOCABULARY, False
-    return people_vocabulary(manifest), manifest_declares_owed_to(manifest)
+            return DEFAULT_PEOPLE_VOCABULARY, False, False
+    return (
+        people_vocabulary(manifest),
+        manifest_declares_owed_to(manifest),
+        manifest_declares_person_insights(manifest),
+    )
 
 
 async def _people_core(
@@ -4660,7 +4669,9 @@ async def list_people(
         ignored.append("confirmed")
 
     async with db_pool.acquire() as conn:
-        vocab, owed_to_available = await _people_read_context(conn, app_id)
+        vocab, owed_to_available, insights_available = (
+            await _people_read_context(conn, app_id)
+        )
         core = await _people_core(
             conn, user_id, owed_to_available=owed_to_available, vocab=vocab
         )
@@ -4704,7 +4715,7 @@ async def list_people(
         "total": total,
         "total_unfiltered": total_unfiltered,
         "deleted": deleted,
-        "capabilities": capability_report(owed_to_available),
+        "capabilities": capability_report(owed_to_available, insights_available),
         "query": {
             "since": since,
             "confirmed": confirmed,
@@ -4745,9 +4756,27 @@ async def get_person(
 
     `you_owe` is null, not an empty list, for callers whose registered
     manifest does not declare `owed_to`. See capabilities.you_owe.
+
+    `insights` is the 16a lens stack: up to one derived card per lens in
+    the CQ-side lens vocabulary, each with the claim, the do line, its
+    own `decay_state`, and the receipts. It is null, not [], when CQ
+    cannot answer at all (no person patch to derive from, or the fetch
+    failed); an empty list means the pass has produced nothing yet. See
+    capabilities.insights for whether this app can produce any.
+
+    Each evidence row is one DISTINCT meeting behind the claim, carrying
+    the source patch text and the patch ids so the client can join to
+    patches it already holds. `ingested_on` (and its legacy alias
+    `date`) is the day CQ STORED that source, not the day the meeting
+    happened: CQ persists no meeting date and will not invent one. Join
+    `origin_id` to the app's own meeting record for that. Archived
+    sources are not served, so an insight can honestly show fewer
+    receipts than the gate that created it required.
     """
     async with db_pool.acquire() as conn:
-        vocab, owed_to_available = await _people_read_context(conn, app_id)
+        vocab, owed_to_available, insights_available = (
+            await _people_read_context(conn, app_id)
+        )
         try:
             resolved = await _load_active_person(
                 conn, user_id, entity_id, vocab.person_entity_type
@@ -4836,14 +4865,19 @@ async def get_person(
 
     # Profile insights (16a): derived patches from the person-keyed
     # consolidation pass, keyed by value.source_person = this person's
-    # patch id. Active-only on the READ (a suppressed insight disappears
-    # from the surface) while the pass's idempotency check ignores
-    # status, which together make hold-to-suppress a durable no through
-    # the existing DELETE /patches route. Evidence is the source
-    # patches' meetings: the receipts the 12a design demands. Empty list
-    # = none derived yet; insights need a person PATCH, so a patchless
-    # entity honestly has none.
-    insights: list = []
+    # patch id. Up to one card per lens in the CQ-side lens vocabulary.
+    # Active-only on the READ (a suppressed insight disappears from the
+    # surface) while the pass's idempotency check ignores status PER
+    # LENS, which together make hold-to-suppress a durable no for that
+    # one card through the existing DELETE /patches route, and leave the
+    # person's other lenses derivable.
+    #
+    # Null, not [], when CQ cannot answer: insights are derived from a
+    # person PATCH, so a patchless entity is one CQ can never derive
+    # for, and a failed fetch is not evidence of an empty stack either.
+    # An empty LIST means the pass has simply produced nothing yet. Same
+    # house rule as you_owe (doc 16 section 6.4).
+    insights: Optional[list] = None
     if row.get("patch_id"):
         try:
             # db_pool, NOT the _people_core conn: that connection's
@@ -4853,9 +4887,13 @@ async def get_person(
             # error).
             ins_rows = await db_pool.fetch(
                 """
-                SELECT cp.patch_id, cp.value, cp.created_at, cp.source_patch_ids
+                SELECT cp.patch_id, cp.patch_type, cp.value, cp.created_at,
+                       cp.updated_at, cp.last_observed_at,
+                       cp.permanence_override, cp.source_patch_ids,
+                       pum.last_accessed_at
                 FROM context_patches cp
                 JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                LEFT JOIN patch_usage_metrics pum ON pum.patch_id = cp.patch_id
                 WHERE ps.subject_key = $1
                   AND cp.origin_mode = 'derived'
                   AND cp.value->>'source_person' = $2
@@ -4864,39 +4902,127 @@ async def get_person(
                 """,
                 f"user:{user_id}", str(row["patch_id"]),
             )
+            insights = []
+            # Same runtime and registry TTLs the ledger's decay bands and
+            # the worker's decay loop read, so an insight's band and the
+            # archival CQ will actually perform come from one authority.
+            ins_runtime = await facet_runtime.get_type_runtime(db_pool.fetch)
+            ins_ttls: dict = {}
+            for _pt in {ir["patch_type"] for ir in ins_rows}:
+                try:
+                    _ttl_row = await db_pool.fetchrow(
+                        decay_model.TTL_REGISTRY_QUERY, _pt
+                    )
+                    if _ttl_row and _ttl_row["default_ttl_days"] is not None:
+                        ins_ttls[_pt] = _ttl_row["default_ttl_days"]
+                except Exception:
+                    pass  # registry table may not exist yet (matches the worker)
             for ir in ins_rows:
                 iv = ir["value"]
                 if isinstance(iv, str):
                     iv = json.loads(iv)
+                # Evidence is the source patches' meetings: the receipts
+                # the 12a design demands, one row per DISTINCT meeting.
+                #
+                # Archived sources are excluded. A decayed or superseded
+                # patch is not a live receipt, and counting it would let
+                # the card claim support it no longer has. That can drop
+                # the list below the rule's min_meetings gate; the list
+                # is served honestly anyway and the count speaks. It is
+                # never padded back up.
+                #
+                # `text` is the source patch's OWN text, which is CQ
+                # state, not app content (doc 15 item 5 draws that line
+                # at things like a meeting TITLE). One meeting can carry
+                # several sources, so the representative is the oldest
+                # by created_at with patch_id breaking ties: a total
+                # order, so two identical calls render identically.
                 evidence: list = []
                 if ir["source_patch_ids"]:
                     ev_rows = await db_pool.fetch(
                         """
-                        SELECT DISTINCT origin_id, min(created_at)::date AS met_on
+                        SELECT origin_id,
+                               min(created_at)::date AS met_on,
+                               array_agg(patch_id
+                                   ORDER BY created_at, patch_id) AS patch_ids,
+                               (array_agg(value->>'text'
+                                   ORDER BY created_at, patch_id))[1] AS text
                         FROM context_patches
-                        WHERE patch_id = ANY($1::uuid[]) AND origin_id IS NOT NULL
-                        GROUP BY origin_id ORDER BY met_on ASC
+                        WHERE patch_id = ANY($1::uuid[])
+                          AND origin_id IS NOT NULL
+                          AND COALESCE(status, 'active') = 'active'
+                        GROUP BY origin_id
+                        ORDER BY met_on ASC, origin_id ASC
                         """,
                         ir["source_patch_ids"],
                     )
                     evidence = [
                         {"origin_id": e["origin_id"],
-                         "date": e["met_on"].isoformat()}
+                         # INGEST date: when CQ stored the source patch,
+                         # not when the meeting happened. CQ does not
+                         # persist a meeting date, so it does not invent
+                         # one. Join origin_id to the app's own meeting
+                         # record for the real date. `date` is the
+                         # original name of this same field, kept
+                         # because the served surface is additive only.
+                         "ingested_on": e["met_on"].isoformat(),
+                         "date": e["met_on"].isoformat(),
+                         "text": e["text"],
+                         "patch_ids": [str(p) for p in (e["patch_ids"] or [])]}
                         for e in ev_rows
                     ]
+                # The insight patch's OWN decay band, from the shared
+                # decay model. Deliberately not a confidence float over
+                # the sources: the source types decay at wildly
+                # different rates (and one of them, `decision`, is
+                # pinned to never decay at all), so a fraction would
+                # report a threshold the decay loop never acts on, which
+                # is the exact split brain decay_model.py exists to
+                # prevent. Null when the type carries no TTL anywhere,
+                # because "not tracked" is not a band. No float is
+                # served here at all, so there is nothing that could
+                # reach GP's allow_nan=False serializer as NaN.
+                ins_state = None
+                if decay_model.effective_ttl_days(
+                    ir["patch_type"],
+                    iv.get("salience"),
+                    ir["permanence_override"],
+                    ins_ttls.get(ir["patch_type"]),
+                ) is not None:
+                    ins_state = decay_model.decay_state(
+                        ir["patch_type"],
+                        updated_at=ir["updated_at"] or ir["created_at"],
+                        created_at=ir["created_at"],
+                        last_observed_at=ir["last_observed_at"],
+                        salience=iv.get("salience"),
+                        permanence_override=ir["permanence_override"],
+                        registry_ttl_days=ins_ttls.get(ir["patch_type"]),
+                        last_accessed_at=ir["last_accessed_at"],
+                        freshness_types=ins_runtime.freshness_tracked_types,
+                        deadline_types=ins_runtime.deadline_anchored_types,
+                    )
                 insights.append({
                     "patch_id": str(ir["patch_id"]),
                     "lens": iv.get("lens"),
                     "text": iv.get("text", ""),
                     "do": iv.get("do"),
                     "derived_at": ir["created_at"].isoformat() if ir["created_at"] else None,
+                    # live | aging | stale, the SAME open vocabulary and
+                    # UTC-day bucketing the ledger items carry.
+                    "decay_state": ins_state,
                     "evidence": evidence,
                 })
         except Exception:
-            insights = []  # serving must never fail the detail route
+            # Serving must never fail the detail route. Null, not []:
+            # a swallowed error is CQ not knowing, not CQ knowing there
+            # are none.
+            insights = None
 
     detail = _public_person(row)
     detail.update({
+        # A list (possibly empty) once CQ can answer, null when it
+        # cannot. See capabilities.insights for whether this app can
+        # ever produce them at all.
         "insights": insights,
         "projects": row["_projects"],
         "commitments": {
@@ -4965,7 +5091,7 @@ async def get_person(
             "confirmed_mentions": None,
             "assumed_mentions": None,
         },
-        "capabilities": capability_report(owed_to_available),
+        "capabilities": capability_report(owed_to_available, insights_available),
     })
     return detail
 
@@ -4998,7 +5124,7 @@ async def merge_people(
 
     subject_key = f"user:{user_id}"
     async with db_pool.acquire() as conn:
-        vocab, _ = await _people_read_context(conn, app_id)
+        vocab, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             try:
                 canonical = await _load_active_person(
@@ -5414,7 +5540,7 @@ async def keep_people_separate(
     source = resolve_identity_source(req.source)
 
     async with db_pool.acquire() as conn:
-        vocab, _ = await _people_read_context(conn, app_id)
+        vocab, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             try:
                 raw_a, raw_b = req.entity_ids
@@ -5499,7 +5625,7 @@ async def confirm_person(
     source = resolve_identity_source(req.source if req else None)
 
     async with db_pool.acquire() as conn:
-        vocab, _ = await _people_read_context(conn, app_id)
+        vocab, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             try:
                 row = await _load_active_person(
@@ -5592,7 +5718,7 @@ async def rename_person(
 
     subject_key = f"user:{user_id}"
     async with db_pool.acquire() as conn:
-        vocab, _ = await _people_read_context(conn, app_id)
+        vocab, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             profile = await conn.fetchrow(
                 "SELECT display_name FROM profiles WHERE user_id = $1", user_id
@@ -5801,7 +5927,7 @@ async def suppress_person(
     source = resolve_identity_source(req.source if req else None)
     subject_key = f"user:{user_id}"
     async with db_pool.acquire() as conn:
-        vocab, _ = await _people_read_context(conn, app_id)
+        vocab, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             try:
                 row = await _load_active_person(
@@ -5881,7 +6007,7 @@ async def unsuppress_person(
     """
     subject_key = f"user:{user_id}"
     async with db_pool.acquire() as conn:
-        vocab, _ = await _people_read_context(conn, app_id)
+        vocab, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             # Direct read: the standard loader refuses suppressed rows.
             row = await conn.fetchrow(
@@ -5972,7 +6098,7 @@ async def create_person(
     created = False
 
     async with db_pool.acquire() as conn:
-        vocab, _ = await _people_read_context(conn, app_id)
+        vocab, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             # Exact name, then recorded alias — the same resolution order
             # the worker's store_entities uses, so the API and the
