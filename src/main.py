@@ -65,6 +65,12 @@ from contextquilt.services.people_signals import (
     compute_person_signals,
     compute_question_totals,
 )
+from contextquilt.services.person_appearances import (
+    SPEAKER_METRICS,
+    plan_speaker_map,
+    reassignment_presence,
+    reassignment_presence_target,
+)
 from contextquilt.services.people_network import (
     MIN_SHARED_MEETINGS as NETWORK_MIN_SHARED,
     NODE_CAP as NETWORK_NODE_CAP,
@@ -3627,6 +3633,28 @@ async def rename_speaker(
 
     The app is responsible for updating patch text separately via PATCH /v1/quilt.
     This endpoint handles the graph layer (entities + relationships).
+
+    PRESENCE, AND WHERE IT CANNOT FOLLOW. `person_appearances` is keyed
+    on entity_id, so the two branches below behave differently and only
+    one of them can be made honest:
+
+    * Old name IS an entity: the rename is IN PLACE. entity_id never
+      changes, so every appearance the person already had still points at
+      them and their presence anchor is untouched. Nothing to do, and
+      nothing here may start deleting and recreating that row
+      (test_reassign_speaker_presence pins it).
+    * Old name was an unnamed placeholder: a NEW entity is created, and
+      the request carries no meeting id anywhere, so there is no meeting
+      to attach an appearance to. CQ will not guess at one by matching
+      patch text or owner strings, which is inference dressed as a
+      record. The new entity therefore starts with NO appearances and
+      serves a null `last_present_at` until an extraction observes them.
+      This is the ONE remaining ambiguous null in the People surface;
+      docs/architecture/16-people.md 6.2a names it and says what the
+      request would have to carry to close it.
+
+    Reassigning a meeting's utterances (POST /v1/quilt/{u}/reassign-speaker)
+    DOES record presence, because every from_label carries its meeting.
     """
     old = rename.old_name
     new = rename.new_name
@@ -3678,12 +3706,111 @@ class ReassignSpeakerRequest(BaseModel):
     from_labels: List[FromLabel]
     to_person_id: Optional[str] = None
     to_self: Optional[bool] = None
+    # The third target, additive: name a speaker CQ has no id for. The
+    # server resolves it (bind to the matching person, create them if
+    # there is none), because name-to-identity resolution is CQ's job and
+    # a client re-implementing it is the duplication doc 16 argues
+    # against. `to_person_id` stays the precise form and nothing about it
+    # changes; this is what makes ONE meeting-scoped verb cover both
+    # naming an unknown speaker and correcting a misattribution.
+    to_name: Optional[str] = None
 
 
 def _reassign_error(code: str, message: str, **extra) -> HTTPException:
     detail = {"code": code, "message": message}
     detail.update(extra)
     return HTTPException(status_code=422, detail=detail)
+
+
+async def _meeting_presence_anchors(
+    conn, user_id: str, subject_key: str, origin_ids: List[str],
+) -> dict:
+    """origin_id -> (timestamp, project_id) for dating a presence row.
+
+    person_appearances runs on the INGEST clock, so a presence recorded
+    after the fact has to be dated by the meeting, never by NOW(). The
+    meeting's other appearance rows are the best anchor (they were
+    stamped when it was ingested, and first_seen_at is the half nothing
+    re-bumps); its own patches are the fallback for a meeting with no
+    appearances at all. A meeting with neither has no honest date, and
+    the caller skips it rather than inventing one.
+
+    Same rule `backfill_person_appearances.py` states in its header:
+    importing at wall-clock time would tell the app every meeting
+    happened today.
+    """
+    rows = await conn.fetch(
+        """
+        WITH sib AS (
+            SELECT origin_id,
+                   MIN(first_seen_at) AS anchor,
+                   -- A meeting carries one project in practice; MIN keeps
+                   -- the pick deterministic if it ever carries two.
+                   MIN(project_id) AS project_id
+            FROM person_appearances
+            WHERE user_id = $1 AND origin_id = ANY($2::text[])
+            GROUP BY origin_id
+        ), pat AS (
+            SELECT cp.origin_id,
+                   MIN(cp.created_at) AS anchor,
+                   MIN(cp.project_id) AS project_id
+            FROM context_patches cp
+            JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+            WHERE ps.subject_key = $3
+              AND cp.origin_type = 'meeting'
+              AND cp.origin_id = ANY($2::text[])
+            GROUP BY cp.origin_id
+        )
+        SELECT m.origin_id,
+               COALESCE(sib.anchor, pat.anchor) AS anchor,
+               COALESCE(sib.project_id, pat.project_id) AS project_id
+        FROM unnest($2::text[]) AS m(origin_id)
+        LEFT JOIN sib ON sib.origin_id = m.origin_id
+        LEFT JOIN pat ON pat.origin_id = m.origin_id
+        """,
+        user_id, list(origin_ids), subject_key,
+    )
+    return {r["origin_id"]: (r["anchor"], r["project_id"]) for r in rows}
+
+
+async def _upsert_speaker_appearance(
+    conn, user_id: str, entity_id, origin_id: str, anchor, project_id,
+    turn_count,
+) -> None:
+    """Record that this person SPOKE in this meeting.
+
+    The merge route's upsert discipline, shared by both write paths so
+    they cannot drift: earliest first_seen wins, latest last_seen wins,
+    capacities UNION (a person recorded by ownership who also spoke ends
+    up carrying both), turn_count MAX with NULL never clobbering a known
+    value.
+    """
+    await conn.execute(
+        """
+        INSERT INTO person_appearances
+            (user_id, entity_id, origin_id, origin_type,
+             project_id, first_seen_at, last_seen_at,
+             capacities, turn_count)
+        VALUES ($1, $2::uuid, $3, 'meeting', $4, $5, $5,
+                ARRAY['speaker'], $6)
+        ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
+            first_seen_at = LEAST(person_appearances.first_seen_at,
+                                  EXCLUDED.first_seen_at),
+            last_seen_at  = GREATEST(person_appearances.last_seen_at,
+                                     EXCLUDED.last_seen_at),
+            project_id    = COALESCE(person_appearances.project_id,
+                                     EXCLUDED.project_id),
+            turn_count    = CASE
+                WHEN EXCLUDED.turn_count IS NULL THEN person_appearances.turn_count
+                ELSE GREATEST(COALESCE(person_appearances.turn_count, 0),
+                              EXCLUDED.turn_count)
+            END,
+            capacities    = ARRAY(SELECT DISTINCT unnest(
+                                person_appearances.capacities
+                                || EXCLUDED.capacities))
+        """,
+        user_id, str(entity_id), origin_id, project_id, anchor, turn_count,
+    )
 
 
 @app.post("/v1/quilt/{user_id}/reassign-speaker", tags=["Quilt"])
@@ -3698,19 +3825,41 @@ async def reassign_speaker(
     user fragments across N diarized labels in one meeting and the user wants
     to merge them into a single attribution.
 
+    Three targets, exactly one per request: `to_person_id` (a person CQ
+    already has), `to_name` (a speaker the user is naming, resolved or
+    created server side), `to_self`. Every from_label carries its own
+    meeting, so all three are MEETING SCOPED, which is what a post-save
+    speaker rename actually is.
+
     Authorization: GP's proxy enforces user.id == path user_id before
     forwarding. CQ trusts the (app, user_id) pair — same pattern as
     rename-speaker.
 
+    PRESENCE FOLLOWS THE REASSIGNMENT. Utterances moving to a person is
+    direct evidence that person SPOKE in that meeting, so a
+    `speaker`-grade appearance is upserted for each meeting where
+    anything actually moved (see docs/architecture/16-people.md 6.2a).
+    Without it CQ served a null `last_present_at` for someone the user
+    had just told it was in the room, which the client could not tell
+    apart from "not present".
+
+    NOT here, deliberately: the patch TEXT rewrite. The app still owns
+    that (PATCH /v1/quilt), as the rename-speaker docstring has always
+    said. Moving it server side is a real improvement and a separate
+    decision, tracked in doc 16 6.2a rather than bundled in.
+
     See contract: docs design pinned 2026-04-26.
     """
     # ------------------------------------------------------------
-    # 1. xor + non-empty validation
+    # 1. exactly-one target + non-empty validation
     # ------------------------------------------------------------
-    if bool(req.to_self) == bool(req.to_person_id):
+    targets_given = sum(
+        1 for t in (req.to_self, req.to_person_id, (req.to_name or "").strip()) if t
+    )
+    if targets_given != 1:
         raise _reassign_error(
             "INVALID_TARGET",
-            "Provide exactly one of to_self=true or to_person_id",
+            "Provide exactly one of to_self=true, to_person_id or to_name",
         )
     if not req.from_labels:
         raise _reassign_error("EMPTY_FROM_LABELS", "from_labels must not be empty")
@@ -3761,13 +3910,36 @@ async def reassign_speaker(
     # ------------------------------------------------------------
     # 3. Resolve target.
     #    to_person_id  -> look up entity name; 404 if not found.
-    #    to_self       -> target_owner is None; the owner field is removed
-    #                     from value (since (you) speaker attribution is
+    #    to_name       -> validated here, resolved-or-created INSIDE the
+    #                     transaction below, so a failed reassignment
+    #                     never strands a half-made person.
+    #    to_self       -> clear_owner; the owner field is removed from
+    #                     value (since (you) speaker attribution is
     #                     implicit via subject_key=user:{user_id}).
     # ------------------------------------------------------------
+    clear_owner = bool(req.to_self)
+    requested_name: Optional[str] = None
+    if req.to_name and not req.to_person_id and not req.to_self:
+        try:
+            # Same gate as POST /v1/people: a placeholder is refused here
+            # too, or naming a speaker becomes the hole straight through
+            # drop_placeholder_entities that endpoint refuses to be.
+            requested_name = validate_person_name(req.to_name)
+        except IdentityRequestError as e:
+            raise _identity_error(e)
+
     if req.to_person_id:
         target_row = await db_pool.fetchrow(
-            "SELECT name FROM entities WHERE entity_id = $1::uuid AND user_id = $2",
+            "SELECT name, suppressed_at, "
+            # Presence lands on the CANONICAL row when the caller holds a
+            # pre-merge id: the People list reads merged_into IS NULL, so
+            # an appearance written to a folded row would be presence
+            # nobody can see, which is the null anchor this fix exists to
+            # remove. The owner STRING stays the id's own name, unchanged
+            # from before, and the ledger still matches it because a
+            # merge leaves the folded name behind as an alias.
+            "       COALESCE(merged_into, entity_id) AS presence_entity_id "
+            "FROM entities WHERE entity_id = $1::uuid AND user_id = $2",
             req.to_person_id, user_id,
         )
         if not target_row:
@@ -3776,8 +3948,32 @@ async def reassign_speaker(
                 detail={"code": "PERSON_NOT_FOUND", "person_id": req.to_person_id},
             )
         target_owner: Optional[str] = target_row["name"]
+        # A suppressed entity ("not a person") accumulates no meeting
+        # history, SS's condition, enforced identically on the ingest
+        # path (worker._record_appearance). The patches still move; only
+        # the presence write is withheld.
+        person_presence_id = (
+            None if target_row["suppressed_at"] is not None
+            else target_row["presence_entity_id"]
+        )
+        self_entity_id = None
+    elif requested_name is not None:
+        # Filled in inside the transaction.
+        target_owner = None
+        person_presence_id = None
+        self_entity_id = None
     else:
         target_owner = None  # to_self: clear the owner field
+        # to_self presence lands on the ego entity and nowhere else. No
+        # ego link stamped means no honest target, so nothing is written
+        # and the response says so; this route never mints an ego stamp
+        # (migration 35 is keep-first for a reason).
+        person_presence_id = None
+        self_entity_id = await db_pool.fetchval(
+            "SELECT entity_id FROM entities "
+            "WHERE user_id = $1 AND self_at IS NOT NULL AND suppressed_at IS NULL",
+            user_id,
+        )
 
     # ------------------------------------------------------------
     # 4. All-or-nothing transaction.
@@ -3785,11 +3981,39 @@ async def reassign_speaker(
     patches_updated = 0
     labels_skipped = 0
     entities_merged = 0
+    appearances_recorded = 0
+    resolved_person: Optional[dict] = None
+    # One entry per (label, meeting) processed, for the presence rule.
+    outcomes: List[dict] = []
 
     async with db_pool.acquire() as conn:
+        vocab, _, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
+            # to_name: resolve or create the person the user just named,
+            # through the SAME path POST /v1/people uses, so a name typed
+            # onto a speaker and the same name typed into the "+" sheet
+            # cannot produce two different people.
+            if requested_name is not None:
+                person = await _resolve_or_create_person(
+                    conn, user_id, app_id, requested_name, "",
+                    resolve_identity_source("speaker_reassign"), vocab,
+                    datetime.utcnow(), "speaker_reassign",
+                )
+                target_owner = person["name"]
+                person_presence_id = person["entity_id"]
+                resolved_person = {
+                    "entity_id": person["entity_id"],
+                    "name": person["name"],
+                    "patch_id": person["patch_id"],
+                    "status": "created" if person["created"] else "exists",
+                }
+
+            presence_entity_id = reassignment_presence_target(
+                person_presence_id, clear_owner, self_entity_id,
+            )
+
             for fl in req.from_labels:
-                if target_owner is None:
+                if clear_owner:
                     update_sql = """
                         UPDATE context_patches
                         SET value = value - 'owner', updated_at = NOW()
@@ -3825,6 +4049,66 @@ async def reassign_speaker(
                     labels_skipped += 1
                 else:
                     patches_updated += count
+                outcomes.append({
+                    "origin_id": fl.meeting_id,
+                    "patches_moved": count,
+                    # Deliberately no turn count. This form moves PATCHES,
+                    # and patch ownership is not a partition of a
+                    # meeting's turns, so carrying the label's count over
+                    # would be inference. It also leaves the source row
+                    # standing (see below), and two rows each claiming the
+                    # same 41 turns would credit one person's speech to
+                    # two people. NULL is unknown, which is true.
+                    # /speaker-map is the form that states the whole
+                    # meeting and can therefore move measurements.
+                    "turn_count": None,
+                })
+
+            # --------------------------------------------------------
+            # 4b. Presence follows the utterances. Whoever these lines
+            # belong to was demonstrably SPEAKING in that meeting, so the
+            # appearance is created if absent and merged into if present,
+            # on the merge route's upsert discipline (earliest first_seen,
+            # latest last_seen, capacities union, MAX turn count and NULL
+            # never clobbering a known one).
+            #
+            # The SOURCE label's appearance is deliberately LEFT ALONE.
+            # A reassignment says whose voice this was, not that nobody
+            # was there: the row records a speaker CQ observed in the
+            # transcript, and removing it would assert an absence from
+            # the same evidence that proved a presence, against
+            # migration 31's own rule. It also holds turn and question
+            # counts that can never be reconstructed, and there is no
+            # undo. The one path that still drops a source appearance is
+            # step 5's cleanup, and only for a label entity with no graph
+            # anchor at all, where the FK cascade takes it.
+            #
+            # The timestamps are the MEETING's ingest anchor, never
+            # NOW(). person_appearances runs on the ingest clock (the
+            # sibling rows for this meeting, or the meeting's own patches
+            # when it has no sibling), and stamping NOW() here would tell
+            # the People list the user met this person today because they
+            # fixed a label today. That is the exact "Last met 6 hours
+            # ago" defect this work came from.
+            # --------------------------------------------------------
+            writes = reassignment_presence(outcomes)
+            if presence_entity_id is not None and writes:
+                anchors = await _meeting_presence_anchors(
+                    conn, user_id, subject_key,
+                    [w["origin_id"] for w in writes],
+                )
+                for w in writes:
+                    anchor, project_id = anchors.get(w["origin_id"], (None, None))
+                    if anchor is None:
+                        # No clock to date this presence by. Skipping is
+                        # the honest move: a row dated NOW() would read as
+                        # a meeting that happened today.
+                        continue
+                    await _upsert_speaker_appearance(
+                        conn, user_id, presence_entity_id, w["origin_id"],
+                        anchor, project_id, w["turn_count"],
+                    )
+                    appearances_recorded += 1
 
             # --------------------------------------------------------
             # 5. Entity cleanup. For to_person_id, drop entities whose
@@ -3834,16 +4118,23 @@ async def reassign_speaker(
             # entities that were created from misattributed speech and
             # have no other anchors).
             #
-            # For to_self, skip entity cleanup — the (you) speaker
-            # doesn't get a person entity, so there's nothing to merge.
+            # For to_self, skip entity cleanup: the ego link lives on a
+            # person entity the user shares with everyone else in the
+            # graph, and a from_label is never that row.
+            #
+            # The target is excluded outright: a label that happens to
+            # carry the target's own name would otherwise delete the
+            # person just reassigned to, and cascade away the appearance
+            # written above with it.
             # --------------------------------------------------------
-            if target_owner is not None:
+            if not clear_owner:
                 from_label_names = list({fl.label for fl in req.from_labels})
                 merge_result = await conn.execute(
                     """
                     DELETE FROM entities
                     WHERE user_id = $1
                       AND name = ANY($2::text[])
+                      AND ($3::uuid IS NULL OR entity_id <> $3::uuid)
                       AND entity_id NOT IN (
                           SELECT from_entity_id FROM relationships
                           WHERE user_id = $1 AND from_entity_id IS NOT NULL
@@ -3853,6 +4144,7 @@ async def reassign_speaker(
                       )
                     """,
                     user_id, from_label_names,
+                    str(presence_entity_id) if presence_entity_id else None,
                 )
                 entities_merged = int(merge_result.rsplit(" ", 1)[-1])
 
@@ -3860,7 +4152,9 @@ async def reassign_speaker(
     # 6. Rebuild Redis entity index when we removed any entities, so
     #    recall stops matching on the dropped names.
     # ------------------------------------------------------------
-    if entities_merged > 0:
+    # A to_name that created someone adds a name recall has to match, so
+    # the index is rebuilt for that too.
+    if entities_merged > 0 or (resolved_person or {}).get("status") == "created":
         entity_index_key = f"entity_index:{user_id}"
         all_names = await db_pool.fetch(ENTITY_INDEX_NAMES_SQL, user_id)
         await redis_client.delete(entity_index_key)
@@ -3873,6 +4167,297 @@ async def reassign_speaker(
         "connections_updated": 0,  # v1: patch attribution changes; connection structure unchanged
         "entities_merged": entities_merged,
         "labels_skipped": labels_skipped,
+        # How many (person, meeting) presence rows this call wrote or
+        # merged into. A count of what happened, with no cause attached:
+        # zero can mean nothing moved, or that a to_self call found no ego
+        # link to hang presence on, and `presence_entity_id` is the field
+        # that separates those without CQ narrating either.
+        "appearances_recorded": appearances_recorded,
+        "presence_entity_id": str(presence_entity_id) if presence_entity_id else None,
+        # Who `to_name` resolved to, so the client can bind the id it did
+        # not have. Null on the other two lanes, which already know their
+        # target.
+        "resolved_person": resolved_person,
+    }
+
+
+# ============================================
+# Speaker map: the meeting's speaker set as it now stands
+# ============================================
+
+class SpeakerMapEntry(BaseModel):
+    label: str
+    to_person_id: Optional[str] = None
+    to_name: Optional[str] = None
+    to_self: Optional[bool] = None
+    # "Nobody". Explicit rather than inferred from three absent siblings,
+    # because this is the field that REMOVES a presence: a client that
+    # forgot to fill in a target must get a 422, never a deletion.
+    to_nobody: Optional[bool] = None
+
+
+class SpeakerMapRequest(BaseModel):
+    meeting_id: str
+    labels: List[SpeakerMapEntry]
+    # Must be literally true. Removal works by ABSENCE from the resulting
+    # speaker set, which is only sound if the caller really did send every
+    # label in the meeting, and CQ cannot verify that from the outside.
+    # Requiring the assertion at the call site means a half-wired lane
+    # fails loudly instead of quietly deleting presence it was never told
+    # about.
+    labels_are_complete: bool = False
+
+
+@app.post("/v1/quilt/{user_id}/speaker-map", tags=["Quilt"])
+async def set_speaker_map(
+    user_id: str,
+    req: SpeakerMapRequest,
+    app_id: str = Depends(verify_application_access),
+):
+    """Declare who spoke in a meeting, as it now stands, and sync presence.
+
+    THE STATE, NOT THE OPERATION. "What is the inverse of a
+    reassignment" has no answer: an undo can mean "I mislabelled that, it
+    was never him", which makes the appearance false, or "I want the raw
+    labels back on screen", which makes it true and reverting it
+    destructive. No client and no server can tell those apart from an
+    undo signal, so nothing here is keyed on an operation. The caller
+    sends the resulting mapping and CQ diffs it against what it holds.
+
+    That dissolves the whole family: an undo is the post-undo mapping, a
+    block-scoped segment edit is the post-edit mapping (so segment ranges
+    are never modelled), a consolidation is a mapping with one fewer
+    speaker. And it is IDEMPOTENT: sending the same mapping twice writes
+    nothing the second time, which is what makes it safe on relabel lanes
+    nobody has found yet, since an unwired lane then fails by omission
+    rather than by writing something false.
+
+    Presence only, deliberately. This route never rewrites `value.owner`
+    and never touches patch text. Speaking and owning are different
+    claims (work gets assigned in absentia), so a mapping of who spoke
+    must not silently re-own anybody's commitments. Use
+    POST /v1/quilt/{u}/reassign-speaker for attribution, this for
+    presence; they compose.
+
+    GP SEQUENCING: this is a NEW route, so the gateway carries it before
+    CQ can call it live. GP's edge declares exact paths, no prefixes and
+    no wildcards, and CQ's own socket cannot see a route-table miss.
+    """
+    # ------------------------------------------------------------
+    # 1. Validation. Every refusal names the label it refused.
+    # ------------------------------------------------------------
+    if not req.labels:
+        raise _reassign_error("EMPTY_LABELS", "labels must not be empty")
+    if not req.labels_are_complete:
+        raise _reassign_error(
+            "INCOMPLETE_MAPPING",
+            "labels_are_complete must be true: removal works by absence "
+            "from the mapping, so a partial mapping would delete presence "
+            "it never described",
+        )
+    seen_labels = set()
+    for e in req.labels:
+        key = (e.label or "").strip().lower()
+        if not key:
+            raise _reassign_error("INVALID_LABEL_FORMAT", "label must not be empty")
+        if key in seen_labels:
+            raise _reassign_error(
+                "DUPLICATE_LABEL", "each label may appear once", label=e.label,
+            )
+        seen_labels.add(key)
+        given = sum(1 for t in (
+            e.to_person_id, (e.to_name or "").strip(), e.to_self, e.to_nobody,
+        ) if t)
+        if given != 1:
+            raise _reassign_error(
+                "INVALID_LABEL_TARGET",
+                "each label needs exactly one of to_person_id, to_name, "
+                "to_self or to_nobody",
+                label=e.label,
+            )
+        if e.to_name:
+            try:
+                validate_person_name(e.to_name)
+            except IdentityRequestError as exc:
+                raise _identity_error(exc)
+
+    subject_key = f"user:{user_id}"
+    known = await db_pool.fetchval(
+        """
+        SELECT EXISTS(
+            SELECT 1 FROM context_patches cp
+            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+            WHERE cp.origin_id = $1 AND cp.origin_type = 'meeting'
+              AND ps.subject_key = $2
+        )
+        """,
+        req.meeting_id, subject_key,
+    )
+    if not known:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "MEETING_NOT_FOUND",
+                    "missing_meeting_ids": [req.meeting_id]},
+        )
+
+    resolved: List[dict] = []
+    created_any = False
+    appearances_recorded = 0
+    capacities_reduced = 0
+    appearances_removed = 0
+
+    async with db_pool.acquire() as conn:
+        vocab, _, _, _ = await _people_read_context(conn, app_id)
+        async with conn.transaction():
+            # ----------------------------------------------------
+            # 2. Resolve every label to an entity, or to nobody, or
+            #    to nothing at all.
+            # ----------------------------------------------------
+            for e in req.labels:
+                entry = {
+                    "label": e.label, "entity_id": None, "name": None,
+                    "patch_id": None, "status": None,
+                }
+                if e.to_person_id:
+                    row = await conn.fetchrow(
+                        "SELECT name, suppressed_at, "
+                        "       COALESCE(merged_into, entity_id) AS presence_entity_id "
+                        "FROM entities WHERE entity_id = $1::uuid AND user_id = $2",
+                        e.to_person_id, user_id,
+                    )
+                    if not row:
+                        raise HTTPException(
+                            status_code=404,
+                            detail={"code": "PERSON_NOT_FOUND",
+                                    "person_id": e.to_person_id,
+                                    "label": e.label},
+                        )
+                    if row["suppressed_at"] is not None:
+                        # "Not a person" keeps accumulating no history.
+                        # Unresolved rather than an error, and it costs
+                        # the removal half (see below).
+                        entry["status"] = "unresolved"
+                    else:
+                        entry.update(
+                            entity_id=str(row["presence_entity_id"]),
+                            name=row["name"], status="exists",
+                        )
+                elif e.to_name:
+                    person = await _resolve_or_create_person(
+                        conn, user_id, app_id, validate_person_name(e.to_name),
+                        "", resolve_identity_source("speaker_map"), vocab,
+                        datetime.utcnow(), "speaker_map",
+                    )
+                    created_any = created_any or person["created"]
+                    entry.update(
+                        entity_id=person["entity_id"], name=person["name"],
+                        patch_id=person["patch_id"],
+                        status="created" if person["created"] else "exists",
+                    )
+                elif e.to_self:
+                    ego = await conn.fetchval(
+                        "SELECT entity_id FROM entities WHERE user_id = $1 "
+                        "AND self_at IS NOT NULL AND suppressed_at IS NULL",
+                        user_id,
+                    )
+                    # No ego link means the user's own presence has no
+                    # honest home, and this route does not mint one.
+                    entry["status"] = "exists" if ego else "unresolved"
+                    entry["entity_id"] = str(ego) if ego else None
+                else:
+                    entry["status"] = "nobody"
+                resolved.append(entry)
+
+            targets = {r["entity_id"] for r in resolved if r["entity_id"]}
+            # Removal by absence is only sound against a COMPLETE target
+            # set. One label CQ could not resolve and absence stops
+            # meaning "did not speak", so that call adds and removes
+            # nothing, and says which labels cost it.
+            unresolved = [r["label"] for r in resolved if r["status"] == "unresolved"]
+
+            rows = await conn.fetch(
+                "SELECT entity_id, capacities FROM person_appearances "
+                "WHERE user_id = $1 AND origin_id = $2",
+                user_id, req.meeting_id,
+            )
+            plan = plan_speaker_map(
+                [{"entity_id": str(r["entity_id"]), "capacities": r["capacities"]}
+                 for r in rows],
+                targets,
+                allow_removal=not unresolved,
+            )
+
+            # ----------------------------------------------------
+            # 3. Apply. Additions are dated by the meeting, never by
+            #    NOW(), for the same reason the reassign path is.
+            # ----------------------------------------------------
+            if plan["add"]:
+                anchor, project_id = (await _meeting_presence_anchors(
+                    conn, user_id, subject_key, [req.meeting_id],
+                )).get(req.meeting_id, (None, None))
+                if anchor is not None:
+                    for eid in plan["add"]:
+                        await _upsert_speaker_appearance(
+                            conn, user_id, eid, req.meeting_id, anchor,
+                            project_id,
+                            # No turn count to give: the transcript is
+                            # gone and the mapping carries labels, not
+                            # counts. NULL is unknown, never zero turns.
+                            None,
+                        )
+                        appearances_recorded += 1
+
+            if plan["strip"]:
+                # The row survives on another capacity, so the person was
+                # still in that meeting. What goes with the label is every
+                # per-speaker MEASUREMENT: a turn count and a question
+                # count are claims about what this person SAID, and the
+                # mapping just said those words were somebody else's. They
+                # are not recoverable, which is the price of a corrected
+                # attribution; an honest unknown beats a confident
+                # misattribution.
+                stripped = await conn.execute(
+                    f"""
+                    UPDATE person_appearances
+                    SET capacities = array_remove(capacities, 'speaker'),
+                        {", ".join(f"{c} = NULL" for c in SPEAKER_METRICS)}
+                    WHERE user_id = $1 AND origin_id = $2
+                      AND entity_id = ANY($3::uuid[])
+                    """,
+                    user_id, req.meeting_id, plan["strip"],
+                )
+                capacities_reduced = int(stripped.rsplit(" ", 1)[-1])
+
+            if plan["remove"]:
+                # `speaker` was the only capacity: nothing else ever
+                # claimed this person was in the room, so the row goes
+                # rather than surviving with an empty capacity set, which
+                # would keep reading as presence (empty means
+                # pre-migration-31 unknown, and unknown counts as there).
+                dropped = await conn.execute(
+                    "DELETE FROM person_appearances WHERE user_id = $1 "
+                    "AND origin_id = $2 AND entity_id = ANY($3::uuid[])",
+                    user_id, req.meeting_id, plan["remove"],
+                )
+                appearances_removed = int(dropped.rsplit(" ", 1)[-1])
+
+    if created_any:
+        await _rebuild_entity_index(user_id)
+
+    return {
+        "meeting_id": req.meeting_id,
+        "labels_received": len(req.labels),
+        "appearances_recorded": appearances_recorded,
+        "capacities_reduced": capacities_reduced,
+        "appearances_removed": appearances_removed,
+        # Echoed back so the caller can see what CQ acted on, the same
+        # RECEIVED-plus-ignored shape the People list uses for its query
+        # echo. Non-empty means the removal half was skipped entirely.
+        "unresolved_labels": unresolved,
+        # Every entry carries every sibling key, so a client decodes one
+        # type: label, entity_id, name, patch_id, status. status is
+        # exists | created | nobody | unresolved.
+        "labels": resolved,
     }
 
 
@@ -6421,6 +7006,142 @@ async def unsuppress_person(
     }
 
 
+async def _resolve_or_create_person(
+    conn, user_id: str, app_id: str, name: str, description: str,
+    source: str, vocab, now, source_prompt: str,
+) -> dict:
+    """Resolve a user-supplied person name, creating the person if new.
+
+    The single identity-authoring path, shared by POST /v1/people and by
+    reassign-speaker's `to_name`. Both are the same act (a human vouching
+    for who someone is) and they must not produce different people: a
+    name typed into the "+" sheet and the same name typed onto a speaker
+    have to land on one row, whole in both cases. Writes the entity AND
+    the declared person patch, so nothing arrives half created depending
+    on which door the client used.
+
+    Runs inside the CALLER's transaction. Returns entity_id, the name CQ
+    actually stores (not the caller's casing), patch_id, and whether each
+    half was created.
+    """
+    # Exact name, then recorded alias, the same resolution order the
+    # worker's store_entities uses, so the API and the extraction path
+    # agree on what counts as "already known".
+    row = await conn.fetchrow(
+        """
+        SELECT entity_id FROM entities
+        WHERE user_id = $1 AND entity_type = $3
+          AND LOWER(name) = LOWER($2)
+        LIMIT 1
+        """,
+        user_id, name, vocab.person_entity_type,
+    )
+    if row is None:
+        row = await conn.fetchrow(
+            """
+            SELECT e.entity_id
+            FROM entity_aliases a
+            JOIN entities e ON e.entity_id = a.entity_id
+            WHERE a.user_id = $1 AND LOWER(a.alias) = LOWER($2)
+              AND e.entity_type = $3
+            LIMIT 1
+            """,
+            user_id, name, vocab.person_entity_type,
+        )
+
+    created = False
+    if row is not None:
+        resolved = await _load_active_person(
+            conn, user_id, str(row["entity_id"]), vocab.person_entity_type
+        )
+        entity_uuid = str(resolved["entity_id"])
+        # Answer with the name CQ actually stores, not the caller's
+        # casing: "kinsley raman" resolving to "Kinsley Raman" is
+        # information the client needs to render the row it just got.
+        name = resolved["name"]
+        await conn.execute(
+            """
+            UPDATE entities SET
+                description = COALESCE(NULLIF(description, ''), $1),
+                confirmed_at = COALESCE(confirmed_at, NOW()),
+                confirmation_source = COALESCE(confirmation_source, $2)
+            WHERE entity_id = $3::uuid
+            """,
+            description, source, entity_uuid,
+        )
+    else:
+        created = True
+        entity_uuid = str(await conn.fetchval(
+            """
+            INSERT INTO entities
+                (user_id, name, entity_type, description,
+                 confirmed_at, confirmation_source)
+            VALUES ($1, $2, $5, $3, NOW(), $4)
+            RETURNING entity_id
+            """,
+            user_id, name, description, source, vocab.person_entity_type,
+        ))
+
+    # The person patch. Looked up in both branches so the caller
+    # always gets an id it can wire connections to; only created
+    # when missing, because a second person patch for the same
+    # human is exactly the duplicate this path exists to avoid.
+    subject_key = f"user:{user_id}"
+    existing_patch = await conn.fetchrow(
+        """
+        SELECT cp.patch_id FROM context_patches cp
+        JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
+        WHERE ps.subject_key = $1
+          AND cp.patch_type = $3
+          AND COALESCE(cp.status, 'active') = 'active'
+          AND LOWER(cp.value->>'text') = LOWER($2)
+        LIMIT 1
+        """,
+        subject_key, name, vocab.person_type,
+    )
+    patch_id = str(existing_patch["patch_id"]) if existing_patch else None
+    patch_created = patch_id is None
+    if patch_id is None:
+        patch_id = str(uuid.uuid4())
+        await conn.execute(
+            """
+            INSERT INTO context_patches (
+                patch_id, patch_name, patch_type, value,
+                origin_mode, source_prompt, confidence, persistence,
+                status, created_at, updated_at, last_observed_at
+            ) VALUES ($1, $2, $6, $3, 'declared', $7,
+                      1.0, $4, 'active', $5, $5, $5)
+            """,
+            patch_id, f"declared_{patch_id[:8]}",
+            json.dumps({"text": name}),
+            PATCH_PERSISTENCE.get(vocab.person_type, "decaying"), now,
+            vocab.person_type, source_prompt,
+        )
+        await conn.execute(
+            "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
+            patch_id, subject_key,
+        )
+        try:
+            await conn.execute(
+                """
+                INSERT INTO context_patch_acl
+                    (patch_id, app_id, can_read, can_write, can_delete)
+                VALUES ($1, $2, TRUE, TRUE, TRUE)
+                """,
+                patch_id, uuid.UUID(str(app_id)),
+            )
+        except (ValueError, AttributeError):
+            pass  # legacy X-App-ID, no ACL row
+
+    return {
+        "entity_id": entity_uuid,
+        "name": name,
+        "patch_id": patch_id,
+        "created": created,
+        "patch_created": patch_created,
+    }
+
+
 @app.post("/v1/people/{user_id}", tags=["People"])
 async def create_person(
     user_id: str,
@@ -6446,119 +7167,20 @@ async def create_person(
         raise _identity_error(e)
 
     description = (req.description or "").strip()
-    subject_key = f"user:{user_id}"
     now = datetime.utcnow()
-    created = False
 
     async with db_pool.acquire() as conn:
         vocab, _, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
-            # Exact name, then recorded alias — the same resolution order
-            # the worker's store_entities uses, so the API and the
-            # extraction path agree on what counts as "already known".
-            row = await conn.fetchrow(
-                """
-                SELECT entity_id FROM entities
-                WHERE user_id = $1 AND entity_type = $3
-                  AND LOWER(name) = LOWER($2)
-                LIMIT 1
-                """,
-                user_id, name, vocab.person_entity_type,
+            resolved = await _resolve_or_create_person(
+                conn, user_id, app_id, name, description, source, vocab,
+                now, "people_create",
             )
-            if row is None:
-                row = await conn.fetchrow(
-                    """
-                    SELECT e.entity_id
-                    FROM entity_aliases a
-                    JOIN entities e ON e.entity_id = a.entity_id
-                    WHERE a.user_id = $1 AND LOWER(a.alias) = LOWER($2)
-                      AND e.entity_type = $3
-                    LIMIT 1
-                    """,
-                    user_id, name, vocab.person_entity_type,
-                )
-
-            if row is not None:
-                resolved = await _load_active_person(
-                    conn, user_id, str(row["entity_id"]), vocab.person_entity_type
-                )
-                entity_uuid = str(resolved["entity_id"])
-                # Answer with the name CQ actually stores, not the caller's
-                # casing — "kinsley raman" resolving to "Kinsley Raman" is
-                # information the client needs to render the row it just got.
-                name = resolved["name"]
-                await conn.execute(
-                    """
-                    UPDATE entities SET
-                        description = COALESCE(NULLIF(description, ''), $1),
-                        confirmed_at = COALESCE(confirmed_at, NOW()),
-                        confirmation_source = COALESCE(confirmation_source, $2)
-                    WHERE entity_id = $3::uuid
-                    """,
-                    description, source, entity_uuid,
-                )
-            else:
-                created = True
-                entity_uuid = str(await conn.fetchval(
-                    """
-                    INSERT INTO entities
-                        (user_id, name, entity_type, description,
-                         confirmed_at, confirmation_source)
-                    VALUES ($1, $2, $5, $3, NOW(), $4)
-                    RETURNING entity_id
-                    """,
-                    user_id, name, description, source, vocab.person_entity_type,
-                ))
-
-            # The person patch. Looked up in both branches so the caller
-            # always gets an id it can wire connections to; only created
-            # when missing, because a second person patch for the same
-            # human is exactly the duplicate this endpoint exists to avoid.
-            existing_patch = await conn.fetchrow(
-                """
-                SELECT cp.patch_id FROM context_patches cp
-                JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
-                WHERE ps.subject_key = $1
-                  AND cp.patch_type = $3
-                  AND COALESCE(cp.status, 'active') = 'active'
-                  AND LOWER(cp.value->>'text') = LOWER($2)
-                LIMIT 1
-                """,
-                subject_key, name, vocab.person_type,
-            )
-            patch_id = str(existing_patch["patch_id"]) if existing_patch else None
-            patch_created = patch_id is None
-            if patch_id is None:
-                patch_id = str(uuid.uuid4())
-                await conn.execute(
-                    """
-                    INSERT INTO context_patches (
-                        patch_id, patch_name, patch_type, value,
-                        origin_mode, source_prompt, confidence, persistence,
-                        status, created_at, updated_at, last_observed_at
-                    ) VALUES ($1, $2, $6, $3, 'declared', 'people_create',
-                              1.0, $4, 'active', $5, $5, $5)
-                    """,
-                    patch_id, f"declared_{patch_id[:8]}",
-                    json.dumps({"text": name}),
-                    PATCH_PERSISTENCE.get(vocab.person_type, "decaying"), now,
-                    vocab.person_type,
-                )
-                await conn.execute(
-                    "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
-                    patch_id, subject_key,
-                )
-                try:
-                    await conn.execute(
-                        """
-                        INSERT INTO context_patch_acl
-                            (patch_id, app_id, can_read, can_write, can_delete)
-                        VALUES ($1, $2, TRUE, TRUE, TRUE)
-                        """,
-                        patch_id, uuid.UUID(str(app_id)),
-                    )
-                except (ValueError, AttributeError):
-                    pass  # legacy X-App-ID, no ACL row
+    entity_uuid = resolved["entity_id"]
+    name = resolved["name"]
+    patch_id = resolved["patch_id"]
+    created = resolved["created"]
+    patch_created = resolved["patch_created"]
 
     await _rebuild_entity_index(user_id)
     # An entity that already existed can still gain its first person patch

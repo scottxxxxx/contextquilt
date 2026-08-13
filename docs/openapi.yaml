@@ -412,6 +412,161 @@ components:
         new_name:
           type: string
 
+    FromLabel:
+      type: object
+      required: [label, meeting_id]
+      properties:
+        label:
+          type: string
+        meeting_id:
+          type: string
+          description: The meeting UUID, stored as origin_id.
+
+    ReassignSpeakerRequest:
+      type: object
+      required: [from_labels]
+      description: >
+        Exactly one of to_person_id, to_name or to_self. Every from_label
+        carries its own meeting, so the request is meeting scoped.
+      properties:
+        from_labels:
+          type: array
+          items:
+            $ref: "#/components/schemas/FromLabel"
+        to_person_id:
+          type: string
+          nullable: true
+        to_name:
+          type: string
+          nullable: true
+          description: >
+            Name a speaker CQ has no id for. Resolved or created server
+            side, through the same path POST /v1/people uses. Diarization
+            placeholders are refused (422 PLACEHOLDER_NAME).
+        to_self:
+          type: boolean
+          nullable: true
+
+    ReassignSpeakerResponse:
+      type: object
+      properties:
+        patches_updated:
+          type: integer
+        connections_updated:
+          type: integer
+        entities_merged:
+          type: integer
+        labels_skipped:
+          type: integer
+        appearances_recorded:
+          type: integer
+          description: >
+            Speaker-capacity person_appearances rows written or merged
+            into, dated by the meeting's ingest clock.
+        presence_entity_id:
+          type: string
+          nullable: true
+          description: >
+            Where presence landed. Null when a to_self call found no ego
+            link to hang it on.
+        resolved_person:
+          type: object
+          nullable: true
+          description: Present for to_name, null otherwise.
+          properties:
+            entity_id:
+              type: string
+            name:
+              type: string
+            patch_id:
+              type: string
+              nullable: true
+            status:
+              type: string
+              enum: [created, exists]
+
+    SpeakerMapEntry:
+      type: object
+      required: [label]
+      description: Exactly one of to_person_id, to_name, to_self, to_nobody.
+      properties:
+        label:
+          type: string
+        to_person_id:
+          type: string
+          nullable: true
+        to_name:
+          type: string
+          nullable: true
+        to_self:
+          type: boolean
+          nullable: true
+        to_nobody:
+          type: boolean
+          nullable: true
+          description: >
+            This label maps to no one. Explicit rather than inferred from
+            absent siblings, because this is what REMOVES a presence.
+
+    SpeakerMapRequest:
+      type: object
+      required: [meeting_id, labels, labels_are_complete]
+      properties:
+        meeting_id:
+          type: string
+        labels:
+          type: array
+          items:
+            $ref: "#/components/schemas/SpeakerMapEntry"
+        labels_are_complete:
+          type: boolean
+          description: >
+            Must be true. Removal works by absence from the mapping, so a
+            partial mapping would delete presence it never described
+            (422 INCOMPLETE_MAPPING).
+
+    SpeakerMapResponse:
+      type: object
+      properties:
+        meeting_id:
+          type: string
+        labels_received:
+          type: integer
+        appearances_recorded:
+          type: integer
+        capacities_reduced:
+          type: integer
+          description: Rows that lost the speaker capacity but survived.
+        appearances_removed:
+          type: integer
+          description: Rows whose only capacity was speaker.
+        unresolved_labels:
+          type: array
+          items:
+            type: string
+          description: >
+            Labels CQ could not resolve. Non-empty means the removal half
+            was skipped entirely.
+        labels:
+          type: array
+          items:
+            type: object
+            properties:
+              label:
+                type: string
+              entity_id:
+                type: string
+                nullable: true
+              name:
+                type: string
+                nullable: true
+              patch_id:
+                type: string
+                nullable: true
+              status:
+                type: string
+                enum: [exists, created, nobody, unresolved]
+
     Project:
       type: object
       properties:
@@ -821,6 +976,68 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RenameSpeakerResponse"
+
+  /v1/quilt/{user_id}/reassign-speaker:
+    post:
+      operationId: reassignSpeaker
+      summary: Reassign Speaker
+      description: >
+        Move one or more diarization labels, in named meetings, to a
+        person (by id or by name) or to the submitting user. Records a
+        speaker-capacity appearance for each meeting where patches
+        actually moved, dated by the meeting rather than by now. See
+        docs/architecture/16-people.md 6.2a.
+      tags: [Quilt]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReassignSpeakerRequest"
+      responses:
+        "200":
+          description: Labels reassigned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReassignSpeakerResponse"
+
+  /v1/quilt/{user_id}/speaker-map:
+    post:
+      operationId: setSpeakerMap
+      summary: Set Speaker Map
+      description: >
+        Declare who spoke in a meeting as it now stands and sync presence
+        to match. State, not operation: an undo is the post-undo mapping
+        and a segment edit is the post-edit mapping. Idempotent. Presence
+        only; never rewrites patch owners or text. See
+        docs/architecture/16-people.md 6.2a.
+      tags: [Quilt]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpeakerMapRequest"
+      responses:
+        "200":
+          description: Mapping applied.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeakerMapResponse"
 
   /v1/projects/{user_id}:
     get:
