@@ -41,6 +41,9 @@ from contextquilt.services.extraction_schema import (
     speaker_turn_counts,
     question_attribution,
     extraction_patch_backstop,
+    cap_entities,
+    inject_ownership_entities,
+    ENTITY_CAPACITY_KEY,
     EXTRACTION_SCHEMA,
     drop_placeholder_and_self_person_patches,
     drop_placeholder_entities,
@@ -116,6 +119,7 @@ from contextquilt.services.corrections import (
 )
 from contextquilt.services.entity_aliasing import find_alias_candidate
 from contextquilt.services.people_identity import people_vocabulary
+from contextquilt.services.person_appearances import observed_capacities
 from contextquilt.services.ingest_modes import is_interaction_allowed
 from contextquilt.services.decay_model import (
     DEFAULT_TTLS,
@@ -1295,16 +1299,27 @@ async def store_entities(
             # Capacity: what we can honestly assert from this ingest. Being
             # named in the extraction is a mention; being a transcript
             # speaker label is stronger and is what the identity gate reads.
-            # `ownership` is deliberately not stamped here — it is fully
-            # derivable from Postgres at any time (owner strings + owns
-            # edges) with no retention risk, so the backfill owns it.
+            #
+            # `ownership` now lands HERE too, carried on the entity by
+            # inject_ownership_entities. It used to be left to the backfill
+            # on the reasoning that it is derivable from Postgres at any
+            # time, which is true and was still wrong: the backfill only
+            # runs when a human remembers to run it, so between runs a
+            # person who owned work out of a meeting had no presence in it
+            # at all (2026-08-13, origin 866E8E1B).
+            #
+            # Only ownership and mention are honoured from the entity.
+            # `speaker` is a claim about a transcript label and is computed
+            # right here from the transcript, so no caller and no model
+            # output can assert it.
             # Capacities UNION on conflict rather than overwrite: a second
             # ingest that only mentions someone must not erase the fact
             # that they spoke.
-            capacities = ["mention"]
             name_key = name.strip().lower()
-            if speaker_labels and name_key in speaker_labels:
-                capacities.append("speaker")
+            capacities = observed_capacities(
+                ent.get(ENTITY_CAPACITY_KEY) if isinstance(ent, dict) else None,
+                spoke=bool(speaker_labels and name_key in speaker_labels),
+            )
             # Turn count: captured at the only moment it exists (the
             # transcript is derive-then-discard; no backfill is possible,
             # ever). NULL = unknown, never "spoke zero turns".
@@ -4276,6 +4291,12 @@ class ColdPathWorker:
             # the app has no registered manifest.
             resolved_prompt, resolved_schema, resolved_manifest = await self._resolve_extraction_prompt(app_id)
 
+            # Which of this app's types and labels carry People semantics
+            # (doc 16 5.9), resolved once: the ownership-entity injection
+            # below and the entity sink both need it, and reading it twice
+            # invites the two of them to disagree about what a person is.
+            people_vocab = people_vocabulary(await self._app_manifest(app_id))
+
             response = await llm.extract(
                 system_prompt=resolved_prompt,
                 user_content=meeting_date_line + language_line + user_context + open_commits_block + effective_summary,
@@ -4479,6 +4500,29 @@ class ColdPathWorker:
             drop_placeholder_and_self_person_patches(
                 response.content, user_label=user_label
             )
+            # Presence for the people who own the work. enforce_person_ownership
+            # above guarantees the person PATCH; person_appearances is written
+            # from the ENTITIES array, so without this an owner can come out of
+            # a meeting with three commitments and no presence in it at all.
+            # Deliberately placed here: after every pass that prunes or
+            # rewrites a person patch name (so the names are final), and
+            # BEFORE drop_placeholder_entities, so the placeholder pass still
+            # cleans up after this rather than ahead of it.
+            inject_ownership_entities(
+                response.content,
+                person_patch_type=people_vocab.person_type,
+                person_entity_type=people_vocab.person_entity_type,
+                ownership_label=people_vocab.ownership_label,
+                user_label=user_label,
+            )
+            if (oi := response.content.get("_ownership_entities_injected")):
+                logger.info(
+                    "ownership_entities_injected",
+                    user_id=user_id,
+                    injected=oi["injected"],
+                    owners=len(oi["owners"]),
+                    model=response.model,
+                )
             drop_placeholder_entities(response.content)
             if (pe := response.content.get("_placeholder_entities_enforced")):
                 logger.info(
@@ -4570,9 +4614,19 @@ class ColdPathWorker:
                 )
 
             # Entities and relationships always stored (feeds entity name index)
-            if len(entities) > MAX_ENTITIES_PER_MEETING:
-                logger.warning("extraction_capped", type="entities", original=len(entities), capped=MAX_ENTITIES_PER_MEETING)
-                entities = entities[:MAX_ENTITIES_PER_MEETING]
+            #
+            # The cap bounds LLM-output noise, so an ownership-carrying
+            # entity is exempt from it: those are structural, and truncating
+            # one deletes a person's presence in the meeting. Same reasoning
+            # as "cap first, then enforce" on the patch backstop above, in
+            # the only shape available here (the injection has already run).
+            entities, entities_dropped = cap_entities(entities, MAX_ENTITIES_PER_MEETING)
+            if entities_dropped:
+                logger.warning(
+                    "extraction_capped", type="entities",
+                    original=len(entities) + entities_dropped,
+                    capped=len(entities),
+                )
             if len(relationships) > MAX_RELATIONSHIPS_PER_MEETING:
                 logger.warning("extraction_capped", type="relationships", original=len(relationships), capped=MAX_RELATIONSHIPS_PER_MEETING)
                 relationships = relationships[:MAX_RELATIONSHIPS_PER_MEETING]
@@ -4595,9 +4649,7 @@ class ColdPathWorker:
                 # vocabulary (doc 16 5.9); the SS floor when undeclared.
                 # This closes slice 2's recorded limit: a custom-named
                 # person entity type now accumulates appearances.
-                person_entity_type=people_vocabulary(
-                    await self._app_manifest(app_id)
-                ).person_entity_type,
+                person_entity_type=people_vocab.person_entity_type,
                 # The ego link (13b): whichever identity signal named the
                 # user — structured metadata or the inline (you) marker —
                 # stamps their resolved entity as self. Both land here as

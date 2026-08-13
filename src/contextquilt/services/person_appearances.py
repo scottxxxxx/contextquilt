@@ -62,6 +62,28 @@ def merge_tier(rows: dict, found: dict, capacity: str) -> int:
     return new
 
 
+def observed_capacities(declared, spoke: bool) -> List[str]:
+    """The capacities one ingest may honestly stamp on an appearance.
+
+    `declared` is what the entity arrived carrying, which on the
+    extraction lane is written by `inject_ownership_entities` and on the
+    structured lane is whatever the app sent. Only `ownership` and
+    `mention` are honoured from it, and nothing means `mention`: being
+    named in an extraction is the floor, and it is what this sink
+    asserted for every entity before ownership landed here.
+
+    `speaker` can only be added by this function's own caller, from a
+    resolved transcript label. It is never accepted from the entity, in
+    any lane. It is the strongest presence claim CQ makes, it is what
+    SS's duplicate veto reads to tell label drift from two humans, and a
+    caller that could assert it would be able to forge attendance.
+    """
+    caps = [c for c in (declared or ()) if c in (OWNERSHIP, MENTION)] or [MENTION]
+    if spoke:
+        caps.append(SPEAKER)
+    return caps
+
+
 def reassignment_presence_target(
     target_entity_id, to_self: bool, self_entity_id,
 ):
