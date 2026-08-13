@@ -542,6 +542,241 @@ class TestOwnerIsNeverCanonicalized:
         assert got["owner"] == "  marcus v. "
 
 
+class TestChases:
+    """The metric that carries the follow up finding, after the first one
+    was measured and did not hold.
+
+    Questions RECEIVED is nearly level across people whose follow up is
+    nothing alike (twelve against ten on the real transcripts), because a
+    chase and a substantive probe both count as one question. What
+    separates them is whether the item moved. So the count is chases on
+    items already in the ledger that produced no advance, and question
+    volume stays its own number: conflating the two is what produced a
+    false claim.
+    """
+
+    def _appearances(self, *rows):
+        """(month, day, from_user_explicit, from_user_inferred, origin)."""
+        return [
+            {
+                "origin_id": o,
+                "last_seen_at": datetime(2026, m, d, 10, 0),
+                "capacities": ["speaker"],
+                "questions_from_user_explicit": ex,
+                "questions_from_user_inferred": inf,
+            }
+            for m, d, ex, inf, o in rows
+        ]
+
+    def test_a_chase_that_moved_nothing_is_counted(self):
+        # The item came up in a meeting where the user pressed, and it
+        # had not closed by the next meeting with that person.
+        got = classify_items(
+            [item(restatements=[restatement((7, 1), "Still on it", origin="m2")])],
+            TODAY,
+            appearances=self._appearances(
+                (7, 1, 2, 0, "m2"), (7, 20, 0, 0, "m3"),
+            ),
+        )
+        c = got[0]["chases"]
+        assert c["total"] == 1
+        assert c["without_advance"] == 1
+        assert c["with_advance"] == 0
+        assert c["unresolved"] == 0
+        assert c["occasions"][0]["next_meeting_on"] == "2026-07-20"
+        assert c["occasions"][0]["advanced"] is False
+
+    def test_a_chase_the_item_closed_after_is_an_advance(self):
+        got = classify_items(
+            [item(
+                completed_at=datetime(2026, 7, 10),
+                restatements=[restatement((7, 1), "On it", origin="m2")],
+            )],
+            TODAY,
+            appearances=self._appearances((7, 1, 1, 0, "m2"), (7, 20, 0, 0, "m3")),
+        )
+        c = got[0]["chases"]
+        assert c["with_advance"] == 1
+        assert c["without_advance"] == 0
+        assert c["occasions"][0]["advanced"] is True
+
+    def test_closing_after_the_next_meeting_is_not_an_advance_for_that_chase(self):
+        # It closed eventually. The question this metric asks is whether
+        # THAT chase moved it, and by the next meeting it had not.
+        got = classify_items(
+            [item(
+                completed_at=datetime(2026, 8, 1),
+                restatements=[restatement((7, 1), "On it", origin="m2")],
+            )],
+            TODAY,
+            appearances=self._appearances((7, 1, 1, 0, "m2"), (7, 20, 0, 0, "m3")),
+        )
+        assert got[0]["chases"]["without_advance"] == 1
+
+    def test_a_re_date_is_not_an_advance(self):
+        # The whole point. Motion that reads as progress at a checkpoint
+        # is the illusion, so only closing counts.
+        got = classify_items(
+            [item(
+                deadline_date="2026-09-01",
+                deadline_history=[{"deadline_date": "2026-07-15"}],
+                restatements=[restatement(
+                    (7, 1), "Pushing to September", deadline_date="2026-09-01",
+                    origin="m2",
+                )],
+            )],
+            TODAY,
+            appearances=self._appearances((7, 1, 3, 0, "m2"), (7, 20, 0, 0, "m3")),
+        )
+        assert got[0]["chases"]["without_advance"] == 1
+        assert got[0]["chases"]["advance_definition"] == (
+            "closed_by_the_next_meeting_with_this_person"
+        )
+
+    def test_a_chase_in_the_latest_meeting_is_unresolved_not_a_failure(self):
+        # Nothing has had a chance to happen yet, and counting it as no
+        # advance would manufacture the finding out of recency.
+        got = classify_items(
+            [item(restatements=[restatement((7, 20), "This week", origin="m3")])],
+            TODAY,
+            appearances=self._appearances((7, 1, 0, 0, "m2"), (7, 20, 2, 0, "m3")),
+        )
+        c = got[0]["chases"]
+        assert c["total"] == 1
+        assert c["unresolved"] == 1
+        assert c["without_advance"] == 0
+        assert c["occasions"][0]["advanced"] is None
+
+    def test_an_item_that_came_up_with_no_question_is_not_a_chase(self):
+        got = classify_items(
+            [item(restatements=[restatement((7, 1), "Mentioned it", origin="m2")])],
+            TODAY,
+            appearances=self._appearances((7, 1, 0, 0, "m2"), (7, 20, 0, 0, "m3")),
+        )
+        c = got[0]["chases"]
+        assert c["total"] == 0
+        assert c["unmeasurable"] == 0
+
+    def test_a_meeting_with_no_question_metric_is_unmeasurable_not_zero(self):
+        # Every meeting on the day this ships. A client rendering the
+        # chase count without this number is reporting a floor as a
+        # total.
+        got = classify_items(
+            [item(restatements=[restatement((7, 1), "Still on it", origin="m2")])],
+            TODAY,
+            appearances=self._appearances(
+                (7, 1, None, None, "m2"), (7, 20, None, None, "m3"),
+            ),
+        )
+        c = got[0]["chases"]
+        assert c["unmeasurable"] == 1
+        assert c["total"] == 0
+        assert c["without_advance"] == 0
+
+    def test_a_restatement_in_a_room_this_person_was_not_in_is_not_a_chase(self):
+        got = classify_items(
+            [item(restatements=[restatement((7, 1), "Came up elsewhere", origin="zz")])],
+            TODAY,
+            appearances=self._appearances((7, 20, 5, 0, "m3")),
+        )
+        c = got[0]["chases"]
+        assert c["total"] == 0
+        assert c["unmeasurable"] == 0
+
+    def test_three_chases_on_one_item_across_three_meetings(self):
+        # The sentence the finding is actually made of.
+        got = classify_items(
+            [item(restatements=[
+                restatement((6, 1), "End of next week, easy", origin="m1"),
+                restatement((7, 1), "Partial, chasing Renata", origin="m2"),
+                restatement((7, 20), "Request in with legal, weeks", origin="m3"),
+            ])],
+            TODAY,
+            appearances=self._appearances(
+                (6, 1, 2, 0, "m1"), (7, 1, 1, 1, "m2"),
+                (7, 20, 3, 0, "m3"), (8, 5, 0, 0, "m4"),
+            ),
+        )
+        c = got[0]["chases"]
+        assert c["total"] == 3
+        assert c["without_advance"] == 3
+        s = summarize(got)
+        assert s["chases_without_advance"] == 3
+        assert s["items_chased_without_advance"] == 1
+        assert s["max_chases_without_advance_on_one_item"] == 3
+
+    def test_the_summary_totals_and_names_the_definition(self):
+        items = classify_items(
+            [
+                item(patch_id="a", restatements=[
+                    restatement((7, 1), "Soon", origin="m2")]),
+                item(patch_id="b", restatements=[
+                    restatement((7, 1), "Also soon", origin="m2")]),
+                item(patch_id="c"),
+            ],
+            TODAY,
+            appearances=self._appearances((7, 1, 4, 0, "m2"), (7, 20, 0, 0, "m3")),
+        )
+        s = summarize(items)
+        assert s["chases"] == 2
+        assert s["chases_without_advance"] == 2
+        assert sorted(s["patch_ids_chased_without_advance"]) == ["a", "b"]
+        assert s["chase_advance_definition"] == (
+            "closed_by_the_next_meeting_with_this_person"
+        )
+
+    def test_no_chases_leaves_the_peak_null_never_zero(self):
+        s = summarize(classify_items([item()], TODAY))
+        assert s["chases"] == 0
+        assert s["chases_without_advance"] == 0
+        assert s["max_chases_without_advance_on_one_item"] is None
+        assert s["patch_ids_chased_without_advance"] == []
+
+    def test_production_data_produces_no_chases_and_says_so(self):
+        # Today: no restatement has ever been recorded and no meeting
+        # carries a question count. Both numbers are zero, and zero
+        # chases with zero unmeasurable is the honest reading of a
+        # corpus where nothing has been observed yet.
+        got = classify_items(
+            [item(deadline_date="2026-06-20")],
+            TODAY,
+            appearances=[
+                {"origin_id": "m1", "last_seen_at": datetime(2026, 7, 2),
+                 "capacities": ["speaker"]},
+                {"origin_id": "m2", "last_seen_at": datetime(2026, 7, 30),
+                 "capacities": ["speaker"]},
+            ],
+        )
+        assert got[0]["chases"]["total"] == 0
+        assert got[0]["chases"]["unmeasurable"] == 0
+        # The modes that do not need a restatement still work.
+        assert got[0]["mode"] == SILENTLY_DROPPED
+
+    def test_volume_and_chases_are_different_numbers_by_construction(self):
+        # Two people, level question volume, opposite follow up. The
+        # ledger separates them; a count of questions received cannot.
+        chased = classify_items(
+            [item(patch_id="a", restatements=[
+                restatement((6, 1), "Soon", origin="m1"),
+                restatement((7, 1), "Still soon", origin="m2"),
+            ])],
+            TODAY,
+            appearances=self._appearances(
+                (6, 1, 6, 0, "m1"), (7, 1, 6, 0, "m2"), (7, 20, 0, 0, "m3"),
+            ),
+        )
+        ahead = classify_items(
+            [item(patch_id="b", completed_at=datetime(2026, 6, 5))],
+            TODAY,
+            appearances=self._appearances(
+                (6, 1, 6, 0, "n1"), (7, 1, 6, 0, "n2"), (7, 20, 0, 0, "n3"),
+            ),
+        )
+        # Identical volume, 12 questions each.
+        assert summarize(chased)["chases_without_advance"] == 2
+        assert summarize(ahead)["chases_without_advance"] == 0
+
+
 class TestServedSurface:
     """Source guards for the wiring (fastapi is absent in the local unit
     environment, so the route bodies are checked as source the same way
@@ -577,6 +812,27 @@ class TestServedSurface:
         assert "for r in rows" not in block
         assert '"scope": "open_only"' in block
         assert '"people_considered": total_unfiltered' in block
+
+    def test_the_list_serves_counts_and_the_detail_serves_receipts(self):
+        # Stripped by FAMILY, so a receipt key added later cannot quietly
+        # start growing a browse payload.
+        block = MAIN.split("def _counts_only")[1].split("commitment_pressure = {")[0]
+        assert "k not in commitment_ledger.RECEIPT_KEYS" in block
+        pressure = MAIN.split("commitment_pressure = {")[1].split("\n    }")[0]
+        assert "_counts_only(all_ledger_items)" in pressure
+        assert "_counts_only(r[\"_ledger_items\"])" in pressure
+        assert "patch_ids" not in pressure
+        # The detail route keeps the full summary, ids included.
+        detail = MAIN.split('"commitment_ledger": {')[1].split("},")[0]
+        assert "commitment_ledger.summarize(" in detail
+        assert "RECEIPT_KEYS" not in detail
+
+    def test_every_receipt_key_the_service_produces_is_declared(self):
+        # The guard on the guard: a receipt key that never made it into
+        # RECEIPT_KEYS would leak onto the list silently.
+        from contextquilt.services.commitment_ledger import RECEIPT_KEYS
+        s = summarize(classify_items([item(patch_id="a")], TODAY))
+        assert {k for k in s if k.startswith("patch_ids")} == set(RECEIPT_KEYS)
 
     def test_the_aggregate_serves_no_ratio(self):
         block = MAIN.split("commitment_pressure = {")[1].split("\n    }")[0]

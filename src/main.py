@@ -4852,29 +4852,41 @@ async def list_people(
     # population, which is why `scope` is stated rather than assumed: the
     # person detail's ledger runs the same classifier over a wider set.
     all_ledger_items = [i for r in core["people"] for i in r["_ledger_items"]]
+
+    def _counts_only(items: list) -> dict:
+        """A summary with the receipt keys stripped.
+
+        Counts on the list, receipts on the detail. This is a browse
+        surface polled for every person the user has, and a patch id
+        list per mode per person grows that payload without earning it:
+        the ids are only useful once the user has chosen somebody, and
+        the detail route serves them there along with each item's own
+        restatements. Stripped by FAMILY (`RECEIPT_KEYS`) rather than by
+        name, so a receipt key added later cannot quietly land here.
+        """
+        return {
+            k: v for k, v in commitment_ledger.summarize(items).items()
+            if k not in commitment_ledger.RECEIPT_KEYS
+        }
+
     commitment_pressure = {
         "scope": "open_only",
         "people_considered": total_unfiltered,
         "people_with_items": sum(1 for r in core["people"] if r["_ledger_items"]),
-        "summary": commitment_ledger.summarize(all_ledger_items),
+        "summary": _counts_only(all_ledger_items),
         # Per person, ordered by name so a browse surface never
-        # reshuffles between polls. The ids behind these counts live on
-        # the top level summary and on each person's detail route, which
-        # is where an item's own receipts (its restatements, their dates
-        # and their meetings) are served.
+        # reshuffles between polls.
         "by_person": [
             {
                 "entity_id": r["entity_id"],
                 "name": r["name"],
-                **{
-                    k: v for k, v in commitment_ledger.summarize(
-                        r["_ledger_items"]
-                    ).items()
-                    if k != "patch_ids_by_mode"
-                },
-                # The other half of the phase two read, on the same row:
-                # how much follow up pressure this person actually gets.
-                # Counts with their denominators, nothing derived.
+                **_counts_only(r["_ledger_items"]),
+                # Question VOLUME, kept as its own count and never
+                # folded into the chase numbers above. Measured by hand
+                # against the transcripts, volume is nearly level across
+                # people whose follow up is nothing alike, so a claim
+                # built on it asserts something the data contradicts.
+                # Two counts, two questions, both served.
                 "questions": r["questions"],
             }
             for r in sorted(
@@ -4946,12 +4958,21 @@ async def get_person(
     denominator, and no field here describes a person: the surface ships
     the count, never the cause.
 
-    `questions` (and `meetings[].questions`) is the other side of the same
-    read, the follow up pressure this person actually receives, captured
+    `questions` (and `meetings[].questions`) is question VOLUME: how many
+    this person asked, was asked, and was asked by the user, captured
     from the transcript at ingest because transcripts are not retained.
     The explicit and inferred grades are separate on purpose and must not
     be summed: one is a vocative CQ read, the other is a guess from who
     spoke next. Null is unknown, never "was asked nothing".
+
+    Volume is NOT the follow up finding and must not be rendered as one.
+    Measured against real transcripts it runs nearly level across people
+    whose follow up is nothing alike, because a chase and a substantive
+    probe both count as one question. The metric that carries it is
+    `commitment_ledger.summary.chases_without_advance`: an item already
+    in the ledger came up in a meeting where the user asked this person
+    something, and it had not closed by their next meeting. The two are
+    served as separate counts and stay separate.
 
     `insights` is the 16a lens stack: up to one derived card per lens in
     the CQ-side lens vocabulary, each with the claim, the do line, its

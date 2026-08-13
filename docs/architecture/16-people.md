@@ -1186,8 +1186,70 @@ items only, because the list route does not fetch the completed
 population. `scope` states that on the wire rather than leaving the two
 denominators to be assumed equal with the detail route's.
 
-The other half of that read is `questions` (see 6.6): how much follow up
-pressure each person actually receives.
+**Counts on the list, receipts on the detail.** `summarize()` produces
+patch id arrays alongside its counts, and the list strips that whole
+family (`commitment_ledger.RECEIPT_KEYS`) rather than one key by name, so
+a receipt key added later cannot quietly start growing a browse payload
+polled for every person the user has. The ids are only useful once the
+user has chosen somebody, and the detail route serves them there next to
+each item's own restatements.
+
+### 5.12 Chases that produced no advance
+
+**This replaced a metric that did not survive measurement, and the
+correction is worth keeping.** The finding was that follow up pressure
+runs inversely to the delivery record: the person generating risk gets
+warmth, the one who never misses gets interrogated. The obvious metric
+was questions RECEIVED. Computed by hand against the transcripts, it does
+not hold: the volume is twelve questions to one person and ten to the
+other, nearly level, and a card built on it would have asserted something
+the data contradicts.
+
+What separates the two sets is the KIND of question. One person's twelve
+are chases on items already in the ledger that produced no advance, three
+of them on the same item across three meetings. The other's ten are
+substantive probes to somebody already ahead of the user. A chase and a
+probe both count as one question, which is exactly why volume cannot see
+the difference.
+
+So the metric is chases that produced no advance, and **question volume
+stays its own separate count** (`questions`, section 6.6). Conflating
+them is what produced the false claim; they answer different questions
+and are served as different numbers.
+
+Both halves of the join were already stored. A restatement records that
+THIS item came up in a specific meeting (`origin_id`), and
+`person_appearances` records, for that same meeting, how many questions
+the user asked THIS person. An occasion where both are true is a chase.
+
+Per chase there are three outcomes, and the third is why this cannot
+collapse into one number:
+
+| outcome | meaning |
+| --- | --- |
+| `without_advance` | there was a later meeting with this person and the item had not closed by it |
+| `with_advance` | it closed by that next meeting |
+| `unresolved` | the chase was in the most recent meeting, so nothing has had a chance to happen |
+
+Plus `unmeasurable`: the item came up in a meeting carrying no question
+metric, so whether it was a chase is unknowable. On the day this ships
+that is every meeting there has ever been, and a client rendering the
+chase count without this one is reporting a floor as a total.
+
+`ADVANCE_DEFINITION` is published on the wire next to the counts
+(`closed_by_the_next_meeting_with_this_person`) because it is deliberately
+narrow and nobody should have to guess. **A fresh restatement is not an
+advance and a moved due date is not an advance.** Motion that reads as
+progress at every checkpoint is the illusion this whole surface exists to
+break, so only closing counts. `unresolved` exists for the same reason in
+the other direction: counting a chase from the latest meeting as a
+failure would manufacture the finding out of recency.
+
+The summary carries `chases`, `chases_without_advance`,
+`items_chased_without_advance`,
+`max_chases_without_advance_on_one_item` (the number behind "three of
+them on the same item"), `chases_unmeasurable` and the patch ids, which
+are receipts and therefore detail-route only.
 
 ---
 
@@ -1334,6 +1396,13 @@ counts: two questions out of three asked all meeting and two out of forty
 are not the same observation. CQ computes no ratio over them and serves
 no string naming a pattern. Served per meeting in `meetings[].questions`
 and aggregated per person as `questions`.
+
+**Volume is not the follow up finding.** It is nearly level across people
+whose follow up is nothing alike, because a chase and a substantive probe
+each count as one question. Section 5.12 is the metric that carries it,
+and it CONSUMES these columns (the from_user pair is what makes a
+restatement a chase) without replacing them. Two counts, two questions,
+both served, never folded together.
 
 ### 6.3 Built and held: manifest v9
 

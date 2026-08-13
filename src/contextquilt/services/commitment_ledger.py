@@ -96,6 +96,23 @@ MIN_SILENT_MEETINGS = 2
 # hand-written or backfilled value cannot inflate one item's payload.
 RESTATEMENT_RECEIPT_CAP = 10
 
+# Summary keys that carry patch ids rather than counts. Named as a set so
+# a surface that serves counts only (the person LIST, a browse surface)
+# strips the family rather than one key it happens to know about: adding
+# a receipt key later must not silently start growing a list payload.
+# Counts on the list, receipts on the detail, where the user has already
+# chosen the person.
+RECEIPT_KEYS = ("patch_ids_by_mode", "patch_ids_chased_without_advance")
+
+# What counts as an item ADVANCING between one meeting and the next.
+# Deliberately narrow, and this is the load bearing choice in the chase
+# metric: an item advanced only if it CLOSED. A fresh restatement is not
+# an advance and a moved due date is not an advance, because motion that
+# reads as progress at every checkpoint is the exact illusion this whole
+# module exists to break. Published on the wire next to the counts so
+# nobody has to guess which definition produced them.
+ADVANCE_DEFINITION = "closed_by_the_next_meeting_with_this_person"
+
 
 def _as_date(value: Any) -> Optional[date]:
     """A date from a date, a datetime or an ISO string, else None.
@@ -280,6 +297,120 @@ def _meeting_days(appearances: Iterable[Mapping[str, Any]]) -> List[date]:
     return sorted(days)
 
 
+def _chase_meetings(appearances: Iterable[Mapping[str, Any]]) -> Dict[str, dict]:
+    """origin_id -> {day, asked_by_user} for this person's meetings.
+
+    `asked_by_user` is None when the meeting carried no question metric
+    at all, which is every meeting ingested before migration 37 and can
+    never be backfilled. None here means CANNOT TELL whether the user
+    pressed, and it is counted as its own number rather than folded into
+    either answer.
+    """
+    out: Dict[str, dict] = {}
+    for a in appearances or ():
+        origin = a.get("origin_id")
+        if not origin or not is_presence_grade(a):
+            continue
+        day = _as_date(a.get("last_seen_at"))
+        explicit = a.get("questions_from_user_explicit")
+        inferred = a.get("questions_from_user_inferred")
+        asked = None
+        if isinstance(explicit, int) or isinstance(inferred, int):
+            asked = (explicit or 0) + (inferred or 0)
+        out[str(origin)] = {"day": day, "asked_by_user": asked}
+    return out
+
+
+def _chases(
+    row: Mapping[str, Any],
+    restatements: Sequence[dict],
+    meeting_days: Sequence[date],
+    chase_meetings: Mapping[str, dict],
+    completed_at: Optional[date],
+) -> Dict[str, Any]:
+    """How often this item was chased, and how often the chase moved it.
+
+    The metric this replaced was questions RECEIVED, and it was wrong.
+    Measured by hand against the transcripts, the volume is nearly level
+    (twelve questions to one person, ten to another) while the two sets
+    are not the same act: one set is chases on items already in the
+    ledger that produced no advance, three of them on one item across
+    three meetings, and the other is substantive probing of somebody
+    already ahead of the user. A card built on volume would have
+    asserted something the data contradicts. So the count is chases that
+    produced no advance, and questions received stays a separate number
+    because the two answer different questions.
+
+    Both halves of the join are already stored. A restatement records
+    that THIS item came up in a specific meeting (`origin_id`), and
+    `person_appearances` records, for the same meeting, how many
+    questions the user asked THIS person. An occasion where both are
+    true is a chase.
+
+    Three outcomes, and the third is why this cannot be one number:
+
+    - resolved and no advance: there was a later meeting with this
+      person and the item had not closed by it.
+    - resolved and advanced: it closed by that next meeting. See
+      ADVANCE_DEFINITION for how narrow that is, deliberately.
+    - unresolved: the chase happened in the most recent meeting, so
+      nothing has had a chance to happen yet. Counting it as "no
+      advance" would manufacture the finding out of recency.
+
+    `unmeasurable` is the fourth number and the honest one: the item
+    came up in a meeting whose question metric does not exist. On the
+    day this ships that is every meeting there has ever been.
+    """
+    days = sorted(meeting_days)
+    occasions: List[dict] = []
+    without_advance = advanced = unresolved = unmeasurable = 0
+
+    for e in restatements:
+        origin = e.get("origin_id")
+        meeting = chase_meetings.get(str(origin)) if origin else None
+        if meeting is None:
+            # Restated in a room this person was not in. The user did not
+            # chase THEM, whatever else happened to the item.
+            continue
+        asked = meeting["asked_by_user"]
+        if asked is None:
+            unmeasurable += 1
+            continue
+        if asked <= 0:
+            # The item came up and the user asked this person nothing.
+            # Not a chase, and not evidence of anything else either.
+            continue
+        on = _as_date(e.get("observed_at")) or meeting["day"]
+        next_day = next((d for d in days if on and d > on), None)
+        if next_day is None:
+            outcome, unresolved = None, unresolved + 1
+        elif completed_at is not None and completed_at <= next_day:
+            outcome, advanced = True, advanced + 1
+        else:
+            outcome, without_advance = False, without_advance + 1
+        occasions.append({
+            "origin_id": str(origin),
+            "on": on.isoformat() if on else None,
+            "next_meeting_on": next_day.isoformat() if next_day else None,
+            # True, False, or null for "no later meeting yet".
+            "advanced": outcome,
+        })
+
+    return {
+        # Occasions where the item came up AND the user asked this
+        # person at least one question in that meeting.
+        "total": len(occasions),
+        "without_advance": without_advance,
+        "with_advance": advanced,
+        "unresolved": unresolved,
+        # Came up, but that meeting predates the question metric, so
+        # whether it was a chase is unknowable. Never a zero in disguise.
+        "unmeasurable": unmeasurable,
+        "advance_definition": ADVANCE_DEFINITION,
+        "occasions": occasions[:RESTATEMENT_RECEIPT_CAP],
+    }
+
+
 def classify_item(
     row: Mapping[str, Any],
     today: date,
@@ -287,6 +418,7 @@ def classify_item(
     user_label: Optional[str] = None,
     min_silent_meetings: int = MIN_SILENT_MEETINGS,
     regression: Optional[bool] = None,
+    chase_meetings: Optional[Mapping[str, dict]] = None,
 ) -> Dict[str, Any]:
     """One item's closure mode, with the receipts behind it.
 
@@ -379,6 +511,13 @@ def classify_item(
         # zero meetings.
         "meetings_since_last_statement": meetings_since,
         "owner_change": change,
+        # Chases on this item, and how many of them moved it. See
+        # _chases: this is the metric that carries the follow up finding,
+        # and questions RECEIVED is kept separate rather than folded in
+        # because measuring the two as one produced a false claim.
+        "chases": _chases(
+            row, restatements, meeting_days, chase_meetings or {}, completed_at
+        ),
         # Null is CANNOT TELL and is the only value this ships with. See
         # object_regression() for exactly what would be needed to answer
         # it, and why a string heuristic is not it.
@@ -409,7 +548,9 @@ def classify_items(
     patch_id keyed map of verdicts from a future cold path judge. Absent
     (always, today) every item reports null for it.
     """
+    appearances = list(appearances or ())
     days = _meeting_days(appearances)
+    chase_meetings = _chase_meetings(appearances)
     verdicts = regressions or {}
     items = [
         classify_item(
@@ -418,6 +559,7 @@ def classify_items(
             user_label=user_label,
             min_silent_meetings=min_silent_meetings,
             regression=verdicts.get(str(r.get("patch_id"))),
+            chase_meetings=chase_meetings,
         )
         for r in rows or ()
     ]
@@ -446,6 +588,9 @@ def summarize(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
     by_mode = {m: 0 for m in MODE_PRECEDENCE}
     ids: Dict[str, List[str]] = {m: [] for m in MODE_PRECEDENCE}
     hops: List[int] = []
+    chased_ids: List[str] = []
+    chases = chases_without_advance = chases_unmeasurable = 0
+    per_item_without_advance: List[int] = []
     for i in items or ():
         mode = i.get("mode") or OPEN
         by_mode[mode] = by_mode.get(mode, 0) + 1
@@ -453,6 +598,14 @@ def summarize(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         h = i.get("hop_count")
         if isinstance(h, int):
             hops.append(h)
+        c = i.get("chases") or {}
+        chases += c.get("total", 0)
+        chases_unmeasurable += c.get("unmeasurable", 0)
+        no_advance = c.get("without_advance", 0)
+        chases_without_advance += no_advance
+        if no_advance:
+            chased_ids.append(i.get("patch_id"))
+            per_item_without_advance.append(no_advance)
     return {
         "items": len(items or ()),
         # Every mode key is always present, per the additive rule: a
@@ -466,6 +619,28 @@ def summarize(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         # Pulled out because it is the count the design is FOR, and a
         # client should not have to know the mode vocabulary to find it.
         "silently_dropped": by_mode.get(SILENTLY_DROPPED, 0),
+        # The follow up pressure metric. NOT questions received: that is
+        # a separate count on the person, kept separate because the two
+        # answer different questions and measuring them as one produced
+        # a claim the data contradicts (near level volume, opposite
+        # kinds of question). This one is chases on items already in the
+        # ledger that moved nothing.
+        "chases": chases,
+        "chases_without_advance": chases_without_advance,
+        "items_chased_without_advance": len(chased_ids),
+        # "Three of them on the same item across three meetings" is the
+        # sentence the finding is actually made of, so the number behind
+        # it is served rather than left to be recomputed.
+        "max_chases_without_advance_on_one_item": (
+            max(per_item_without_advance) if per_item_without_advance else None
+        ),
+        # Chases CQ cannot see: the item came up in a meeting with no
+        # question metric. On the day this ships this is every meeting,
+        # and a client that renders the count above without this one is
+        # reporting a floor as a total.
+        "chases_unmeasurable": chases_unmeasurable,
+        "chase_advance_definition": ADVANCE_DEFINITION,
+        "patch_ids_chased_without_advance": chased_ids,
     }
 
 
