@@ -10,6 +10,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from contextquilt.services.people_signals import (
     CADENCE_MIN_MEETINGS,
     compute_person_signals,
+    compute_question_totals,
+    is_presence_grade,
 )
 
 TODAY = date(2026, 8, 11)
@@ -112,3 +114,89 @@ def test_observed_projects_are_presence_grade():
     block = MAIN.split("project_counts: dict = {}")[1].split("observed = [")[0]
     assert 'caps & {"speaker", "ownership"}' in block
     assert "continue" in block
+
+
+# Follow up pressure: the per person totals over the question counts
+# captured at ingest (migration 37). Counts and denominators only. There
+# is no ratio here and no served string naming a pattern, which is the
+# product rule, not an oversight.
+
+
+def _measured(**over):
+    row = {
+        "last_seen_at": datetime(2026, 8, 10, tzinfo=timezone.utc),
+        "capacities": ["speaker"],
+        "questions_asked": 1,
+        "questions_received_explicit": 2,
+        "questions_received_inferred": 1,
+        "questions_from_user_explicit": 2,
+        "questions_from_user_inferred": 1,
+        "meeting_questions_by_user": 9,
+    }
+    row.update(over)
+    return row
+
+
+def test_question_totals_sum_across_measured_meetings():
+    t = compute_question_totals([_measured(), _measured()])
+    assert t["meetings_measured"] == 2
+    assert t["asked"] == 2
+    assert t["received_explicit"] == 4
+    assert t["received_inferred"] == 2
+    assert t["from_user_explicit"] == 4
+    assert t["user_asked_total"] == 18
+
+
+def test_the_two_grades_stay_separate():
+    t = compute_question_totals([_measured()])
+    assert "received" not in t
+    assert t["received_explicit"] != t["received_inferred"]
+
+
+def test_unmeasured_meetings_are_null_not_zero():
+    # Every meeting that predates the metric. "Was asked nothing" is a
+    # claim CQ must not make from a transcript it never parsed.
+    old = {"last_seen_at": datetime(2026, 7, 1, tzinfo=timezone.utc),
+           "capacities": ["speaker"]}
+    t = compute_question_totals([old, old])
+    assert t["meetings_measured"] == 0
+    assert t["meetings_present"] == 2
+    assert t["asked"] is None
+    assert t["received_explicit"] is None
+    assert t["user_asked_total"] is None
+
+
+def test_a_measured_zero_is_a_real_zero():
+    t = compute_question_totals([_measured(questions_asked=0)])
+    assert t["asked"] == 0
+
+
+def test_nulls_are_per_field_not_per_row():
+    # A meeting can know how many questions a person was asked and still
+    # not know which speaker was the user, and the from_user pair has to
+    # say so rather than report a zero.
+    t = compute_question_totals([_measured(
+        questions_from_user_explicit=None,
+        questions_from_user_inferred=None,
+        meeting_questions_by_user=None,
+    )])
+    assert t["received_explicit"] == 2
+    assert t["from_user_explicit"] is None
+    assert t["from_user_inferred"] is None
+    assert t["user_asked_total"] is None
+
+
+def test_no_appearances_at_all_is_all_null():
+    t = compute_question_totals([])
+    assert t["meetings_measured"] == 0
+    assert t["asked"] is None
+
+
+def test_presence_grade_is_one_predicate_for_every_surface():
+    # The ledger's "meetings since this was last said" and the cadence
+    # here must count the same meetings.
+    assert is_presence_grade({"capacities": ["speaker"]}) is True
+    assert is_presence_grade({"capacities": ["ownership"]}) is True
+    assert is_presence_grade({"capacities": []}) is True
+    assert is_presence_grade({"capacities": None}) is True
+    assert is_presence_grade({"capacities": ["mention"]}) is False

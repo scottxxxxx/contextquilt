@@ -184,6 +184,26 @@ READ_CAPABILITIES: dict = {
         "available": True,
         "reason": None,
     },
+    # The closure ledger (open on the list, open plus completed on the
+    # detail). Always available: it is computed from state CQ already
+    # owns, so nothing about an app's manifest can turn it off. What CAN
+    # be empty is the restatement history behind it, because a
+    # restatement is only recorded from the moment that write path
+    # shipped, and no backfill can invent one. An item that carries no
+    # restatements is not a quiet item, it is an item CQ was not
+    # watching for this yet.
+    "commitment_ledger": {
+        "available": True,
+        "reason": None,
+    },
+    # Per meeting question counts. Available, with per meeting nulls
+    # doing the honest work: null means that meeting carried no
+    # measurable transcript, predates the metric, or named no speaker as
+    # the user. Never "was asked nothing".
+    "question_counts": {
+        "available": True,
+        "reason": None,
+    },
     "confirmed_mention_split": {
         "available": False,
         "reason": (

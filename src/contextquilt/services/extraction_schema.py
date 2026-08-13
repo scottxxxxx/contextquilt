@@ -1442,6 +1442,230 @@ def speaker_turn_counts(text: object, user_label: "str | None" = None) -> dict:
     return counts
 
 
+# One turn: a speaker label and everything said until the next label.
+_TURN = re.compile(r"^\s*\[([^\]]{1,60})\]([^\[]*)", re.MULTILINE)
+# Sentences, keeping the terminator so a question can be recognized by it.
+_SENTENCE = re.compile(r"[^.!?\n]+[.!?]+|[^.!?\n]+")
+# Openers that sit in front of a vocative and are not part of the name.
+_VOCATIVE_FILLER = frozenset({
+    "hey", "hi", "hello", "ok", "okay", "so", "and", "but", "well",
+    "um", "uh", "yeah", "yep", "right", "look", "listen", "sorry",
+})
+_NAME_EDGE = re.compile(r"^[\s\"'`().,!?-]+|[\s\"'`().,!?-]+$")
+
+
+def _clean_name(fragment: str) -> str:
+    return _NAME_EDGE.sub("", fragment or "").strip().lower()
+
+
+def _strip_vocative_filler(fragment: str) -> str:
+    """Drop leading interjections so "Hey Marcus" reads as "Marcus"."""
+    tokens = _clean_name(fragment).split()
+    while tokens and tokens[0] in _VOCATIVE_FILLER:
+        tokens = tokens[1:]
+    return " ".join(tokens)
+
+
+def _addressee_vocabulary(labels: "set") -> dict:
+    """Every spoken form that unambiguously names one speaker label.
+
+    The full label, plus its first token when no other speaker in the
+    room shares it. Two Marcuses in one meeting means "Marcus" names
+    nobody in particular, and an ambiguous vocative must fall through to
+    the inferred column rather than pick one at random.
+    """
+    vocab: dict = {}
+    first_tokens: dict = {}
+    for label in labels:
+        vocab[label] = label
+        head = label.split()[0] if label.split() else ""
+        if head and head != label:
+            first_tokens.setdefault(head, set()).add(label)
+    for head, owners in first_tokens.items():
+        if len(owners) == 1 and head not in vocab:
+            vocab[head] = next(iter(owners))
+    return vocab
+
+
+def _explicit_addressee(question: str, vocab: dict, speaker: str) -> "str | None":
+    """The speaker label a question NAMES as its addressee, or None.
+
+    A vocative is comma delimited and sits at an edge of the sentence:
+    "Marcus, can you get me that?" and "Can you get me that, Marcus?".
+    A name in the middle of a clause is a name being TALKED ABOUT, not
+    an addressee, and the difference is the whole reliability of this
+    column: "Did Marcus ever send that?" asked of somebody else names
+    Marcus and is addressed to the person across the table. That case
+    returns None here and falls through to the inferred column, where a
+    client can choose not to trust it. Reading it as explicit would put
+    the user's follow up pressure on the wrong person's row with the
+    high confidence label attached, which is the one error this design
+    cannot absorb.
+
+    A question that is nothing but a name ("Marcus?") is explicit too.
+    """
+    body = _NAME_EDGE.sub("", question or "")
+    if not body:
+        return None
+    parts = [p for p in body.split(",")]
+    candidates = []
+    if len(parts) >= 2:
+        candidates.append(_strip_vocative_filler(parts[0]))
+        candidates.append(_clean_name(parts[-1]))
+    else:
+        candidates.append(_clean_name(body))
+    for c in candidates:
+        target = vocab.get(c)
+        if target and target != speaker:
+            return target
+    return None
+
+
+def question_attribution(text: object, user_label: "str | None" = None) -> dict:
+    """Who asked the questions in a transcript, and who they were asked OF.
+
+    The sibling of `speaker_turn_counts`, and it exists for the same
+    reason and under the same constraint: the transcript is in hand
+    exactly once, at ingest, and this signal can NEVER be backfilled.
+    Every meeting that lands before this ships is permanently
+    unmeasurable, which is why it is worth capturing before there is a
+    surface that reads it.
+
+    What it is for: follow up pressure. CQ can already say what each
+    person owes and how their items closed. It cannot say who the user
+    actually presses, and the interesting question about a set of
+    meetings is whether those two line up. This module measures; it
+    draws no conclusion, computes no ratio, and names no asymmetry.
+
+    Attribution runs in three grades and they are NEVER summed:
+
+    - EXPLICIT: the question names its addressee as a vocative. High
+      confidence, see `_explicit_addressee`.
+    - INFERRED: the question ends the turn and somebody else speaks
+      next, so the addressee is taken to be them. A heuristic, and
+      wrong sometimes: a person who ignores a question asked to the room
+      and changes the subject collects it. Kept in its own column so a
+      client can trust the explicit one alone, which it could never do
+      again if the two were blended into a number.
+    - UNATTRIBUTED: a question to the room with nothing to attribute it
+      to. Counted, never dropped, because it is the denominator that
+      says how much of the meeting this measurement missed.
+
+    Rhetorical questions are the reason inference only fires on a turn's
+    TRAILING questions (the ones after its last statement sentence): "Why
+    did that slip? Because legal." answers itself, and the next speaker
+    did not receive it. "Why did that slip? Because legal. Can you fix
+    it?" attributes only the last one.
+
+    Same hygiene as `speaker_turn_counts`: `(you)` stripped, diarization
+    placeholders dropped, label keys lowercased. The user is not a row in
+    `by_label` (they have no appearance row of their own); their side is
+    the `user` block, and it is None when no label could be identified as
+    theirs, which makes every `from_user_*` count None as well. That is a
+    cannot-tell, not a zero: the counts would otherwise read as "the user
+    asked this person nothing".
+    """
+    empty = {
+        "by_label": {},
+        "user": None,
+        "unattributed": 0,
+        "questions_total": 0,
+    }
+    if not isinstance(text, str) or not text:
+        return empty
+
+    # Pass 1: the turns, with the self label resolved from either signal
+    # (the inline marker or the passed display name).
+    turns: list = []
+    self_key: "str | None" = None
+    for m in _TURN.finditer(text):
+        raw, body = m.group(1), m.group(2)
+        marked = "(you)" in raw.lower()
+        name = re.sub(r"\(you\)", "", raw, flags=re.IGNORECASE).strip()
+        if not name or is_placeholder_or_self_person(name):
+            turns.append((None, body))
+            continue
+        key = name.lower()
+        if marked or is_placeholder_or_self_person(name, user_label):
+            self_key = self_key or key
+        turns.append((key, body))
+    if not turns:
+        return empty
+
+    labels = {k for k, _ in turns if k}
+    vocab = _addressee_vocabulary(labels)
+    others = sorted(labels - ({self_key} if self_key else set()))
+
+    def _blank() -> dict:
+        return {
+            "asked": 0,
+            "received_explicit": 0,
+            "received_inferred": 0,
+            # Null, not zero, when CQ cannot tell which speaker is the
+            # user. See the docstring.
+            "from_user_explicit": 0 if self_key else None,
+            "from_user_inferred": 0 if self_key else None,
+        }
+
+    by_label = {k: _blank() for k in others}
+    user_block = {"asked": 0, "received_explicit": 0, "received_inferred": 0} if self_key else None
+    unattributed = 0
+    total = 0
+
+    for idx, (speaker, body) in enumerate(turns):
+        if not speaker or not body.strip():
+            continue
+        sentences = [s.strip() for s in _SENTENCE.findall(body) if s.strip()]
+        if not sentences:
+            continue
+        # Trailing questions: everything after the turn's last statement.
+        last_statement = max(
+            (i for i, s in enumerate(sentences) if not s.endswith("?")),
+            default=-1,
+        )
+        # Only the IMMEDIATE next turn can be an answer. Skipping over a
+        # placeholder turn to find a named one would attribute a question
+        # across somebody else's reply, so a placeholder next turn (None
+        # here) leaves the question unattributed.
+        next_speaker = turns[idx + 1][0] if idx + 1 < len(turns) else None
+
+        for i, sentence in enumerate(sentences):
+            if not sentence.endswith("?"):
+                continue
+            total += 1
+            if speaker == self_key:
+                user_block["asked"] += 1
+            else:
+                by_label[speaker]["asked"] += 1
+
+            target = _explicit_addressee(sentence, vocab, speaker)
+            grade = "explicit"
+            if target is None and i > last_statement and next_speaker and next_speaker != speaker:
+                target, grade = next_speaker, "inferred"
+            if target is None:
+                unattributed += 1
+                continue
+            if target == self_key:
+                user_block[f"received_{grade}"] += 1
+                continue
+            slot = by_label.get(target)
+            if slot is None:
+                unattributed += 1
+                continue
+            slot[f"received_{grade}"] += 1
+            if self_key and speaker == self_key:
+                slot[f"from_user_{grade}"] += 1
+
+    return {
+        "by_label": by_label,
+        # The denominator for every from_user count: how many questions
+        # the user asked in this meeting at all, attributed or not.
+        "user": user_block,
+        "unattributed": unattributed,
+        "questions_total": total,
+    }
+
+
 def self_speaker_label(text: object) -> "str | None":
     """The (you)-marked speaker's name from a transcript, lowercased, or
     None when no marker is present.

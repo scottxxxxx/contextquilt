@@ -1071,6 +1071,126 @@ specific version of "not yet".
 
 ---
 
+### 5.10 The closure ledger: what happened to an item, not whether it is open
+
+An action item tracker answers one question, open or closed, and that
+question is blind to the failure mode that matters most. Some items are
+never failed, they are MOLTED: the same object comes back at the next
+meeting as a differently shaped fresh commitment, the language stays
+strong ("Yeah, absolutely, end of next week, easy"), and the state never
+changes. Motion reads as progress at every checkpoint, which is exactly
+why it survives every accountability system the user already has. It is
+visible only by holding one object across months, which is the one thing
+CQ can do and a task list cannot.
+
+Two halves, a write and a read.
+
+**Write (worker, dedup re-observation path).** Re-observation already
+detected a restatement: a trigram match over 0.6 bumps `updated_at`,
+`last_observed_at` and the usage counters, and a different
+`deadline_date` displaces the old one into `value.deadline_history`. What
+it never recorded was WHAT was restated. It now appends, FOR COMPLETABLES
+ONLY, to `value.restatements` (capped at 10, the deadline_history rule):
+`observed_at`, the `text` as spoken in this meeting, the `owner` as
+spoken, the `deadline` as spoken, `deadline_date`, and `origin_id`.
+`value.restatement_count` is a monotonic counter that survives the cap,
+so an item restated fourteen times reports fourteen while keeping ten
+receipts. `value.text` is NOT rewritten: this is a record of an object's
+life, not an edit to the fact. Neither is `value.owner`, which is what
+the ledger matches on, so rewriting it would move an item off the ledger
+of the person the user is owed by. A handover is stamped once as
+`value.owner_restated_at`, and the restatement owners stay the single
+source of truth for classifying it.
+
+The same `origin_id` is the idempotency key: a meeting can restate an
+item once. A re-ingest of one transcript, or a second extracted phrasing
+of one sentence landing on the same patch, is not a second hop months
+later, and an item first stated in this meeting has not come back yet.
+
+**Read (`commitment_ledger` on the detail route).** A pure classifier,
+`services/commitment_ledger.py`, no database, unit tested the way
+`follow_through.py` is. Per item, one headline `mode` plus every other
+mode that is also true in `modes`:
+
+| mode | meaning |
+| --- | --- |
+| `delivered` | completed, with the existing completion stamps |
+| `absorbed_by_user` | the owner changed TO the user |
+| `reassigned` | the owner changed to somebody else |
+| `silently_dropped` | open, past its date, and not raised across the last 2 meetings the user actually had with that person |
+| `re_dated` | open, and the due date has moved at least once |
+| `restated` | open, restated with no date movement (the molt) |
+| `open` | none of the above yet |
+
+Precedence runs in that order and the tie breaks are deliberate.
+Ownership modes outrank the rest because a change of hands is true
+forever, while dropped and re-dated describe the last few weeks.
+`silently_dropped` outranks `re_dated` in the other direction: a re-date
+is management, and the point of the dropped mode is that management
+STOPPED. Nothing is hidden by the choice, because `modes` carries the
+rest and `by_mode` counts each item exactly once, so the counts sum to
+`summary.items`.
+
+`silently_dropped` counts MEETINGS WITH THAT PERSON, from
+`person_appearances`, never elapsed days: a fortnight of silence while
+the two of them were never in a room together is not a drop. The
+presence-grade predicate is shared with the 17a signals
+(`people_signals.is_presence_grade`), so both surfaces count the same
+meetings. Shelved items are excluded on the ledger's usual principle:
+"Let it go" is the user releasing the item.
+
+Per item CQ also serves `hop_count`, `deadline_moves`, `days_open` (first
+statement to close or to today), `meetings_since_last_statement`, the
+`owner_change` receipt, and the restatement array itself.
+`object_regression` (did the OBJECT get vaguer, "a name" becoming "a
+person to identify" becoming "a shortlist that still needs cleaning up")
+is honestly `null`: no string comparison separates that from the same
+object in different words, and the seam for a cold path judge is a
+`regressions` map keyed by patch id, with no served field changing shape.
+
+**The rules this surface is built on, which are not negotiable:**
+
+- SHIP THE COUNT, NEVER THE CAUSE. "Six items assigned to this person
+  have each been restated rather than closed, median three hops, zero
+  closures" is checkable by the user AND by the subject. "He avoids
+  accountability" is a verdict, it is unfalsifiable, and no mode name,
+  no field and no string here may carry it.
+- STORE INSTANCES, NEVER TRAITS. A stored trait about a named colleague
+  is a defamation shaped object in a commercial engagement.
+  `patch_ids_by_mode` makes every count openable into the dated, quoted
+  items behind it.
+- NO PERCENTAGE ON A DENOMINATOR UNDER FIVE. One to four observations
+  per person per month means most thirty day ratios are statistically
+  empty. This surface serves no ratio at all: counts, with `items` next
+  to them, so the client can refuse to render.
+- `median_hop_count` is `null` on an empty set, never NaN, and no other
+  float is produced anywhere in the module (GP serializes with
+  `allow_nan=False`).
+
+### 5.11 `commitment_pressure`: the across-people read, which is about the user
+
+On the person LIST route. The finding it exists for is about the person
+running the meetings, not the people in them: follow up pressure can run
+inversely to the delivery record, so the person generating risk gets
+warmth and a re-date while the person who never misses gets interrogated.
+Most of that falls out of the ledger already (`absorbed_by_user`, the
+per person re-date and hop counts say who the user stops chasing and
+whose work they end up holding). CQ serves those counts, their
+denominators and the patch ids behind them, and writes NO interpretation:
+no score, no ranking, no served string naming an asymmetry. The client
+says what it means.
+
+It is computed over the UNFILTERED population, so paging or a
+`min_meetings` filter cannot move a user-level number, and over OPEN
+items only, because the list route does not fetch the completed
+population. `scope` states that on the wire rather than leaving the two
+denominators to be assumed equal with the detail route's.
+
+The other half of that read is `questions` (see 6.6): how much follow up
+pressure each person actually receives.
+
+---
+
 ## 6. Schema
 
 ### 6.1 Shipped (migration 29)
@@ -1156,6 +1276,64 @@ signal for a third party. Voice matching is the app's, and
 identity, not a participant's. A column no writer populates would read
 as "zero confirmed" and become a quiet lie, so the split is reported as
 untracked instead (see 6.4).
+
+### 6.6 Question counts per appearance (shipped, migration 37)
+
+The sibling of migration 34's `turn_count`, and it exists under the same
+constraint: transcripts are derive-then-discard, so a signal not captured
+at ingest is lost forever and every meeting that landed before this
+column existed is permanently unmeasurable. That is the whole argument
+for shipping it before the surface that reads it is finished.
+
+`extraction_schema.question_attribution` parses the same normalized
+transcript `speaker_turn_counts` does, in the same pass, with the same
+hygiene: `(you)` stripped, diarization placeholders dropped, label keys
+lowercased. Six nullable columns land on `person_appearances`:
+`questions_asked`, `questions_received_explicit`,
+`questions_received_inferred`, `questions_from_user_explicit`,
+`questions_from_user_inferred`, `meeting_questions_by_user`.
+
+**The two attribution grades are stored separately and must never be
+summed by a reader.**
+
+- EXPLICIT: the question names its addressee as a vocative, which is
+  defined as comma delimited at an edge of the sentence ("Marcus, can you
+  get me that?", "Can you get me that, Marcus?", or a question that is
+  only a name). High confidence.
+- INFERRED: no name, so the addressee is taken to be whoever speaks next,
+  and only for the questions that TRAIL a turn (the ones after its last
+  statement sentence). That last part is what keeps a rhetorical question
+  the speaker answers themselves out of somebody's row. It is still a
+  heuristic and it is wrong sometimes, which is the point of the column.
+- UNATTRIBUTED: a question to the room with nothing to attribute it to.
+  Counted, never dropped, because it says how much of the meeting the
+  measurement missed.
+
+The interesting false positive is a question that NAMES somebody who is
+not the addressee: "Did Marcus ever send that?" asked of the person
+across the table. A name inside a clause is a name being talked ABOUT, so
+the edge rule leaves it unnamed and it falls into the inferred column.
+Reading it as explicit would put the user's follow up pressure on the
+wrong person's row wearing the high confidence label, which is the one
+error this design cannot absorb. Known limit, recorded as a test: the
+addressee vocabulary is built from SPEAKER LABELS, so a person who is in
+the room and never speaks is not addressable and their vocative falls
+through to the guess. Fixing that means matching spoken names against the
+entity graph, which the pure function has no access to.
+
+NULL is unknown everywhere: the meeting predates the metric, the ingest
+carried no transcript, or no speaker label could be identified as the
+user. Nulls are per FIELD, not per row, because a meeting can know how
+many questions a person was asked and still not know which speaker was
+the user; the `from_user` pair says so rather than reporting a zero the
+transcript never supported. Re-ingesting one meeting keeps the MAX per
+column, never sums, exactly as `turn_count` does.
+
+`meeting_questions_by_user` is the denominator that travels with the
+counts: two questions out of three asked all meeting and two out of forty
+are not the same observation. CQ computes no ratio over them and serves
+no string naming a pattern. Served per meeting in `meetings[].questions`
+and aggregated per person as `questions`.
 
 ### 6.3 Built and held: manifest v9
 
