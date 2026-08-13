@@ -442,6 +442,12 @@ before a merge still lands on the right person. Adds to the above:
 
 ```json
 {
+  "insights": [
+    {"patch_id": "…", "lens": "how_they_decide", "text": "…", "do": "…",
+     "derived_at": "2026-08-11T…Z", "decay_state": "live",
+     "evidence": [{"origin_id": "…", "ingested_on": "2026-06-17",
+                   "date": "2026-06-17", "text": "…", "patch_ids": ["…"]}]}
+  ],
   "projects": [
     {"project_id": "…", "project": "Atlas Migration",
      "meeting_count": 5, "observed": true, "stated": false}
@@ -487,7 +493,9 @@ is meeting_count descending then name, so a browse surface does not
 reshuffle between polls.
 
 `you_owe` is `null`, not `[]`. An empty list means "none open"; null
-means CQ cannot tell. See 6.4.
+means CQ cannot tell. See 6.4. `insights` (5.8) carries the same
+distinction: `null` when CQ cannot derive for this person at all, `[]`
+when the pass has produced nothing yet.
 
 CQ deliberately does **not** return meeting titles or durations. Per
 doc 15 item 5, CQ wins on state and SS wins on content. SS joins
@@ -733,6 +741,118 @@ on prod could not say whether a client deleted them or time did. Old
 rows stay null = unknown; a new archive site that stamps nothing fails
 `test_shelve_triage.py`.
 
+### 5.8 Insights: the 16a lens stack (detail route only)
+
+SS design 16a puts a stack of up to three lens cards above the
+obligations ledger. CQ's half is the `insights` array on
+`GET /v1/people/{user_id}/{entity_id}`. There is no insight on the list
+row and there will not be: a stack of claims per row is a different
+product than a directory.
+
+```json
+"insights": [
+  {"patch_id": "…",
+   "lens": "how_they_decide",
+   "text": "Agrees in the room and reopens scope on the thread afterwards.",
+   "do": "End the meeting with him restating the deliverable in his words.",
+   "derived_at": "2026-08-11T…Z",
+   "decay_state": "live",
+   "evidence": [
+     {"origin_id": "…",
+      "ingested_on": "2026-06-17",
+      "date": "2026-06-17",
+      "text": "Agreed to the env strategy, reopened it the next morning.",
+      "patch_ids": ["…", "…"]}
+   ]}
+]
+```
+
+**Where it comes from.** The worker's consolidation loop runs a
+person-keyed pass (`_consolidate_user_people`, doc 14 has the machinery)
+over the items connected to a person patch by the ownership edge. One
+LLM call per person cluster returns a lens, a one-sentence claim, and one
+imperative `do` line, or declines. The claim and the `do` are served
+together or not at all: the parse rejects a claim with no actionable
+line, because 16a renders both or neither.
+
+**The lens vocabulary is CQ-side, not manifest-declared.**
+`PROFILE_LENSES` in `services/consolidation.py` holds it:
+`how_they_decide` and `what_moves_them`. A response naming anything else
+is declined, never coerced. This is deliberate asymmetry: an app declares
+WHICH of its types and labels carry People semantics (5.9), but it does
+not get to invent lenses, because the lens is the thing the prompt, the
+card layout and the suppression rule all agree on. Adding a lens is a CQ
+change, and it reopens every person for one more derivation by design.
+
+**The receipts gate.** A claim about a person must be supported across at
+least `min_meetings` DISTINCT meetings (default 3), or it is an anecdote
+wearing a pattern's clothes. Checked in the cluster SQL and re-checked in
+code against the fetched sources, sanitizer style.
+
+**The durable no is per LENS.** Suppressing a card rides the existing
+`DELETE /v1/patches/{id}` route, which archives. The pass's idempotency
+check therefore ignores `status`: an archived insight is the record of a
+lens the user said no to, and it is never re-derived. What changed on
+2026-08-13 is the KEY. It used to match any prior insight for the person,
+which meant the first card closed the person forever and a second lens
+was structurally impossible, so the stack could never be a stack. The
+gate now counts DISTINCT `value.lens` stamps for that person (archived
+rows included) and admits them while that count is below the vocabulary
+size. The lens itself cannot be in the pre-filter, because the model
+picks it AFTER the call, so the authoritative refusal is a post-check:
+the taken set is re-read once the model answers, and a repeat lens is
+declined with no write. The prompt is told which lenses are taken, but
+only to save a wasted call; a prompt is a hint and this is an invariant.
+
+One consequence worth stating: a person missing both lenses gains at most
+one card per consolidation cycle (one cluster row, one call), so the
+second lands on the next 24h pass.
+
+**Fields.**
+
+* `lens` names which card this is. Clients should treat the vocabulary as
+  open and skip a lens they do not render, the same posture as
+  `decay_state`.
+* `decay_state` is the INSIGHT patch's own band: `live | aging | stale`,
+  from `services/decay_model.py`, the same module the worker's decay loop
+  and the ledger items read, with the same UTC-day bucketing. Null means
+  the type carries no TTL anywhere, so decay is not tracked for it, never
+  a band CQ cannot stand behind. It is deliberately NOT a confidence
+  float over the sources: the source types decay at wildly different
+  rates (takeaway 14 days, blocker and commitment 30, and `decision` is
+  pinned to never decay at all), so a per-source fraction would report a
+  threshold the decay loop never acts on, which is the exact split brain
+  `decay_model.py` exists to prevent. If the design wants "how much
+  support is still inside the window", that is a new measurement to agree
+  on, not a number to synthesize here.
+* `evidence` is one row per DISTINCT meeting behind the claim. `text` is
+  the source patch's OWN text. That does not cross the doc 15 line: a
+  meeting TITLE is app content, a patch's text is CQ state. When several
+  sources share a meeting the representative is the oldest by
+  `created_at` with `patch_id` breaking ties, a total order, so two
+  identical calls render identically. `patch_ids` carries all the live
+  sources from that meeting so the client can join to patches it already
+  holds.
+* **`ingested_on` is an INGEST date, not a meeting date.** It is
+  `min(created_at)` on the source patches: the day CQ stored them. CQ
+  persists no meeting date and will not invent one. Join `origin_id` to
+  the app's own meeting record for the real date and duration, the same
+  split as everywhere else in this document. `date` is the original name
+  of this same field and survives as an alias, because the served surface
+  is additive only (doc 17 section 6); it is the same ingest date and
+  carries no other meaning.
+* Archived sources are NOT served as evidence: a decayed or superseded
+  patch is not a live receipt. This can drop the list below the
+  `min_meetings` that created the insight. The honest list is served
+  anyway and the count speaks. It is never padded back up.
+
+**Null versus empty.** `insights` is `null` when CQ cannot answer at all:
+the entity has no person patch (nothing to derive from), or the fetch
+failed and was swallowed so the detail route never fails on this leg. An
+empty LIST means the pass has produced nothing yet. Same house rule as
+`you_owe` (6.4). Whether the app can EVER have insights is
+`capabilities.insights`.
+
 ---
 
 ## 6. Schema
@@ -885,6 +1005,18 @@ confirmed/assumed mention split. An empty *list* means "none open"; a
 distinguishes them.
 
 Flip an entry to `available: true` in the same PR that makes it true.
+
+`insights` (added 2026-08-13) follows `you_owe` exactly: it reads from
+the CALLER'S manifest, not from CQ's code. An app that declares no
+person-clustered consolidation rule never runs the profile pass, so the
+lens stack is not empty for it, it is unavailable, and the entry says so
+with a reason. Two apps reading the same user can honestly get different
+answers. Note the boundary: the capability answers "can this app ever
+have insights", the per-person `null` answers "can CQ derive them for
+THIS person". The `CQ_CONSOLIDATION_ENABLED` kill switch is deliberately
+not folded in, because it is the worker's environment and the API process
+cannot see the worker's copy of it; existing insights keep serving while
+it is off.
 
 ### 6.5 SHIPPED: a merge folds duplicate person patches
 

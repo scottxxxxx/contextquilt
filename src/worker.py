@@ -79,12 +79,14 @@ from contextquilt.services.consolidation import (
     MAX_CLUSTERS_PER_USER_PER_CYCLE,
     MAX_SOURCE_TEXTS,
     MAX_USERS_PER_APP_PER_CYCLE,
+    PROFILE_LENSES,
     PROFILE_SYSTEM,
     build_profile_content,
     build_synthesis_content,
     parse_consolidation_rules,
     parse_profile_response,
     parse_synthesis_response,
+    remaining_lenses,
 )
 from contextquilt.services.corrections import (
     COMPLETION_SYSTEM,
@@ -2278,14 +2280,24 @@ class ColdPathWorker:
         receipts gate) with >= min_patches members. Three deliberate
         differences from the cue pass:
 
-        - The idempotency check ignores status: a user-deleted insight
-          (hold-to-suppress rides DELETE /patches, archive_cause
-          user_delete) is a durable no, never re-derived.
+        - The idempotency check ignores status, PER LENS: a user-deleted
+          insight (hold-to-suppress rides DELETE /patches, archive_cause
+          user_delete) is a durable no for the lens it carried, never
+          re-derived. It is not a no for the person's other lenses,
+          which is what lets 16a stack more than one card. The SQL gate
+          counts DISTINCT lens stamps rather than naming one, because
+          the model picks the lens AFTER the call; the authoritative
+          per-lens refusal is the post-check in
+          `_synthesize_person_cluster`.
         - The SELF person is excluded: 16a's lenses are about the
           counterparty; insights about the user belong to the self-typed
           machinery.
         - Sources must carry origin_ids, because the receipts ARE the
           meetings.
+
+        A person missing both lenses gains at most one per cycle (one
+        cluster row, one call), so the second card lands on the next
+        consolidation pass rather than in the same one.
         """
         if budget <= 0:
             return 0
@@ -2321,16 +2333,20 @@ class ColdPathWorker:
               AND cp.created_at > NOW() - INTERVAL '{CLUSTER_WINDOW_DAYS} days'
               AND ($9::text IS NULL
                    OR lower(btrim(op.value->>'text')) <> lower(btrim($9)))
-              -- durable-no idempotency: ANY prior derived insight for this
-              -- person, INCLUDING archived (user-deleted), blocks re-derivation
-              AND NOT EXISTS (
-                  SELECT 1 FROM context_patches d
+              -- durable-no idempotency, PER LENS: every lens already
+              -- stamped for this person counts, INCLUDING archived
+              -- (user-deleted) ones, so a suppressed lens stays
+              -- suppressed. The person leaves the candidate set only
+              -- once the stamps cover the whole lens vocabulary.
+              AND (
+                  SELECT count(DISTINCT d.value->>'lens')
+                  FROM context_patches d
                   JOIN patch_subjects dps ON dps.patch_id = d.patch_id
                   WHERE dps.subject_key = $1
                     AND d.patch_type = $4
                     AND d.origin_mode = 'derived'
                     AND d.value->>'source_person' = op.patch_id::text
-              )
+              ) < $11
             GROUP BY op.patch_id, op.value->>'text'
             HAVING count(DISTINCT cp.patch_id) >= $5
                AND count(DISTINCT cp.origin_id) >= $6
@@ -2340,6 +2356,7 @@ class ColdPathWorker:
             subject_key, app_id, rule["from_types"], rule["produce_type"],
             rule["min_patches"], rule["min_meetings"],
             vocab.ownership_label, vocab.person_type, self_name, budget,
+            len(PROFILE_LENSES),
         )
         created = 0
         for cluster in clusters:
@@ -2352,14 +2369,44 @@ class ColdPathWorker:
                 created += 1
         return created
 
+    async def _taken_lenses(
+        self, subject_key: str, produce_type: str, person_patch_id: str,
+    ) -> set:
+        """Every lens already stamped for this person, in ANY status.
+
+        No status predicate, deliberately: an archived (user-deleted)
+        insight is the record of a lens the user said no to, and reading
+        only active rows would re-derive the card they suppressed.
+        """
+        rows = await self.db.fetch(
+            """
+            SELECT DISTINCT d.value->>'lens' AS lens
+            FROM context_patches d
+            JOIN patch_subjects dps ON dps.patch_id = d.patch_id
+            WHERE dps.subject_key = $1
+              AND d.patch_type = $2
+              AND d.origin_mode = 'derived'
+              AND d.value->>'source_person' = $3
+            """,
+            subject_key, produce_type, person_patch_id,
+        )
+        return {r["lens"] for r in rows if r["lens"]}
+
     async def _synthesize_person_cluster(
         self, subject_key: str, app_id: str, rule: dict,
         person_patch_id: str, person_name: str, source_patch_ids: list,
     ) -> bool:
-        """One profile call + provenance write. The receipts gate is
-        re-checked here against the fetched sources (sanitizer-style
-        second layer): the claim never ships on fewer distinct meetings
-        than the rule demands, whatever the cluster query said."""
+        """One profile call + provenance write. Two invariants are
+        re-checked here against fetched state (sanitizer-style second
+        layer): the claim never ships on fewer distinct meetings than
+        the rule demands, whatever the cluster query said, and it never
+        ships on a lens this person already carries in any status.
+
+        The lens check has to live here because the lens does not exist
+        until the model answers. The prompt is told which lenses are
+        taken, but a prompt is a hint and this is an invariant, so the
+        answer is checked on the way in and a repeat lens is declined
+        without a write."""
         rows = await self.db.fetch(
             """
             SELECT value->>'text' AS text, origin_id, created_at
@@ -2376,11 +2423,17 @@ class ColdPathWorker:
         distinct_origins = {r["origin_id"] for r in rows if r["origin_id"]}
         if len(dated) < rule["min_patches"] or len(distinct_origins) < rule["min_meetings"]:
             return False
+        taken_lenses = await self._taken_lenses(
+            subject_key, rule["produce_type"], person_patch_id
+        )
+        if not remaining_lenses(taken_lenses):
+            return False
         try:
             response = await self.llm.extract(
                 system_prompt=PROFILE_SYSTEM,
                 user_content=build_profile_content(
-                    person_name, dated, rule.get("guidance")
+                    person_name, dated, rule.get("guidance"),
+                    taken_lenses=taken_lenses,
                 ),
             )
             profile = parse_profile_response(response.content)
@@ -2391,6 +2444,19 @@ class ColdPathWorker:
             return False
         if not profile:
             logger.debug("profile_declined", subject=subject_key, person=person_name)
+            return False
+
+        # The post-check. Re-read rather than trusting the pre-call set:
+        # the LLM call is seconds of wall clock, and this is the one
+        # place the per-lens durable no is actually enforced.
+        taken_lenses = await self._taken_lenses(
+            subject_key, rule["produce_type"], person_patch_id
+        )
+        if profile["lens"] in taken_lenses:
+            logger.debug(
+                "profile_lens_already_taken",
+                subject=subject_key, person=person_name, lens=profile["lens"],
+            )
             return False
 
         patch_id = str(uuid.uuid4())

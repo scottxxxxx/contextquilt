@@ -192,6 +192,18 @@ READ_CAPABILITIES: dict = {
             "person-level confirmed flag is real."
         ),
     },
+    # The 16a lens stack. Served on the DETAIL route only; the list rows
+    # carry no insights and never will, because a stack of claims per
+    # row is a different product than a directory.
+    "insights": {
+        "available": False,
+        "reason": (
+            "This app's registered manifest declares no person-clustered "
+            "consolidation rule, so the profile pass never runs for it and "
+            "no insight is ever derived. Declare one (cluster: person) to "
+            "turn the lens stack on (docs/architecture/16-people.md 5.8)."
+        ),
+    },
 }
 
 
@@ -327,16 +339,22 @@ def is_self_owned(owner: object, user_label: "str | None") -> bool:
     return is_user_reference(owner, user_label)
 
 
-def capability_report(owed_to_available: bool = False) -> dict:
+def capability_report(
+    owed_to_available: bool = False,
+    insights_available: bool = False,
+) -> dict:
     """The capabilities block echoed on every People read.
 
-    `owed_to_available` comes from the CALLER'S manifest, so two apps
-    reading the same user can honestly get different answers: one whose
-    schema declares the counterparty label, one whose does not.
+    Both flags come from the CALLER'S manifest, so two apps reading the
+    same user can honestly get different answers: one whose schema
+    declares the counterparty label or the person-clustered
+    consolidation rule, one whose does not.
     """
     report = {name: dict(spec) for name, spec in READ_CAPABILITIES.items()}
     if owed_to_available:
         report["you_owe"] = {"available": True, "reason": None}
+    if insights_available:
+        report["insights"] = {"available": True, "reason": None}
     return report
 
 
