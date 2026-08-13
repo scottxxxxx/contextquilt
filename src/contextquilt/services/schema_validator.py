@@ -65,6 +65,30 @@ PATCH_TYPE_OPTIONAL = {
     # Per-type associative-retrieval cue instruction (rendered by the
     # schema prompt builder's CUES section).
     "cue_guidance",
+    # Storage behavior, both absent by default and both meaning today's
+    # behavior when absent.
+    #
+    # `collapse_duplicates: false` opts a type OUT of the trigram and
+    # semantic dedup tiers: two similar observations in two meetings are a
+    # trajectory, not a duplicate, and collapsing them destroys a receipt.
+    # Distinct from `longitudinal`, which additionally asserts series
+    # identity (a descriptor field, a patch_observations history) and is
+    # wired only into structured ingest.
+    #
+    # `origin_scoped: true` stamps origin_id/origin_type on a type that is
+    # meeting-bound without being project-bound. Without it such a type
+    # lands with a null origin and is unclusterable by the profile pass,
+    # which counts distinct origins as meetings.
+    "collapse_duplicates", "origin_scoped",
+    # `ledger_tracked: true` puts this type's objects in the item ledger:
+    # things that can be UNRESOLVED and are therefore worth holding
+    # across meetings to see whether they keep coming back. A completable
+    # type is already in (the runtime unions the completables), so this
+    # key exists for the objects completability cannot describe: a
+    # question nobody answered, a decision that keeps being revisited, an
+    # unowned concern. Absent means not declared, which is today's
+    # behavior. See doc 16 section 5.9a and migration 38.
+    "ledger_tracked",
 }
 
 LABEL_REQUIRED = {"label", "role", "from_types", "to_types", "description"}
@@ -283,7 +307,10 @@ def _validate_patch_type(pt: Any, idx: int) -> List[str]:
         errors.append(f"{prefix}.value_shape must be a non-empty object.")
 
     # Optional typed fields
-    for bool_field in ("completable", "project_scoped", "self_only", "longitudinal"):
+    for bool_field in (
+        "completable", "project_scoped", "self_only", "longitudinal",
+        "collapse_duplicates", "origin_scoped",
+    ):
         if bool_field in pt and not isinstance(pt[bool_field], bool):
             errors.append(f"{prefix}.{bool_field} must be a boolean.")
 

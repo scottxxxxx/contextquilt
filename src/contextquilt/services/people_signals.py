@@ -30,6 +30,93 @@ def _day(ts) -> Optional[date]:
     return None
 
 
+def is_presence_grade(appearance: dict) -> bool:
+    """True when an appearance row is evidence the person was THERE.
+
+    A mention is not a meeting (the RV/Raj field report, 2026-08-11):
+    someone NAMED in a room did not attend it, and "met 2 hours ago" is
+    a presence claim. Presence grade = speaker or ownership capacity;
+    EMPTY capacities are pre-migration-31 rows and count as presence per
+    that migration's own rule (unknown must not become "did not
+    attend"). Mention-only rows still exist on the person (the directory
+    knows the name) but never feed a presence number.
+
+    Module level so the commitment ledger's "meetings since this was
+    last said" counts the SAME meetings this module's cadence does. Two
+    definitions of presence would let one surface say a person has been
+    met twice since an item went quiet while another says nothing has
+    happened.
+    """
+    caps = set(appearance.get("capacities") or [])
+    return not caps or bool(caps & {"speaker", "ownership"})
+
+
+QUESTION_FIELDS = (
+    "questions_asked",
+    "questions_received_explicit",
+    "questions_received_inferred",
+    "questions_from_user_explicit",
+    "questions_from_user_inferred",
+)
+
+
+def compute_question_totals(appearances: List[dict]) -> Dict:
+    """One person's question counts across the meetings CQ measured.
+
+    Captured per appearance at ingest (migration 37) because transcripts
+    are derive-then-discard. What this is for: CQ can say what a person
+    owes and how their items closed, and this is the other half, who the
+    user actually presses for an answer. CQ serves both sets of counts
+    and says nothing about how they line up. There is no ratio here, no
+    score, and no served string naming a pattern; that reading belongs to
+    the client, on numbers it can open.
+
+    Two grades, never summed. `explicit` is a vocative CQ read in the
+    transcript ("Marcus, can you get me that?"). `inferred` is a guess
+    from who spoke next, and it is wrong sometimes. A client may render
+    the explicit column alone; it could never separate them again if CQ
+    added them together here.
+
+    Every total carries its denominators: `meetings_measured` (how many
+    of this person's meetings carried the metric at all, which is zero
+    for every meeting that predates it) and `user_asked_total` (how many
+    questions the user asked in those meetings, so two out of three and
+    two out of forty do not render the same). Null everywhere means
+    cannot tell, never zero asked.
+    """
+    measured = [
+        a for a in appearances or ()
+        if any(a.get(f) is not None for f in QUESTION_FIELDS)
+    ]
+    present = [a for a in appearances or () if is_presence_grade(a)]
+
+    def _sum(field: str) -> Optional[int]:
+        # Null per FIELD, not per row: a meeting can know how many
+        # questions a person asked and still not know which speaker was
+        # the user, and the from_user pair has to say so rather than
+        # report a zero the transcript never supported.
+        vals = [a.get(field) for a in measured if a.get(field) is not None]
+        return sum(vals) if vals else None
+
+    user_asked = [
+        a.get("meeting_questions_by_user") for a in measured
+        if a.get("meeting_questions_by_user") is not None
+    ]
+    return {
+        "meetings_measured": len(measured),
+        "meetings_present": len(present),
+        "asked": _sum("questions_asked"),
+        "received_explicit": _sum("questions_received_explicit"),
+        "received_inferred": _sum("questions_received_inferred"),
+        "from_user_explicit": _sum("questions_from_user_explicit"),
+        "from_user_inferred": _sum("questions_from_user_inferred"),
+        # The denominator for the from_user pair: every question the user
+        # asked in the measured meetings, whoever it landed on. Null when
+        # no meeting could identify which speaker is the user.
+        "user_asked_total": sum(user_asked) if user_asked else None,
+    }
+
+
 def compute_person_signals(
     appearances: List[dict],
     they_owe: List[dict],
@@ -46,18 +133,9 @@ def compute_person_signals(
     """
     today = today or datetime.now(timezone.utc).date()
 
-    # A mention is not a meeting (the RV/Raj field report, 2026-08-11):
-    # someone NAMED in a room did not attend it, and "met 2 hours ago"
-    # is a presence claim. Presence-grade = speaker or ownership
-    # capacity; EMPTY capacities are pre-migration-31 rows and count as
-    # presence per that migration's own rule (unknown must not become
-    # "did not attend"). Mention-only rows still exist on the person
-    # (the directory knows the name) but never feed a presence number.
-    def _present(a) -> bool:
-        caps = set(a.get("capacities") or [])
-        return not caps or bool(caps & {"speaker", "ownership"})
-
-    present = [a for a in appearances if _present(a)]
+    # A mention is not a meeting: see is_presence_grade, which is now
+    # module level so the commitment ledger counts the same meetings.
+    present = [a for a in appearances if is_presence_grade(a)]
     present_days = sorted(
         {d for a in present if (d := _day(a.get("last_seen_at")))}
     )

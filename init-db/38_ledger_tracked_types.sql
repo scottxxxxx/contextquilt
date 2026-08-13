@@ -1,0 +1,35 @@
+-- Migration 38: ledger eligibility as its own per-type declaration.
+--
+-- The item ledger holds objects that KEEP COMING BACK WITHOUT
+-- RESOLVING. A commitment is one kind of such object. A question nobody
+-- answered, a decision that keeps getting revisited and an unowned
+-- concern are others, and mechanically they are identical: an object,
+-- restated across meetings, state unchanged.
+--
+-- Eligibility could not be read off `is_completable`, which is why this
+-- column exists. In this schema completability means a type can be
+-- CLOSED by the completion machinery, and it drags two other behaviors
+-- with it: deadline anchoring in the decay loop (an item with a due
+-- date must never archive before it) and membership of the People
+-- `commitments.they_owe` ledger. A recurring question has no due date
+-- and is not something a person OWES, so declaring its type completable
+-- to get it into the ledger would be wrong in both directions at once.
+--
+-- So the runtime resolves eligibility as a UNION: every completable
+-- type (which is what keeps day one coverage byte-identical to what
+-- shipped, since ShoulderSurf's commitment and blocker arrive through
+-- that half with no manifest change at all), PLUS any type whose
+-- manifest declares `ledger_tracked: true`. The first half says "this
+-- can be finished". The second says "this can be UNFINISHED", and only
+-- the second one generalises past commitments.
+--
+-- NULL and FALSE are the same answer here, deliberately: not declared,
+-- which is today's behavior. This is the additive-by-default rule the
+-- `collapse_duplicates` and `origin_scoped` keys already follow.
+--
+-- The read side never fails on the absence of this column: the runtime
+-- reads it through to_jsonb so a database that has not applied this
+-- migration returns NULL rather than erroring the whole snapshot.
+
+ALTER TABLE patch_type_registry
+    ADD COLUMN IF NOT EXISTS ledger_tracked BOOLEAN DEFAULT FALSE;

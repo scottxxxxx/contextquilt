@@ -17,6 +17,12 @@ and rely on prompt-described shape instead.
 import re
 from datetime import date, timedelta
 
+from .follow_through import (
+    CHARACTER_TRAIT_WORDS,
+    CHARACTER_WORDS,
+    character_word_in,
+)
+
 PATCH_TYPES = [
     "trait",
     "preference",
@@ -915,6 +921,159 @@ def strip_prose_from_person_names(content: dict) -> dict:
     return content
 
 
+def sanitize_behavior_observations(content: dict) -> dict:
+    """Drop behavioral observations that state character instead of conduct.
+
+    Guardrail 12b says a claim cites observable behavior and never
+    character: "reopens vague commitments" is something a reader can check
+    against a transcript, "insecure" is a verdict about a human being. The
+    guardrail was written for the claim the profile pass writes, but the
+    pass can only be as good as what it reads, and behavioral observations
+    are captured at extraction. So the rule is enforced here too, on the
+    corpus, and not only on the sentence written from it.
+
+    Dropping rather than rewriting is deliberate. There is no honest
+    repair for "Yardley is defensive about review feedback": the observable
+    thing that provoked it was not recorded, so anything we kept would be
+    the verdict with the evidence still missing. A dropped observation
+    costs one row; a stored one poisons every lens that later reads this
+    person's corpus, and does it invisibly.
+
+    Two mechanics that matter:
+
+    - Only types in BEHAVIOR_OBSERVATION_TYPES are inspected. Every other
+      type passes through untouched, so a manifest that declares no such
+      type gets byte-identical output.
+    - Any other patch's `connects_to` entry pointing at a dropped
+      observation is stripped, exactly as the placeholder-person sanitizer
+      does. Without that, the Pass-2 resolver in `store_connected_patches`
+      finds an unresolved target and SYNTHESIZES a stub patch carrying the
+      same text, which would put the dropped verdict back in the quilt
+      with a lower confidence and no origin.
+
+    English only, and the limit is real rather than theoretical:
+    extraction writes in the language of the meeting, so a character
+    verdict in Spanish or Japanese passes this function untouched and is
+    governed only by the manifest guidance the model was shown. See
+    `follow_through.CHARACTER_TRAIT_WORDS`.
+
+    Mutates content in place; returns it. Records what it dropped in
+    ``content["_behavior_observations_sanitized"]``.
+    """
+    patches = content.get("patches")
+    if not isinstance(patches, list) or not patches:
+        return content
+
+    dropped: list[dict] = []
+    dropped_targets: set[tuple] = set()
+    kept: list[dict] = []
+
+    for patch in patches:
+        if not isinstance(patch, dict) or patch.get("type") not in BEHAVIOR_OBSERVATION_TYPES:
+            kept.append(patch)
+            continue
+        value = patch.get("value")
+        text = value.get("text") if isinstance(value, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            kept.append(patch)
+            continue
+        word = character_word_in(text, CHARACTER_WORDS + CHARACTER_TRAIT_WORDS)
+        if word is None:
+            kept.append(patch)
+            continue
+        dropped.append({
+            "type": patch.get("type"),
+            "text": text[:120],
+            "word": word,
+        })
+        dropped_targets.add((patch.get("type"), text.strip().lower()))
+
+    if not dropped:
+        return content
+
+    content["patches"] = kept
+    for patch in kept:
+        connects = patch.get("connects_to")
+        if not isinstance(connects, list):
+            continue
+        patch["connects_to"] = [
+            c for c in connects
+            if not (
+                isinstance(c, dict)
+                and isinstance(c.get("target_text"), str)
+                and (c.get("target_type"), c["target_text"].strip().lower())
+                in dropped_targets
+            )
+        ]
+
+    content["_behavior_observations_sanitized"] = {
+        "dropped": dropped,
+        "count": len(dropped),
+    }
+    return content
+
+
+# ------------------------------------------------------------------
+# Manifest-declared storage behavior
+# ------------------------------------------------------------------
+# Two per-type opt-ins the storage sink reads. Both are absent from every
+# manifest registered before this change, and absent means today's
+# behavior, so nothing that ships now moves.
+
+
+def _flagged_patch_types(manifest: object, key: str, want: bool) -> frozenset:
+    """Every declared domain_type whose `key` flag is exactly `want`."""
+    if not isinstance(manifest, dict):
+        return frozenset()
+    out = set()
+    for pt in manifest.get("patch_types") or []:
+        if not isinstance(pt, dict):
+            continue
+        name = pt.get("domain_type")
+        if isinstance(name, str) and name and pt.get(key) is want:
+            out.add(name)
+    return frozenset(out)
+
+
+def no_collapse_patch_types(manifest: object) -> frozenset:
+    """Types that declared `collapse_duplicates: false`.
+
+    Storage dedup is type-blind: the trigram fast path merges any two
+    same-type patches whose text is similar enough, which is right for a
+    fact ("ship the API by Friday" said twice is one commitment) and
+    destructive for an observation. Two observations of the same behavior
+    in two meetings are a TRAJECTORY, which is the same argument doc 12
+    section 3.1 makes about ratings. Worse, a collapse keeps only the
+    surviving patch's origin_id, so it silently destroys a receipt, and
+    the profile pass gates on distinct meetings.
+
+    Deliberately NOT the existing `longitudinal` flag. That one carries
+    series identity semantics (a descriptor field, a patch_observations
+    history, one row per series) that answer a different question, and it
+    is wired only into structured ingest. This flag says one thing:
+    never merge two of these, ever.
+    """
+    return _flagged_patch_types(manifest, "collapse_duplicates", False)
+
+
+def origin_scoped_patch_types(manifest: object) -> frozenset:
+    """Types that declared `origin_scoped: true`.
+
+    The storage sink stamps `origin_id` only on project-scoped types, so a
+    type that is meeting-bound but NOT project-bound lands with a null
+    origin: no receipt, invisible to the meeting view, and structurally
+    unclusterable by the profile pass, whose cluster query requires
+    `origin_id IS NOT NULL` and counts distinct origins as meetings.
+
+    This flag separates the two ideas that gate used to conflate. Project
+    scoping says WHICH project a patch belongs to; origin scoping says
+    the patch records something that happened at a particular moment and
+    must remember which one. A patch type can now say the second without
+    claiming the first.
+    """
+    return _flagged_patch_types(manifest, "origin_scoped", True)
+
+
 # Types that only make sense attached to a project the (you) speaker owns.
 # The quilt is user-centric — patches must anchor to something the user
 # cares about. A decision/commitment/blocker/takeaway/role with no project
@@ -1189,10 +1348,31 @@ def enforce_connection_requirements(
 
 # Action-item types that gain a `person → owns → action` connection when
 # the LLM extracts a named human as their owner. Mirrors the SS app's
-# `owns` connection vocabulary: from={person} to={commitment,blocker,decision,goal}.
+# `owns` connection vocabulary: from={person}
+# to={commitment,blocker,decision,goal,behavior}.
+#
+# `behavior` is here because the ownership edge is the ONLY way anything
+# reaches a person: the profile pass clusters on it, and a type absent
+# from this set can be declared in a manifest, extracted, stored, and
+# still never be seen by a lens. A behavioral observation whose whole
+# purpose is to describe one named person is the strongest member of the
+# set, not an exception to it.
+#
+# Still a hardcoded SS name list, and still the read side's standing debt
+# (project_facet_runtime_debt). The general form is already sitting in
+# every manifest: this set IS `connection_labels[label=owns].to_types`,
+# which for SS v11 is exactly these five names. Deriving it needs the
+# manifest threaded into the enforcer and its mirror, which is a wider
+# change than this one earns.
 PERSON_OWNED_ACTION_TYPES = frozenset(
-    {"commitment", "blocker", "decision", "goal"}
+    {"commitment", "blocker", "decision", "goal", "behavior"}
 )
+
+# Types whose text is a claim about how a named human conducted
+# themselves, and which are therefore held to guardrail 12b at capture
+# time: cite observable behavior, never character. Same hardcoded-name
+# caveat as the set above.
+BEHAVIOR_OBSERVATION_TYPES = frozenset({"behavior"})
 
 # Owner-text values that MUST NOT trigger a synthetic person patch:
 # - the (you) speaker (their attribution is implicit via patch ownership)
@@ -1260,6 +1440,230 @@ def speaker_turn_counts(text: object, user_label: "str | None" = None) -> dict:
         key = name.lower()
         counts[key] = counts.get(key, 0) + 1
     return counts
+
+
+# One turn: a speaker label and everything said until the next label.
+_TURN = re.compile(r"^\s*\[([^\]]{1,60})\]([^\[]*)", re.MULTILINE)
+# Sentences, keeping the terminator so a question can be recognized by it.
+_SENTENCE = re.compile(r"[^.!?\n]+[.!?]+|[^.!?\n]+")
+# Openers that sit in front of a vocative and are not part of the name.
+_VOCATIVE_FILLER = frozenset({
+    "hey", "hi", "hello", "ok", "okay", "so", "and", "but", "well",
+    "um", "uh", "yeah", "yep", "right", "look", "listen", "sorry",
+})
+_NAME_EDGE = re.compile(r"^[\s\"'`().,!?-]+|[\s\"'`().,!?-]+$")
+
+
+def _clean_name(fragment: str) -> str:
+    return _NAME_EDGE.sub("", fragment or "").strip().lower()
+
+
+def _strip_vocative_filler(fragment: str) -> str:
+    """Drop leading interjections so "Hey Marcus" reads as "Marcus"."""
+    tokens = _clean_name(fragment).split()
+    while tokens and tokens[0] in _VOCATIVE_FILLER:
+        tokens = tokens[1:]
+    return " ".join(tokens)
+
+
+def _addressee_vocabulary(labels: "set") -> dict:
+    """Every spoken form that unambiguously names one speaker label.
+
+    The full label, plus its first token when no other speaker in the
+    room shares it. Two Marcuses in one meeting means "Marcus" names
+    nobody in particular, and an ambiguous vocative must fall through to
+    the inferred column rather than pick one at random.
+    """
+    vocab: dict = {}
+    first_tokens: dict = {}
+    for label in labels:
+        vocab[label] = label
+        head = label.split()[0] if label.split() else ""
+        if head and head != label:
+            first_tokens.setdefault(head, set()).add(label)
+    for head, owners in first_tokens.items():
+        if len(owners) == 1 and head not in vocab:
+            vocab[head] = next(iter(owners))
+    return vocab
+
+
+def _explicit_addressee(question: str, vocab: dict, speaker: str) -> "str | None":
+    """The speaker label a question NAMES as its addressee, or None.
+
+    A vocative is comma delimited and sits at an edge of the sentence:
+    "Marcus, can you get me that?" and "Can you get me that, Marcus?".
+    A name in the middle of a clause is a name being TALKED ABOUT, not
+    an addressee, and the difference is the whole reliability of this
+    column: "Did Marcus ever send that?" asked of somebody else names
+    Marcus and is addressed to the person across the table. That case
+    returns None here and falls through to the inferred column, where a
+    client can choose not to trust it. Reading it as explicit would put
+    the user's follow up pressure on the wrong person's row with the
+    high confidence label attached, which is the one error this design
+    cannot absorb.
+
+    A question that is nothing but a name ("Marcus?") is explicit too.
+    """
+    body = _NAME_EDGE.sub("", question or "")
+    if not body:
+        return None
+    parts = [p for p in body.split(",")]
+    candidates = []
+    if len(parts) >= 2:
+        candidates.append(_strip_vocative_filler(parts[0]))
+        candidates.append(_clean_name(parts[-1]))
+    else:
+        candidates.append(_clean_name(body))
+    for c in candidates:
+        target = vocab.get(c)
+        if target and target != speaker:
+            return target
+    return None
+
+
+def question_attribution(text: object, user_label: "str | None" = None) -> dict:
+    """Who asked the questions in a transcript, and who they were asked OF.
+
+    The sibling of `speaker_turn_counts`, and it exists for the same
+    reason and under the same constraint: the transcript is in hand
+    exactly once, at ingest, and this signal can NEVER be backfilled.
+    Every meeting that lands before this ships is permanently
+    unmeasurable, which is why it is worth capturing before there is a
+    surface that reads it.
+
+    What it is for: follow up pressure. CQ can already say what each
+    person owes and how their items closed. It cannot say who the user
+    actually presses, and the interesting question about a set of
+    meetings is whether those two line up. This module measures; it
+    draws no conclusion, computes no ratio, and names no asymmetry.
+
+    Attribution runs in three grades and they are NEVER summed:
+
+    - EXPLICIT: the question names its addressee as a vocative. High
+      confidence, see `_explicit_addressee`.
+    - INFERRED: the question ends the turn and somebody else speaks
+      next, so the addressee is taken to be them. A heuristic, and
+      wrong sometimes: a person who ignores a question asked to the room
+      and changes the subject collects it. Kept in its own column so a
+      client can trust the explicit one alone, which it could never do
+      again if the two were blended into a number.
+    - UNATTRIBUTED: a question to the room with nothing to attribute it
+      to. Counted, never dropped, because it is the denominator that
+      says how much of the meeting this measurement missed.
+
+    Rhetorical questions are the reason inference only fires on a turn's
+    TRAILING questions (the ones after its last statement sentence): "Why
+    did that slip? Because legal." answers itself, and the next speaker
+    did not receive it. "Why did that slip? Because legal. Can you fix
+    it?" attributes only the last one.
+
+    Same hygiene as `speaker_turn_counts`: `(you)` stripped, diarization
+    placeholders dropped, label keys lowercased. The user is not a row in
+    `by_label` (they have no appearance row of their own); their side is
+    the `user` block, and it is None when no label could be identified as
+    theirs, which makes every `from_user_*` count None as well. That is a
+    cannot-tell, not a zero: the counts would otherwise read as "the user
+    asked this person nothing".
+    """
+    empty = {
+        "by_label": {},
+        "user": None,
+        "unattributed": 0,
+        "questions_total": 0,
+    }
+    if not isinstance(text, str) or not text:
+        return empty
+
+    # Pass 1: the turns, with the self label resolved from either signal
+    # (the inline marker or the passed display name).
+    turns: list = []
+    self_key: "str | None" = None
+    for m in _TURN.finditer(text):
+        raw, body = m.group(1), m.group(2)
+        marked = "(you)" in raw.lower()
+        name = re.sub(r"\(you\)", "", raw, flags=re.IGNORECASE).strip()
+        if not name or is_placeholder_or_self_person(name):
+            turns.append((None, body))
+            continue
+        key = name.lower()
+        if marked or is_placeholder_or_self_person(name, user_label):
+            self_key = self_key or key
+        turns.append((key, body))
+    if not turns:
+        return empty
+
+    labels = {k for k, _ in turns if k}
+    vocab = _addressee_vocabulary(labels)
+    others = sorted(labels - ({self_key} if self_key else set()))
+
+    def _blank() -> dict:
+        return {
+            "asked": 0,
+            "received_explicit": 0,
+            "received_inferred": 0,
+            # Null, not zero, when CQ cannot tell which speaker is the
+            # user. See the docstring.
+            "from_user_explicit": 0 if self_key else None,
+            "from_user_inferred": 0 if self_key else None,
+        }
+
+    by_label = {k: _blank() for k in others}
+    user_block = {"asked": 0, "received_explicit": 0, "received_inferred": 0} if self_key else None
+    unattributed = 0
+    total = 0
+
+    for idx, (speaker, body) in enumerate(turns):
+        if not speaker or not body.strip():
+            continue
+        sentences = [s.strip() for s in _SENTENCE.findall(body) if s.strip()]
+        if not sentences:
+            continue
+        # Trailing questions: everything after the turn's last statement.
+        last_statement = max(
+            (i for i, s in enumerate(sentences) if not s.endswith("?")),
+            default=-1,
+        )
+        # Only the IMMEDIATE next turn can be an answer. Skipping over a
+        # placeholder turn to find a named one would attribute a question
+        # across somebody else's reply, so a placeholder next turn (None
+        # here) leaves the question unattributed.
+        next_speaker = turns[idx + 1][0] if idx + 1 < len(turns) else None
+
+        for i, sentence in enumerate(sentences):
+            if not sentence.endswith("?"):
+                continue
+            total += 1
+            if speaker == self_key:
+                user_block["asked"] += 1
+            else:
+                by_label[speaker]["asked"] += 1
+
+            target = _explicit_addressee(sentence, vocab, speaker)
+            grade = "explicit"
+            if target is None and i > last_statement and next_speaker and next_speaker != speaker:
+                target, grade = next_speaker, "inferred"
+            if target is None:
+                unattributed += 1
+                continue
+            if target == self_key:
+                user_block[f"received_{grade}"] += 1
+                continue
+            slot = by_label.get(target)
+            if slot is None:
+                unattributed += 1
+                continue
+            slot[f"received_{grade}"] += 1
+            if self_key and speaker == self_key:
+                slot[f"from_user_{grade}"] += 1
+
+    return {
+        "by_label": by_label,
+        # The denominator for every from_user count: how many questions
+        # the user asked in this meeting at all, attributed or not.
+        "user": user_block,
+        "unattributed": unattributed,
+        "questions_total": total,
+    }
 
 
 def self_speaker_label(text: object) -> "str | None":

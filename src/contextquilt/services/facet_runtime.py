@@ -68,8 +68,16 @@ SS_PINNED_TYPES = frozenset(DEFAULT_TTLS) | {
 }
 
 REGISTRY_TYPES_QUERY = """
-    SELECT type_key, facet, is_completable, project_scoped, default_ttl_days
-    FROM patch_type_registry
+    SELECT type_key, facet, is_completable, project_scoped, default_ttl_days,
+           -- Read through to_jsonb rather than as a bare column so a
+           -- database that has not applied migration 38 yet returns NULL
+           -- for it instead of failing the whole query. The runtime's
+           -- own failure posture is to serve the floor, and losing
+           -- project scoping and completability because a NEW column is
+           -- missing would be a wildly disproportionate degradation.
+           COALESCE(to_jsonb(t)->>'ledger_tracked', 'false') = 'true'
+               AS ledger_tracked
+    FROM patch_type_registry t
 """
 
 # How long a snapshot is trusted before re-reading the registry. Type
@@ -94,6 +102,11 @@ class TypeRuntime:
     # registry type carrying a TTL. A registry type absent here decays
     # never (permanent/decade), which is a statement, not an oversight.
     decaying_types: tuple
+    # Types the item ledger holds across meetings: objects that can be
+    # UNRESOLVED. See `ledger_tracked_types` for why this is not simply
+    # the completable set, and doc 16 section 5.9a for why the primitive
+    # is not a commitment.
+    ledger_declared_types: frozenset
     # Types a NO-PROJECT recall fetches: self-disclosure that applies
     # everywhere. SS floor is {trait, preference}; a non-pinned type
     # joins when its facet is self-disclosure (Attribute/Affinity/
@@ -112,6 +125,39 @@ class TypeRuntime:
         # must never archive before it. One concept, one set.
         return frozenset(self.completable_types)
 
+    @property
+    def ledger_tracked_types(self) -> frozenset:
+        """Types the item ledger holds as objects that can be unresolved.
+
+        THE ELIGIBILITY ANSWER, and it is deliberately not the
+        completable set alone.
+
+        `is_completable` means a type can be CLOSED by the completion
+        machinery, and in this codebase it drags two other things with
+        it: deadline anchoring (see above, one concept one set) and
+        membership of the People `commitments.they_owe` ledger. That
+        makes it the wrong gate for the general primitive. A question
+        that keeps coming back has no due date and must never appear as
+        something a person OWES; declaring its type completable to get
+        it into the ledger would do both by side effect.
+
+        So eligibility is its own declaration, and it is a UNION:
+
+        - every completable type, because an object with an open and a
+          closed state is exactly what this ledger holds. This is what
+          keeps day one coverage identical to what shipped: SS's
+          commitment and blocker arrive here through this half, with no
+          manifest change and no registry row required.
+        - plus any type whose manifest declares `ledger_tracked: true`,
+          which is how a question, an unowned concern or a decision that
+          keeps getting revisited joins WITHOUT a CQ deploy.
+
+        The two halves are not redundant. The first says "this can be
+        finished"; the second says "this can be unfinished", and only
+        the second one generalises past commitments.
+        """
+        return frozenset(self.completable_types) | self.ledger_declared_types
+
 
 FALLBACK_UNIVERSAL_RECALL_TYPES = ("preference", "trait")
 
@@ -123,9 +169,25 @@ def fallback_type_runtime() -> TypeRuntime:
         project_scoped_types=frozenset(FALLBACK_PROJECT_SCOPED_TYPES),
         freshness_tracked_types=frozenset(FRESHNESS_TRACKED_TYPES),
         facet_by_type={},
+        # Nothing is ledger-declared in the floor: SS's completables
+        # arrive through the completable half of the union, exactly as
+        # they did before the ledger existed.
+        ledger_declared_types=frozenset(),
         decaying_types=tuple(sorted(DEFAULT_TTLS)),
         universal_recall_types=FALLBACK_UNIVERSAL_RECALL_TYPES,
     )
+
+
+def _flag(row, key: str) -> bool:
+    """One boolean off a registry row, False when the column is absent.
+
+    asyncpg Records raise KeyError rather than returning None for a
+    column that is not in the result set, and the ledger flag is newer
+    than some of the databases this runs against."""
+    try:
+        return bool(row[key])
+    except (KeyError, IndexError, TypeError):
+        return False
 
 
 def build_type_runtime(rows) -> TypeRuntime:
@@ -142,6 +204,7 @@ def build_type_runtime(rows) -> TypeRuntime:
     project_scoped = set(FALLBACK_PROJECT_SCOPED_TYPES)
     freshness = set(FRESHNESS_TRACKED_TYPES)
     facets: dict = {}
+    ledger_declared: set = set()
     decaying = set(DEFAULT_TTLS)
     universal = set(FALLBACK_UNIVERSAL_RECALL_TYPES)
 
@@ -170,6 +233,13 @@ def build_type_runtime(rows) -> TypeRuntime:
             decaying.add(t)
         if r["is_completable"]:
             completable.add(t)
+        # A type that declares itself ledger tracked without being
+        # completable: the widening path (a recurring question, an
+        # unowned concern). Read through a key that may be absent on a
+        # row from a database predating migration 38, which reads as
+        # not declared, which is today's behavior.
+        if _flag(r, "ledger_tracked"):
+            ledger_declared.add(t)
         if r["project_scoped"]:
             project_scoped.add(t)
         else:
@@ -191,6 +261,7 @@ def build_type_runtime(rows) -> TypeRuntime:
         project_scoped_types=frozenset(project_scoped),
         freshness_tracked_types=frozenset(freshness),
         facet_by_type=facets,
+        ledger_declared_types=frozenset(ledger_declared),
         decaying_types=tuple(sorted(decaying)),
         universal_recall_types=tuple(sorted(universal)),
     )

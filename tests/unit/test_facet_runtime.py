@@ -255,3 +255,59 @@ def test_pinned_ss_types_cannot_join_the_universal_leg():
     set the same way it covers the decay inventory."""
     rt = build_type_runtime(SS_ROWS)
     assert rt.universal_recall_types == ("preference", "trait")
+
+
+# Ledger eligibility (the widening): a type can be UNRESOLVED without
+# being something a person owes, and that is its own declaration.
+
+LEDGER_ROWS = [
+    {"type_key": "commitment", "facet": "Episode", "is_completable": True,
+     "project_scoped": True, "default_ttl_days": 90, "ledger_tracked": False},
+    {"type_key": "open_question", "facet": "Episode", "is_completable": False,
+     "project_scoped": True, "default_ttl_days": 90, "ledger_tracked": True},
+    {"type_key": "note", "facet": "Episode", "is_completable": False,
+     "project_scoped": True, "default_ttl_days": 90, "ledger_tracked": False},
+]
+
+
+def test_a_declared_type_joins_the_ledger_without_becoming_completable():
+    """The eligibility answer. A recurring question is held by the ledger
+    and is NOT something a person owes, so it must never reach the
+    completable set, which also governs deadline anchoring and the
+    People they_owe ledger."""
+    rt = facet_runtime.build_type_runtime(LEDGER_ROWS)
+    assert "open_question" in rt.ledger_tracked_types
+    assert "open_question" not in rt.completable_types
+    assert "open_question" not in rt.deadline_anchored_types
+    assert "note" not in rt.ledger_tracked_types
+
+
+def test_completables_are_ledger_tracked_without_declaring_anything():
+    """Day one coverage: SS's commitment and blocker arrive through the
+    completable half of the union, with no manifest change at all."""
+    rt = facet_runtime.build_type_runtime(LEDGER_ROWS)
+    assert {"commitment", "blocker"} <= rt.ledger_tracked_types
+
+
+def test_the_floor_tracks_exactly_the_completables():
+    rt = facet_runtime.fallback_type_runtime()
+    assert rt.ledger_tracked_types == frozenset(rt.completable_types)
+    assert rt.ledger_declared_types == frozenset()
+
+
+def test_a_row_predating_the_column_reads_as_not_declared():
+    """A registry row from a database without migration 38 has no such
+    key at all. Absent means not declared, which is today's behavior."""
+    rows = [{"type_key": "legacy", "facet": "Episode", "is_completable": False,
+             "project_scoped": True, "default_ttl_days": 90}]
+    rt = facet_runtime.build_type_runtime(rows)
+    assert "legacy" not in rt.ledger_tracked_types
+
+
+def test_the_registry_query_cannot_fail_on_a_database_without_the_column():
+    """Read through to_jsonb, not as a bare column. Verified against a
+    real Postgres both before and after migration 38: the runtime's
+    failure posture is to serve the floor, and losing project scoping
+    because a NEW column is missing would be wildly disproportionate."""
+    assert "to_jsonb(t)->>'ledger_tracked'" in facet_runtime.REGISTRY_TYPES_QUERY
+    assert "FROM patch_type_registry t" in facet_runtime.REGISTRY_TYPES_QUERY

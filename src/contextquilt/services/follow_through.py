@@ -91,6 +91,48 @@ CHARACTER_WORDS = (
     "incompetent", "untrustworthy", "dishonest", "disorganized",
 )
 
+# The same rule, one step upstream. Guardrail 12b ("cite observable
+# behavior, never character") governs the CLAIM, but a claim is only ever
+# as good as the corpus it was written from, and behavioral observations
+# are captured at extraction now. So the denylist grew a second half:
+# words that pass judgment on who a person IS rather than reporting what
+# they were seen to do.
+#
+# Split rather than merged on purpose. The list above is what the shipped
+# follow through lens declines on, and widening it would silently change a
+# live surface for reasons that have nothing to do with delivery records.
+# Extraction checks BOTH halves; the lens keeps checking only its own.
+#
+# Same honesty caveat, and it bites harder here: extraction writes in the
+# language of the meeting (see the `output_language` anchor), so an
+# observation in Spanish or German passes this list untouched. The real
+# guarantee for those is the manifest guidance the model is shown. This
+# catches the English shape, which is the shape live traffic ships today.
+CHARACTER_TRAIT_WORDS = (
+    "insecure", "arrogant", "defensive", "abrasive", "difficult",
+    "passive", "aggressive", "stubborn", "rude", "hostile", "toxic",
+    "brilliant", "smart", "stupid", "weak", "needy", "anxious",
+    "manipulative", "petty", "immature", "egotistical", "narcissistic",
+)
+
+
+def character_word_in(text: str, words: Sequence[str] = CHARACTER_WORDS) -> Optional[str]:
+    """The first denylisted character word in `text`, or None.
+
+    One matcher for both call sites (the lens declines an answer, the
+    extraction sanitizer drops an observation) so the two can never drift
+    into disagreeing about what counts as a verdict about a human being.
+    Word bounded, so "difficulty" and "smarter" do not trip a list aimed
+    at "difficult" and "smart".
+    """
+    if not isinstance(text, str) or not text:
+        return None
+    lowered = text.lower()
+    for word in words:
+        if re.search(rf"\b{re.escape(word)}\b", lowered):
+            return word
+    return None
+
 
 def _as_date(value: Any) -> Optional[date]:
     """A date from a date, a datetime or an ISO string, else None.
@@ -353,7 +395,6 @@ def parse_follow_through_response(
         stated = {int(n) for n in _INTEGER.findall(text + " " + do)}
         if not stated <= {int(p) for p in permitted}:
             return None
-    lowered = f"{text} {do}".lower()
-    if any(re.search(rf"\b{w}\b", lowered) for w in CHARACTER_WORDS):
+    if character_word_in(f"{text} {do}"):
         return None
     return {"lens": FOLLOW_THROUGH_LENS, "text": text, "do": do}

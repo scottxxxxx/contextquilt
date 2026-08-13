@@ -53,6 +53,46 @@ read path is untouched.
    A bad generalization is traceable and deletable; deleting it (or its
    sources — connections cascade) is always safe.
 
+## The corpus the profile pass reads
+
+The person-clustered rule (`cluster: "person"`) is what produces the 16a
+insight cards, and two of its three lenses ask a model to infer HOW a
+person behaves. They kept declining, and the cause was measured against
+production rather than guessed at. It was not sampling: the live model
+declined identically on the best evidenced declined person at ten sources
+and at his full 39 source window, with the same stated reason both times,
+that the observations are all task assignments and status updates with no
+pattern of decision making across meetings. It was not volume either: one
+declined person owns more patches than a person carrying two cards.
+
+It was the corpus. CQ stored what happened and never stored how anyone
+behaved, so every pass re-inferred behavior from task text and mostly
+failed. The fix is capture, not prompting: the `behavior` type records one
+observed instance of how a named participant conducted themselves, owned
+by that person, so the evidence accumulates per person between passes.
+
+Three properties are load bearing and each one is a place this quietly
+breaks:
+
+- **It reaches a person only through the ownership edge.** The cluster
+  query walks `owns` from the person patch, so the type has to be in
+  `PERSON_OWNED_ACTION_TYPES` and in the manifest's `owns` to_types. A
+  manifest-only type is extracted, stored, and never seen by any lens.
+- **It must not dedup, and it must carry its origin.** See
+  `collapse_duplicates` and `origin_scoped` in the manifest reference. A
+  collapsed observation destroys a receipt, and an origin-null one is
+  invisible to a query that counts distinct meetings.
+- **Episode facet, deliberately.** A non project scoped type joins
+  `universal_recall_types` only when its facet is a freshness facet, so
+  Episode keeps observations about third parties out of every recall
+  block that has no project context.
+
+Guardrail 12b (cite observable behavior, never character) now applies at
+capture as well as at the claim, via `sanitize_behavior_observations`. The
+denylist behind it is English only while extraction writes in the language
+of the meeting, so for other languages the manifest guidance is the whole
+guarantee.
+
 ## Deliberate v1 limits
 
 - No refresh: a consolidated cue is never re-synthesized when its

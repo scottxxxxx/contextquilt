@@ -1071,6 +1071,394 @@ specific version of "not yet".
 
 ---
 
+### 5.9a The primitive is not a commitment
+
+Read this before the field names in 5.10, because the names are the
+smaller half and they only make sense once this is settled.
+
+The thing worth tracking is **an object that keeps coming back without
+resolving**. A commitment is one kind of such object. A question nobody
+answers, a decision that keeps getting revisited and a concern nobody
+owns are others, and mechanically they are IDENTICAL: an object,
+restated across meetings, its state unchanged. Nothing about the
+machinery cares which it is.
+
+Two independent findings forced this, and neither came from the design.
+
+The single most valuable object in the test corpus is an ownership
+question raised in three consecutive meetings and never assigned. It is
+not a commitment. Nobody owes it. It has no due date. The USER raised it
+himself. A ledger built on commitments would not hold it at all, and it
+beat every commitment finding in testing.
+
+Separately, the persona work landed on the same point: three of the four
+people most likely to install this app do not have action items in any
+meaningful sense. A fundraiser has a topic that keeps surfacing. A new
+manager has a concern their report raises every fortnight. Neither is a
+deliverable that slipped, and a product that only sees deliverables is
+invisible to three quarters of its likely users.
+
+So the contract is written for the general object. **Nothing in the wire
+shape assumes a commitment**: the module is `services/item_ledger.py`,
+the served blocks are `item_ledger` and `item_ledger_rollup`, every entry
+carries its own `object_type`, and the one commitment-specific mode
+(`re_dated`) is declared as such in a published vocabulary rather than
+left for a client to discover. The contract does not need renegotiating
+with the client when questions arrive.
+
+**Day one coverage is still commitments and blockers only.** Extraction
+is unchanged and no manifest declares anything new. The point of doing
+this before merge is that the wire shape is the expensive thing to change
+later, not the coverage.
+
+#### Eligibility: `ledger_tracked`, and why completability was the wrong gate
+
+Which types the ledger holds resolves from the facet runtime
+(`TypeRuntime.ledger_tracked_types`), never from a list in CQ code, so a
+manifest can widen coverage without a CQ deploy.
+
+It is deliberately NOT the completable set alone. In this schema
+`is_completable` means a type can be CLOSED by the completion machinery,
+and it drags two other behaviors with it: deadline anchoring in the decay
+loop (an item with a due date must never archive before it, see 5.7) and
+membership of the People `commitments.they_owe` ledger. A recurring
+question has no due date and is not something a person OWES, so declaring
+its type completable to get it into the ledger would be wrong in both
+directions at once.
+
+So eligibility is a UNION of two declarations that say different things:
+
+| half | says | who arrives through it |
+| --- | --- | --- |
+| `is_completable` | this can be FINISHED | SS's commitment and blocker, with no manifest change at all |
+| `ledger_tracked: true` (migration 38) | this can be UNFINISHED | a question, an unowned concern, a decision that keeps being revisited |
+
+Only the second generalises past commitments, which is why it could not
+be folded into the first.
+
+The write path and the read path consume the same set, so capture and
+serving widen together: the worker records restatement history for
+ledger-tracked types, and `_people_core` fetches the wider population
+while every `commitments` array filters back down to completables
+**explicitly**. That explicit filter is the load-bearing line. Day one the
+two sets are equal, so it is a no-op, which is exactly the condition
+under which an omission would go unnoticed until the first question
+appeared on somebody's card as an outstanding obligation.
+
+The runtime reads the new column through `to_jsonb` rather than as a bare
+column, so a database that has not applied migration 38 returns "not
+declared" instead of failing the whole snapshot. Losing project scoping
+and completability because a NEW column is missing would be a wildly
+disproportionate degradation.
+
+### 5.10 The closure ledger: what happened to an item, not whether it is open
+
+An action item tracker answers one question, open or closed, and that
+question is blind to the failure mode that matters most. Some items are
+never failed, they are MOLTED: the same object comes back at the next
+meeting as a differently shaped fresh commitment, the language stays
+strong ("Yeah, absolutely, end of next week, easy"), and the state never
+changes. Motion reads as progress at every checkpoint, which is exactly
+why it survives every accountability system the user already has. It is
+visible only by holding one object across months, which is the one thing
+CQ can do and a task list cannot.
+
+Two halves, a write and a read.
+
+**Write (worker, dedup re-observation path).** Re-observation already
+detected a restatement: a trigram match over 0.6 bumps `updated_at`,
+`last_observed_at` and the usage counters, and a different
+`deadline_date` displaces the old one into `value.deadline_history`. What
+it never recorded was WHAT was restated. It now appends, FOR
+LEDGER-TRACKED TYPES ONLY (5.9a), to `value.restatements` (capped at 10, the deadline_history rule):
+`observed_at`, the `text` as spoken in this meeting, the `owner` as
+spoken, the `deadline` as spoken, `deadline_date`, and `origin_id`.
+`value.restatement_count` is a monotonic counter that survives the cap,
+so an item restated fourteen times reports fourteen while keeping ten
+receipts. `value.text` is NOT rewritten: this is a record of an object's
+life, not an edit to the fact. Neither is `value.owner`, which is what
+the ledger matches on, so rewriting it would move an item off the ledger
+of the person the user is owed by. A handover is stamped once as
+`value.owner_restated_at`, and the restatement owners stay the single
+source of truth for classifying it.
+
+The same `origin_id` is the idempotency key: a meeting can restate an
+item once. A re-ingest of one transcript, or a second extracted phrasing
+of one sentence landing on the same patch, is not a second hop months
+later, and an item first stated in this meeting has not come back yet.
+
+**Read (`item_ledger` on the detail route).** A pure classifier,
+`services/item_ledger.py`, no database, unit tested the way
+`follow_through.py` is. Per item, one headline `mode` plus every other
+mode that is also true in `modes`:
+
+| mode | meaning |
+| --- | --- |
+| `resolved` | finished, with the existing completion stamps: delivery for a commitment, an answer for a question, a decision for an open decision |
+| `absorbed_by_user` | the owner changed TO the user |
+| `reassigned` | the owner changed to somebody else |
+| `not_raised_since` | open, past its date, and not raised across the last 2 meetings the user actually had with that person |
+| `re_dated` | open, and the due date has moved at least once |
+| `restated` | open, restated with no date movement (the molt) |
+| `open` | none of the above yet |
+
+Precedence runs in that order and the tie breaks are deliberate.
+Ownership modes outrank the rest because a change of hands is true
+forever, while `not_raised_since` and `re_dated` describe the last few
+weeks. `not_raised_since` outranks `re_dated` in the other direction: a
+re-date is the item being managed against a calendar, and the point of
+`not_raised_since` is that it stopped being managed OUT LOUD. Nothing is
+hidden by the choice, because `modes` carries the rest and `by_mode`
+counts each item exactly once, so the counts sum to `summary.items`.
+
+#### The observation is about the conversation, never about the work
+
+`not_raised_since` was called `silently_dropped` until review, and the
+rename is the more important half of this section.
+
+What CQ observes is that an item has not come up in the last two
+presence-grade meetings with that person. What "dropped" asserts is that
+it was abandoned. Those are different claims, and the gap between them is
+where the worst false negative lives: **the item may have been finished
+by email on the Tuesday and simply never mentioned again**, and CQ would
+hold identical evidence either way.
+
+Every other mode in the ledger is self-evidencing, because the receipt is
+the person's own words in a meeting on a date. This is the only mode
+where ABSENCE does the work, and absence is the one thing a meeting
+cannot see. So the name states the observation, and the item carries
+`meetings_since_last_statement` (peaked in the summary as
+`max_meetings_not_raised`) so a client can render "has not come up in
+your last 3 meetings with her" and be exactly right whatever happened
+offline. A client must not render this mode as abandonment, neglect or a
+stall.
+
+The count itself uses MEETINGS WITH THAT PERSON, from
+`person_appearances`, never elapsed days: a fortnight of silence while
+the two of them were never in a room together is not evidence of
+anything. The presence-grade predicate is shared with the 17a signals
+(`people_signals.is_presence_grade`), so both surfaces count the same
+meetings. Shelved items are excluded on the ledger's usual principle:
+"Let it go" is the user releasing the item, so the silence afterwards is
+the user's own decision. `MIN_MEETINGS_NOT_RAISED = 2` is a parameter,
+not a constant, so it can be tuned against real data rather than
+re-argued: two is the smallest number where "it did not come up" is a
+pattern rather than one crowded agenda.
+
+**The generalised rule, which now governs this whole surface:** a served
+name may assert only what was observed. Where a name would assert a cause
+and the evidence supports an observation, the observation wins, and where
+inference is unavoidable it is published as a definition on the wire
+rather than buried in a docstring (see `ADVANCE_DEFINITION` and
+`CHASE_DEFINITION` in 5.12).
+
+Per item CQ also serves `hop_count`, `deadline_moves`, `days_open` (first
+statement to close or to today), `meetings_since_last_statement`, the
+`owner_change` receipt, and the restatement array itself.
+`object_regression` (did the OBJECT get vaguer, "a name" becoming "a
+person to identify" becoming "a shortlist that still needs cleaning up")
+is honestly `null`: no string comparison separates that from the same
+object in different words, and the seam for a cold path judge is a
+`regressions` map keyed by patch id, with no served field changing shape.
+
+**The rules this surface is built on, which are not negotiable:**
+
+- SHIP THE COUNT, NEVER THE CAUSE. "Six items assigned to this person
+  have each been restated rather than closed, median three hops, zero
+  closures" is checkable by the user AND by the subject. "He avoids
+  accountability" is a verdict, it is unfalsifiable, and no mode name,
+  no field and no string here may carry it.
+- STORE INSTANCES, NEVER TRAITS. A stored trait about a named colleague
+  is a defamation shaped object in a commercial engagement.
+  `patch_ids_by_mode` makes every count openable into the dated, quoted
+  items behind it.
+- NO PERCENTAGE ON A DENOMINATOR UNDER FIVE. One to four observations
+  per person per month means most thirty day ratios are statistically
+  empty. This surface serves no ratio at all: counts, with `items` next
+  to them, so the client can refuse to render.
+- `median_hop_count` is `null` on an empty set, never NaN, and no other
+  float is produced anywhere in the module (GP serializes with
+  `allow_nan=False`).
+
+### 5.11 `item_ledger_rollup`: the across-people read, which is about the user
+
+On the person LIST route. The finding it exists for is about the person
+running the meetings, not the people in them: follow up pressure can run
+inversely to the delivery record, so the person generating risk gets
+warmth and a re-date while the person who never misses gets interrogated.
+Most of that falls out of the ledger already (`absorbed_by_user`, the
+per person re-date and hop counts say who the user stops chasing and
+whose work they end up holding). CQ serves those counts, their
+denominators and the patch ids behind them, and writes NO interpretation:
+no score, no ranking, no served string naming an asymmetry. The client
+says what it means.
+
+It is computed over the UNFILTERED population, so paging or a
+`min_meetings` filter cannot move a user-level number, and over OPEN
+items only, because the list route does not fetch the completed
+population. `scope` states that on the wire rather than leaving the two
+denominators to be assumed equal with the detail route's.
+
+**Counts on the list, receipts on the detail.** `summarize()` produces
+patch id arrays alongside its counts, and the list strips that whole
+family (`item_ledger.RECEIPT_KEYS`) rather than one key by name, so
+a receipt key added later cannot quietly start growing a browse payload
+polled for every person the user has. The ids are only useful once the
+user has chosen somebody, and the detail route serves them there next to
+each item's own restatements.
+
+### 5.12 `raised_without_advance`: the follow up metric, after two corrections
+
+**Both corrections are worth keeping, because each was a claim that did
+not survive contact.**
+
+FIRST, the finding was that follow up pressure runs inversely to the
+delivery record: the person generating risk gets warmth, the one who
+never misses gets interrogated. The obvious metric was questions
+RECEIVED. Computed by hand against the transcripts, it does not hold. The
+volume is twelve questions to one person and ten to the other, nearly
+level, and a card built on it would have asserted something the data
+contradicts.
+
+What separates the two sets is the KIND of question. One person's twelve
+are items already in the ledger coming up again and not moving, three
+times on one item across three meetings. The other's ten are substantive
+probes to somebody already ahead of the user. Both kinds count as one
+question each, which is exactly why volume cannot see the difference. So
+the metric counts occasions that produced no advance, and **question
+volume stays its own separate count** (`questions`, section 6.6).
+Conflating them is what produced the false claim.
+
+SECOND, the replacement was called `chases` until review, and it did not
+survive the rule in 5.13 either. "Chase" asserts pursuit. What is
+observed is thinner: a restatement records that THIS item came up in a
+specific meeting (`origin_id`), and `person_appearances` records, for
+that same meeting, how many questions the user asked THIS person. Both
+halves were already stored, but **the join is MEETING level, not question
+level**, because CQ holds no link from a question to an item. An occasion
+where the item came up while the user asked about something else counts,
+so a name asserting pursuit would report a motive off a coincidence of
+timing. "Pressed" would have been the same assertion said more quietly.
+RAISED is the observation with nothing added.
+
+That rule biting its own author is the correct outcome of having a rule.
+
+`RAISED_DEFINITION` ships on the wire
+(`item_raised_in_a_meeting_where_the_user_asked_this_person_a_question`)
+so the boundary travels with the number instead of living in a docstring.
+
+Three outcomes per occasion, and the third is why this cannot collapse
+into one number:
+
+| outcome | meaning |
+| --- | --- |
+| `without_advance` | there was a later meeting with this person and the item had not closed by it |
+| `with_advance` | it closed by that next meeting |
+| `unresolved` | it was raised in the most recent meeting, so nothing has had a chance to happen |
+
+Plus `unmeasurable`: the item came up in a meeting carrying no question
+metric, so whether the user asked anything is unknowable. On the day this
+ships that is every meeting there has ever been, and a client rendering
+the count without this one is reporting a floor as a total.
+
+`ADVANCE_DEFINITION` is published the same way
+(`closed_by_the_next_meeting_with_this_person`) because it is
+deliberately narrow. **A fresh restatement is not an advance and a moved
+due date is not an advance.** Motion that reads as progress at every
+checkpoint is the illusion this whole surface exists to break, so only
+resolution counts. `unresolved` exists for the same reason pointed the
+other way: counting an occasion from the latest meeting as a failure
+would manufacture the finding out of recency.
+
+The summary carries `raised_with_a_question`, `raised_without_advance`,
+`items_raised_without_advance`,
+`max_raised_without_advance_on_one_item` (the number behind "three of
+them on the same item"), `raised_unmeasurable`, both definitions, and the
+patch ids, which are receipts and therefore detail-route only.
+
+### 5.12a The extraction seam, and what it would actually cost
+
+**Explicit non-goal: CQ does not extract questions today, and nothing in
+this pass built toward it beyond leaving the seam clean.** Day one
+coverage is commitments and blockers, exactly as before.
+
+The seam is the point of 5.9a: because eligibility is a manifest
+declaration resolved through the runtime, turning on a recurring-question
+ledger needs NO CQ code. What it needs, in order:
+
+1. **A patch type in the app's manifest.** `open_question` (or whatever
+   the app calls it) with `facet: Episode`, `project_scoped: true`,
+   `ledger_tracked: true`, a permanence, and a `value_shape` carrying at
+   minimum `text`. Registration writes the registry row and invalidates
+   the runtime cache, and the ledger picks it up within the cache TTL.
+   Zero CQ changes. This part is done and tested.
+2. **Extraction guidance for it**, which is the real work and is entirely
+   in the manifest's `extraction_rules` plus the schema prompt builder
+   that already renders them. The hard part is not the prompt, it is the
+   PRECISION: an extractor that emits every interrogative sentence would
+   bury the ledger, because most questions in a meeting are answered in
+   the next breath and are not objects at all. The target is the narrow
+   case the corpus proved valuable: a question that is RAISED AND LEFT
+   OPEN, with nobody named to answer it.
+3. **Dedup thresholds for it.** This is the one place a question is
+   genuinely harder than a commitment. The ledger's whole premise is that
+   the same object restated in different words collapses onto one patch,
+   and questions are restated much more loosely than commitments ("Who
+   owns the vendor relationship?" then "We still have not sorted out
+   ownership"). The trigram fast path will miss that pair; the gray zone
+   judge is the mechanism that catches it, and its prompt is written for
+   facts rather than for questions.
+
+**Estimate.** Steps 1 and 3 are small: a manifest version bump and a
+registration, plus a judge prompt variant and an eval over the existing
+transcripts, call it two days including the eval. Step 2 is the whole
+cost and it is not a coding cost: writing the extraction rule is perhaps
+half a day, and measuring whether it fires on the right sentences needs
+a labelled pass over the benchmark transcripts, which is where the time
+goes. Three to four days end to end to a number worth trusting, with the
+risk concentrated entirely in precision rather than in plumbing.
+
+**What would make it worth doing now:** the recurring-question case beat
+every commitment finding in testing, and three of the four likely
+personas have no action items at all (5.9a). What would make it worth
+waiting: the ledger's value on questions cannot be measured until
+questions exist in the corpus, and nothing that ships before then can
+tell us whether the extraction precision is good enough.
+
+### 5.13 The vocabulary audit
+
+Prompted by the `silently_dropped` finding, every name this surface
+serves was checked against one rule: **a served name may assert only what
+was observed.** Two names failed and one is on the line.
+
+| name | verdict |
+| --- | --- |
+| `silently_dropped` | FAILED, renamed `not_raised_since` (5.10) |
+| `chases` | FAILED, renamed `raised_without_advance`, boundary published as `RAISED_DEFINITION` (5.12) |
+| `delivered` | kept through the naming audit, then renamed `resolved` when the primitive widened, see below |
+| `re_dated`, `restated`, `reassigned`, `absorbed_by_user`, `open` | pass: each is a thing somebody said, on a date, in a meeting |
+| `hop_count`, `deadline_moves`, `days_open`, `first_stated_on`, `last_stated_on`, `meetings_since_last_statement`, `owner_change` | pass: all counts of stored observations |
+| `received_explicit` / `received_inferred` | pass, and the split is itself the honesty: the inferred half names its own uncertainty |
+| `unresolved`, `unmeasurable` | pass: both exist precisely to keep an unknown out of a count |
+| `object_regression` | pass by being null, and by asking about the restatement TEXTS (the conversation) rather than about the work |
+
+`resolved` (which was `delivered` through the naming audit, and was
+renamed when the primitive widened rather than because the audit failed
+it) is worth stating rather than waving through. It does assert more
+than the record strictly holds: `completed_at` is when CQ LEARNED an
+item closed, not when the work landed, and the same caveat is already
+written into `follow_through.py`. It is kept because it differs in KIND
+from the failed name: PRESENCE does the work, not absence. A closure is
+an affirmative act by a person or the user, and it arrives with
+`completion_source` and `completion_evidence` attached, so the claim
+carries its own receipt and a reader can check it. `not_raised_since` had
+nothing to check, which is exactly why it could not keep a name that
+asserted a cause. The later rename to `resolved` preserved that property
+exactly: it is the same affirmative act with the same stamps, said in a
+word that is still true when the object is a question somebody answered.
+
+---
+
 ## 6. Schema
 
 ### 6.1 Shipped (migration 29)
@@ -1156,6 +1544,72 @@ signal for a third party. Voice matching is the app's, and
 identity, not a participant's. A column no writer populates would read
 as "zero confirmed" and become a quiet lie, so the split is reported as
 untracked instead (see 6.4).
+
+### 6.6 Question counts per appearance (shipped, migration 37)
+
+The sibling of migration 34's `turn_count`, and it exists under the same
+constraint: transcripts are derive-then-discard, so a signal not captured
+at ingest is lost forever and every meeting that landed before this
+column existed is permanently unmeasurable. That is the whole argument
+for shipping it before the surface that reads it is finished.
+
+`extraction_schema.question_attribution` parses the same normalized
+transcript `speaker_turn_counts` does, in the same pass, with the same
+hygiene: `(you)` stripped, diarization placeholders dropped, label keys
+lowercased. Six nullable columns land on `person_appearances`:
+`questions_asked`, `questions_received_explicit`,
+`questions_received_inferred`, `questions_from_user_explicit`,
+`questions_from_user_inferred`, `meeting_questions_by_user`.
+
+**The two attribution grades are stored separately and must never be
+summed by a reader.**
+
+- EXPLICIT: the question names its addressee as a vocative, which is
+  defined as comma delimited at an edge of the sentence ("Marcus, can you
+  get me that?", "Can you get me that, Marcus?", or a question that is
+  only a name). High confidence.
+- INFERRED: no name, so the addressee is taken to be whoever speaks next,
+  and only for the questions that TRAIL a turn (the ones after its last
+  statement sentence). That last part is what keeps a rhetorical question
+  the speaker answers themselves out of somebody's row. It is still a
+  heuristic and it is wrong sometimes, which is the point of the column.
+- UNATTRIBUTED: a question to the room with nothing to attribute it to.
+  Counted, never dropped, because it says how much of the meeting the
+  measurement missed.
+
+The interesting false positive is a question that NAMES somebody who is
+not the addressee: "Did Marcus ever send that?" asked of the person
+across the table. A name inside a clause is a name being talked ABOUT, so
+the edge rule leaves it unnamed and it falls into the inferred column.
+Reading it as explicit would put the user's follow up pressure on the
+wrong person's row wearing the high confidence label, which is the one
+error this design cannot absorb. Known limit, recorded as a test: the
+addressee vocabulary is built from SPEAKER LABELS, so a person who is in
+the room and never speaks is not addressable and their vocative falls
+through to the guess. Fixing that means matching spoken names against the
+entity graph, which the pure function has no access to.
+
+NULL is unknown everywhere: the meeting predates the metric, the ingest
+carried no transcript, or no speaker label could be identified as the
+user. Nulls are per FIELD, not per row, because a meeting can know how
+many questions a person was asked and still not know which speaker was
+the user; the `from_user` pair says so rather than reporting a zero the
+transcript never supported. Re-ingesting one meeting keeps the MAX per
+column, never sums, exactly as `turn_count` does.
+
+`meeting_questions_by_user` is the denominator that travels with the
+counts: two questions out of three asked all meeting and two out of forty
+are not the same observation. CQ computes no ratio over them and serves
+no string naming a pattern. Served per meeting in `meetings[].questions`
+and aggregated per person as `questions`.
+
+**Volume is not the follow up finding.** It is nearly level across people
+whose follow up is nothing alike, because an item being raised again and
+a substantive probe each count as one question. Section 5.12 is the
+metric that carries it, and it CONSUMES these columns (the from_user
+pair is what turns a restatement into a counted occasion) without
+replacing them. Two counts, two questions, both served, never folded
+together.
 
 ### 6.3 Built and held: manifest v9
 

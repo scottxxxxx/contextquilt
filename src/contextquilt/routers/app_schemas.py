@@ -145,9 +145,9 @@ async def register_schema(
                     INSERT INTO patch_type_registry
                         (type_key, app_id, display_name, schema, persistence,
                          default_ttl_days, is_completable, project_scoped,
-                         facet, permanence)
+                         facet, permanence, ledger_tracked)
                     VALUES
-                        ($1, $2::uuid, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)
+                        ($1, $2::uuid, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, $11)
                     """,
                     pt["domain_type"],
                     app_id,
@@ -159,6 +159,13 @@ async def register_schema(
                     bool(pt.get("project_scoped", False)),
                     pt["facet"],
                     pt["permanence"],
+                    # Ledger eligibility: this type's objects can be
+                    # UNRESOLVED and are worth holding across meetings.
+                    # Absent means not declared, which is today's
+                    # behavior; a completable type does not need it,
+                    # because the runtime unions the completables in
+                    # (migration 38, doc 16 section 5.9a).
+                    bool(pt.get("ledger_tracked", False)),
                 )
                 patch_count += 1
 

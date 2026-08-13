@@ -320,6 +320,35 @@ def test_series_descriptor_must_be_value_shape_field(minimal_valid_manifest):
     assert any("series_descriptor_field" in e and "value_shape" in e for e in errors)
 
 
+def test_storage_flags_accepted(minimal_valid_manifest):
+    # The two per-type storage opt-ins. Declared here because the
+    # validator rejects unknown keys, so an undeclared flag would fail
+    # registration rather than being quietly ignored.
+    pt = minimal_valid_manifest["patch_types"][0]
+    pt["collapse_duplicates"] = False
+    pt["origin_scoped"] = True
+    ok, errors = validate_manifest(minimal_valid_manifest, "test-app")
+    assert ok, errors
+
+
+def test_storage_flags_must_be_bool(minimal_valid_manifest):
+    for key in ("collapse_duplicates", "origin_scoped"):
+        manifest = copy.deepcopy(minimal_valid_manifest)
+        manifest["patch_types"][0][key] = "no"
+        ok, errors = validate_manifest(manifest, "test-app")
+        assert not ok
+        assert any(key in e for e in errors)
+
+
+def test_unknown_patch_type_key_is_still_rejected(minimal_valid_manifest):
+    # The strict unknown-key rule is the reason the flags had to be
+    # declared; it must not have been loosened to let them in.
+    minimal_valid_manifest["patch_types"][0]["collapse_dupes"] = False
+    ok, errors = validate_manifest(minimal_valid_manifest, "test-app")
+    assert not ok
+    assert any("unknown keys" in e and "collapse_dupes" in e for e in errors)
+
+
 def test_required_fields_must_be_value_shape_fields(minimal_valid_manifest):
     minimal_valid_manifest["patch_types"][0]["required_fields"] = ["text", "nope"]
     ok, errors = validate_manifest(minimal_valid_manifest, "test-app")

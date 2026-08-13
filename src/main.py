@@ -44,6 +44,7 @@ from contextquilt.config import get_settings
 from dashboard.router import router as dashboard_router
 from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
+from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import facet_runtime
 from contextquilt.services.consolidation import (
@@ -60,7 +61,10 @@ from contextquilt.services.recall_formatter import (
     format_flat_ranked_with_stats,
     resolve_token_budget,
 )
-from contextquilt.services.people_signals import compute_person_signals
+from contextquilt.services.people_signals import (
+    compute_person_signals,
+    compute_question_totals,
+)
 from contextquilt.services.people_network import (
     MIN_SHARED_MEETINGS as NETWORK_MIN_SHARED,
     NODE_CAP as NETWORK_NODE_CAP,
@@ -4183,6 +4187,29 @@ async def _people_core(
     # read the SAME facts (manifest-declared, SS floor fallback).
     type_runtime = await facet_runtime.get_type_runtime(conn.fetch)
     completable_types = type_runtime.completable_types
+    # Two sets, and the difference between them is load bearing.
+    #
+    # COMPLETABLE is what a person can OWE, and it is the only thing the
+    # `commitments` block may ever contain. LEDGER TRACKED is what the
+    # item ledger holds across meetings: every completable, plus any type
+    # whose manifest declares `ledger_tracked` (a question nobody
+    # answered, a decision that keeps being revisited). The ledger's
+    # primitive is a thing that keeps coming back without resolving, and
+    # a recurring question is emphatically NOT something the person owes
+    # the user.
+    #
+    # Day one the two sets are equal, so every byte of the existing
+    # People surface is unchanged. They stop being equal the moment a
+    # manifest declares a non-completable type, which is exactly when
+    # `they_owe` must not widen. The fetch below uses the superset and
+    # every ledger array filters back down to completables explicitly,
+    # so the widening cannot leak by omission.
+    ledger_types = tuple(sorted(type_runtime.ledger_tracked_types))
+    completable_set = frozenset(completable_types)
+    # One UTC day for the whole assembly, so two people in one response
+    # can never be classified against different todays, and the response
+    # stays byte stable within a day (the upstream prompt cache rule).
+    ledger_today = item_ledger.today_utc()
 
     people = await conn.fetch(
         f"""
@@ -4209,7 +4236,14 @@ async def _people_core(
     appearance_rows = await conn.fetch(
         """
         SELECT pa.entity_id, pa.origin_id, pa.origin_type, pa.project_id,
-               pa.last_seen_at, pa.capacities, pa.turn_count, pr.name AS project
+               pa.last_seen_at, pa.capacities, pa.turn_count,
+               -- Question counts, captured at ingest with the turn count
+               -- (migration 37). NULL is unknown, never zero asked.
+               pa.questions_asked, pa.questions_received_explicit,
+               pa.questions_received_inferred,
+               pa.questions_from_user_explicit, pa.questions_from_user_inferred,
+               pa.meeting_questions_by_user,
+               pr.name AS project
         FROM person_appearances pa
         LEFT JOIN projects pr ON pr.project_id = pa.project_id
         WHERE pa.user_id = $1 AND pa.entity_id = ANY($2::uuid[])
@@ -4244,6 +4278,13 @@ async def _people_core(
                cp.value->>'shelved_at' AS shelved_at,
                cp.value->>'shelved_source' AS shelved_source,
                cp.value->>'salience' AS salience,
+               -- The molt record: every later meeting that said this same
+               -- item again, and the monotonic count that survives the
+               -- array's cap. Empty on every item stored before the
+               -- restatement write path shipped.
+               cp.value->'restatements' AS restatements,
+               cp.value->>'restatement_count' AS restatement_count,
+               cp.value->'deadline_history' AS deadline_history,
                cp.updated_at, cp.created_at, cp.permanence_override,
                pum.last_accessed_at,
                cp.project_id, cp.project, cp.origin_id,
@@ -4274,13 +4315,13 @@ async def _people_core(
           AND COALESCE(cp.status, 'active') = 'active'
         ORDER BY cp.value->>'deadline_date' NULLS LAST, cp.patch_id
         """,
-        subject_key, list(completable_types), vocab.ownership_label,
+        subject_key, list(ledger_types), vocab.ownership_label,
     )
     # Registry TTL overrides for the completable types, resolved the same
     # way the decay loop resolves them, so the decay_state served here and
     # the archival the worker performs derive from the SAME parameters.
     registry_ttls: dict = {}
-    for _pt in completable_types:
+    for _pt in ledger_types:
         try:
             _ttl_row = await conn.fetchrow(decay_model.TTL_REGISTRY_QUERY, _pt)
             if _ttl_row and _ttl_row["default_ttl_days"] is not None:
@@ -4309,7 +4350,10 @@ async def _people_core(
                    cp.value->>'shelved_source' AS shelved_source,
                    cp.value->>'completion_source' AS completion_source,
                    cp.value->>'completion_evidence' AS completion_evidence,
-                   cp.completed_at,
+                   cp.value->'restatements' AS restatements,
+                   cp.value->>'restatement_count' AS restatement_count,
+                   cp.value->'deadline_history' AS deadline_history,
+                   cp.completed_at, cp.created_at,
                    cp.project_id, cp.project, cp.origin_id,
                    (SELECT pc.from_patch_id FROM patch_connections pc
                       JOIN context_patches op ON op.patch_id = pc.from_patch_id
@@ -4327,7 +4371,7 @@ async def _people_core(
               AND cp.completed_at IS NOT NULL
             ORDER BY cp.completed_at DESC
             """,
-            subject_key, list(completable_types), vocab.ownership_label,
+            subject_key, list(ledger_types), vocab.ownership_label,
         )
         # decay_state is None on a completed item: decay no longer applies,
         # and per the house rule null means "not tracked", not a band.
@@ -4496,12 +4540,24 @@ async def _people_core(
         # counting condition SS holds us to: a served count agrees with the
         # rows it gates, so the exclusion happens HERE, once, before
         # anything counts anything.
-        they_owe = [
+        # Everything of this person's that the LEDGER holds: any
+        # ledger-tracked type they own, shelved rows already gone. This
+        # is the wider set, and it is the one the item ledger classifies,
+        # because a recurring question belongs in the ledger.
+        owned_open = [
             r for r in open_items
             if r["shelved_at"] is None
             and ((r["owner"] or "").strip().lower() in keys
                  or (patch_id and r["owner_patch_id"] and str(r["owner_patch_id"]) == patch_id))
         ]
+
+        # What this person OWES, which is the narrower set and is
+        # COMPLETABLE ONLY. Filtered explicitly rather than inherited
+        # from the fetch, so the day a manifest declares a
+        # non-completable ledger type, a question cannot arrive on
+        # somebody's card as an outstanding obligation. Day one the two
+        # sets are identical and this is a no-op.
+        they_owe = [r for r in owned_open if r["patch_type"] in completable_set]
 
         # What the USER owes this person: an item pointing here with an
         # owed_to edge, that the user themselves holds. Both halves are
@@ -4524,6 +4580,7 @@ async def _people_core(
             you_owe = [
                 r for r in open_items
                 if r["shelved_at"] is None
+                and r["patch_type"] in completable_set
                 and str(r["patch_id"]) in owed_ids
                 and is_self_owned(r["owner"], user_label)
             ]
@@ -4533,19 +4590,37 @@ async def _people_core(
         # to the completed population. No shelved filter: done is done,
         # whatever state preceded it. completed_items arrives newest
         # completion first, so these stay in that order.
-        completed_they_owe = [
+        owned_completed = [
             r for r in completed_items
             if (r["owner"] or "").strip().lower() in keys
             or (patch_id and r["owner_patch_id"] and str(r["owner_patch_id"]) == patch_id)
+        ]
+        completed_they_owe = [
+            r for r in owned_completed if r["patch_type"] in completable_set
         ]
         completed_you_owe = None
         if owed_to_available and patch_id and include_completed:
             c_owed_ids = completed_owed_by_person.get(patch_id) or ()
             completed_you_owe = [
                 r for r in completed_items
-                if str(r["patch_id"]) in c_owed_ids
+                if r["patch_type"] in completable_set
+                and str(r["patch_id"]) in c_owed_ids
                 and is_self_owned(r["owner"], user_label)
             ]
+
+        # Closure mode per item (the molt ledger): what actually happened
+        # to each thing this person owes, not merely whether it is open.
+        # Computed from the SAME filtered rows the ledger arrays carry,
+        # so every count here opens into items the caller already has.
+        # The completed leg is present only on the detail route, which is
+        # why the served block states its own scope rather than letting a
+        # client assume the denominators match across the two surfaces.
+        ledger_items = item_ledger.classify_items(
+            owned_open + owned_completed,
+            today=ledger_today,
+            appearances=appearances,
+            user_label=user_label,
+        )
 
         row = {
             "entity_id": eid,
@@ -4599,7 +4674,23 @@ async def _people_core(
             # person nothing", which is a different claim from "CQ cannot
             # tell". Once the label exists, 0 is honest and this is a count.
             "open_you_owe": None if you_owe is None else len(you_owe),
+            # Follow up pressure: how many questions this person asked,
+            # was asked, and was asked BY THE USER, with the denominators
+            # they were computed from. Counts only; CQ draws no
+            # conclusion from them and names no pattern.
+            "questions": compute_question_totals(appearances),
             "_appearances": appearances,
+            "_ledger_items": ledger_items,
+            # Which modes can occur for the object types in THIS
+            # person's ledger, so a client never guesses. Dated types
+            # come from the runtime's deadline-anchored set, which is
+            # what makes `re_dated` impossible for an object that never
+            # had a date.
+            "_ledger_vocabulary": item_ledger.vocabulary(
+                {i["object_type"] for i in ledger_items},
+                dated_types=type_runtime.deadline_anchored_types,
+            ),
+            "_ledger_scope": "open_and_completed" if include_completed else "open_only",
             "_projects": projects,
             "_they_owe": they_owe,
             "_you_owe": you_owe,
@@ -4793,10 +4884,68 @@ async def list_people(
     if limit:
         rows = rows[:limit]
 
+    # The across-people read, and it is about the USER rather than about
+    # any of them: which items get re-dated and re-stated instead of
+    # closed, and which ones the user ends up holding themselves
+    # (`absorbed_by_user`). CQ serves the counts, their denominators and
+    # the patch ids behind them. It computes no ratio, ranks nobody, and
+    # emits no string naming a pattern; the reading is the client's.
+    #
+    # Deliberately over the UNFILTERED population, so paging or a
+    # `min_meetings` filter cannot change a user-level number. Open items
+    # only, because the list route does not fetch the completed
+    # population, which is why `scope` is stated rather than assumed: the
+    # person detail's ledger runs the same classifier over a wider set.
+    all_ledger_items = [i for r in core["people"] for i in r["_ledger_items"]]
+
+    def _counts_only(items: list) -> dict:
+        """A summary with the receipt keys stripped.
+
+        Counts on the list, receipts on the detail. This is a browse
+        surface polled for every person the user has, and a patch id
+        list per mode per person grows that payload without earning it:
+        the ids are only useful once the user has chosen somebody, and
+        the detail route serves them there along with each item's own
+        restatements. Stripped by FAMILY (`RECEIPT_KEYS`) rather than by
+        name, so a receipt key added later cannot quietly land here.
+        """
+        return {
+            k: v for k, v in item_ledger.summarize(items).items()
+            if k not in item_ledger.RECEIPT_KEYS
+        }
+
+    item_ledger_rollup = {
+        "scope": "open_only",
+        "people_considered": total_unfiltered,
+        "people_with_items": sum(1 for r in core["people"] if r["_ledger_items"]),
+        "summary": _counts_only(all_ledger_items),
+        # Per person, ordered by name so a browse surface never
+        # reshuffles between polls.
+        "by_person": [
+            {
+                "entity_id": r["entity_id"],
+                "name": r["name"],
+                **_counts_only(r["_ledger_items"]),
+                # Question VOLUME, kept as its own count and never
+                # folded into the chase numbers above. Measured by hand
+                # against the transcripts, volume is nearly level across
+                # people whose follow up is nothing alike, so a claim
+                # built on it asserts something the data contradicts.
+                # Two counts, two questions, both served.
+                "questions": r["questions"],
+            }
+            for r in sorted(
+                (r for r in core["people"] if r["_ledger_items"]),
+                key=lambda r: ((r["name"] or "").lower(), r["entity_id"]),
+            )
+        ],
+    }
+
     return {
         "people": [_public_person(r) for r in rows],
         "total": total,
         "total_unfiltered": total_unfiltered,
+        "item_ledger_rollup": item_ledger_rollup,
         "deleted": deleted,
         "capabilities": capability_report(owed_to_available, insights_available),
         "query": {
@@ -4839,6 +4988,46 @@ async def get_person(
 
     `you_owe` is null, not an empty list, for callers whose registered
     manifest does not declare `owed_to`. See capabilities.you_owe.
+
+    `item_ledger` is the closure lens over those same items (doc 16
+    section 5.10): per item, WHAT happened to it rather than whether it is
+    open. `delivered` is the only mode that is delivery; `restated` is the
+    molt (said again, with the date never moving), `re_dated` is an item
+    being managed against a calendar, `not_raised_since` is one that has
+    not come up across the last meetings with THAT PERSON (counted in
+    meetings, never in elapsed days), and `absorbed_by_user` is one the
+    user ended up holding themselves.
+
+    `not_raised_since` is named for what was observed and must be
+    rendered that way. It is the only mode where ABSENCE does the work,
+    and a meeting cannot see an email: an item finished offline on the
+    Tuesday and never mentioned again produces exactly this state. The
+    safe sentence is the one built from `meetings_since_last_statement`,
+    "has not come up in your last 3 meetings with her", which is true
+    whatever happened away from the room.
+
+    Each item carries one headline `mode` plus every
+    other mode also true of it in `modes`, so `summary.by_mode` counts
+    each item once and the counts sum to `summary.items`. Every count
+    opens into `summary.patch_ids_by_mode`. No ratio is served at any
+    denominator, and no field here describes a person: the surface ships
+    the count, never the cause.
+
+    `questions` (and `meetings[].questions`) is question VOLUME: how many
+    this person asked, was asked, and was asked by the user, captured
+    from the transcript at ingest because transcripts are not retained.
+    The explicit and inferred grades are separate on purpose and must not
+    be summed: one is a vocative CQ read, the other is a guess from who
+    spoke next. Null is unknown, never "was asked nothing".
+
+    Volume is NOT the follow up finding and must not be rendered as one.
+    Measured against real transcripts it runs nearly level across people
+    whose follow up is nothing alike, because a chase and a substantive
+    probe both count as one question. The metric that carries it is
+    `item_ledger.summary.raised_without_advance`: an item already
+    in the ledger came up in a meeting where the user asked this person
+    something, and it had not closed by their next meeting. The two are
+    served as separate counts and stay separate.
 
     `insights` is the 16a lens stack: up to one derived card per lens in
     the CQ-side lens vocabulary, each with the claim, the do line, its
@@ -5164,6 +5353,34 @@ async def get_person(
                 else _history(row["_completed_you_owe"])
             ),
         },
+        # The closure ledger: what HAPPENED to each item this person
+        # owes, over the same rows `commitments` carries. An action item
+        # tracker can say an item is open; it cannot say that this one
+        # object has come back three times as a fresh commitment with
+        # its state unchanged, which is the failure mode that survives
+        # every accountability system the user already has.
+        #
+        # `summary.by_mode` counts each item under ONE headline mode and
+        # `item.modes` lists everything else that is also true of it, so
+        # the totals add up to `summary.items` and nothing is hidden by
+        # the choice of headline. `patch_ids_by_mode` is the trace: every
+        # count opens into the exact patches behind it, which is the
+        # difference between "three times, here they are" and a verdict.
+        # No ratio is served at any denominator.
+        "item_ledger": {
+            # open_and_completed here; the person LIST serves the same
+            # classifier over open items only and says so, because the
+            # two denominators are not the same number.
+            "scope": row["_ledger_scope"],
+            "items": row["_ledger_items"],
+            "summary": item_ledger.summarize(row["_ledger_items"]),
+            # The mode contract for the object types actually present.
+            # Open in both directions: a type that does not exist yet
+            # appears the day it appears in the data, with no contract
+            # change, and a client meeting a mode it does not know skips
+            # that row rather than guessing.
+            "vocabulary": row["_ledger_vocabulary"],
+        },
         # `capacities` says HOW this person turned up in this meeting, not
         # merely that they did: `speaker` means a diarization label resolved
         # to them, `ownership` means they were named as the owner of an item
@@ -5194,6 +5411,23 @@ async def get_person(
                 # against a 41-turn label in one meeting is a diarization
                 # artifact, not a second person.
                 "turn_count": a["turn_count"],
+                # Questions in THIS meeting, read off the transcript at
+                # ingest (migration 37). The two attribution grades are
+                # separate and must never be summed by a reader: one is a
+                # vocative CQ read, the other is a guess from who spoke
+                # next. Null is unknown (the meeting predates the metric,
+                # or no speaker label could be identified as the user),
+                # never "was asked nothing".
+                "questions": {
+                    "asked": a["questions_asked"],
+                    "received_explicit": a["questions_received_explicit"],
+                    "received_inferred": a["questions_received_inferred"],
+                    "from_user_explicit": a["questions_from_user_explicit"],
+                    "from_user_inferred": a["questions_from_user_inferred"],
+                    # The denominator: every question the user asked in
+                    # this meeting, whoever it landed on.
+                    "user_asked_total": a["meeting_questions_by_user"],
+                },
             }
             for a in row["_appearances"]
         ],

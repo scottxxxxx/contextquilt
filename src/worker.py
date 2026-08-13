@@ -39,6 +39,7 @@ from contextquilt.services.deadline_resolver import run_deadline_micropass
 from contextquilt.services.extraction_schema import (
     PATCH_TYPES,
     speaker_turn_counts,
+    question_attribution,
     extraction_patch_backstop,
     EXTRACTION_SCHEMA,
     drop_placeholder_and_self_person_patches,
@@ -52,8 +53,11 @@ from contextquilt.services.extraction_schema import (
     speaker_labels_in,
     self_speaker_label,
     is_placeholder_or_self_person,
+    no_collapse_patch_types,
     normalize_cue_list,
     normalize_owner_in_transcript,
+    origin_scoped_patch_types,
+    sanitize_behavior_observations,
     sanitize_cues,
     sanitize_deadline_dates,
     sanitize_salience,
@@ -410,6 +414,8 @@ async def store_connected_patches(
     user_label: str | None = None,
     llm=None,
     longitudinal_types: dict[str, str] | None = None,
+    no_collapse_types: set[str] | frozenset[str] | None = None,
+    origin_scoped_types: set[str] | frozenset[str] | None = None,
 ):
     """
     Store typed, connected patches (Connected Quilt V2 model).
@@ -428,10 +434,26 @@ async def store_connected_patches(
     instead of being dedup-collapsed, so a trajectory (Weak→Meets→Strong) is
     preserved rather than overwritten. Empty/None (the SS path) → no type is
     longitudinal and behavior is exactly as before.
+
+    `no_collapse_types` are types that declared `collapse_duplicates:
+    false`. Dedup is skipped for them entirely: every occurrence inserts.
+    Two observations of the same behavior in two meetings are a
+    trajectory, and a collapse would keep only the surviving patch's
+    origin_id, silently destroying a receipt the profile pass counts.
+    Empty/None (every manifest registered before this) → dedup runs
+    exactly as before, for every type.
+
+    `origin_scoped_types` are types that declared `origin_scoped: true`.
+    They carry origin_id/origin_type without being project-scoped, which
+    is what lets a meeting-bound type that belongs to no project keep its
+    receipt. Empty/None → the origin stamp follows project scoping alone,
+    exactly as before.
     """
     if not patches:
         return 0
     longitudinal_types = longitudinal_types or {}
+    no_collapse_types = frozenset(no_collapse_types or ())
+    origin_scoped_types = frozenset(origin_scoped_types or ())
 
     await db.execute(
         "INSERT INTO profiles (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
@@ -454,7 +476,20 @@ async def store_connected_patches(
     # Resolved from the facet runtime (manifest project_scoped flags,
     # SS floor as fallback), so a registered app's types carry project
     # context per THEIR manifest instead of the SS episode list.
-    project_scoped_types = (await get_type_runtime(db.fetch)).project_scoped_types
+    _type_runtime = await get_type_runtime(db.fetch)
+    project_scoped_types = _type_runtime.project_scoped_types
+    # Which types the item ledger holds, from the same runtime: every
+    # completable, plus any type whose manifest declares `ledger_tracked`.
+    # Only these record restatement history below, because only an object
+    # that can be UNRESOLVED can be molted (restated in a fresh shape
+    # while its state never changes).
+    #
+    # Deliberately not `completable_types`, which is the narrower "a
+    # person can owe this" set. The primitive is a thing that keeps
+    # coming back without resolving, and a question nobody answered is
+    # one of those without being anything anybody owes. Day one the two
+    # sets are equal, so this changes no byte of what SS writes.
+    ledger_types = frozenset(_type_runtime.ledger_tracked_types)
 
     async def _store_cues(patch_id: str, cues: list) -> None:
         """Attach associative-retrieval cues to a patch. Idempotent (PK on
@@ -483,6 +518,15 @@ async def store_connected_patches(
         week later by "ship it by Friday" is one fact gaining a date, so
         when the re-observation carries a deadline_date the existing
         patch lacks, copy it over.
+
+        And, for completables only, it RECORDS THE RESTATEMENT. Before
+        this, re-observation stored the fact that it happened (three
+        timestamps and a counter) and nothing about what was said, so an
+        item that comes back every month as a differently shaped fresh
+        commitment was indistinguishable from an item nobody has
+        mentioned since. The history it writes is additive: the existing
+        text still wins for `value.text`, because this is a record of an
+        object's life, not an edit to the fact.
         """
         await db.execute(
             "UPDATE context_patches SET updated_at = $1, last_observed_at = $1 WHERE patch_id = $2::uuid",
@@ -558,6 +602,93 @@ async def store_connected_patches(
                 """,
                 existing_id,
             )
+        # The restatement record. Ledger-tracked types only: everything
+        # else that dedups is a fact being observed again ("she is based
+        # in Lisbon"), where a second observation is corroboration and
+        # there is no state that could fail to change. Types outside the
+        # ledger take exactly the writes they took before this shipped.
+        if patch_type in ledger_types:
+            observed_at = (
+                created_at.isoformat() if hasattr(created_at, "isoformat")
+                else str(created_at)
+            )
+            await db.execute(
+                """
+                UPDATE context_patches
+                   SET value = jsonb_set(
+                           jsonb_set(
+                               value,
+                               '{restatements}',
+                               CASE WHEN jsonb_array_length(
+                                        COALESCE(value->'restatements', '[]'::jsonb)) >= 10
+                                    THEN (COALESCE(value->'restatements', '[]'::jsonb) - 0)
+                                    ELSE COALESCE(value->'restatements', '[]'::jsonb)
+                               END || jsonb_build_object(
+                                       'observed_at', $2::text,
+                                       'text', $3::text,
+                                       'owner', $4::text,
+                                       'deadline', $5::text,
+                                       'deadline_date', $6::text,
+                                       'origin_id', $7::text)
+                           ),
+                           '{restatement_count}',
+                           -- Guarded rather than a bare ::int cast: the
+                           -- patch edit surface can put anything in the
+                           -- value JSONB, and a cast error here would
+                           -- take down the whole extraction's storage
+                           -- pass, not just one counter.
+                           to_jsonb(
+                               CASE WHEN value->>'restatement_count' ~ '^[0-9]+$'
+                                    THEN (value->>'restatement_count')::int
+                                    ELSE 0
+                               END + 1
+                           )
+                       )
+                 WHERE patch_id = $1::uuid
+                   AND (
+                       $7::text IS NULL
+                       OR (
+                           COALESCE(origin_id, '') <> $7
+                           AND COALESCE(
+                                   value->'restatements'->-1->>'origin_id', ''
+                               ) <> $7
+                       )
+                   )
+                """,
+                existing_id, observed_at, text,
+                value.get("owner"), value.get("deadline"),
+                value.get("deadline_date"),
+                # The receipt, and the idempotency key. One meeting can
+                # only restate an item once: a re-ingest of the same
+                # transcript, or a second extracted phrasing of the same
+                # sentence landing on the same patch, must not read as a
+                # second hop months later. The patch's OWN origin is
+                # excluded for the same reason, since an item first
+                # stated in this meeting has not come back yet.
+                str(origin_id) if origin_id else None,
+            )
+            # A handover, stamped once, the first time a restatement
+            # names somebody else. `value.owner` is deliberately NOT
+            # rewritten: it is what the ledger matches on, so editing it
+            # would move the item off the ledger of the person the user
+            # is owed by, which is the record they are trying to read.
+            # Nothing classifies from this stamp (the restatement owners
+            # are the single source of truth, and the read side derives
+            # the change from them); it exists so a handover is visible
+            # in the patch itself and in delta sync.
+            if isinstance(value.get("owner"), str) and value["owner"].strip():
+                await db.execute(
+                    """
+                    UPDATE context_patches
+                       SET value = jsonb_set(
+                               value, '{owner_restated_at}', to_jsonb($2::text))
+                     WHERE patch_id = $1::uuid
+                       AND value->>'owner_restated_at' IS NULL
+                       AND lower(btrim(COALESCE(value->>'owner', '')))
+                           <> lower(btrim($3::text))
+                    """,
+                    existing_id, observed_at, value["owner"],
+                )
         await _store_cues(existing_id, cues or [])
         patch_lookup[(text.lower().strip(), patch_type)] = existing_id
         logger.debug("patch_deduplicated", type=patch_type, text=text[:50],
@@ -584,7 +715,18 @@ async def store_connected_patches(
         # Without this, role patches landed with project_id set but origin_id NULL,
         # which SS's diagnostic surfaced as a NULL-origin "regression" 2026-05-04.
         patch_project_id = project_id if patch_type in project_scoped_types or (patch_type == "role" and patch_project) else None
-        patch_origin_id = origin_id if patch_type in project_scoped_types or (patch_type == "role" and patch_project) else None
+        # Origin is stamped for project-scoped types, for role-with-parent,
+        # and for any type that declared `origin_scoped`. The last one is
+        # the split: project scoping says which project a patch belongs
+        # to, origin scoping says the patch records a moment and has to
+        # remember which meeting it was. A type can now claim the second
+        # without the first, which is what keeps a receipt on a patch that
+        # belongs to no project.
+        patch_origin_id = origin_id if (
+            patch_type in project_scoped_types
+            or patch_type in origin_scoped_types
+            or (patch_type == "role" and patch_project)
+        ) else None
         patch_origin_type = origin_type if patch_origin_id else None
 
         await db.execute(
@@ -786,6 +928,15 @@ async def store_connected_patches(
             )
             continue
 
+        # Types that opted out of collapsing skip BOTH dedup tiers, and
+        # skip the candidate query with them. There is nothing to ask:
+        # the answer would be discarded either way, and a similar
+        # observation from a previous meeting is the evidence this type
+        # exists to accumulate, not a duplicate of it.
+        if patch_type in no_collapse_types:
+            await _insert_new_patch(patch, patch_type, value, text)
+            continue
+
         # Deduplication, two tiers against active same-type patches:
         #   similarity > TRIGRAM_DEDUP_THRESHOLD          → same fact, fast path
         #   SEMANTIC_DEDUP_FLOOR < similarity <= threshold → gray zone; deferred
@@ -946,7 +1097,10 @@ async def store_connected_patches(
                 stub_persistence = DEFAULT_PERSISTENCE.get(target_type, "sticky")
                 stub_project = project if target_type in project_scoped_types else None
                 stub_project_id = project_id if target_type in project_scoped_types else None
-                stub_origin_id = origin_id if target_type in project_scoped_types else None
+                stub_origin_id = origin_id if (
+                    target_type in project_scoped_types
+                    or target_type in origin_scoped_types
+                ) else None
                 stub_origin_type = origin_type if stub_origin_id else None
 
                 await db.execute(
@@ -1072,6 +1226,7 @@ async def store_entities(
     person_entity_type: str = "person",
     speaker_turns: dict | None = None,
     self_label: str | None = None,
+    speaker_questions: dict | None = None,
 ):
     """
     Store extracted entities to Postgres, resolving alternate surface
@@ -1154,6 +1309,15 @@ async def store_entities(
             # transcript is derive-then-discard; no backfill is possible,
             # ever). NULL = unknown, never "spoke zero turns".
             turn_count = (speaker_turns or {}).get(name_key)
+            # Question counts, captured at the same only-moment turn
+            # counts are. The two attribution grades stay in their own
+            # columns, never summed: one is a vocative CQ read, the other
+            # is a guess from who spoke next. NULL is unknown throughout,
+            # including the from_user pair when no speaker label could be
+            # identified as the user.
+            q = (speaker_questions or {}).get("by_label", {}).get(name_key) or {}
+            q_user = (speaker_questions or {}).get("user") or {}
+            questions_by_user = q_user.get("asked") if q_user else None
             try:
                 # A suppressed entity ("not a person") accumulates no
                 # meeting history: SS's condition that appearances stop
@@ -1170,8 +1334,11 @@ async def store_entities(
                 await db.execute(
                     """
                     INSERT INTO person_appearances
-                        (user_id, entity_id, origin_id, origin_type, project_id, capacities, turn_count)
-                    VALUES ($1, $2, $3, $4, $5, $6::text[], $7)
+                        (user_id, entity_id, origin_id, origin_type, project_id, capacities, turn_count,
+                         questions_asked, questions_received_explicit, questions_received_inferred,
+                         questions_from_user_explicit, questions_from_user_inferred,
+                         meeting_questions_by_user)
+                    VALUES ($1, $2, $3, $4, $5, $6::text[], $7, $8, $9, $10, $11, $12, $13)
                     ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
                         last_seen_at = NOW(),
                         project_id = COALESCE(EXCLUDED.project_id, person_appearances.project_id),
@@ -1184,6 +1351,43 @@ async def store_entities(
                         turn_count = CASE
                             WHEN EXCLUDED.turn_count IS NULL THEN person_appearances.turn_count
                             ELSE GREATEST(COALESCE(person_appearances.turn_count, 0), EXCLUDED.turn_count)
+                        END,
+                        -- Every question column follows turn_count's rule
+                        -- for exactly the same reason: one meeting counted
+                        -- twice is still one meeting.
+                        questions_asked = CASE
+                            WHEN EXCLUDED.questions_asked IS NULL THEN person_appearances.questions_asked
+                            ELSE GREATEST(COALESCE(person_appearances.questions_asked, 0), EXCLUDED.questions_asked)
+                        END,
+                        questions_received_explicit = CASE
+                            WHEN EXCLUDED.questions_received_explicit IS NULL
+                                THEN person_appearances.questions_received_explicit
+                            ELSE GREATEST(COALESCE(person_appearances.questions_received_explicit, 0),
+                                          EXCLUDED.questions_received_explicit)
+                        END,
+                        questions_received_inferred = CASE
+                            WHEN EXCLUDED.questions_received_inferred IS NULL
+                                THEN person_appearances.questions_received_inferred
+                            ELSE GREATEST(COALESCE(person_appearances.questions_received_inferred, 0),
+                                          EXCLUDED.questions_received_inferred)
+                        END,
+                        questions_from_user_explicit = CASE
+                            WHEN EXCLUDED.questions_from_user_explicit IS NULL
+                                THEN person_appearances.questions_from_user_explicit
+                            ELSE GREATEST(COALESCE(person_appearances.questions_from_user_explicit, 0),
+                                          EXCLUDED.questions_from_user_explicit)
+                        END,
+                        questions_from_user_inferred = CASE
+                            WHEN EXCLUDED.questions_from_user_inferred IS NULL
+                                THEN person_appearances.questions_from_user_inferred
+                            ELSE GREATEST(COALESCE(person_appearances.questions_from_user_inferred, 0),
+                                          EXCLUDED.questions_from_user_inferred)
+                        END,
+                        meeting_questions_by_user = CASE
+                            WHEN EXCLUDED.meeting_questions_by_user IS NULL
+                                THEN person_appearances.meeting_questions_by_user
+                            ELSE GREATEST(COALESCE(person_appearances.meeting_questions_by_user, 0),
+                                          EXCLUDED.meeting_questions_by_user)
                         END
                     """,
                     user_id, entity_id, str(origin_id),
@@ -1191,6 +1395,12 @@ async def store_entities(
                     meta.get("project_id"),
                     capacities,
                     turn_count,
+                    q.get("asked"),
+                    q.get("received_explicit"),
+                    q.get("received_inferred"),
+                    q.get("from_user_explicit"),
+                    q.get("from_user_inferred"),
+                    questions_by_user,
                 )
             except Exception as e:
                 logger.debug("person_appearance_skipped", error=str(e)[:120])
@@ -3888,6 +4098,13 @@ class ColdPathWorker:
                     conn, user_id, patches, "structured_ingest", app_id, timestamp,
                     project, project_id, origin_id, origin_type,
                     longitudinal_types=longitudinal_types,
+                    # Same two manifest facts the extraction lane reads.
+                    # Neither structured manifest registered today declares
+                    # either key, so both sets are empty and this lane is
+                    # unchanged; a structured app that wants the behavior
+                    # should not have to ask for a code change to get it.
+                    no_collapse_types=no_collapse_patch_types(manifest),
+                    origin_scoped_types=origin_scoped_patch_types(manifest),
                 )
                 entities_stored = await store_entities(
                     conn, self.redis, user_id, entities, metadata,
@@ -4136,6 +4353,23 @@ class ColdPathWorker:
                 )
                 response.content["patches"] = raw_patches[:patch_backstop]
 
+            # Guardrail 12b at capture time: a behavioral observation
+            # cites conduct, never character. Runs BEFORE the ownership
+            # enforcer on purpose, so a dropped verdict never gets a
+            # person patch and an owns edge minted for it; the sanitizer
+            # also strips edges the model emitted itself, because an
+            # unresolved owns target makes the Pass-2 resolver synthesize
+            # a stub carrying the same text.
+            sanitize_behavior_observations(response.content)
+            if (bo := response.content.get("_behavior_observations_sanitized")):
+                logger.info(
+                    "behavior_observations_sanitized",
+                    user_id=user_id,
+                    dropped=bo["count"],
+                    dropped_detail=bo["dropped"][:20],
+                    model=response.model,
+                )
+
             # Person-ownership safety net. The prompt requires a person
             # patch + owns connection for every named action-item owner,
             # but Haiku 4.5 compliance is unreliable. enforce_person_ownership
@@ -4304,6 +4538,11 @@ class ColdPathWorker:
                     project, project_id, origin_id, origin_type,
                     user_label=user_label,
                     llm=llm,
+                    # Manifest-declared storage behavior. Both sets are
+                    # empty for every manifest that predates them, so the
+                    # sink behaves exactly as before for those apps.
+                    no_collapse_types=no_collapse_patch_types(resolved_manifest),
+                    origin_scoped_types=origin_scoped_patch_types(resolved_manifest),
                 )
                 facts_stored = patches_stored
                 actions_stored = 0
@@ -4345,6 +4584,13 @@ class ColdPathWorker:
                 # transcript the extraction saw.
                 speaker_labels=speaker_labels_in(effective_summary, owner_speaker_label),
                 speaker_turns=speaker_turn_counts(effective_summary, owner_speaker_label),
+                # Who the questions in this room were asked OF, from the
+                # same normalized transcript, in the same one pass. The
+                # transcript is gone after this; there is no second
+                # chance at this signal for this meeting, ever.
+                speaker_questions=question_attribution(
+                    effective_summary, owner_speaker_label
+                ),
                 # Which entity type IS a person comes from the app's people
                 # vocabulary (doc 16 5.9); the SS floor when undeclared.
                 # This closes slice 2's recorded limit: a custom-named
