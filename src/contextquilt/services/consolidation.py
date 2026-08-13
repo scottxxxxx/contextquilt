@@ -54,7 +54,24 @@ DEFAULT_MIN_PATCHES = 3
 MAX_CLUSTERS_PER_USER_PER_CYCLE = 3
 MAX_USERS_PER_APP_PER_CYCLE = 20
 CLUSTER_WINDOW_DAYS = 180
-MAX_SOURCE_TEXTS = 10  # prompt size cap per synthesis call
+MAX_SOURCE_TEXTS = 10  # prompt size cap per CUE synthesis call
+
+# The profile pass gets its own, far higher cap. Measured 2026-08-13:
+# the largest live person cluster cites 29 sources, source texts average
+# 114 characters, and the whole profile prompt runs about 3.6 KB at ten
+# sources against 7.7 KB at forty, roughly 900 tokens against 1,900. A
+# whole consolidation cycle made two LLM calls that day. So ten was
+# never buying anything. It hid most of a person's record to save a few
+# hundred tokens, and the fetch was already uncapped, so the pass paid
+# to read the whole cluster and then showed the model a tenth of it.
+#
+# 60 covers every live cluster twice over while still bounding a
+# pathological one, and spread_sample stays the trimmer above it, so the
+# behavior we get above 60 is the behavior we had at 10 rather than a
+# cliff. Raising this is also the experiment that sizes the rest of the
+# longitudinal work: if the decline rate moves, the problem was the
+# sample; if it does not, the problem is the corpus.
+MAX_PROFILE_SOURCE_TEXTS = 60
 
 # The profile pass (design 16a / 12a): person-keyed clustering. The
 # receipts gate is the 12a audit's invariant: a claim about a person
@@ -262,7 +279,7 @@ def build_profile_content(
     # A spread across the window, not the oldest slice of it. The cap is
     # prompt size; which items it drops is a quality decision, and
     # dropping everything recent was the wrong one.
-    for date_s, text in spread_sample(dated_texts, MAX_SOURCE_TEXTS):
+    for date_s, text in spread_sample(dated_texts, MAX_PROFILE_SOURCE_TEXTS):
         lines.append(f"- [{date_s}] {text}")
     return "\n".join(lines)
 

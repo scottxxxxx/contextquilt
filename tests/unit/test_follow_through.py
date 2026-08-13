@@ -21,6 +21,7 @@ from contextquilt.services.consolidation import (
     COMPUTED_LENSES,
     PROFILE_SYSTEM,
     parse_profile_response,
+    MAX_PROFILE_SOURCE_TEXTS,
     MAX_SOURCE_TEXTS,
     MODEL_CHOSEN_LENSES,
     PROFILE_LENSES,
@@ -368,7 +369,46 @@ def test_the_profile_prompt_now_reaches_recent_behavior():
     dated = [(f"2026-0{1 + i // 10}-{1 + i % 10:02d}", f"obs {i}") for i in range(30)]
     content = build_profile_content("Suresh", dated)
     assert "obs 0" in content and "obs 29" in content
-    assert content.count("\n- ") == MAX_SOURCE_TEXTS
+    # 30 sources is under the profile cap, so the model sees ALL of them.
+    # The largest live cluster on 2026-08-13 cited 29, so in practice no
+    # real person is sampled today; spread_sample is the trimmer above.
+    assert content.count("\n- ") == 30
+
+
+def test_a_whole_live_sized_cluster_reaches_the_model():
+    """The point of the higher cap: a real cluster is not sampled.
+
+    Ten was the old cue-pass cap borrowed by the profile pass, and it hid
+    two thirds of the largest live cluster. Anything at or below
+    MAX_PROFILE_SOURCE_TEXTS must arrive whole.
+    """
+    dated = [(f"2026-08-{1 + i % 28:02d}", f"obs {i}")
+             for i in range(MAX_PROFILE_SOURCE_TEXTS)]
+    content = build_profile_content("Suresh", dated)
+    assert content.count("\n- ") == MAX_PROFILE_SOURCE_TEXTS
+    for i in range(MAX_PROFILE_SOURCE_TEXTS):
+        assert f"obs {i}" in content
+
+
+def test_above_the_cap_it_still_spreads_rather_than_truncates():
+    """Above the cap the old behavior returns: a spread, never a slice.
+
+    The failure this guards is a regression to items[:k], which would put
+    the cliff back and make recent behavior structurally invisible again.
+    """
+    dated = [(f"2026-08-{1 + i % 28:02d}", f"obs {i}")
+             for i in range(MAX_PROFILE_SOURCE_TEXTS * 2)]
+    content = build_profile_content("Suresh", dated)
+    assert content.count("\n- ") == MAX_PROFILE_SOURCE_TEXTS
+    assert "obs 0" in content
+    assert f"obs {MAX_PROFILE_SOURCE_TEXTS * 2 - 1}" in content
+
+
+def test_the_cue_pass_cap_is_untouched():
+    """The cue pass keeps its own, smaller budget. Its economics were
+    never measured here and its clusters are a different shape."""
+    assert MAX_SOURCE_TEXTS == 10
+    assert MAX_PROFILE_SOURCE_TEXTS > MAX_SOURCE_TEXTS
 
 
 # --- readiness ---------------------------------------------------------
