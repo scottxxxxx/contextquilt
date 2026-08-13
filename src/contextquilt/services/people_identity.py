@@ -32,6 +32,11 @@ KNOWN_IDENTITY_SOURCES = frozenset({
     "app",                 # the app asserted it without an explicit prompt
     "voice_match",         # app-side speaker enrollment agreed
     "merge_backfill",      # scripts/backfill_entity_aliases.py
+    # Both are a human naming a speaker in one meeting, which is a
+    # confirmation like any other; the finer value records WHERE it was
+    # answered so provenance stays auditable.
+    "speaker_reassign",    # to_name on POST /v1/quilt/{u}/reassign-speaker
+    "speaker_map",         # to_name on POST /v1/quilt/{u}/speaker-map
 })
 
 DEFAULT_IDENTITY_SOURCE = "user_confirmation"

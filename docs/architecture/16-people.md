@@ -1545,6 +1545,296 @@ identity, not a participant's. A column no writer populates would read
 as "zero confirmed" and become a quiet lie, so the split is reported as
 untracked instead (see 6.4).
 
+### 6.2a Presence follows a relabel: the reassignment, the speaker map, and the one null that stays ambiguous
+
+**The invariant this section exists to state: a null
+`signals.last_present_at` means NO PRESENCE WAS RECORDED, on every path
+but one, and that one is named below.**
+
+Why it matters more than it looks. The client fell back to its own local
+speaker-label index whenever CQ served a null anchor, because a null
+could mean two different things: "this person was not there" or "CQ
+cannot tell, because an identity moved and the appearance did not follow
+it". A client cannot separate those, so it could not delete the
+fallback, and the fallback is NOT trustworthy: a stranger has worn the
+user's enrolled name for an entire meeting on this app. Untrustworthy
+local data was outranking the server because the server's null was
+vague. Making the null mean one thing is what lets the fallback go.
+
+#### What the client actually does, which changed the design
+
+A post-save speaker rename does not call `rename-speaker`. It fires
+`MeetingStore.onSpeakerRenamed(meetingId, oldLabel, newLabel)` from
+three call sites, filters that MEETING's patches, string-replaces the
+old label inside the fact text, and sends `PATCH /v1/quilt` per patch.
+The meeting id is in the function signature and never leaves the device,
+so the graph layer is never told anything and no appearance can follow.
+A FOURTH lane, block-scoped segment relabelling, notifies CQ of nothing
+at all, not even the text surgery.
+
+Two things fall out of that. First, **a post-save rename is already
+meeting scoped**, so nothing here needs to reason about a user's whole
+history. Second, **the verb that should carry this is `reassign-speaker`,
+not `rename-speaker`**: it already takes `from_labels: [{label,
+meeting_id}]`, which is exactly the scope.
+
+#### Form 1: `POST /v1/quilt/{u}/reassign-speaker`, one binding
+
+Imperative and narrow: these labels, in these meetings, are this person.
+Three targets, exactly one per request.
+
+```json
+{
+  "from_labels": [{ "label": "Speaker 4", "meeting_id": "<uuid>" }],
+  "to_person_id": "<uuid>"
+}
+```
+
+```json
+{
+  "from_labels": [{ "label": "Speaker 4", "meeting_id": "<uuid>" }],
+  "to_name": "Ramkumar"
+}
+```
+
+```json
+{
+  "from_labels": [{ "label": "Speaker 4", "meeting_id": "<uuid>" }],
+  "to_self": true
+}
+```
+
+`to_name` is the new one and it is the whole reason a second route was
+not needed for naming: CQ resolves the name (bind to the matching
+person, create them if there is none) through the SAME path
+`POST /v1/people` uses, so a name typed onto a speaker and the same name
+typed into the "+" sheet cannot produce two different people. Server
+side resolution on purpose: a client re-implementing name matching is
+the duplication section 1 argues against. Placeholder names are refused
+(422 `PLACEHOLDER_NAME`), same gate as create.
+
+Response, additive:
+
+```json
+{
+  "patches_updated": 3, "connections_updated": 0,
+  "entities_merged": 0, "labels_skipped": 0,
+  "appearances_recorded": 1,
+  "presence_entity_id": "<uuid|null>",
+  "resolved_person": {
+    "entity_id": "<uuid>", "name": "Ramkumar",
+    "patch_id": "<uuid>", "status": "created"
+  }
+}
+```
+
+`resolved_person` is null on the other two lanes, which already know
+their target.
+
+What it writes, and the reasoning behind each part:
+
+* **Presence.** Utterances moving to a person is direct evidence that
+  person SPOKE in that meeting, so a `speaker`-capacity appearance is
+  upserted per meeting where anything actually moved, on the merge
+  route's discipline (6.2): earliest `first_seen_at`, latest
+  `last_seen_at`, capacities unioned, `turn_count` MAX with NULL never
+  clobbering a known value. Several labels folding into one person in one
+  meeting stay ONE appearance, because that is still one meeting.
+* **A label that moved nothing records nothing.** The request named it;
+  the meeting never used it. There is no evidence anyone spoke under it.
+* **The timestamps are the MEETING's ingest anchor, never `NOW()`.**
+  Appearances run on the ingest clock, so the anchor is the meeting's
+  sibling appearance rows, or the meeting's own patches when it has no
+  siblings, and a meeting with neither is skipped rather than dated.
+  Stamping `NOW()` would tell the People list the user met this person
+  today because they fixed a label today, which is the same failure
+  `backfill_person_appearances.py` refuses in its own header.
+* **The SOURCE label's appearance is left in place, and no measurement
+  moves.** This form moves PATCHES, and patch ownership is not a
+  partition of a meeting's turns, so carrying the label's turn count over
+  would be inference. The source row also survives, and two rows each
+  claiming the same 41 turns would credit one person's speech to two
+  people. NULL is unknown, which is true. Form 2 states the whole meeting
+  and can therefore move measurements; this one cannot.
+* **The target is excluded from the label cleanup**, so a label wearing
+  the target's own name can no longer delete the person just reassigned
+  to, and cascade away the appearance with it.
+* **A suppressed target accumulates no meeting history**, matching the
+  ingest path exactly. The patches still move; only the presence write is
+  withheld.
+* **A pre-merge target id writes presence to the CANONICAL row**, since
+  the list reads `merged_into IS NULL` and an appearance on a folded row
+  is presence nobody can see. The owner STRING is unchanged, and the
+  ledger still matches it because a merge leaves the folded name behind
+  as an alias.
+
+**`to_self` lands on the ego entity (migration 35) and nowhere else.**
+The ego is a People row like every other, carrying the same `signals`
+block, so leaving it out would make the user's own row the one place a
+null anchor still means cannot-tell. The user saying "those were me" is
+the same grade of presence evidence as saying "those were Marcus". The
+guard is harder, though: no ego link stamped means nothing is written,
+and this route never mints a stamp. The ego link is keep-first because a
+moving ego silently reshapes every graph read, and a route about speaker
+attribution does not get to decide who the user is.
+
+#### Form 2: `POST /v1/quilt/{u}/speaker-map`, the resulting state
+
+**The state, not the operation.** "What is the inverse of a
+reassignment" has no answer as posed. An undo can mean "I mislabelled
+that, it was never him", which makes the appearance a false statement,
+or "I want the raw labels back on screen", which makes it a true one
+that reverting would destroy. Neither CQ nor the client can tell those
+apart from an undo signal, so any rule keyed on the OPERATION is wrong.
+
+So CQ accepts the full label-to-person mapping for a meeting as it now
+stands, diffs it against the appearances it holds, and adds or removes to
+match. That dissolves the family: an undo is just the post-undo mapping,
+a block-scoped edit is just the post-edit mapping (so segment ranges are
+never modelled), a consolidation is a mapping with one fewer key.
+
+```json
+{
+  "meeting_id": "<uuid>",
+  "labels_are_complete": true,
+  "labels": [
+    { "label": "Speaker 1", "to_person_id": "<uuid>" },
+    { "label": "Speaker 2", "to_name": "Ramkumar" },
+    { "label": "Speaker 3", "to_self": true },
+    { "label": "Speaker 4", "to_nobody": true }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "meeting_id": "<uuid>",
+  "labels_received": 4,
+  "appearances_recorded": 2,
+  "capacities_reduced": 1,
+  "appearances_removed": 1,
+  "unresolved_labels": [],
+  "labels": [
+    { "label": "Speaker 1", "entity_id": "<uuid>", "name": "Priya",
+      "patch_id": null, "status": "exists" },
+    { "label": "Speaker 4", "entity_id": null, "name": null,
+      "patch_id": null, "status": "nobody" }
+  ]
+}
+```
+
+Every `labels` entry carries every sibling key so a client decodes one
+type. `status` is `exists | created | nobody | unresolved`.
+
+**Idempotent, as a hard requirement rather than a nice property.** Only
+necessary work is planned (`services/person_appearances.plan_speaker_map`
+is pure and unit tested), so sending the same mapping twice writes
+nothing the second time and moves no timestamp. That is what makes it
+safe on relabel lanes nobody has found yet: an unwired lane then fails by
+OMISSION rather than by writing something false.
+
+**Removal, which is the half that makes undo work.** Capacities are a
+set for exactly this reason, so the rule is graded:
+
+* A row whose ONLY capacity is `speaker` is DELETED. Nothing but the
+  label ever claimed this person was in the room. It is not left with an
+  empty capacity set, because empty means pre-migration-31 unknown and
+  unknown already counts as presence, so an emptied row would keep
+  asserting the thing that was just retracted.
+* A row standing on another capacity SURVIVES and loses only `speaker`.
+  A person recorded by `ownership` was in that meeting whether or not a
+  label still points at them.
+* A row with no `speaker` capacity at all, including an EMPTY one, is
+  never touched in either direction. This mapping speaks about speaker
+  labels; it may not add or remove a claim of a grade it never described.
+* Stripping `speaker` also NULLS the per-speaker measurements
+  (`turn_count` and the four per-person question counts). A turn count is
+  a claim about what this person SAID, and the mapping just said those
+  words were somebody else's. They are not recoverable, which is the
+  price of a corrected attribution; an honest unknown beats a confident
+  misattribution. `meeting_questions_by_user` stays, because it counts
+  what the user asked in the meeting and is a property of the meeting.
+* **Removal requires a fully resolved target set.** If any label fails to
+  resolve (today: a `to_self` with no ego link, or a `to_person_id`
+  pointing at a suppressed row), absence stops meaning "did not speak",
+  so that call adds and removes nothing and echoes the labels that cost
+  it in `unresolved_labels`.
+* **`labels_are_complete` must be literally true**, or the request is
+  refused (422 `INCOMPLETE_MAPPING`). Removal works by absence and CQ
+  cannot verify completeness from the outside, so the assertion is made
+  at the call site: a half-wired lane fails loudly instead of quietly
+  deleting presence it was never told about. `to_nobody` is explicit for
+  the same reason, since a client that forgot to fill in a target must
+  get a 422 rather than a deletion.
+
+**Presence only, deliberately.** This form never rewrites `value.owner`
+and never touches patch text. Speaking and owning are different claims
+(work gets assigned in absentia, which is the argument the appearance
+backfill's own header makes), so a map of who spoke must not silently
+re-own anybody's commitments. Use form 1 for attribution and form 2 for
+presence; they compose, and both are meeting scoped.
+
+#### `POST /v1/quilt/{u}/rename-speaker` is unchanged, and stays
+
+Not deprecated and not removed here: GP carries it, and a route removal
+is a two-sided release. What is now pinned by test:
+
+1. **The old name is already an entity.** The rename is IN PLACE:
+   `UPDATE entities SET name`, so `entity_id` never changes.
+   `person_appearances` is keyed on `entity_id`, so every appearance the
+   person already had still points at them and the presence anchor is
+   untouched. Verified, and pinned, because a future "fix" that turned
+   this into a delete plus recreate would silently drop the person's whole
+   meeting history.
+2. **The old name was an unnamed placeholder.** A NEW entity is created,
+   and `SpeakerRename` carries `old_name` and `new_name` and nothing
+   else. There is no meeting id anywhere in the request, so there is no
+   meeting to attach an appearance to. CQ will NOT guess by matching
+   patch text or owner strings; that is inference wearing a record's
+   clothes. The new entity starts with zero appearances and serves a null
+   `last_present_at` until an extraction observes them.
+
+The recommendation is NOT to add meeting ids to this route. Both of its
+jobs are already expressible: `reassign-speaker` with `to_name` names an
+unknown speaker in a meeting, and `speaker-map` states the meeting's
+whole speaker set. Adding a third meeting-scoped dialect would mean
+three ways to say the same thing, one of which cannot express removal.
+
+#### The honest audit of a null anchor
+
+| Path | Null anchor means |
+| --- | --- |
+| Mention-only person (17a presence grading) | Not present. Unambiguous. |
+| Person from a chat turn or `POST /v1/people` (no origin) | No meeting recorded. Unambiguous. |
+| Person whose meetings all predate migration 30 and were never backfilled | Not present as far as CQ can see. The `ownership` and `speakers` backfill tiers ran (8c); `mentions` is held, and it is not attendance anyway. |
+| Reassigned speaker (form 1) | Present, and now recorded. |
+| Speaker map (form 2) | Exactly what the mapping said, in both directions. |
+| Merged identity | Present, and recorded since 6.2. |
+| Renamed speaker, old name was an entity | Present, and recorded. Verified in place. |
+| **Renamed speaker, old name was a placeholder** | **AMBIGUOUS. Could be genuinely absent, or an hour of real presence CQ has no meeting id for. Closes when the client routes that lane through either form above; no CQ contract change is needed.** |
+| **A relabel lane that calls neither form** (today: the client's three text-only lanes and the block-scoped one) | **AMBIGUOUS until it is wired. This is the omission failure the design chose over a false write.** |
+| MCP deployment whose Postgres lags migration 30 | Cannot tell. The write degrades silently by design there. |
+
+#### Sequencing and one follow-up
+
+`speaker-map` is a NEW route, so **GP carries it before CQ can call it
+live**: the gateway declares exact paths, no prefix and no wildcard, and
+CQ's socket cannot see a route-table miss. `to_name` is a new FIELD on a
+route GP already carries, which is additive at the reader. Same word,
+different mechanism.
+
+**Follow-up, not bundled here: the patch TEXT rewrite.** The client
+still does the string replacement itself and sends `PATCH /v1/quilt` per
+patch, as `rename-speaker`'s docstring has always assigned. The
+recommendation is to move it server side eventually, because the client
+is rewriting fact text with a naive string replace (a label that appears
+inside a sentence gets rewritten too) and because it is the last piece of
+a relabel that CQ learns about only as anonymous patch edits. It is a
+real behavior change to shared surfaces and deserves its own decision
+rather than a bundle.
+
 ### 6.6 Question counts per appearance (shipped, migration 37)
 
 The sibling of migration 34's `turn_count`, and it exists under the same
