@@ -444,10 +444,18 @@ before a merge still lands on the right person. Adds to the above:
 {
   "insights": [
     {"patch_id": "…", "lens": "how_they_decide", "text": "…", "do": "…",
-     "derived_at": "2026-08-11T…Z", "decay_state": "live",
+     "derived_at": "2026-08-11T…Z", "decay_state": "live", "facts": null,
      "evidence": [{"origin_id": "…", "ingested_on": "2026-06-17",
                    "date": "2026-06-17", "text": "…", "patch_ids": ["…"]}]}
   ],
+  "insight_readiness": {
+    "lenses": [
+      {"lens": "how_they_follow_through", "state": "pending_evidence",
+       "more_meetings_help": true,
+       "items_observed": 2, "items_required": 4, "items_remaining": 2,
+       "meetings_observed": 1, "meetings_required": 3, "meetings_remaining": 2}
+    ]
+  },
   "projects": [
     {"project_id": "…", "project": "Atlas Migration",
      "meeting_count": 5, "observed": true, "stated": false}
@@ -494,8 +502,10 @@ reshuffle between polls.
 
 `you_owe` is `null`, not `[]`. An empty list means "none open"; null
 means CQ cannot tell. See 6.4. `insights` (5.8) carries the same
-distinction: `null` when CQ cannot derive for this person at all, `[]`
-when the pass has produced nothing yet.
+distinction, with a narrower null: `[]` whenever the pass has produced
+nothing yet, INCLUDING for a person too thin to have a person patch,
+and `null` only when the fetch failed. `insight_readiness` (5.8.2) says
+why each lens is absent and whether waiting will fix it.
 
 CQ deliberately does **not** return meeting titles or durations. Per
 doc 15 item 5, CQ wins on state and SS wins on content. SS joins
@@ -776,13 +786,62 @@ together or not at all: the parse rejects a claim with no actionable
 line, because 16a renders both or neither.
 
 **The lens vocabulary is CQ-side, not manifest-declared.**
-`PROFILE_LENSES` in `services/consolidation.py` holds it:
-`how_they_decide` and `what_moves_them`. A response naming anything else
-is declined, never coerced. This is deliberate asymmetry: an app declares
-WHICH of its types and labels carry People semantics (5.9), but it does
-not get to invent lenses, because the lens is the thing the prompt, the
-card layout and the suppression rule all agree on. Adding a lens is a CQ
-change, and it reopens every person for one more derivation by design.
+`PROFILE_LENSES` in `services/consolidation.py` holds it, in two halves
+that are produced by two different kinds of pass:
+
+* `MODEL_CHOSEN_LENSES`: `how_they_decide` and `what_moves_them`. A model
+  reads the observations and picks between them. A response naming
+  anything else is declined, never coerced.
+* `COMPUTED_LENSES`: `how_they_follow_through` (5.8.1). Arithmetic
+  decides the verdict before any call happens, and the model only writes
+  it up. It is never offered to the profile call, so that call cannot
+  produce it and cannot decline it.
+
+This is deliberate asymmetry: an app declares WHICH of its types and
+labels carry People semantics (5.9), but it does not get to invent
+lenses, because the lens is the thing the prompt, the card layout and the
+suppression rule all agree on. Adding a lens is a CQ change, and it
+reopens every person for one more derivation by design.
+
+Two counts follow the vocabulary and must not be confused. The profile
+call's candidate ceiling is `len(MODEL_CHOSEN_LENSES)`, because that is
+what the call can produce; counting a computed stamp there would hold a
+person in the candidate set forever, burning a cluster slot every cycle
+to decline. Everything else (the readiness surface, the durable no, the
+stack a person can carry) is the whole vocabulary. Neither is a literal
+in the code, which is what let the vocabulary grow from two to three
+without touching the gate.
+
+**What a card can physically hold** lives in `services/insight_cards.py`,
+one home shared by every lens so no two prompts can drift on it. The
+claim is capped at 62 characters and the do line at 90, enforced in the
+parse rather than requested in the prompt, because a served claim the UI
+cannot render is worse than no claim. 62 is the 16a design's own number:
+the collapsed capsule is one line, and iOS measured the visible budget
+beside the lens chip at 30 to 37 characters on an iPhone. The first four
+live insights ran 97 to 177 characters of claim and 94 to 148 of do,
+because nothing in any prompt said otherwise.
+
+A claim also may not OPEN with the person's name. Every shipped claim did
+("Sukumar gates forward movement..."), on a page titled with that name,
+spending six to eight characters of a thirty five character budget on the
+one word the reader already has. Stripping it at render time was the
+obvious fix and the wrong one: editing served words on the client is the
+pattern this workstream has been retiring, so it is fixed at the
+generator and checked in the parse.
+
+The PROMPT asks for less than the parse allows (45 characters of claim,
+70 of do). That gap is measured, not stylistic: asked for "at most 62
+characters" the live model returned 65 on five identical calls, and
+temperature is pinned, so an over-limit answer is not a lottery a retry
+could win, it is a person who never gets a card. Anchoring the ask below
+the ceiling puts the habitual overshoot inside it. After the change, four
+of four live calls landed at 45 characters on the computed lens and 58 to
+59 on the prose lens, none opening with the name. A rejected card costs
+one call and no write, so the person keeps their candidacy and the next
+cycle tries again; the rejection logs at info with its reason
+(`profile_card_rejected`), because a run of format failures would
+otherwise look exactly like a model that keeps declining.
 
 **The receipts gate.** A claim about a person must be supported across at
 least `min_meetings` DISTINCT meetings (default 3), or it is an anecdote
@@ -846,12 +905,169 @@ second lands on the next 24h pass.
   `min_meetings` that created the insight. The honest list is served
   anyway and the count speaks. It is never padded back up.
 
-**Null versus empty.** `insights` is `null` when CQ cannot answer at all:
-the entity has no person patch (nothing to derive from), or the fetch
-failed and was swallowed so the detail route never fails on this leg. An
-empty LIST means the pass has produced nothing yet. Same house rule as
-`you_owe` (6.4). Whether the app can EVER have insights is
-`capabilities.insights`.
+**Null versus empty.** `insights` is `null` in ONE case: the fetch
+failed and was swallowed, so the detail route never fails on this leg.
+Everything else is `[]`, meaning the pass has produced nothing yet.
+
+That includes a person with no person patch, which shipped on
+2026-08-13 as null on the reasoning that CQ could "never" derive for a
+patchless entity. The word never was wrong. An entity accumulates a
+person patch as it is observed, so a patchless person is not a
+cannot-tell, it is the thinnest possible NOT YET, and it is exactly the
+case the not-yet card exists for: a user two meetings in, wondering why
+someone has no card. Clients correctly render nothing for null, so
+serving null there gave that user a blank screen. Same house rule as
+`you_owe` (6.4), applied to the honest boundary. Whether the app can
+EVER have insights is `capabilities.insights`.
+
+**`facts`** carries the arithmetic a COMPUTED lens was written from, and
+is null for a lens a model reasoned its way to (it counted nothing, so it
+has no counts). Ints only, so nothing here can reach a strict serializer
+as NaN or Infinity. It is served so the numbers behind a sentence stay
+auditable: anyone can check the claim against the counts, and the counts
+against the evidence rows.
+
+
+### 5.8.1 The follow-through lens: a verdict the arithmetic owns
+
+`how_they_follow_through` is the third lens and the first computed one.
+The claim it produces is about delivery: "commits to a date and lands
+most of them a week after it" rather than "responds well to charts".
+
+**Why it is built the other way round.** The prose lenses ask a model to
+read stored observations and name a behavioral pattern. That works for
+well evidenced people (one person on prod carries `how_they_decide` and
+`what_moves_them` at once), but it declines on the two best evidenced
+people who have no card yet, with the same stated reason both times and
+on both the oldest and the newest slice of their record: the stored
+observations are task assignments and scheduling notes, so they describe
+what a person DOES, and neither prose lens is about that. Arithmetic over
+those same records cannot decline. So this lens reaches people the prose
+lenses never will, and its verdict is never a model's opinion.
+
+**What is computed, in `services/follow_through.py`.** For each item the
+person owns that carried a due date which has come due:
+
+| verdict | how it is decided |
+| --- | --- |
+| `on_time` | closed, and neither signal says otherwise |
+| `late` | closed after the due date, OR carrying `value.overdue_since` |
+| `open_past_due` | still open, active, unshelved, due date passed |
+
+Everything else has NO verdict and is not counted: no due date (it cannot
+be early or late), a due date still ahead (nobody has been asked the
+question), shelved (the user released it, and holding a person to
+something the user stopped tracking is not a delivery fact), archived
+without a completion (expiry is CQ forgetting, not anyone failing, the
+same rule that keeps decayed items out of the completion history).
+
+`late` reads two independent signals and takes either. `overdue_since`
+means the deadline sweep actually FOUND the item open past its date,
+which survives the item closing later; the date comparison catches items
+that closed before any sweep tick saw them. On the live corpus the two
+agree exactly, and keeping both means neither the sweep's six hour
+cadence nor a cleared stamp can turn a slip into an on time.
+
+**What these numbers are, stated once so nothing overclaims.**
+`completed_at` is when CQ LEARNED an item closed (a later meeting, an app
+tap, a chat completion), not when the work landed, and `overdue_since` is
+when the sweep first noticed. So every count is a fact about the RECORD,
+not a stopwatch on a person, and the claim written from it says so. This
+is also the first rule in the prompt: describe observed delivery
+behavior, never character. "Slips twice before landing" is a claim a
+reader can check against the receipts. "Unreliable" is a verdict about a
+human being, it is not a fact about anything, and it is rejected in the
+parse as well as forbidden in the prompt.
+
+**Moved due dates.** `value.deadline_history` is the only place a
+superseded due date survives: the dedup path records the displaced pair
+when a re-observation carries a different date (shipped 2026-08-10 with
+the 12a capture signals). Nothing else in CQ remembers that a date
+changed, which makes the move count the one signal here that cannot be
+reconstructed later. It is stated to the model only when it is non-zero,
+because "0 moves" invites a sentence about an absence nobody asked about.
+The store is empty today and fills forward.
+
+**The gate, and why it is in code.** Arithmetic does not decline, so the
+refusal has to be ours and it happens BEFORE a call is spent:
+`MIN_JUDGED_ITEMS` (4) judged items across the rule's `min_meetings`
+distinct meetings. Both thresholds are about volume. Nothing declines
+because the numbers are unflattering or mixed, which is the whole point:
+"commits confidently and slips twice before landing" is exactly the card
+this lens is for.
+
+**The receipts are the counted items.** `source_patch_ids` holds every
+item the arithmetic counted, so the evidence rows a user taps through are
+the meetings behind the number, and `value.facts` records the counts
+beside the claim. The claim never states a number the arithmetic did not
+produce: every integer in the served text has to be one of those counts,
+checked in the parse, not merely asked for in the prompt.
+
+**Everything else is shared.** Same write path, same lens stamp, same
+per-lens durable no, same receipts read, same decay band. The two lens
+families differ in how they reach a claim and in nothing else.
+
+### 5.8.2 `insight_readiness`: why a lens is absent, and whether waiting helps
+
+An absent lens used to be invisible: it simply was not in the array, and
+on the wire "never derived" and "the user permanently rejected this" were
+the same bytes. That is not a cosmetic gap. A client rendering an honest
+empty state ("keep meeting Priya and this fills in") would say it after a
+reinstall about the exact claim the user threw away, which is the product
+arguing with a decision it promised to respect. It is also not something
+a client can fix locally: local state does not survive a reinstall or
+cross devices, and CQ is the authority on what it will and will not
+derive. Same reason decay bands are not computed on device.
+
+So the detail route serves, per lens in the whole vocabulary:
+
+```json
+{"lens": "how_they_follow_through",
+ "state": "pending_evidence",
+ "more_meetings_help": true,
+ "items_observed": 2, "items_required": 4, "items_remaining": 2,
+ "meetings_observed": 1, "meetings_required": 3, "meetings_remaining": 2}
+```
+
+| state | meaning | waiting helps |
+| --- | --- | --- |
+| `available` | the card is in `insights` | no, it is already there |
+| `pending_evidence` | below the gate, and the numbers say by how much | yes |
+| `pending_pattern` | gate met, no claim found yet, re-checked each cycle | yes |
+| `suppressed` | the user rejected this card | NO, never invite waiting |
+| `retired` | the system archived it | NO, never invite waiting |
+
+`suppressed` and `retired` both mean the pass will not produce this card
+again, because the durable no ignores status: any stamp closes the lens
+forever. They are separated because they are not the same fact about the
+user, and a client may want to word them differently. `suppressed` is an
+archived stamp carrying `value.archive_cause = "user_delete"`, which is
+what `DELETE /v1/patches/{id}` writes.
+
+The vocabulary is OPEN, like `lens` and `decay_state`. A client meeting a
+state it does not know must render NOTHING for that lens, never the
+not-yet copy, because the not-yet copy is a promise. `more_meetings_help`
+exists so a client never has to reason about the vocabulary to answer the
+only question the empty card actually asks.
+
+**The numbers are the gate the pass really runs on**, read from the
+caller's manifest rule, not hardcoded: "two more meetings" is honest only
+if it counts toward the threshold that gates the derivation. The two lens
+families count different things, so their `items_observed` differ on the
+same person: the model lenses count what their cluster SQL counts (ACTIVE
+items carrying a meeting), while the computed lens counts items whose
+date has come due, which is mostly items that already closed, and closing
+archives the row.
+
+Every entry carries every sibling key (doc 17 section 6) and every number
+is an int, so nothing on this surface can reach GP's `allow_nan=False`
+serializer as NaN or Infinity. `insight_readiness` is `null` in two
+cases: the app declares no person-clustered rule (so no lens will ever be
+derived and `capabilities.insights` already says so), or the readiness
+fetch itself failed. It is present and meaningful for exactly the case
+`insights: []` now covers, including a person with no person patch, who
+reports zero observed against the real thresholds. That is the honest,
+specific version of "not yet".
 
 ---
 

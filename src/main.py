@@ -46,7 +46,12 @@ from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
 from contextquilt.services import decay_model
 from contextquilt.services import facet_runtime
-from contextquilt.services.consolidation import manifest_declares_person_insights
+from contextquilt.services.consolidation import (
+    CLUSTER_WINDOW_DAYS,
+    build_insight_readiness,
+    manifest_declares_person_insights,
+    person_insight_rule,
+)
 from contextquilt.services.extraction_schema import is_user_reference
 from contextquilt.services.recall_formatter import (
     format_people_scope,
@@ -4024,13 +4029,13 @@ async def _people_vocab_cached(app_id: str) -> "PeopleVocabulary":
     if hit and now - hit[1] < 300:
         return hit[0]
     async with db_pool.acquire() as conn:
-        vocab, _, _ = await _people_read_context(conn, app_id)
+        vocab, _, _, _ = await _people_read_context(conn, app_id)
     _recall_vocab_cache[app_id] = (vocab, now)
     return vocab
 
 
 async def _people_read_context(conn, app_id: str):
-    """(vocabulary, owed_to_available, insights_available), one fetch.
+    """(vocabulary, owed_to_available, insights_available, person_rule).
 
     All three are properties of the app's registered manifest, not of
     CQ's code: the vocabulary says WHICH types and labels carry People
@@ -4047,33 +4052,111 @@ async def _people_read_context(conn, app_id: str):
     capability follows the schema that produces the data, not the code
     that reads it.
 
+    The fourth member is the person-clustered rule itself, because the
+    readiness surface has to report the THRESHOLDS the pass actually runs
+    on. "Two more meetings" is only honest if it counts toward the number
+    that gates the derivation, and that number lives in the manifest.
+
     Any failure to resolve the manifest, a legacy non-UUID app id, no
     registered schema, unparseable JSON, degrades to (default floor,
-    False, False). False is the conservative direction: the caller gets
-    null and a stated reason.
+    False, False, None). False is the conservative direction: the caller
+    gets null and a stated reason.
     """
     import uuid as _uuid
+    empty = (DEFAULT_PEOPLE_VOCABULARY, False, False, None)
     try:
         app_uuid = _uuid.UUID(app_id)
     except (ValueError, AttributeError, TypeError):
-        return DEFAULT_PEOPLE_VOCABULARY, False, False
+        return empty
     row = await conn.fetchrow(
         "SELECT manifest FROM app_schemas WHERE app_id = $1 "
         "ORDER BY version DESC LIMIT 1",
         app_uuid,
     )
     if row is None:
-        return DEFAULT_PEOPLE_VOCABULARY, False, False
+        return empty
     manifest = row["manifest"]
     if isinstance(manifest, str):
         try:
             manifest = json.loads(manifest)
         except (ValueError, TypeError):
-            return DEFAULT_PEOPLE_VOCABULARY, False, False
+            return empty
     return (
         people_vocabulary(manifest),
         manifest_declares_owed_to(manifest),
         manifest_declares_person_insights(manifest),
+        person_insight_rule(manifest),
+    )
+
+
+async def _person_insight_readiness(
+    user_id: str,
+    person_patch_id: Optional[Any],
+    ownership_label: str,
+    rule: dict,
+) -> dict:
+    """Per lens: where this person stands, and whether waiting helps.
+
+    Detail route only, and one person at a time: this is two extra
+    queries, which is nothing against one person and 300 round trips
+    against a directory.
+
+    A person with no person patch is not skipped, they are the whole
+    point. They have no owned items and no lens stamps, so every lens
+    reports zero observed against its real threshold, which is the
+    honest and specific version of "not yet".
+
+    Both queries are deliberately shaped like the passes they report on:
+    the same ownership edge, the same source types, the same 180 day
+    window, and stamps read status-blind because a suppressed lens is a
+    stamp in a non-active status and is exactly what the client needs to
+    stop asking the user to wait for it.
+    """
+    source_rows: list = []
+    stamp_rows: list = []
+    if person_patch_id:
+        source_rows = await db_pool.fetch(
+            f"""
+            SELECT cp.patch_id, cp.origin_id, cp.completed_at,
+                   COALESCE(cp.status, 'active') AS status,
+                   cp.value->>'deadline_date' AS deadline_date,
+                   cp.value->>'overdue_since' AS overdue_since,
+                   cp.value->>'shelved_at' AS shelved_at,
+                   jsonb_array_length(
+                       COALESCE(cp.value->'deadline_history', '[]'::jsonb)
+                   ) AS deadline_history
+            FROM patch_connections pc
+            JOIN context_patches cp ON cp.patch_id = pc.to_patch_id
+            JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+            WHERE ps.subject_key = $1
+              AND pc.from_patch_id = $2::uuid
+              AND pc.connection_label = $3
+              AND COALESCE(pc.status, 'active') = 'active'
+              AND cp.patch_type = ANY($4::text[])
+              AND cp.created_at > NOW() - INTERVAL '{CLUSTER_WINDOW_DAYS} days'
+            """,
+            f"user:{user_id}", str(person_patch_id), ownership_label,
+            rule["from_types"],
+        )
+        stamp_rows = await db_pool.fetch(
+            """
+            SELECT cp.value->>'lens' AS lens,
+                   COALESCE(cp.status, 'active') AS status,
+                   cp.value->>'archive_cause' AS archive_cause
+            FROM context_patches cp
+            JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+            WHERE ps.subject_key = $1
+              AND cp.origin_mode = 'derived'
+              AND cp.value->>'source_person' = $2
+            """,
+            f"user:{user_id}", str(person_patch_id),
+        )
+    return build_insight_readiness(
+        [dict(r) for r in source_rows],
+        [dict(r) for r in stamp_rows],
+        today=datetime.utcnow().date(),
+        min_patches=rule["min_patches"],
+        min_meetings=rule["min_meetings"],
     )
 
 
@@ -4669,7 +4752,7 @@ async def list_people(
         ignored.append("confirmed")
 
     async with db_pool.acquire() as conn:
-        vocab, owed_to_available, insights_available = (
+        vocab, owed_to_available, insights_available, person_rule = (
             await _people_read_context(conn, app_id)
         )
         core = await _people_core(
@@ -4759,10 +4842,19 @@ async def get_person(
 
     `insights` is the 16a lens stack: up to one derived card per lens in
     the CQ-side lens vocabulary, each with the claim, the do line, its
-    own `decay_state`, and the receipts. It is null, not [], when CQ
-    cannot answer at all (no person patch to derive from, or the fetch
-    failed); an empty list means the pass has produced nothing yet. See
-    capabilities.insights for whether this app can produce any.
+    own `decay_state`, the computed `facts` where the lens has any, and
+    the receipts. It is null ONLY when the fetch failed; an empty list
+    means the pass has produced nothing yet, which includes a person too
+    thin to have a person patch. See capabilities.insights for whether
+    this app can produce any.
+
+    `insight_readiness` says, per lens, why it is absent and how close it
+    is: `pending_evidence` with the counts still needed, `pending_pattern`
+    when the gate is met and no claim has been found yet, `suppressed`
+    when the user rejected that card (it is never coming back, so never
+    invite them to wait for it), `retired` when the system archived it,
+    `available` when it is in `insights`. `more_meetings_help` answers
+    the client's actual rendering question directly.
 
     Each evidence row is one DISTINCT meeting behind the claim, carrying
     the source patch text and the patch ids so the client can join to
@@ -4774,7 +4866,7 @@ async def get_person(
     receipts than the gate that created it required.
     """
     async with db_pool.acquire() as conn:
-        vocab, owed_to_available, insights_available = (
+        vocab, owed_to_available, insights_available, person_rule = (
             await _people_read_context(conn, app_id)
         )
         try:
@@ -4872,12 +4964,28 @@ async def get_person(
     # one card through the existing DELETE /patches route, and leave the
     # person's other lenses derivable.
     #
-    # Null, not [], when CQ cannot answer: insights are derived from a
-    # person PATCH, so a patchless entity is one CQ can never derive
-    # for, and a failed fetch is not evidence of an empty stack either.
-    # An empty LIST means the pass has simply produced nothing yet. Same
-    # house rule as you_owe (doc 16 section 6.4).
-    insights: Optional[list] = None
+    # Null ONLY when the fetch failed. A patchless person is NOT a
+    # cannot-tell: an entity accumulates a person patch as it is
+    # observed, so "no patch yet" is the thinnest possible NOT YET, and
+    # it is precisely the case the not-yet card exists for (a user two
+    # meetings in, wondering why a person has no card). #239 served null
+    # for it on the reasoning that CQ could "never" derive for a
+    # patchless entity, which was wrong about the word never: clients
+    # correctly render nothing for null, so the motivating case got a
+    # blank screen. It is [] now, with `insight_readiness` saying how far
+    # along the person is.
+    insights: Optional[list] = []
+    # Per lens: where this person stands and whether waiting helps.
+    # Null when the app cannot produce insights at all (capabilities
+    # explains that) or when the fetch failed.
+    readiness: Optional[dict] = None
+    if insights_available and person_rule:
+        try:
+            readiness = await _person_insight_readiness(
+                user_id, row.get("patch_id"), vocab.ownership_label, person_rule
+            )
+        except Exception:
+            readiness = None
     if row.get("patch_id"):
         try:
             # db_pool, NOT the _people_core conn: that connection's
@@ -5006,6 +5114,12 @@ async def get_person(
                     "lens": iv.get("lens"),
                     "text": iv.get("text", ""),
                     "do": iv.get("do"),
+                    # The arithmetic a COMPUTED lens was written from,
+                    # ints only, so the client can show the numbers
+                    # behind the sentence and anyone can audit the claim
+                    # against them. Null for a lens a model reasoned its
+                    # way to: it counted nothing, so it has no counts.
+                    "facts": iv.get("facts"),
                     "derived_at": ir["created_at"].isoformat() if ir["created_at"] else None,
                     # live | aging | stale, the SAME open vocabulary and
                     # UTC-day bucketing the ledger items carry.
@@ -5015,15 +5129,20 @@ async def get_person(
         except Exception:
             # Serving must never fail the detail route. Null, not []:
             # a swallowed error is CQ not knowing, not CQ knowing there
-            # are none.
+            # are none. This is now the ONLY path that serves null.
             insights = None
 
     detail = _public_person(row)
     detail.update({
-        # A list (possibly empty) once CQ can answer, null when it
-        # cannot. See capabilities.insights for whether this app can
-        # ever produce them at all.
+        # A list (possibly empty) unless the fetch failed, which is the
+        # only cannot-tell. See capabilities.insights for whether this
+        # app can ever produce them at all.
         "insights": insights,
+        # Why a lens is missing and how close it is, per lens, so an
+        # empty stack can be explained honestly instead of papered over.
+        # Null when the app produces no insights at all, or the readiness
+        # fetch failed. See doc 16 section 5.8.2.
+        "insight_readiness": readiness,
         "projects": row["_projects"],
         "commitments": {
             "they_owe": [_item(r) for r in row["_they_owe"]],
@@ -5124,7 +5243,7 @@ async def merge_people(
 
     subject_key = f"user:{user_id}"
     async with db_pool.acquire() as conn:
-        vocab, _, _ = await _people_read_context(conn, app_id)
+        vocab, _, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             try:
                 canonical = await _load_active_person(
@@ -5540,7 +5659,7 @@ async def keep_people_separate(
     source = resolve_identity_source(req.source)
 
     async with db_pool.acquire() as conn:
-        vocab, _, _ = await _people_read_context(conn, app_id)
+        vocab, _, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             try:
                 raw_a, raw_b = req.entity_ids
@@ -5625,7 +5744,7 @@ async def confirm_person(
     source = resolve_identity_source(req.source if req else None)
 
     async with db_pool.acquire() as conn:
-        vocab, _, _ = await _people_read_context(conn, app_id)
+        vocab, _, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             try:
                 row = await _load_active_person(
@@ -5718,7 +5837,7 @@ async def rename_person(
 
     subject_key = f"user:{user_id}"
     async with db_pool.acquire() as conn:
-        vocab, _, _ = await _people_read_context(conn, app_id)
+        vocab, _, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             profile = await conn.fetchrow(
                 "SELECT display_name FROM profiles WHERE user_id = $1", user_id
@@ -5927,7 +6046,7 @@ async def suppress_person(
     source = resolve_identity_source(req.source if req else None)
     subject_key = f"user:{user_id}"
     async with db_pool.acquire() as conn:
-        vocab, _, _ = await _people_read_context(conn, app_id)
+        vocab, _, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             try:
                 row = await _load_active_person(
@@ -6007,7 +6126,7 @@ async def unsuppress_person(
     """
     subject_key = f"user:{user_id}"
     async with db_pool.acquire() as conn:
-        vocab, _, _ = await _people_read_context(conn, app_id)
+        vocab, _, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             # Direct read: the standard loader refuses suppressed rows.
             row = await conn.fetchrow(
@@ -6098,7 +6217,7 @@ async def create_person(
     created = False
 
     async with db_pool.acquire() as conn:
-        vocab, _, _ = await _people_read_context(conn, app_id)
+        vocab, _, _, _ = await _people_read_context(conn, app_id)
         async with conn.transaction():
             # Exact name, then recorded alias — the same resolution order
             # the worker's store_entities uses, so the API and the
