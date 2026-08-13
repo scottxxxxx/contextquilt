@@ -1117,27 +1117,60 @@ mode that is also true in `modes`:
 | `delivered` | completed, with the existing completion stamps |
 | `absorbed_by_user` | the owner changed TO the user |
 | `reassigned` | the owner changed to somebody else |
-| `silently_dropped` | open, past its date, and not raised across the last 2 meetings the user actually had with that person |
+| `not_raised_since` | open, past its date, and not raised across the last 2 meetings the user actually had with that person |
 | `re_dated` | open, and the due date has moved at least once |
 | `restated` | open, restated with no date movement (the molt) |
 | `open` | none of the above yet |
 
 Precedence runs in that order and the tie breaks are deliberate.
 Ownership modes outrank the rest because a change of hands is true
-forever, while dropped and re-dated describe the last few weeks.
-`silently_dropped` outranks `re_dated` in the other direction: a re-date
-is management, and the point of the dropped mode is that management
-STOPPED. Nothing is hidden by the choice, because `modes` carries the
-rest and `by_mode` counts each item exactly once, so the counts sum to
-`summary.items`.
+forever, while `not_raised_since` and `re_dated` describe the last few
+weeks. `not_raised_since` outranks `re_dated` in the other direction: a
+re-date is the item being managed against a calendar, and the point of
+`not_raised_since` is that it stopped being managed OUT LOUD. Nothing is
+hidden by the choice, because `modes` carries the rest and `by_mode`
+counts each item exactly once, so the counts sum to `summary.items`.
 
-`silently_dropped` counts MEETINGS WITH THAT PERSON, from
+#### The observation is about the conversation, never about the work
+
+`not_raised_since` was called `silently_dropped` until review, and the
+rename is the more important half of this section.
+
+What CQ observes is that an item has not come up in the last two
+presence-grade meetings with that person. What "dropped" asserts is that
+it was abandoned. Those are different claims, and the gap between them is
+where the worst false negative lives: **the item may have been finished
+by email on the Tuesday and simply never mentioned again**, and CQ would
+hold identical evidence either way.
+
+Every other mode in the ledger is self-evidencing, because the receipt is
+the person's own words in a meeting on a date. This is the only mode
+where ABSENCE does the work, and absence is the one thing a meeting
+cannot see. So the name states the observation, and the item carries
+`meetings_since_last_statement` (peaked in the summary as
+`max_meetings_not_raised`) so a client can render "has not come up in
+your last 3 meetings with her" and be exactly right whatever happened
+offline. A client must not render this mode as abandonment, neglect or a
+stall.
+
+The count itself uses MEETINGS WITH THAT PERSON, from
 `person_appearances`, never elapsed days: a fortnight of silence while
-the two of them were never in a room together is not a drop. The
-presence-grade predicate is shared with the 17a signals
+the two of them were never in a room together is not evidence of
+anything. The presence-grade predicate is shared with the 17a signals
 (`people_signals.is_presence_grade`), so both surfaces count the same
 meetings. Shelved items are excluded on the ledger's usual principle:
-"Let it go" is the user releasing the item.
+"Let it go" is the user releasing the item, so the silence afterwards is
+the user's own decision. `MIN_MEETINGS_NOT_RAISED = 2` is a parameter,
+not a constant, so it can be tuned against real data rather than
+re-argued: two is the smallest number where "it did not come up" is a
+pattern rather than one crowded agenda.
+
+**The generalised rule, which now governs this whole surface:** a served
+name may assert only what was observed. Where a name would assert a cause
+and the evidence supports an observation, the observation wins, and where
+inference is unavoidable it is published as a definition on the wire
+rather than buried in a docstring (see `ADVANCE_DEFINITION` and
+`CHASE_DEFINITION` in 5.12).
 
 Per item CQ also serves `hop_count`, `deadline_moves`, `days_open` (first
 statement to close or to today), `meetings_since_last_statement`, the
@@ -1222,6 +1255,16 @@ THIS item came up in a specific meeting (`origin_id`), and
 `person_appearances` records, for that same meeting, how many questions
 the user asked THIS person. An occasion where both are true is a chase.
 
+**Known boundary, published as `CHASE_DEFINITION` rather than documented
+here alone.** That join is MEETING level, not question level: CQ stores
+no link from a question to an item, so an occasion where the item came up
+and the user asked about something else counts. The word "chase" is
+therefore doing a little inference the evidence does not carry, which is
+a milder form of the defect that renamed `silently_dropped`. Until a
+question-to-item link exists the mitigation is to say exactly what was
+seen, on the wire, so a client that only trusts observations can read the
+definition and decide for itself.
+
 Per chase there are three outcomes, and the third is why this cannot
 collapse into one number:
 
@@ -1248,8 +1291,36 @@ failure would manufacture the finding out of recency.
 The summary carries `chases`, `chases_without_advance`,
 `items_chased_without_advance`,
 `max_chases_without_advance_on_one_item` (the number behind "three of
-them on the same item"), `chases_unmeasurable` and the patch ids, which
-are receipts and therefore detail-route only.
+them on the same item"), `chases_unmeasurable`, both definitions, and the
+patch ids, which are receipts and therefore detail-route only.
+
+### 5.13 The vocabulary audit
+
+Prompted by the `silently_dropped` finding, every name this surface
+serves was checked against one rule: **a served name may assert only what
+was observed.** Two names failed and one is on the line.
+
+| name | verdict |
+| --- | --- |
+| `silently_dropped` | FAILED, renamed `not_raised_since` (5.10) |
+| `chases` | ON THE LINE, kept, boundary published as `CHASE_DEFINITION` (5.12) |
+| `delivered` | kept, see below |
+| `re_dated`, `restated`, `reassigned`, `absorbed_by_user`, `open` | pass: each is a thing somebody said, on a date, in a meeting |
+| `hop_count`, `deadline_moves`, `days_open`, `first_stated_on`, `last_stated_on`, `meetings_since_last_statement`, `owner_change` | pass: all counts of stored observations |
+| `received_explicit` / `received_inferred` | pass, and the split is itself the honesty: the inferred half names its own uncertainty |
+| `unresolved`, `unmeasurable` | pass: both exist precisely to keep an unknown out of a count |
+| `object_regression` | pass by being null, and by asking about the restatement TEXTS (the conversation) rather than about the work |
+
+`delivered` is worth stating rather than waving through. It does assert
+more than the record strictly holds: `completed_at` is when CQ LEARNED an
+item closed, not when the work landed, and the same caveat is already
+written into `follow_through.py`. It is kept because it differs in KIND
+from the failed name: PRESENCE does the work, not absence. A closure is
+an affirmative act by a person or the user, and it arrives with
+`completion_source` and `completion_evidence` attached, so the claim
+carries its own receipt and a reader can check it. `not_raised_since` had
+nothing to check, which is exactly why it could not keep a name that
+asserted a cause.
 
 ---
 

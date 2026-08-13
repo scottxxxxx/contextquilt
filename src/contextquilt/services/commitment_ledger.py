@@ -59,7 +59,20 @@ RE_DATED = "re_dated"
 RESTATED = "restated"
 REASSIGNED = "reassigned"
 ABSORBED_BY_USER = "absorbed_by_user"
-SILENTLY_DROPPED = "silently_dropped"
+# Named for what was OBSERVED, not for what it probably means. It was
+# `silently_dropped` until review, and that name was a verdict about the
+# world while the evidence only supports a claim about the conversation.
+#
+# Every other mode here is self-evidencing: the receipt is the person's
+# own words, in a meeting, on a date. This is the only one where ABSENCE
+# does the work, and absence is the one thing a meeting cannot see. The
+# item may have been finished by email on the Tuesday and never mentioned
+# again, and CQ would hold exactly the same evidence either way. So the
+# name says the observation ("this has not come up since") and the item
+# carries `meetings_since_last_statement`, which lets a client render
+# "has not come up in your last 3 meetings with her" and be exactly right
+# whatever happened offline.
+NOT_RAISED_SINCE = "not_raised_since"
 OPEN = "open"
 
 # Precedence, highest first, and the tie break is deliberate rather than
@@ -68,28 +81,30 @@ OPEN = "open"
 # three meetings), so one of them has to be the headline.
 #
 # Ownership modes outrank the rest because a change of hands is a
-# structural fact about the item that is true forever, while dropped and
-# re-dated are statements about the last few weeks. `silently_dropped`
-# outranks `re_dated` for the same reason in the other direction: a
-# re-date is management, and the whole point of the dropped mode is that
-# management STOPPED. Everything an item also qualifies for is served
-# alongside in `modes`, so nothing is hidden by the choice.
+# structural fact about the item that is true forever, while
+# not_raised_since and re_dated are statements about the last few weeks.
+# `not_raised_since` outranks `re_dated` for the same reason in the other
+# direction: a re-date is the item being managed against a calendar, and
+# the point of not_raised_since is that it stopped being managed OUT
+# LOUD. Everything an item also qualifies for is served alongside in
+# `modes`, so nothing is hidden by the choice.
 MODE_PRECEDENCE = (
     DELIVERED,
     ABSORBED_BY_USER,
     REASSIGNED,
-    SILENTLY_DROPPED,
+    NOT_RAISED_SINCE,
     RE_DATED,
     RESTATED,
     OPEN,
 )
 
-# Meetings with THAT PERSON, not elapsed days. Two weeks of silence is
-# not a drop when the two of them did not meet; two meetings where the
+# Meetings with THAT PERSON, not elapsed days. A fortnight of silence
+# says nothing when the two of them did not meet; two meetings where the
 # item never came up is the thing the user cannot see for themselves.
 # Two is the smallest number where "it did not come up" is a pattern
-# rather than one crowded agenda.
-MIN_SILENT_MEETINGS = 2
+# rather than one crowded agenda. A parameter rather than a constant so
+# it can be tuned against real data instead of re-argued.
+MIN_MEETINGS_NOT_RAISED = 2
 
 # How many restatement receipts travel with one item. Matches the write
 # path's own cap, so in practice this truncates nothing; it exists so a
@@ -112,6 +127,21 @@ RECEIPT_KEYS = ("patch_ids_by_mode", "patch_ids_chased_without_advance")
 # module exists to break. Published on the wire next to the counts so
 # nobody has to guess which definition produced them.
 ADVANCE_DEFINITION = "closed_by_the_next_meeting_with_this_person"
+
+# What was actually OBSERVED to make an occasion a chase, published on
+# the wire for the same reason ADVANCE_DEFINITION is: a number whose
+# definition lives in a docstring is a number nobody can safely reuse.
+#
+# It matters more here than it looks, because the word "chase" is doing
+# inference the evidence does not quite carry. CQ stores no link from a
+# QUESTION to an ITEM: the join is meeting level (this item was restated
+# in meeting X, and in meeting X the user asked this person N questions),
+# so an occasion where the item came up and the user asked about
+# something else entirely counts here. That is the same defect shape as
+# the mode formerly called `silently_dropped`, in a milder form, and the
+# honest mitigation until a question-to-item link exists is to say
+# exactly what was seen rather than what it probably means.
+CHASE_DEFINITION = "item_raised_in_a_meeting_where_the_user_asked_this_person_a_question"
 
 
 def _as_date(value: Any) -> Optional[date]:
@@ -347,6 +377,16 @@ def _chases(
     questions the user asked THIS person. An occasion where both are
     true is a chase.
 
+    Known boundary, published as CHASE_DEFINITION rather than left in
+    this docstring: that join is MEETING level, not question level. CQ
+    stores no link from a question to an item, so an occasion where the
+    item came up and the user asked about something else counts. The
+    word "chase" is therefore doing a little inference the evidence does
+    not carry, which is the same defect that renamed `silently_dropped`,
+    milder. Naming the observation on the wire is the mitigation until a
+    question-to-item link exists; a client that only trusts what was
+    seen can read the definition and decide.
+
     Three outcomes, and the third is why this cannot be one number:
 
     - resolved and no advance: there was a later meeting with this
@@ -406,6 +446,12 @@ def _chases(
         # Came up, but that meeting predates the question metric, so
         # whether it was a chase is unknowable. Never a zero in disguise.
         "unmeasurable": unmeasurable,
+        # Both definitions travel with the counts. The second one is the
+        # honest boundary of the first: the join is meeting level, not
+        # question level, so `total` counts occasions where the item came
+        # up and the user asked SOMETHING, not occasions CQ saw the user
+        # ask about this item.
+        "chase_definition": CHASE_DEFINITION,
         "advance_definition": ADVANCE_DEFINITION,
         "occasions": occasions[:RESTATEMENT_RECEIPT_CAP],
     }
@@ -416,7 +462,7 @@ def classify_item(
     today: date,
     meeting_days: Sequence[date] = (),
     user_label: Optional[str] = None,
-    min_silent_meetings: int = MIN_SILENT_MEETINGS,
+    min_meetings_not_raised: int = MIN_MEETINGS_NOT_RAISED,
     regression: Optional[bool] = None,
     chase_meetings: Optional[Mapping[str, dict]] = None,
 ) -> Dict[str, Any]:
@@ -454,19 +500,20 @@ def classify_item(
         modes.append(DELIVERED)
     if change is not None:
         modes.append(ABSORBED_BY_USER if change["to_user"] else REASSIGNED)
-    # Dropped is an OPEN item's mode only, and it needs three things at
-    # once: a date that has passed, an owner the user has since met, and
-    # nobody raising it in those meetings. Shelved items are excluded on
-    # the same principle the ledger uses everywhere: "Let it go" is the
-    # user releasing the item, so its silence afterwards is the user's
-    # decision, not a drop.
+    # An OPEN item's mode only, and it needs three things at once: a date
+    # that has passed, an owner the user has met since, and nobody
+    # raising it in those meetings. It says the item has not come up; it
+    # does NOT say nothing happened to it, because a meeting cannot see
+    # an email. Shelved items are excluded on the ledger's usual
+    # principle: "Let it go" is the user releasing the item, so the
+    # silence afterwards is the user's own decision.
     if (
         is_open and not shelved
         and due is not None and due < today
         and meetings_since is not None
-        and meetings_since >= min_silent_meetings
+        and meetings_since >= min_meetings_not_raised
     ):
-        modes.append(SILENTLY_DROPPED)
+        modes.append(NOT_RAISED_SINCE)
     if is_open and moves > 0:
         modes.append(RE_DATED)
     # The molt: said again, and again, with the date never moving. A
@@ -539,7 +586,7 @@ def classify_items(
     today: date,
     appearances: Iterable[Mapping[str, Any]] = (),
     user_label: Optional[str] = None,
-    min_silent_meetings: int = MIN_SILENT_MEETINGS,
+    min_meetings_not_raised: int = MIN_MEETINGS_NOT_RAISED,
     regressions: Optional[Mapping[str, bool]] = None,
 ) -> List[Dict[str, Any]]:
     """Every item on one person's ledger, classified, in a total order.
@@ -557,7 +604,7 @@ def classify_items(
             r, today,
             meeting_days=days,
             user_label=user_label,
-            min_silent_meetings=min_silent_meetings,
+            min_meetings_not_raised=min_meetings_not_raised,
             regression=verdicts.get(str(r.get("patch_id"))),
             chase_meetings=chase_meetings,
         )
@@ -618,7 +665,22 @@ def summarize(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "max_hop_count": max(hops) if hops else None,
         # Pulled out because it is the count the design is FOR, and a
         # client should not have to know the mode vocabulary to find it.
-        "silently_dropped": by_mode.get(SILENTLY_DROPPED, 0),
+        # It counts items that have not COME UP, which is not the same
+        # claim as items nobody worked on: see NOT_RAISED_SINCE. The
+        # sentence a client can safely write from it is per item, off
+        # `meetings_since_last_statement`.
+        "not_raised_since": by_mode.get(NOT_RAISED_SINCE, 0),
+        # The peak of that per item number, so "has not come up in your
+        # last 4 meetings with her" is available without walking items.
+        # Null, never zero, when nothing is in this mode at all.
+        "max_meetings_not_raised": (
+            max(
+                (i.get("meetings_since_last_statement") or 0)
+                for i in (items or ())
+                if i.get("mode") == NOT_RAISED_SINCE
+            )
+            if by_mode.get(NOT_RAISED_SINCE, 0) else None
+        ),
         # The follow up pressure metric. NOT questions received: that is
         # a separate count on the person, kept separate because the two
         # answer different questions and measuring them as one produced
@@ -639,6 +701,7 @@ def summarize(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         # and a client that renders the count above without this one is
         # reporting a floor as a total.
         "chases_unmeasurable": chases_unmeasurable,
+        "chase_definition": CHASE_DEFINITION,
         "chase_advance_definition": ADVANCE_DEFINITION,
         "patch_ids_chased_without_advance": chased_ids,
     }

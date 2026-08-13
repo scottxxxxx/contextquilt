@@ -2,12 +2,19 @@
 
 Two of these matter more than the rest.
 
-The first is `re_dated` against `silently_dropped`, because they look
-identical in a list of open overdue items and mean opposite things. A
-re-dated item is being managed against a calendar. A silently dropped one
-has fallen out of the conversation, and the test for that is meetings
-with THAT PERSON, never elapsed days: a fortnight of silence while
-neither of them was in a room together is not a drop.
+The first is `re_dated` against `not_raised_since`, because they look
+identical in a list of open overdue items and mean different things. A
+re-dated item is being managed against a calendar. A not_raised_since one
+has not come up, and the test for that is meetings with THAT PERSON,
+never elapsed days: a fortnight of silence while neither of them was in a
+room together is not evidence of anything.
+
+That mode is also the only one in the ledger where ABSENCE does the work,
+which is why its name says what was observed rather than what it probably
+means. The item may have been finished by email on the Tuesday and never
+mentioned again, and CQ would hold identical evidence either way, so
+every test here asserts the conversation and none of them asserts the
+work.
 
 The second is the empty `deadline_history` case, because that is the
 state of every completable in production on the day this ships. Nothing
@@ -30,7 +37,7 @@ from contextquilt.services.commitment_ledger import (
     REASSIGNED,
     RESTATED,
     RE_DATED,
-    SILENTLY_DROPPED,
+    NOT_RAISED_SINCE,
     classify_item,
     classify_items,
     object_regression,
@@ -107,7 +114,7 @@ class TestProductionShapedData:
             meeting_days=[d.date() for d in
                           (datetime(2026, 7, 2), datetime(2026, 7, 30))],
         )
-        assert got["mode"] == SILENTLY_DROPPED
+        assert got["mode"] == NOT_RAISED_SINCE
         assert got["meetings_since_last_statement"] == 2
 
     def test_missing_created_at_is_a_cannot_tell_not_a_zero(self):
@@ -194,8 +201,8 @@ class TestDroppedVersusReDated:
             ),
             TODAY, meeting_days=self.TWO_MEETINGS,
         )
-        assert got["mode"] == SILENTLY_DROPPED
-        assert got["modes"] == [SILENTLY_DROPPED, RE_DATED]
+        assert got["mode"] == NOT_RAISED_SINCE
+        assert got["modes"] == [NOT_RAISED_SINCE, RE_DATED]
 
     def test_a_completed_item_is_never_dropped(self):
         got = classify_item(
@@ -348,7 +355,7 @@ class TestOwnership:
             meeting_days=[date(2026, 7, 2), date(2026, 7, 30)],
         )
         assert got["mode"] == ABSORBED_BY_USER
-        assert SILENTLY_DROPPED in got["modes"]
+        assert NOT_RAISED_SINCE in got["modes"]
 
     def test_delivery_outranks_everything(self):
         got = classify_item(
@@ -444,7 +451,7 @@ class TestMeetingsAreCountedByPresence:
         got = classify_items(
             [item(deadline_date="2026-06-20")], TODAY, appearances=legacy
         )
-        assert got[0]["mode"] == SILENTLY_DROPPED
+        assert got[0]["mode"] == NOT_RAISED_SINCE
 
     def test_two_appearances_on_one_day_are_one_meeting_day(self):
         same_day = [
@@ -512,14 +519,41 @@ class TestSummary:
         assert s["median_hop_count"] == 2.5
         assert s["max_hop_count"] == 6
 
-    def test_silently_dropped_is_pulled_out_by_name(self):
+    def test_not_raised_since_is_pulled_out_by_name(self):
         items = classify_items(
             [item(patch_id="a", deadline_date="2026-06-01")],
             TODAY, appearances=met((7, 1), (8, 1)),
         )
         s = summarize(items)
-        assert s["silently_dropped"] == 1
-        assert s["by_mode"][SILENTLY_DROPPED] == 1
+        assert s["not_raised_since"] == 1
+        assert s["by_mode"][NOT_RAISED_SINCE] == 1
+        # The number a client renders the sentence from: "has not come
+        # up in your last 2 meetings with her", which is true whatever
+        # happened offline.
+        assert s["max_meetings_not_raised"] == 2
+        assert items[0]["meetings_since_last_statement"] == 2
+
+    def test_the_peak_is_null_not_zero_when_nothing_is_in_that_mode(self):
+        s = summarize(classify_items([item()], TODAY))
+        assert s["not_raised_since"] == 0
+        assert s["max_meetings_not_raised"] is None
+
+    def test_the_mode_never_claims_the_work_stopped(self):
+        """The name is the guard. An item finished by email on the
+        Tuesday and never mentioned again produces exactly this state,
+        so nothing may be served that asserts otherwise."""
+        items = classify_items(
+            [item(patch_id="a", deadline_date="2026-06-01")],
+            TODAY, appearances=met((7, 1), (8, 1)),
+        )
+        got = items[0]
+        assert got["mode"] == "not_raised_since"
+        # Everything served about it is a fact about the conversation.
+        assert got["meetings_since_last_statement"] == 2
+        assert got["last_stated_on"] == "2026-06-01"
+        blob = repr(got) + repr(summarize(items))
+        for verdict in ("dropped", "abandoned", "ignored", "stalled", "neglect"):
+            assert verdict not in blob
 
 
 class TestOrdering:
@@ -705,6 +739,28 @@ class TestChases:
         assert s["items_chased_without_advance"] == 1
         assert s["max_chases_without_advance_on_one_item"] == 3
 
+    def test_both_definitions_travel_with_the_counts(self):
+        # A number whose definition lives in a docstring is a number
+        # nobody can safely reuse. The chase definition is the honest
+        # boundary of the count: the join is meeting level, so an
+        # occasion where the item came up and the user asked about
+        # something else is in here.
+        got = classify_items(
+            [item(restatements=[restatement((7, 1), "Still on it", origin="m2")])],
+            TODAY,
+            appearances=self._appearances((7, 1, 2, 0, "m2"), (7, 20, 0, 0, "m3")),
+        )
+        c = got[0]["chases"]
+        assert c["chase_definition"] == (
+            "item_raised_in_a_meeting_where_the_user_asked_this_person_a_question"
+        )
+        assert c["advance_definition"] == (
+            "closed_by_the_next_meeting_with_this_person"
+        )
+        s = summarize(got)
+        assert s["chase_definition"] == c["chase_definition"]
+        assert s["chase_advance_definition"] == c["advance_definition"]
+
     def test_the_summary_totals_and_names_the_definition(self):
         items = classify_items(
             [
@@ -750,7 +806,7 @@ class TestChases:
         assert got[0]["chases"]["total"] == 0
         assert got[0]["chases"]["unmeasurable"] == 0
         # The modes that do not need a restatement still work.
-        assert got[0]["mode"] == SILENTLY_DROPPED
+        assert got[0]["mode"] == NOT_RAISED_SINCE
 
     def test_volume_and_chases_are_different_numbers_by_construction(self):
         # Two people, level question volume, opposite follow up. The

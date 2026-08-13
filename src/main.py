@@ -4948,10 +4948,20 @@ async def get_person(
     section 5.10): per item, WHAT happened to it rather than whether it is
     open. `delivered` is the only mode that is delivery; `restated` is the
     molt (said again, with the date never moving), `re_dated` is an item
-    being managed against a calendar, `silently_dropped` is one that fell
-    out of the conversation, counted in meetings with THAT PERSON rather
-    than in elapsed days, and `absorbed_by_user` is one the user ended up
-    holding themselves. Each item carries one headline `mode` plus every
+    being managed against a calendar, `not_raised_since` is one that has
+    not come up across the last meetings with THAT PERSON (counted in
+    meetings, never in elapsed days), and `absorbed_by_user` is one the
+    user ended up holding themselves.
+
+    `not_raised_since` is named for what was observed and must be
+    rendered that way. It is the only mode where ABSENCE does the work,
+    and a meeting cannot see an email: an item finished offline on the
+    Tuesday and never mentioned again produces exactly this state. The
+    safe sentence is the one built from `meetings_since_last_statement`,
+    "has not come up in your last 3 meetings with her", which is true
+    whatever happened away from the room.
+
+    Each item carries one headline `mode` plus every
     other mode also true of it in `modes`, so `summary.by_mode` counts
     each item once and the counts sum to `summary.items`. Every count
     opens into `summary.patch_ids_by_mode`. No ratio is served at any
