@@ -52,8 +52,11 @@ from contextquilt.services.extraction_schema import (
     speaker_labels_in,
     self_speaker_label,
     is_placeholder_or_self_person,
+    no_collapse_patch_types,
     normalize_cue_list,
     normalize_owner_in_transcript,
+    origin_scoped_patch_types,
+    sanitize_behavior_observations,
     sanitize_cues,
     sanitize_deadline_dates,
     sanitize_salience,
@@ -410,6 +413,8 @@ async def store_connected_patches(
     user_label: str | None = None,
     llm=None,
     longitudinal_types: dict[str, str] | None = None,
+    no_collapse_types: set[str] | frozenset[str] | None = None,
+    origin_scoped_types: set[str] | frozenset[str] | None = None,
 ):
     """
     Store typed, connected patches (Connected Quilt V2 model).
@@ -428,10 +433,26 @@ async def store_connected_patches(
     instead of being dedup-collapsed, so a trajectory (Weak→Meets→Strong) is
     preserved rather than overwritten. Empty/None (the SS path) → no type is
     longitudinal and behavior is exactly as before.
+
+    `no_collapse_types` are types that declared `collapse_duplicates:
+    false`. Dedup is skipped for them entirely: every occurrence inserts.
+    Two observations of the same behavior in two meetings are a
+    trajectory, and a collapse would keep only the surviving patch's
+    origin_id, silently destroying a receipt the profile pass counts.
+    Empty/None (every manifest registered before this) → dedup runs
+    exactly as before, for every type.
+
+    `origin_scoped_types` are types that declared `origin_scoped: true`.
+    They carry origin_id/origin_type without being project-scoped, which
+    is what lets a meeting-bound type that belongs to no project keep its
+    receipt. Empty/None → the origin stamp follows project scoping alone,
+    exactly as before.
     """
     if not patches:
         return 0
     longitudinal_types = longitudinal_types or {}
+    no_collapse_types = frozenset(no_collapse_types or ())
+    origin_scoped_types = frozenset(origin_scoped_types or ())
 
     await db.execute(
         "INSERT INTO profiles (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
@@ -584,7 +605,18 @@ async def store_connected_patches(
         # Without this, role patches landed with project_id set but origin_id NULL,
         # which SS's diagnostic surfaced as a NULL-origin "regression" 2026-05-04.
         patch_project_id = project_id if patch_type in project_scoped_types or (patch_type == "role" and patch_project) else None
-        patch_origin_id = origin_id if patch_type in project_scoped_types or (patch_type == "role" and patch_project) else None
+        # Origin is stamped for project-scoped types, for role-with-parent,
+        # and for any type that declared `origin_scoped`. The last one is
+        # the split: project scoping says which project a patch belongs
+        # to, origin scoping says the patch records a moment and has to
+        # remember which meeting it was. A type can now claim the second
+        # without the first, which is what keeps a receipt on a patch that
+        # belongs to no project.
+        patch_origin_id = origin_id if (
+            patch_type in project_scoped_types
+            or patch_type in origin_scoped_types
+            or (patch_type == "role" and patch_project)
+        ) else None
         patch_origin_type = origin_type if patch_origin_id else None
 
         await db.execute(
@@ -786,6 +818,15 @@ async def store_connected_patches(
             )
             continue
 
+        # Types that opted out of collapsing skip BOTH dedup tiers, and
+        # skip the candidate query with them. There is nothing to ask:
+        # the answer would be discarded either way, and a similar
+        # observation from a previous meeting is the evidence this type
+        # exists to accumulate, not a duplicate of it.
+        if patch_type in no_collapse_types:
+            await _insert_new_patch(patch, patch_type, value, text)
+            continue
+
         # Deduplication, two tiers against active same-type patches:
         #   similarity > TRIGRAM_DEDUP_THRESHOLD          → same fact, fast path
         #   SEMANTIC_DEDUP_FLOOR < similarity <= threshold → gray zone; deferred
@@ -946,7 +987,10 @@ async def store_connected_patches(
                 stub_persistence = DEFAULT_PERSISTENCE.get(target_type, "sticky")
                 stub_project = project if target_type in project_scoped_types else None
                 stub_project_id = project_id if target_type in project_scoped_types else None
-                stub_origin_id = origin_id if target_type in project_scoped_types else None
+                stub_origin_id = origin_id if (
+                    target_type in project_scoped_types
+                    or target_type in origin_scoped_types
+                ) else None
                 stub_origin_type = origin_type if stub_origin_id else None
 
                 await db.execute(
@@ -3888,6 +3932,13 @@ class ColdPathWorker:
                     conn, user_id, patches, "structured_ingest", app_id, timestamp,
                     project, project_id, origin_id, origin_type,
                     longitudinal_types=longitudinal_types,
+                    # Same two manifest facts the extraction lane reads.
+                    # Neither structured manifest registered today declares
+                    # either key, so both sets are empty and this lane is
+                    # unchanged; a structured app that wants the behavior
+                    # should not have to ask for a code change to get it.
+                    no_collapse_types=no_collapse_patch_types(manifest),
+                    origin_scoped_types=origin_scoped_patch_types(manifest),
                 )
                 entities_stored = await store_entities(
                     conn, self.redis, user_id, entities, metadata,
@@ -4136,6 +4187,23 @@ class ColdPathWorker:
                 )
                 response.content["patches"] = raw_patches[:patch_backstop]
 
+            # Guardrail 12b at capture time: a behavioral observation
+            # cites conduct, never character. Runs BEFORE the ownership
+            # enforcer on purpose, so a dropped verdict never gets a
+            # person patch and an owns edge minted for it; the sanitizer
+            # also strips edges the model emitted itself, because an
+            # unresolved owns target makes the Pass-2 resolver synthesize
+            # a stub carrying the same text.
+            sanitize_behavior_observations(response.content)
+            if (bo := response.content.get("_behavior_observations_sanitized")):
+                logger.info(
+                    "behavior_observations_sanitized",
+                    user_id=user_id,
+                    dropped=bo["count"],
+                    dropped_detail=bo["dropped"][:20],
+                    model=response.model,
+                )
+
             # Person-ownership safety net. The prompt requires a person
             # patch + owns connection for every named action-item owner,
             # but Haiku 4.5 compliance is unreliable. enforce_person_ownership
@@ -4304,6 +4372,11 @@ class ColdPathWorker:
                     project, project_id, origin_id, origin_type,
                     user_label=user_label,
                     llm=llm,
+                    # Manifest-declared storage behavior. Both sets are
+                    # empty for every manifest that predates them, so the
+                    # sink behaves exactly as before for those apps.
+                    no_collapse_types=no_collapse_patch_types(resolved_manifest),
+                    origin_scoped_types=origin_scoped_patch_types(resolved_manifest),
                 )
                 facts_stored = patches_stored
                 actions_stored = 0

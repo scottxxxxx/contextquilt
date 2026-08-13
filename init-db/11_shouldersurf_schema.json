@@ -1,6 +1,6 @@
 {
   "app_id": "shouldersurf",
-  "version": 10,
+  "version": 11,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
@@ -352,6 +352,29 @@
       }
     },
     {
+      "domain_type": "behavior",
+      "facet": "Episode",
+      "permanence": "quarter",
+      "display_name": "Behavioral Observation",
+      "description": "One observed instance of HOW a named participant conducted themselves in this meeting: what they asked for before agreeing, how they responded to a piece of framing, what moved their position. This is the unit the profile pass reads. Every other episode type records what happened; this one records how somebody behaved while it happened. Records conduct that a reader could have watched, never a verdict about who a person is.",
+      "value_shape": {
+        "text": "string",
+        "owner": "string?"
+      },
+      "completable": false,
+      "project_scoped": false,
+      "self_only": false,
+      "collapse_duplicates": false,
+      "origin_scoped": true,
+      "extraction_rules": {
+        "required_fields": [
+          "text",
+          "owner"
+        ],
+        "guidance": "Emit when the transcript shows HOW a named participant conducted themselves. The observation must be something a reader could have watched happen, and `owner` must be the person who did it, named exactly as the transcript names them. Right shape: 'Asked for the cost breakdown before agreeing to the vendor switch' (owner Denby); 'Moved off the launch date once the churn numbers were on screen' (owner Fenwick); 'Answered the compliance question by reading out the specific clause rather than summarizing it' (owner Lockridge). Wrong shape: 'Is defensive about code review feedback' says what kind of person someone is instead of what was observed, and gets dropped. Two more that belong to other types: 'Will send the revised deck on Thursday' is a commitment, and 'The vendor migration slipped again' is an event. One patch per distinct behavior, with an owner every time: an observation nobody is named for can never be read as being about anyone. Never emit this type for the (you) speaker; the user's own way of operating is a trait."
+      }
+    },
+    {
       "domain_type": "insight",
       "facet": "Attribute",
       "permanence": "year",
@@ -414,9 +437,10 @@
         "commitment",
         "blocker",
         "decision",
-        "goal"
+        "goal",
+        "behavior"
       ],
-      "description": "Person is responsible for or author of this item."
+      "description": "Person is responsible for or author of this item. For a behavioral observation it reads as authorship rather than obligation: this is the person who was observed doing the thing. That edge is also the only route anything has to a person, which is why an observation without one is invisible to the profile pass."
     },
     {
       "label": "owed_to",
@@ -539,6 +563,7 @@
       "Decisions that were reached",
       "Commitments with named owners",
       "Blockers preventing current progress",
+      "Behavioral observations of how a named participant conducted themselves, one per distinct behavior, owner always named (max 5 per meeting)",
       "Events (external occurrences affecting the project)",
       "Takeaways — evaluative lessons only (max 3 per meeting)"
     ],
@@ -546,7 +571,8 @@
       "entities_per_meeting": 15,
       "relationships_per_meeting": 15,
       "per_type_caps": {
-        "takeaway": 3
+        "takeaway": 3,
+        "behavior": 5
       }
     },
     "exclusion_examples": [
@@ -582,6 +608,7 @@
     {
       "cluster": "person",
       "from_types": [
+        "behavior",
         "commitment",
         "blocker",
         "decision",
@@ -590,7 +617,7 @@
       "produce_type": "insight",
       "min_patches": 4,
       "min_meetings": 3,
-      "guidance": "Profile how this person works, not what they did. The pattern must recur across different meetings: how they reach and keep decisions, or what kinds of framing they respond to. Skip status, skip one-off events, skip anything a single meeting could explain."
+      "guidance": "Profile how this person works, not what they did. The pattern must recur across different meetings: how they reach and keep decisions, or what kinds of framing they respond to. Skip status, skip one-off events, skip anything a single meeting could explain. Behavioral observations are the direct evidence here; the task items are the context they happened in, and a pattern that rests only on task text is usually not a pattern."
     }
   ]
 }

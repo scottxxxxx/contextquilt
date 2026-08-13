@@ -17,6 +17,12 @@ and rely on prompt-described shape instead.
 import re
 from datetime import date, timedelta
 
+from .follow_through import (
+    CHARACTER_TRAIT_WORDS,
+    CHARACTER_WORDS,
+    character_word_in,
+)
+
 PATCH_TYPES = [
     "trait",
     "preference",
@@ -915,6 +921,159 @@ def strip_prose_from_person_names(content: dict) -> dict:
     return content
 
 
+def sanitize_behavior_observations(content: dict) -> dict:
+    """Drop behavioral observations that state character instead of conduct.
+
+    Guardrail 12b says a claim cites observable behavior and never
+    character: "reopens vague commitments" is something a reader can check
+    against a transcript, "insecure" is a verdict about a human being. The
+    guardrail was written for the claim the profile pass writes, but the
+    pass can only be as good as what it reads, and behavioral observations
+    are captured at extraction. So the rule is enforced here too, on the
+    corpus, and not only on the sentence written from it.
+
+    Dropping rather than rewriting is deliberate. There is no honest
+    repair for "Yardley is defensive about review feedback": the observable
+    thing that provoked it was not recorded, so anything we kept would be
+    the verdict with the evidence still missing. A dropped observation
+    costs one row; a stored one poisons every lens that later reads this
+    person's corpus, and does it invisibly.
+
+    Two mechanics that matter:
+
+    - Only types in BEHAVIOR_OBSERVATION_TYPES are inspected. Every other
+      type passes through untouched, so a manifest that declares no such
+      type gets byte-identical output.
+    - Any other patch's `connects_to` entry pointing at a dropped
+      observation is stripped, exactly as the placeholder-person sanitizer
+      does. Without that, the Pass-2 resolver in `store_connected_patches`
+      finds an unresolved target and SYNTHESIZES a stub patch carrying the
+      same text, which would put the dropped verdict back in the quilt
+      with a lower confidence and no origin.
+
+    English only, and the limit is real rather than theoretical:
+    extraction writes in the language of the meeting, so a character
+    verdict in Spanish or Japanese passes this function untouched and is
+    governed only by the manifest guidance the model was shown. See
+    `follow_through.CHARACTER_TRAIT_WORDS`.
+
+    Mutates content in place; returns it. Records what it dropped in
+    ``content["_behavior_observations_sanitized"]``.
+    """
+    patches = content.get("patches")
+    if not isinstance(patches, list) or not patches:
+        return content
+
+    dropped: list[dict] = []
+    dropped_targets: set[tuple] = set()
+    kept: list[dict] = []
+
+    for patch in patches:
+        if not isinstance(patch, dict) or patch.get("type") not in BEHAVIOR_OBSERVATION_TYPES:
+            kept.append(patch)
+            continue
+        value = patch.get("value")
+        text = value.get("text") if isinstance(value, dict) else None
+        if not isinstance(text, str) or not text.strip():
+            kept.append(patch)
+            continue
+        word = character_word_in(text, CHARACTER_WORDS + CHARACTER_TRAIT_WORDS)
+        if word is None:
+            kept.append(patch)
+            continue
+        dropped.append({
+            "type": patch.get("type"),
+            "text": text[:120],
+            "word": word,
+        })
+        dropped_targets.add((patch.get("type"), text.strip().lower()))
+
+    if not dropped:
+        return content
+
+    content["patches"] = kept
+    for patch in kept:
+        connects = patch.get("connects_to")
+        if not isinstance(connects, list):
+            continue
+        patch["connects_to"] = [
+            c for c in connects
+            if not (
+                isinstance(c, dict)
+                and isinstance(c.get("target_text"), str)
+                and (c.get("target_type"), c["target_text"].strip().lower())
+                in dropped_targets
+            )
+        ]
+
+    content["_behavior_observations_sanitized"] = {
+        "dropped": dropped,
+        "count": len(dropped),
+    }
+    return content
+
+
+# ------------------------------------------------------------------
+# Manifest-declared storage behavior
+# ------------------------------------------------------------------
+# Two per-type opt-ins the storage sink reads. Both are absent from every
+# manifest registered before this change, and absent means today's
+# behavior, so nothing that ships now moves.
+
+
+def _flagged_patch_types(manifest: object, key: str, want: bool) -> frozenset:
+    """Every declared domain_type whose `key` flag is exactly `want`."""
+    if not isinstance(manifest, dict):
+        return frozenset()
+    out = set()
+    for pt in manifest.get("patch_types") or []:
+        if not isinstance(pt, dict):
+            continue
+        name = pt.get("domain_type")
+        if isinstance(name, str) and name and pt.get(key) is want:
+            out.add(name)
+    return frozenset(out)
+
+
+def no_collapse_patch_types(manifest: object) -> frozenset:
+    """Types that declared `collapse_duplicates: false`.
+
+    Storage dedup is type-blind: the trigram fast path merges any two
+    same-type patches whose text is similar enough, which is right for a
+    fact ("ship the API by Friday" said twice is one commitment) and
+    destructive for an observation. Two observations of the same behavior
+    in two meetings are a TRAJECTORY, which is the same argument doc 12
+    section 3.1 makes about ratings. Worse, a collapse keeps only the
+    surviving patch's origin_id, so it silently destroys a receipt, and
+    the profile pass gates on distinct meetings.
+
+    Deliberately NOT the existing `longitudinal` flag. That one carries
+    series identity semantics (a descriptor field, a patch_observations
+    history, one row per series) that answer a different question, and it
+    is wired only into structured ingest. This flag says one thing:
+    never merge two of these, ever.
+    """
+    return _flagged_patch_types(manifest, "collapse_duplicates", False)
+
+
+def origin_scoped_patch_types(manifest: object) -> frozenset:
+    """Types that declared `origin_scoped: true`.
+
+    The storage sink stamps `origin_id` only on project-scoped types, so a
+    type that is meeting-bound but NOT project-bound lands with a null
+    origin: no receipt, invisible to the meeting view, and structurally
+    unclusterable by the profile pass, whose cluster query requires
+    `origin_id IS NOT NULL` and counts distinct origins as meetings.
+
+    This flag separates the two ideas that gate used to conflate. Project
+    scoping says WHICH project a patch belongs to; origin scoping says
+    the patch records something that happened at a particular moment and
+    must remember which one. A patch type can now say the second without
+    claiming the first.
+    """
+    return _flagged_patch_types(manifest, "origin_scoped", True)
+
+
 # Types that only make sense attached to a project the (you) speaker owns.
 # The quilt is user-centric — patches must anchor to something the user
 # cares about. A decision/commitment/blocker/takeaway/role with no project
@@ -1189,10 +1348,31 @@ def enforce_connection_requirements(
 
 # Action-item types that gain a `person → owns → action` connection when
 # the LLM extracts a named human as their owner. Mirrors the SS app's
-# `owns` connection vocabulary: from={person} to={commitment,blocker,decision,goal}.
+# `owns` connection vocabulary: from={person}
+# to={commitment,blocker,decision,goal,behavior}.
+#
+# `behavior` is here because the ownership edge is the ONLY way anything
+# reaches a person: the profile pass clusters on it, and a type absent
+# from this set can be declared in a manifest, extracted, stored, and
+# still never be seen by a lens. A behavioral observation whose whole
+# purpose is to describe one named person is the strongest member of the
+# set, not an exception to it.
+#
+# Still a hardcoded SS name list, and still the read side's standing debt
+# (project_facet_runtime_debt). The general form is already sitting in
+# every manifest: this set IS `connection_labels[label=owns].to_types`,
+# which for SS v11 is exactly these five names. Deriving it needs the
+# manifest threaded into the enforcer and its mirror, which is a wider
+# change than this one earns.
 PERSON_OWNED_ACTION_TYPES = frozenset(
-    {"commitment", "blocker", "decision", "goal"}
+    {"commitment", "blocker", "decision", "goal", "behavior"}
 )
+
+# Types whose text is a claim about how a named human conducted
+# themselves, and which are therefore held to guardrail 12b at capture
+# time: cite observable behavior, never character. Same hardcoded-name
+# caveat as the set above.
+BEHAVIOR_OBSERVATION_TYPES = frozenset({"behavior"})
 
 # Owner-text values that MUST NOT trigger a synthetic person patch:
 # - the (you) speaker (their attribution is implicit via patch ownership)
