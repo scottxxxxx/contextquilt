@@ -22,6 +22,10 @@ from .follow_through import (
     CHARACTER_WORDS,
     character_word_in,
 )
+# The appearance-capacity vocabulary lives in one module so the sanitizer,
+# the worker's sink and the backfill cannot drift apart on what a capacity
+# is called.
+from .person_appearances import MENTION, OWNERSHIP
 
 PATCH_TYPES = [
     "trait",
@@ -2104,6 +2108,180 @@ def enforce_owed_to_counterparty(
     if dropped:
         content["_owed_to_enforced"] = {"dropped": dropped}
     return content
+
+
+# The key an entity dict carries its OBSERVED appearance capacities on.
+# Underscore-prefixed because nothing outside CQ is meant to write it: the
+# extraction lane's only writer is inject_ownership_entities below, and
+# both it and the sink filter the value to the vocabulary they honour.
+# `speaker` is never accepted from here in any lane, because speaking is
+# read off a transcript label and off nothing else. The residual risk of
+# an entity arriving with a forged value is a person losing a `mention`
+# they were owed, which costs nothing any read depends on.
+ENTITY_CAPACITY_KEY = "_cq_capacities"
+
+
+def inject_ownership_entities(
+    content: dict,
+    person_patch_type: str = "person",
+    person_entity_type: str = "person",
+    ownership_label: str = "owns",
+    user_label: str | None = None,
+) -> dict:
+    """Give every person who OWNS something in this meeting an entity, so
+    their presence in it is recorded.
+
+    The hole this closes, found live on 2026-08-13 (origin
+    866E8E1B-3586-42BE-B171-E7252CBA425E): the meeting ingested cleanly,
+    produced seven patches including three commitments owned by two named
+    people, and produced ZERO entities. `person_appearances` is written
+    from the ENTITIES array, so neither person's presence moved. Two
+    people owned work coming out of a meeting and, as far as the People
+    surface could tell, were not in it.
+
+    `enforce_person_ownership` is already the structural net for the
+    model returning `value.owner` with no person patch behind it. It
+    operates on `content["patches"]` and nothing did the equivalent for
+    `content["entities"]`, so the net stopped one step short of presence.
+
+    Reads the SURVIVING person patches rather than raw `value.owner`
+    strings, which is why it sits late in the chain: by this point the
+    enforcer has split compound owners into separate person patches,
+    `enforce_owner_edge_agreement` has dropped ownership edges from
+    bystanders, `strip_prose_from_person_names` has cut the sentence out
+    of a name, and the self/placeholder gate has run. The names left are
+    exactly the ones an entity should be keyed on. The same predicates
+    are re-applied here anyway (compound split, placeholder and self
+    filter, case-insensitive matching), because a model-emitted person
+    patch can carry a compound name the enforcer never split.
+
+    Capacity is `ownership`, never `speaker`. Owning an action item is
+    not evidence of having spoken: work gets assigned to people in
+    absentia, and the backfill's tier documentation makes the same
+    distinction. It is not `mention` either for a name being introduced
+    here, which is load bearing rather than pedantic: SS's duplicate veto
+    reads the ownership-only-versus-speaker split off `capacities` to
+    tell label drift from two humans, and stamping a mention CQ did not
+    observe would erase that signature.
+
+    Vocabulary comes from the app's manifest people block (doc 16 5.9),
+    so an app that calls its people something else is served too.
+
+    Idempotent: a second pass finds every name already in the entities
+    array and injects nothing.
+
+    Call AFTER drop_placeholder_and_self_person_patches and BEFORE
+    drop_placeholder_entities, so the placeholder pass cleans up after
+    this rather than before it. Mutates content in place.
+    """
+    patches = content.get("patches")
+    if not isinstance(patches, list) or not patches:
+        return content
+
+    entities = content.get("entities")
+    if not isinstance(entities, list):
+        entities = []
+
+    # Existing person entities, keyed case-insensitively. Only the person
+    # entity type collides: "Marlowe" the org and "Marlowe" the person are
+    # separate rows in the sink, so they are separate here too.
+    by_name: dict[str, dict] = {}
+    for ent in entities:
+        if not isinstance(ent, dict) or ent.get("type") != person_entity_type:
+            continue
+        name = (ent.get("name") or "").strip()
+        if name:
+            by_name.setdefault(name.lower(), ent)
+
+    injected: list[str] = []
+    owners: list[str] = []
+
+    for p in patches:
+        if not isinstance(p, dict) or p.get("type") != person_patch_type:
+            continue
+        edges = p.get("connects_to")
+        if not isinstance(edges, list):
+            continue
+        if not any(
+            isinstance(c, dict) and c.get("label") == ownership_label for c in edges
+        ):
+            continue
+        text = ((p.get("value") or {}).get("text") or "")
+        for name in _split_compound_owner(text):
+            if not _is_real_person_owner(name, user_label):
+                continue
+            name = name.strip()
+            key = name.lower()
+            existing = by_name.get(key)
+            if existing is None:
+                existing = {
+                    "name": name,
+                    "type": person_entity_type,
+                    "description": "",
+                    # Ownership ALONE. This name reached CQ as the owner
+                    # of an item, which is not an observation that anyone
+                    # said it out loud.
+                    ENTITY_CAPACITY_KEY: [OWNERSHIP],
+                }
+                entities.append(existing)
+                by_name[key] = existing
+                injected.append(name)
+            else:
+                # Already in the array, so either the model listed them
+                # (the mention WAS observed and ownership is additional)
+                # or an earlier pass injected them (the marker says so and
+                # is kept, which is what makes a second pass a no-op).
+                # Anything else on the key is discarded: the vocabulary
+                # here is mention and ownership, and `speaker` is a claim
+                # about a transcript label that this function never makes.
+                caps = [
+                    c for c in (existing.get(ENTITY_CAPACITY_KEY) or [])
+                    if c in (MENTION, OWNERSHIP)
+                ] or [MENTION]
+                if OWNERSHIP not in caps:
+                    caps.append(OWNERSHIP)
+                existing[ENTITY_CAPACITY_KEY] = caps
+            owners.append(name)
+
+    if not owners:
+        return content
+
+    content["entities"] = entities
+    content["_ownership_entities_injected"] = {
+        "injected": injected,
+        "owners": sorted(set(owners)),
+    }
+    return content
+
+
+def cap_entities(entities: object, cap: int) -> tuple:
+    """Bound model-emitted entities without dropping injected ones.
+
+    The same lesson the patch backstop learned the hard way: the cap
+    exists to bound LLM-output noise, and applying it to a list that
+    structural enforcement has appended to silently deletes the
+    enforcement. An ownership-carrying entity is exempt, because dropping
+    it takes a person's presence in the meeting with it.
+
+    Returns `(kept, dropped_count)` and preserves order.
+    """
+    if not isinstance(entities, list):
+        return [], 0
+    if len(entities) <= cap:
+        return entities, 0
+    kept: list = []
+    dropped = 0
+    budget = max(0, cap)
+    for ent in entities:
+        caps = ent.get(ENTITY_CAPACITY_KEY) if isinstance(ent, dict) else None
+        if caps and OWNERSHIP in caps:
+            kept.append(ent)
+        elif budget > 0:
+            kept.append(ent)
+            budget -= 1
+        else:
+            dropped += 1
+    return kept, dropped
 
 
 def normalize_owner_in_transcript(

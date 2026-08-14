@@ -50,10 +50,26 @@ source patch or stream entry, never NOW(): importing at wall-clock time
 would make `last_seen_at DESC` meaningless and tell the app every meeting
 happened today.
 
+REPAIRING OWNERSHIP PRESENCE ON HISTORY
+
+The worker did not stamp `ownership` at ingest until 2026-08-13, on the
+reasoning that this script derives it from Postgres whenever it is run.
+That held only while somebody ran it, so every meeting ingested between
+runs has owners with no presence in it. `--tier ownership` is the repair,
+and it needs no transcript retention to do it. The dry run reports the
+delta against what is stored, so "would change: 0 new rows" is a real
+all-clear rather than an empty-looking print.
+
+An owner who never became a person ENTITY cannot be repaired here: an
+appearance references an entity, and this script deliberately creates
+none. That population is the forward fix's job from here on.
+
 USAGE
 
     DATABASE_URL=... python scripts/backfill_person_appearances.py
     DATABASE_URL=... python scripts/backfill_person_appearances.py --apply
+    ... --tier ownership             the ownership repair, dry run
+    ... --tier ownership --apply     the ownership repair, for real
     ... --tier speakers --apply      one tier
     ... --tier ownership,speakers    explicit set
     ... --user <user_id>             restrict to one user
@@ -406,6 +422,51 @@ async def tier_mentions(redis_url, forms, user_id, existing_keys):
     return found
 
 
+async def held_rows(conn, user_id: str | None) -> dict:
+    """(user_id, entity_id, origin_id) -> capacities already stored."""
+    rows = await conn.fetch(
+        """
+        SELECT user_id, entity_id, origin_id, capacities
+        FROM person_appearances
+        WHERE ($1::text IS NULL OR user_id = $1)
+        """,
+        user_id,
+    )
+    return {
+        (r["user_id"], str(r["entity_id"]), r["origin_id"]): set(r["capacities"] or ())
+        for r in rows
+    }
+
+
+def plan_diff(rows: dict, held: dict) -> dict:
+    """What this run would actually change, split by kind.
+
+    The dry run used to print how many appearances it FOUND, which is not
+    the question anyone runs it to answer: on a table that already holds
+    most of them, a big number and a no-op look identical. This is the
+    delta against what is stored.
+
+    `insert` rows do not exist at all. `capacity` rows exist but are
+    missing a capacity this run observed, which is the shape the
+    ownership repair takes on a meeting whose person was already
+    recorded as a mention.
+    """
+    insert: list = []
+    capacity: list = []
+    for key, row in rows.items():
+        have = held.get(key)
+        want = set(row.get("capacities") or ())
+        if have is None:
+            insert.append((key, want))
+        elif want - have:
+            capacity.append((key, want - have))
+    return {
+        "insert": insert,
+        "capacity": capacity,
+        "unchanged": len(rows) - len(insert) - len(capacity),
+    }
+
+
 async def write(conn, rows) -> int:
     written = 0
     for r in rows.values():
@@ -497,6 +558,25 @@ async def main(args) -> None:
         print("busiest people:")
         for n, eid in top:
             print(f"  {n:4d} meetings  {canonical.get(eid, eid)}")
+
+        # What would actually CHANGE. Everything above is what the tiers
+        # found, which on a table that already holds most of it says
+        # nothing about the effect of running.
+        diff = plan_diff(rows, await held_rows(conn, args.user))
+        print(f"\nwould change: {len(diff['insert'])} new rows, "
+              f"{len(diff['capacity'])} existing rows gaining a capacity, "
+              f"{diff['unchanged']} already correct")
+        gained: dict = {}
+        for _key, caps in diff["capacity"]:
+            for c in caps:
+                gained[c] = gained.get(c, 0) + 1
+        for c, n in sorted(gained.items(), key=lambda kv: -kv[1]):
+            print(f"  +{c}: {n} rows")
+        for key, caps in diff["insert"][:10]:
+            print(f"  new: {canonical.get(key[1], key[1])} in {key[2]} "
+                  f"({'+'.join(sorted(caps))})")
+        if len(diff["insert"]) > 10:
+            print(f"  ... and {len(diff['insert']) - 10} more")
 
         if args.apply:
             written = await write(conn, rows)

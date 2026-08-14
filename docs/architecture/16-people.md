@@ -1545,6 +1545,77 @@ identity, not a participant's. A column no writer populates would read
 as "zero confirmed" and become a quiet lie, so the split is reported as
 untracked instead (see 6.4).
 
+### 6.2b Ownership-grade presence lands at ingest (2026-08-13)
+
+**A person who owns an action item out of a meeting has an
+`ownership`-grade appearance for that meeting, written by the same
+ingest that stored the item.** It used to be written by a script, when
+somebody ran the script.
+
+The failure, found in the field. A real meeting ingested cleanly, seven
+patches including three commitments owned by two named people, no error
+anywhere, ZERO entities and ZERO appearance rows. Both owners' cards
+still said they were last met three days earlier. Nothing was broken in
+the sense of throwing: the patches are correct and the owners are on
+them. Presence was simply absent.
+
+The mechanism is one seam. `enforce_person_ownership` is the structural
+net for the model returning `value.owner` with no person patch behind
+it, and its own docstring says compliance is unreliable and this is why
+the net exists. It operates on `content["patches"]`. Appearances are
+written from `content["entities"]`. Nothing did the equivalent there, so
+a person could be a first-class owner of work in a meeting and never
+exist as an entity in it, and an appearance references an entity.
+
+`inject_ownership_entities` closes it in the sanitizer chain, between
+`drop_placeholder_and_self_person_patches` and
+`drop_placeholder_entities`. The position is load bearing in both
+directions: late enough that the person names it reads are final (owner
+edges pruned to real owners, prose cut out of names, self and
+placeholder patches gone), early enough that the placeholder pass still
+cleans up after it rather than ahead of it.
+
+Three rules worth stating because each of them is a way to get this
+wrong:
+
+* **The capacity is `ownership`, never `speaker`.** Work gets assigned
+  to people in absentia, so owning an item is not evidence of having
+  spoken. `speaker` is computed at the sink from a resolved transcript
+  label and is never accepted from an entity in any lane
+  (`observed_capacities`). This is not pedantry: SS's duplicate veto
+  reads the ownership-only-versus-speaker split to tell label drift from
+  two humans (5.2), so a forged or inferred `speaker` is a merge
+  proposal that never appears.
+* **A name introduced by ownership is not stamped `mention`.** CQ did
+  not observe anyone saying it; it observed an owner string. The
+  backfill's ownership tier makes the same claim, so forward rows and
+  repaired rows agree.
+* **The row is dated by the ingest clock**, which for a row written
+  during the ingest is the same clock its sibling mention and speaker
+  rows get. This is the 6.2a trap in a different place: a naive `NOW()`
+  from any path that is not the ingest would tell the People list the
+  user met this person today.
+
+The entity cap gets the patch backstop's exemption for the same reason
+the patch backstop has one: the cap bounds LLM-output noise, and
+truncating a structural injection deletes a person's presence in a
+meeting.
+
+**Consequence beyond presence**, worth noting because it was not the
+target: project membership is presence-grade (`capacities` intersected
+with `{speaker, ownership}`), so an owner who was only ever recorded as
+a mention was being filtered OUT of the project they own work in. They
+now carry `ownership` and count.
+
+**What this does not do.** History is not repaired by shipping it. That
+is `scripts/backfill_person_appearances.py --tier ownership`, which
+derives the same rows from Postgres with no model call and no transcript
+retention, and whose dry run now reports the delta against what is
+stored rather than what it found. An owner who never became a person
+entity at all cannot be repaired by it, because an appearance references
+an entity and the script creates none. That population is the forward
+fix's from here.
+
 ### 6.2a Presence follows a relabel: the reassignment, the speaker map, and the one null that stays ambiguous
 
 **The invariant this section exists to state: a null
@@ -2178,6 +2249,13 @@ history with no retention dependency. A person appears if they own
 something anchored to that meeting, via a raw `value.owner` string or an
 `owns` edge. Deterministic, no LLM call. 436 appearances, 114 people,
 157 meetings.
+
+The worker now stamps this capacity at ingest (6.2b), which changes what
+the tier is FOR. It was the only writer, on the reasoning that ownership
+is derivable from Postgres whenever anyone asks. True, and it still left
+every meeting ingested between runs with owners who had no presence in
+it. The tier is now the repair for history and the audit for the
+forward path, not the mechanism.
 
 **speakers (APPLIED).** Transcript speaker labels resolved against known
 person entities. The strongest attendance signal CQ holds: having spoken
