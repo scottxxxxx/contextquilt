@@ -532,13 +532,47 @@ async def store_connected_patches(
         text still wins for `value.text`, because this is a record of an
         object's life, not an edit to the fact.
         """
+        # A re-ingest of the SAME meeting is the same observation arriving
+        # twice, not the fact being observed again, so it must not move any
+        # freshness anchor. Same principle as the ledger's same-origin
+        # restatement guard below, and the same key. This exists because
+        # the 2026-06-10 entity regression has to be repaired by replaying
+        # ~176 real meetings: without this, one afternoon of replay
+        # re-anchors decay across two months of history in a single write
+        # pass, and every stale item on the user's screen reads as fresh.
+        # `updated_at` is held back too, not just `last_observed_at`:
+        # completables anchor decay on GREATEST(updated_at, deadline_date),
+        # so guarding only the freshness column would still extend the life
+        # of every commitment in the replay set. Detail merges (deadline,
+        # salience, restatements) write their own rows below and are
+        # unaffected — a replay that genuinely learns something still
+        # records it.
+        # Guarded in SQL rather than read-then-branch, for the same reason
+        # the restatement guard is: the comparison is against the stored
+        # row, and a separate read would be a second trip that can disagree
+        # with the write.
+        same_origin = str(origin_id) if origin_id else None
         await db.execute(
-            "UPDATE context_patches SET updated_at = $1, last_observed_at = $1 WHERE patch_id = $2::uuid",
-            created_at, existing_id
+            """
+            UPDATE context_patches
+               SET updated_at = $1, last_observed_at = $1
+             WHERE patch_id = $2::uuid
+               AND ($3::text IS NULL OR COALESCE(origin_id, '') <> $3::text)
+            """,
+            created_at, existing_id, same_origin,
         )
         await db.execute(
-            "UPDATE patch_usage_metrics SET access_count = access_count + 1, last_accessed_at = $1 WHERE patch_id = $2::uuid",
-            created_at, existing_id
+            """
+            UPDATE patch_usage_metrics
+               SET access_count = access_count + 1, last_accessed_at = $1
+             WHERE patch_id = $2::uuid
+               AND ($3::text IS NULL OR NOT EXISTS (
+                       SELECT 1 FROM context_patches cp
+                        WHERE cp.patch_id = $2::uuid
+                          AND COALESCE(cp.origin_id, '') = $3::text
+                   ))
+            """,
+            created_at, existing_id, same_origin,
         )
         new_dd = value.get("deadline_date")
         if new_dd:

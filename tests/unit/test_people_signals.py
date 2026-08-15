@@ -200,3 +200,48 @@ def test_presence_grade_is_one_predicate_for_every_surface():
     assert is_presence_grade({"capacities": []}) is True
     assert is_presence_grade({"capacities": None}) is True
     assert is_presence_grade({"capacities": ["mention"]}) is False
+
+
+# ============================================================
+# presence_anchor: one implementation, two screens
+# ============================================================
+
+
+def test_presence_anchor_matches_what_the_list_signals_serve():
+    # The whole point of splitting it out. If these ever disagree, the
+    # person page and the person list disagree about when the user last
+    # met someone, which is the defect SS just fixed on their side.
+    from contextquilt.services.people_signals import presence_anchor
+
+    apps = _apps((8, 1, 3), (8, 5, 9), (8, 9, 2))
+    anchor = presence_anchor(apps)
+    signals = compute_person_signals(apps, [], [], today=TODAY)
+    assert anchor["first_present_at"] == signals["first_present_at"]
+    assert anchor["last_present_at"] == signals["last_present_at"]
+
+
+def test_presence_anchor_is_null_for_a_mention_only_person():
+    # Null means NOT PRESENT, not "we do not know". A client must omit
+    # the line rather than fall back to any other date: the entity-level
+    # last_seen_at is mention-inclusive AND moves on a rename, so
+    # substituting it claims a meeting that never happened.
+    from contextquilt.services.people_signals import presence_anchor
+
+    mention_only = [{"last_seen_at": datetime(2026, 8, 1, tzinfo=timezone.utc),
+                     "turn_count": None, "capacities": ["mention"]}]
+    assert all(is_presence_grade(a) is False for a in mention_only)
+    anchor = presence_anchor(mention_only)
+    assert anchor["first_present_at"] is None
+    assert anchor["last_present_at"] is None
+    assert anchor["meetings_present"] == 0
+
+
+def test_presence_anchor_counts_days_not_rows():
+    # Two appearances on one day is one meeting-day, same as the list.
+    from contextquilt.services.people_signals import presence_anchor
+
+    same_day = [
+        {"last_seen_at": datetime(2026, 8, 5, 9, tzinfo=timezone.utc), "turn_count": 4},
+        {"last_seen_at": datetime(2026, 8, 5, 17, tzinfo=timezone.utc), "turn_count": 6},
+    ]
+    assert presence_anchor(same_day)["meetings_present"] == 1
