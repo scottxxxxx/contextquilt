@@ -1386,10 +1386,47 @@ async def store_entities(
                         (user_id, entity_id, origin_id, origin_type, project_id, capacities, turn_count,
                          questions_asked, questions_received_explicit, questions_received_inferred,
                          questions_from_user_explicit, questions_from_user_inferred,
-                         meeting_questions_by_user)
-                    VALUES ($1, $2, $3, $4, $5, $6::text[], $7, $8, $9, $10, $11, $12, $13)
+                         meeting_questions_by_user,
+                         first_seen_at, last_seen_at)
+                    VALUES ($1, $2, $3, $4, $5, $6::text[], $7, $8, $9, $10, $11, $12, $13,
+                        -- THE MEETING'S CLOCK, NEVER THE INGEST'S. Doc 16
+                        -- 6.2a states this rule and only the relabel routes
+                        -- in main.py implemented it; the ingest path took the
+                        -- column default and the conflict branch stamped
+                        -- NOW(). That is correct exactly once, on a meeting's
+                        -- first ingest, and wrong every other time. Proven on
+                        -- 2026-08-15: replaying real meetings to repair the
+                        -- entity regression wrote presence rows dated the
+                        -- replay, so people last met in July rendered as met
+                        -- today, across 23 meetings before it was caught.
+                        -- A repair that lies about when is not a repair.
+                        --
+                        -- Resolution order per doc 16: sibling rows for this
+                        -- meeting (already correct), else the meeting's own
+                        -- patches (the ingest clock that wrote them), else
+                        -- now, which is only reached on a genuinely new
+                        -- meeting that produced no patches.
+                        COALESCE(
+                            (SELECT min(pa2.first_seen_at) FROM person_appearances pa2
+                              WHERE pa2.user_id = $1 AND pa2.origin_id = $3),
+                            (SELECT min(cp.created_at) FROM context_patches cp
+                              WHERE cp.origin_id = $3),
+                            NOW()
+                        ),
+                        COALESCE(
+                            (SELECT min(pa2.first_seen_at) FROM person_appearances pa2
+                              WHERE pa2.user_id = $1 AND pa2.origin_id = $3),
+                            (SELECT min(cp.created_at) FROM context_patches cp
+                              WHERE cp.origin_id = $3),
+                            NOW()
+                        ))
                     ON CONFLICT (user_id, entity_id, origin_id) DO UPDATE SET
-                        last_seen_at = NOW(),
+                        -- last_seen_at deliberately NOT touched. One row is
+                        -- one person in one meeting, so there is no later
+                        -- observation to record: a second ingest of the same
+                        -- meeting is the same observation arriving twice.
+                        -- Same principle as the same-origin guard on patch
+                        -- freshness, through the door that one missed.
                         project_id = COALESCE(EXCLUDED.project_id, person_appearances.project_id),
                         capacities = ARRAY(SELECT DISTINCT unnest(
                             person_appearances.capacities || EXCLUDED.capacities)),
