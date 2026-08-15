@@ -194,12 +194,17 @@ class TestNonCompletablesAreUntouched:
             "type": "takeaway",
             "value": {"text": "The vendor list matters more than the timeline"},
         }])
-        assert [sql for sql, _ in db.executed] == [
+        statements = [" ".join(sql.split()) for sql, _ in db.executed]
+        assert statements == [
             "INSERT INTO profiles (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
             "UPDATE context_patches SET updated_at = $1, last_observed_at = $1 "
-            "WHERE patch_id = $2::uuid",
+            "WHERE patch_id = $2::uuid "
+            "AND ($3::text IS NULL OR COALESCE(origin_id, '') <> $3::text)",
             "UPDATE patch_usage_metrics SET access_count = access_count + 1, "
-            "last_accessed_at = $1 WHERE patch_id = $2::uuid",
+            "last_accessed_at = $1 WHERE patch_id = $2::uuid "
+            "AND ($3::text IS NULL OR NOT EXISTS ( "
+            "SELECT 1 FROM context_patches cp WHERE cp.patch_id = $2::uuid "
+            "AND COALESCE(cp.origin_id, '') = $3::text ))",
         ]
 
     async def test_a_completable_keeps_those_same_writes_first(self):

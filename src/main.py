@@ -64,6 +64,7 @@ from contextquilt.services.recall_formatter import (
 from contextquilt.services.people_signals import (
     compute_person_signals,
     compute_question_totals,
+    presence_anchor,
 )
 from contextquilt.services.person_appearances import (
     SPEAKER_METRICS,
@@ -5966,6 +5967,15 @@ async def get_person(
             # that row rather than guessing.
             "vocabulary": row["_ledger_vocabulary"],
         },
+        # When this person was actually PRESENT, from the same predicate
+        # over the same rows the person LIST computes its `signals` from,
+        # so the two screens cannot answer "when did we last meet" with
+        # two different numbers. Null last_present_at means NOT PRESENT,
+        # never "we do not know": a client must omit the line rather than
+        # fall back to any other date. The entity-level `last_seen_at` in
+        # `meetings[]` below is per-appearance and mention-inclusive; it is
+        # not a met-date and must never be rendered as one.
+        "presence": presence_anchor(row["_appearances"]),
         # `capacities` says HOW this person turned up in this meeting, not
         # merely that they did: `speaker` means a diarization label resolved
         # to them, `ownership` means they were named as the owner of an item

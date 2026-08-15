@@ -87,6 +87,7 @@ def build_prompt(manifest: Dict[str, Any]) -> str:
     sections.append(_cues_section(manifest, guidance))
     sections.append(_salience_section(guidance))
     sections.append(_patch_types_section(manifest))
+    sections.append(_entity_types_section(manifest))
     sections.append(_connection_labels_section(manifest))
     sections.append(_priority_order(guidance))
     sections.append(_hard_caps(guidance))
@@ -272,7 +273,7 @@ def _output_shape(manifest: Dict[str, Any]) -> str:
         "- `_reasoning`: short scratchpad explaining why you chose the patches you did\n"
         "- `patches`: array of typed patches (see PATCH TYPES below)\n"
         "- `resolved_commitments`: array of prior open commitments this transcript shows as completed (see RESOLVED COMMITMENTS section)\n"
-        "- `entities`: array of named things (for the recall name index)\n"
+        "- `entities`: array of named things, for the recall name index (see ENTITY TYPES below)\n"
         "- `relationships`: array of edges between entities\n"
         "\n"
         "Each patch has: `type` (one of the domain types), `value` (object with "
@@ -400,6 +401,91 @@ def _patch_types_section(manifest: Dict[str, Any]) -> str:
         if pt.get("project_scoped"):
             lines.append("    Project-scoped: connect it to a project patch via belongs_to.")
         lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _entity_types_section(manifest: Dict[str, Any]) -> str:
+    """The entities array: object shape, declared types, and the rules
+    that decide who gets indexed.
+
+    This section did not exist until 2026-08-15, and its absence was the
+    whole of the entity-extraction regression. The manifest has always
+    declared `entity_types` with per-type `extraction_rules.guidance`,
+    and the builder rendered NONE of it: a 28k-char generated prompt
+    carried exactly one line about the entities array. That was survivable
+    only because the OpenAI-compat client sends `json_schema` for
+    constrained decoding, so the schema carried the contract the prompt
+    never stated. The 2026-06-10 Anthropic-direct cutover took the schema
+    off the wire (`llm_client_anthropic.extract` accepts `json_schema`
+    for interface parity and does not send it), and entity yield stepped
+    from 4.37/meeting to 1.24 with zero-entity meetings going 44% -> 82%.
+    Patches were unaffected because patches were always specified here.
+
+    Same failure shape as the 2026-07-30 cue starvation documented in
+    `_patch_types_section`: an unstated field is an unemitted field. The
+    fix is symmetrical, state it in prose AND keep it in the schema.
+
+    Generic by default, tuned from the manifest without CQ code changes:
+    `guidance.entity_guidance` replaces the default rule prose, and each
+    `entity_types` entry contributes its own description + guidance.
+    Renders even when a manifest declares no entity types, because the
+    shape and the rules are what the model was missing, not the enum.
+    """
+    guidance = manifest.get("extraction_prompt_guidance") or {}
+    entity_types = [
+        et for et in (manifest.get("entity_types") or []) if isinstance(et, dict)
+    ]
+
+    lines = [
+        "=== ENTITY TYPES: the recall name index ===",
+        "",
+        "The top-level `entities` array is how a memory is found later by "
+        "name, and it is how CQ records who was present in a meeting. It is "
+        "NOT covered by the patches array: a person named as a patch `owner` "
+        "is not indexed until they ALSO appear here. An empty `entities` "
+        "array on a transcript that names anyone is wrong.",
+        "",
+        "Each entity: {\"name\": \"<exact name as mentioned in this "
+        "transcript>\", \"type\": \"<one of the types below>\", "
+        "\"description\": \"<brief context from this transcript>\"}",
+        "",
+    ]
+
+    if entity_types:
+        for et in entity_types:
+            name = et.get("entity_type")
+            display = et.get("display_name")
+            header = f"- **{name}**" + (f" ({display})" if display else "")
+            lines.append(header)
+            if et.get("description"):
+                lines.append(f"    {et['description']}")
+            rules = et.get("extraction_rules") or {}
+            if rules.get("guidance"):
+                lines.append(f"    When to emit: {rules['guidance']}")
+            if et.get("indexed"):
+                lines.append("    Indexed for recall: omitting one makes it unfindable by name.")
+            lines.append("")
+
+    body = guidance.get("entity_guidance") or (
+        "RULES:\n"
+        "- Emit an entity for every person, project, organization or other "
+        "named thing this transcript names, using the types above.\n"
+        "- A speaker label carrying a REAL NAME is a naming. \"[Priya]\" or "
+        "\"[Priya (you)]\" means Priya was present and gets a person entity, "
+        "whether or not anyone says her name out loud and whether or not she "
+        "owns anything. Strip the \"(you)\" marker from the entity name.\n"
+        "- Do NOT emit an entity for an unnamed speaker (\"Speaker 4\", "
+        "\"Speaker 16\", \"Unknown\"). Those are diarization labels, not "
+        "names. The app renames them later and the entity is created then.\n"
+        "- Every person named as the `owner` of a commitment, blocker or "
+        "decision MUST also appear in `entities`. An owner who is not "
+        "indexed is a person the user cannot find.\n"
+        "- Use the fullest form of a name the transcript gives, and use it "
+        "consistently: one entity per person, not one per surface form.\n"
+        "- `relationships` may only reference names that appear in "
+        "`entities`."
+    )
+    lines.append(body)
     return "\n".join(lines).rstrip()
 
 

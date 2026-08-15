@@ -117,6 +117,32 @@ def compute_question_totals(appearances: List[dict]) -> Dict:
     }
 
 
+def presence_anchor(appearances: List[dict]) -> Dict:
+    """First/last day this person was actually PRESENT, plus the count.
+
+    Split out of `compute_person_signals` so the person DETAIL route can
+    serve the same anchor the person LIST serves, from the identical
+    predicate over identical rows. Added 2026-08-15 after SS found their
+    person page rendering the entity-level `last_seen_at` as "last met":
+    that column is mention-inclusive AND is stamped to NOW() by a rename,
+    so it could claim a meeting that never happened. They fixed the render
+    to read the presence anchor, which the detail route did not serve, so
+    a person opened by deep link had no anchor at all.
+
+    Two implementations of "when did we last meet" is the drift this whole
+    workstream has been retiring. There is one, and it lives here.
+    """
+    present = [a for a in appearances if is_presence_grade(a)]
+    days = sorted({d for a in present if (d := _day(a.get("last_seen_at")))})
+    return {
+        # null = never actually present (mention-only person), which is a
+        # different claim from "met long ago" and must render as one.
+        "first_present_at": days[0].isoformat() if days else None,
+        "last_present_at": days[-1].isoformat() if days else None,
+        "meetings_present": len(days),
+    }
+
+
 def compute_person_signals(
     appearances: List[dict],
     they_owe: List[dict],
@@ -197,11 +223,13 @@ def compute_person_signals(
         "meetings_30d": meetings_30d,
         "turns_30d": turns_30d,
         "cadence": cadence,
-        # Presence anchors for "met X ago" copy and NEW FACES gating:
-        # null = never actually present (mention-only person), which is
-        # a different claim from "met long ago" and must render as one.
-        "first_present_at": days[0].isoformat() if days else None,
-        "last_present_at": days[-1].isoformat() if days else None,
+        # Presence anchors for "met X ago" copy and NEW FACES gating.
+        # Same values `presence_anchor` serves on the person detail: one
+        # implementation, so the two screens cannot disagree.
+        **{
+            k: v for k, v in presence_anchor(appearances).items()
+            if k != "meetings_present"
+        },
         "open_between": {
             "they_owe_open": len(they_owe),
             "they_owe_overdue": sum(1 for i in they_owe if _overdue(i)),
