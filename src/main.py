@@ -4681,7 +4681,7 @@ async def _people_read_context(conn, app_id: str):
 
 async def _person_insight_readiness(
     user_id: str,
-    person_patch_id: Optional[Any],
+    person_patch_ids: Optional[Any],
     ownership_label: str,
     rule: dict,
 ) -> dict:
@@ -4704,7 +4704,16 @@ async def _person_insight_readiness(
     """
     source_rows: list = []
     stamp_rows: list = []
-    if person_patch_id:
+    # One person, every surface form the extractor has used for them. A
+    # lens stamp and an ownership edge both point at whichever patch was
+    # current when they were written, so reading only the primary reports
+    # "not yet" over a lens that exists and counts a fraction of the
+    # items the person owns.
+    if isinstance(person_patch_ids, (list, tuple, set)):
+        patch_ids = [str(p) for p in person_patch_ids if p]
+    else:
+        patch_ids = [str(person_patch_ids)] if person_patch_ids else []
+    if patch_ids:
         source_rows = await db_pool.fetch(
             f"""
             SELECT cp.patch_id, cp.origin_id, cp.completed_at,
@@ -4719,13 +4728,13 @@ async def _person_insight_readiness(
             JOIN context_patches cp ON cp.patch_id = pc.to_patch_id
             JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
             WHERE ps.subject_key = $1
-              AND pc.from_patch_id = $2::uuid
+              AND pc.from_patch_id = ANY($2::uuid[])
               AND pc.connection_label = $3
               AND COALESCE(pc.status, 'active') = 'active'
               AND cp.patch_type = ANY($4::text[])
               AND cp.created_at > NOW() - INTERVAL '{CLUSTER_WINDOW_DAYS} days'
             """,
-            f"user:{user_id}", str(person_patch_id), ownership_label,
+            f"user:{user_id}", patch_ids, ownership_label,
             rule["from_types"],
         )
         stamp_rows = await db_pool.fetch(
@@ -4737,9 +4746,9 @@ async def _person_insight_readiness(
             JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
             WHERE ps.subject_key = $1
               AND cp.origin_mode = 'derived'
-              AND cp.value->>'source_person' = $2
+              AND cp.value->>'source_person' = ANY($2::text[])
             """,
-            f"user:{user_id}", str(person_patch_id),
+            f"user:{user_id}", patch_ids,
         )
     return build_insight_readiness(
         [dict(r) for r in source_rows],
@@ -5089,11 +5098,25 @@ async def _people_core(
         eid = str(p["entity_id"])
         aliases = aliases_by_id.get(eid, [])
         keys = owner_keys(p["name"], aliases)
-        patch_id = next(
-            (patch_by_name[k] for k in ([p["name"].lower()] + [a.lower() for a in aliases])
-             if k in patch_by_name),
-            None,
-        )
+        # A person can hold SEVERAL person patches, one per surface form
+        # the extractor has used for them ("Suresh", "Suresh Muchakurti").
+        # `patch_id` is the primary, canonical name first then aliases,
+        # and it stays the one thing that identifies this person for the
+        # ledger and the ownership joins.
+        #
+        # `patch_ids` is every one of them, and exists because derived
+        # insights stamp `value.source_person` with whichever patch was
+        # current WHEN THEY WERE DERIVED. Suresh's three insights were
+        # derived against "Suresh" and his page resolves "Suresh
+        # Muchakurti", so a lookup on the primary alone found nothing and
+        # rendered three not-yet cards over three finished insights
+        # (2026-08-16). Which form wins is an accident of extraction
+        # history, so the read has to accept any of them.
+        name_keys = [p["name"].lower()] + [a.lower() for a in aliases]
+        patch_ids = list(dict.fromkeys(
+            patch_by_name[k] for k in name_keys if k in patch_by_name
+        ))
+        patch_id = patch_ids[0] if patch_ids else None
 
         appearances = appearances_by_id.get(eid, [])
         project_counts: dict = {}
@@ -5214,6 +5237,10 @@ async def _people_core(
             "is_self": p["_is_self_row"] if has_self else None,
             "aliases": aliases,
             "patch_id": patch_id,
+            # Every surface form's patch, for reads that must not care
+            # which one was current when a thing was written. Not served:
+            # internal to the assembly, like the other underscore keys.
+            "_patch_ids": patch_ids,
             "description": p["description"] or None,
             "confirmed": p["confirmed_at"] is not None,
             "confirmation_source": p["confirmation_source"],
@@ -5757,7 +5784,10 @@ async def get_person(
     if insights_available and person_rule:
         try:
             readiness = await _person_insight_readiness(
-                user_id, row.get("patch_id"), vocab.ownership_label, person_rule
+                user_id,
+                row.get("_patch_ids") or row.get("patch_id"),
+                vocab.ownership_label,
+                person_rule,
             )
         except Exception:
             readiness = None
@@ -5779,11 +5809,16 @@ async def get_person(
                 LEFT JOIN patch_usage_metrics pum ON pum.patch_id = cp.patch_id
                 WHERE ps.subject_key = $1
                   AND cp.origin_mode = 'derived'
-                  AND cp.value->>'source_person' = $2
+                  AND cp.value->>'source_person' = ANY($2::text[])
                   AND COALESCE(cp.status, 'active') = 'active'
                 ORDER BY cp.created_at DESC
                 """,
-                f"user:{user_id}", str(row["patch_id"]),
+                f"user:{user_id}",
+                # ANY over every surface form's patch, not just the
+                # primary. An insight stamps the patch that was current
+                # when it was derived, and which form that is changes as
+                # the extractor rephrases someone.
+                [str(pid) for pid in (row.get("_patch_ids") or [row["patch_id"]])],
             )
             insights = []
             # Same runtime and registry TTLs the ledger's decay bands and
