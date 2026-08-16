@@ -2774,6 +2774,14 @@ class ColdPathWorker:
         Keyed on `source_entity_id` rather than a person patch, because
         that is the identity that does not move when the extractor
         rephrases somebody.
+
+        ONE EXCEPTION, and it is a distinction the other lenses have not
+        needed yet: a card CQ itself withdrew is not a user's no. When a
+        rule tightens, the cards it would no longer write are retracted,
+        and reading those as suppressions would silently ban the person
+        from a lens forever over a claim they never saw and never
+        rejected. So `archive_cause = 'retracted'` is skipped here, while
+        `user_delete` and every other cause still count.
         """
         return bool(await self.db.fetchval(
             """
@@ -2785,6 +2793,7 @@ class ColdPathWorker:
                   AND d.origin_mode = 'derived'
                   AND d.value->>'lens' = $3
                   AND d.value->>'source_entity_id' = $4
+                  AND COALESCE(d.value->>'archive_cause', '') <> 'retracted'
             )
             """,
             subject_key, produce_type, relationship_lenses.LENS, str(entity_id),
