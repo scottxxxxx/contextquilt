@@ -44,6 +44,7 @@ from contextquilt.config import get_settings
 from dashboard.router import router as dashboard_router
 from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
+from contextquilt.services import insight_cards
 from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import facet_runtime
@@ -5930,12 +5931,18 @@ async def get_person(
                     # against them. Null for a lens a model reasoned its
                     # way to: it counted nothing, so it has no counts.
                     "facts": iv.get("facts"),
+                    # Lower sorts earlier; absent means after the
+                    # ordered ones. Served because the client sorts by
+                    # whether a lens is named, so an order that carries
+                    # meaning cannot be inferred on their side.
+                    "display_order": iv.get("display_order"),
                     "derived_at": ir["created_at"].isoformat() if ir["created_at"] else None,
                     # live | aging | stale, the SAME open vocabulary and
                     # UTC-day bucketing the ledger items carry.
                     "decay_state": ins_state,
                     "evidence": evidence,
                 })
+            insights = insight_cards.one_card_per_lens(insights)
         except Exception:
             # Serving must never fail the detail route. Null, not []:
             # a swallowed error is CQ not knowing, not CQ knowing there
