@@ -145,6 +145,28 @@ FACT_SUBJECTS = {
     "restated": "open items they have restated in more than one meeting",
 }
 
+# The SAME facts in a few words, for the writer only.
+#
+# FACT_SUBJECTS is precise because it labels the counts on the card, where
+# there is room and the reader needs to know exactly what was measured.
+# Handing that phrasing to the writer is a different job, and getting it
+# wrong cost three deploys: given "items that were closed after the date
+# they were due" the model returned "Closes items after their due date far
+# more often than others you work with", 75 characters against a ceiling
+# of 62, IDENTICALLY on three calls because the temperature is pinned.
+#
+# It was not disobeying the limit. It was doing what doc 19.8 says a model
+# does: describing the shape of the material it was given. A 50 character
+# subject phrase becomes a 75 character sentence. So the writer gets the
+# short form and the card keeps the precise one.
+FACT_PHRASES = {
+    "went_quiet": "goes quiet on open items",
+    "closed_late": "closes late",
+    "re_dated": "moves due dates",
+    "handed_back": "hands work back",
+    "restated": "restates open items",
+}
+
 
 def facts_for_person(counts: dict) -> List[Fact]:
     """Every candidate fact this person's counts can support.
@@ -312,7 +334,14 @@ Rules:
 - Write in the same language as the listed items.
 - Skip only when the comparison genuinely supports nothing worth showing.
 
-Claims of the right size and shape, all under 62 characters and none of them carrying a digit: "Closes late far more often than others you work with." / "Almost never misses a date, unlike the rest of your roster." / "Due dates move on this work more than anyone else's."
+BUILD THE CLAIM FROM THE SHORT PHRASE YOU WERE GIVEN, not from the long label beside the counts. The label is precise so the card can show what was measured; it is far too long to put in a sentence. Working claims, every one under 62 characters and none carrying a digit:
+
+"Closes late far more often than others you work with." (52)
+"Almost never misses a date, unlike your other people." (52)
+"Moves due dates more than anyone else you work with." (51)
+"Goes quiet on open items more than your other people." (52)
+
+Count the characters before you answer. A claim of 75 characters is thrown away whole and this person gets no card at all, so a shorter blunter sentence always beats a fuller one that does not fit.
 
 Respond with EXACTLY this raw JSON shape and nothing else:
 {"skip": <true|false>, "text": "<the claim, or empty string when skip is true>", "do": "<the actionable line, or empty string when skip is true>", "reason": "<one short sentence>"}"""
@@ -336,6 +365,12 @@ def build_stands_out_content(
     identical calls build identical prompts.
     """
     lines = [f"Person: {person_name}", ""]
+    # The SHORT phrase, not the card's precise label. The writer copies
+    # the shape of what it is given, so a long subject line comes back as
+    # a long claim; see FACT_PHRASES.
+    phrase = FACT_PHRASES.get(facts.get("fact_key"), facts["subject"])
+    lines.append(f"What was measured: this person {phrase}.")
+    lines.append("")
     lines.append(
         "Measured by ContextQuilt. These are the only numbers you may state:"
     )

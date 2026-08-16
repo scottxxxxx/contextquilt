@@ -466,13 +466,19 @@ def test_the_prompt_asks_for_a_claim_with_no_digits():
 
 def test_every_example_claim_in_the_prompt_would_actually_pass():
     """A prompt that models an unshippable claim teaches the model to
-    write unshippable claims. The examples must clear the real ceiling."""
+    write unshippable claims, which is how this lens shipped three times
+    without producing a card. Every quoted example sentence in the prompt
+    is checked against the real ceiling.
+
+    Anchored on the shape of an example (a quoted sentence ending in a
+    full stop) rather than on a heading, because the heading has already
+    been rewritten once and took this test with it.
+    """
     from contextquilt.services.insight_cards import MAX_CLAIM_CHARS
     from contextquilt.services.relationship_lenses import STANDS_OUT_SYSTEM
     import re
-    block = STANDS_OUT_SYSTEM.split("Claims of the right size and shape")[1]
-    examples = re.findall(r'"([^"]+)"', block)
-    assert examples, "the prompt should carry example claims"
+    examples = re.findall(r'"([A-Z][^"]{15,}?\.)"', STANDS_OUT_SYSTEM)
+    assert len(examples) >= 3, f"expected example claims, found {examples}"
     for example in examples:
         assert len(example) <= MAX_CLAIM_CHARS, (example, len(example))
         assert not re.search(r"\d", example), example
@@ -487,3 +493,48 @@ def test_a_wordy_claim_with_no_digits_still_passes_the_contrast_rule():
         allowed_numbers(FACTS), person_name="Pallavi", facts=FACTS,
     )
     assert got is not None and got["lens"] == LENS
+
+
+# --- the writer copies the shape of what it is given -------------------
+
+def test_every_fact_has_a_short_phrase_for_the_writer():
+    from contextquilt.services.relationship_lenses import (
+        FACT_PHRASES, FACT_SUBJECTS,
+    )
+    assert set(FACT_PHRASES) == set(FACT_SUBJECTS)
+
+
+def test_the_writer_phrases_are_short_enough_to_build_a_claim_from():
+    """Measured 2026-08-16: handed the 50 character label 'items that were
+    closed after the date they were due', the model returned a 75
+    character claim against a 62 ceiling, identically on three calls
+    because the temperature is pinned. It was not disobeying, it was
+    describing the shape of what it was given (doc 19.8). A phrase has to
+    leave room for a sentence around it."""
+    from contextquilt.services.insight_cards import MAX_CLAIM_CHARS
+    from contextquilt.services.relationship_lenses import FACT_PHRASES
+    for key, phrase in FACT_PHRASES.items():
+        assert len(phrase) <= MAX_CLAIM_CHARS // 2, (key, phrase, len(phrase))
+
+
+def test_the_prompt_hands_over_the_short_phrase_not_the_long_label():
+    from contextquilt.services.relationship_lenses import (
+        FACT_PHRASES, build_stands_out_content,
+    )
+    content = build_stands_out_content("Pallavi", FACTS, [])
+    assert FACT_PHRASES["closed_late"] in content
+
+
+def test_the_precise_label_still_reaches_the_card():
+    """The short phrase is for phrasing only. The counts still have to be
+    labelled with exactly what was measured."""
+    content = build_stands_out_content("Pallavi", FACTS, [])
+    assert FACTS["subject"] in content
+
+
+def test_an_unknown_fact_key_falls_back_to_the_long_subject():
+    """A new fact must never lose its description just because nobody
+    added a short phrase for it yet."""
+    from contextquilt.services.relationship_lenses import build_stands_out_content
+    facts = dict(FACTS, fact_key="something_new")
+    assert FACTS["subject"] in build_stands_out_content("X", facts, [])
