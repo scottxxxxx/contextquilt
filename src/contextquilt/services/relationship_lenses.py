@@ -360,12 +360,18 @@ Rules:
 - Write in the same language as the listed items.
 - Skip only when the comparison genuinely supports nothing worth showing.
 
-BUILD THE CLAIM FROM THE SHORT PHRASE YOU WERE GIVEN, not from the long label beside the counts. The label is precise so the card can show what was measured; it is far too long to put in a sentence. Working claims, every one under 62 characters and none carrying a digit:
+BUILD THE CLAIM FROM THE SHORT PHRASE YOU WERE GIVEN, not from the long label beside the counts. The label is precise so the card can show what was measured; it is far too long to put in a sentence.
 
-"Closes late far more often than others you work with." (52)
-"Almost never misses a date, unlike your other people." (52)
-"Moves due dates more than anyone else you work with." (51)
-"Goes quiet on open items more than your other people." (52)
+These are four DIFFERENT SHAPES a claim can take, not four sentences to pick from. Notice that each one opens differently and arranges the comparison differently. Vary the shape to fit the fact rather than pouring every fact into one of them:
+
+"Closes late far more often than others you work with." (52, verb first)
+"Almost never misses a date, unlike your other people." (52, states the absence)
+"Due dates here move more than on anyone else's work." (51, subject first)
+"Hands work back more than the rest of your roster does." (54, roster last)
+
+WHEN YOU AVOID A COLLISION, GET SHORTER, NEVER LONGER. The reflex is to add words to make a sentence different, and that is the one move guaranteed to fail: the extra words break the ceiling and the card is thrown away, so the reader gets nothing instead of something fresh. Change the VERB or the ORDER instead. "Closes late far more often than others" and "Due dates slip here more than elsewhere" say the same thing, share no opening, and both fit.
+
+SAY IT DIFFERENTLY FROM THE OTHERS. You will be shown the claims already written about this user's OTHER people. Yours must not open with the same words as any of them and must not be a rewording of one. Every card that reads like the last card teaches the reader to stop reading them, so a claim that sounds like the others has failed even when its arithmetic is perfect. If the natural sentence collides with one already used, find another way to say the same true thing.
 
 Count the characters before you answer. A claim of 75 characters is thrown away whole and this person gets no card at all, so a shorter blunter sentence always beats a fuller one that does not fit.
 
@@ -379,10 +385,57 @@ DIRECTION_PHRASES = {
 }
 
 
+def retry_note(defect: str, attempt_text: str) -> Optional[str]:
+    """A corrective line for one bounded retry, or None if not worth it.
+
+    #240 established that a pinned temperature makes a retry pointless:
+    the same prompt returns the same answer, so an over-limit claim is
+    not a lottery, it is a person who never gets a card. That reasoning
+    holds only while the prompt is UNCHANGED. Telling the writer exactly
+    what its last answer did wrong is a different prompt, and the second
+    attempt is a genuinely different question rather than another roll.
+
+    Only the two recoverable defects get a retry. A character verdict or
+    an invented number is a judgement problem and asking again invites
+    the model to argue rather than comply.
+    """
+    if defect == "claim_too_long":
+        return (
+            "Your last answer's claim was "
+            f"{len(attempt_text or '')} characters, which is over the limit "
+            "and was thrown away. Say the same true thing in a shorter "
+            "sentence. Cut a qualifier, not the meaning."
+        )
+    if defect == "claim_repeats_another":
+        return (
+            "Your last answer opened with the same words as a claim "
+            "already used for somebody else. Keep it the same length or "
+            "shorter and change the opening: lead with a different verb, "
+            "or put the work first instead of the person."
+        )
+    return None
+
+
+def opening_words(text: str, words: int = 2) -> str:
+    """The first few words, lowercased, for collision checks.
+
+    Measured 2026-08-16 across every live card: `what_moves_them` held
+    six claims with TWO distinct opening words between them, "responds
+    to" opened five cards spanning five different people, and two people
+    carried byte-identical claims. A reader who sees the same opening on
+    every page stops reading the cards, so the opening is the part worth
+    guarding.
+    """
+    tokens = [t.strip(".,;:!?\"'").lower() for t in (text or "").split()]
+    tokens = [t for t in tokens if t]
+    return " ".join(tokens[:words])
+
+
 def build_stands_out_content(
     person_name: str,
     facts: dict,
     examples: Sequence[dict] = (),
+    used_claims: Sequence[str] = (),
 ) -> str:
     """User-content block for one person's contrast call.
 
@@ -423,6 +476,14 @@ def build_stands_out_content(
         lines.append("Items behind this person's count:")
         for item in examples:
             lines.append(f"- {item.get('text') or '(no text stored)'}")
+    if used_claims:
+        lines.append("")
+        lines.append(
+            "ALREADY SAID about this user's other people. Do not open with "
+            "the same words as any of these, and do not reword one:"
+        )
+        for claim in used_claims:
+            lines.append(f"- {claim}")
     return "\n".join(lines)
 
 
@@ -505,6 +566,7 @@ def parse_stands_out_response(
     person_name: Optional[str] = None,
     defects: Optional[list] = None,
     facts: Optional[dict] = None,
+    used_claims: Optional[Sequence[str]] = None,
 ) -> Optional[dict]:
     """{"lens", "text", "do"} or None for skip, refusal or garbage.
 
@@ -570,5 +632,17 @@ def parse_stands_out_response(
         if stated & mine and not stated & theirs:
             if defects is not None:
                 defects.append("contrast_omitted")
+            return None
+    # The prompt asks for a different sentence; this makes it an
+    # invariant. Two people carried BYTE-IDENTICAL claims on the live
+    # prose lenses, which is the failure this prevents rather than
+    # predicts. Only the opening is guarded: demanding total novelty
+    # inside 62 characters would reject honest claims, and the opening is
+    # what a reader sees repeated down a page.
+    if used_claims:
+        opener = opening_words(text)
+        if opener and any(opening_words(u) == opener for u in used_claims):
+            if defects is not None:
+                defects.append("claim_repeats_another")
             return None
     return {"lens": LENS, "text": text, "do": do}

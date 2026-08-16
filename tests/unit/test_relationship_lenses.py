@@ -702,3 +702,103 @@ def test_a_diagnostic_never_breaks_the_pass_it_diagnoses():
     for junk in ("not json", None, 42, {"text": None, "do": None}, "{bad"):
         got = rejected_lengths(junk)
         assert set(got) == {"claim", "claim_chars", "do_chars"}
+
+
+# --- the vocabulary must not collapse ----------------------------------
+
+def test_a_claim_that_opens_like_another_persons_is_rejected():
+    """Measured across every live card: what_moves_them held six claims
+    with TWO distinct opening words between them, 'responds to' opened
+    five cards across five people, and two people carried byte-identical
+    text. A card that reads like the last card teaches the reader to stop
+    reading them."""
+    defects = []
+    assert parse_stands_out_response(
+        _resp("Closes late far more often than others you work with.",
+              "Ask for a real date."),
+        allowed_numbers(FACTS), person_name="Pallavi", defects=defects,
+        facts=FACTS,
+        used_claims=["Closes late far less often than others you work with."],
+    ) is None
+    assert defects == ["claim_repeats_another"]
+
+
+def test_a_genuinely_different_sentence_survives():
+    got = parse_stands_out_response(
+        _resp("Due dates here move more than on anyone else's work.",
+              "Ask what has to change for the next date to hold."),
+        allowed_numbers(FACTS), person_name="Pallavi", facts=FACTS,
+        used_claims=["Closes late far less often than others you work with."],
+    )
+    assert got is not None
+
+
+def test_no_used_claims_means_no_collision_check():
+    """The first card on a roster has nothing to collide with."""
+    got = parse_stands_out_response(
+        _resp("Closes late far more often than others you work with.",
+              "Ask for a real date."),
+        allowed_numbers(FACTS), person_name="Pallavi", facts=FACTS,
+    )
+    assert got is not None
+
+
+def test_the_prompt_shows_the_writer_what_was_already_said():
+    """It cannot avoid a collision it cannot see."""
+    from contextquilt.services.relationship_lenses import build_stands_out_content
+    content = build_stands_out_content(
+        "Pallavi", FACTS, [],
+        used_claims=["Closes late far less often than others you work with."],
+    )
+    assert "ALREADY SAID" in content
+    assert "Closes late far less often" in content
+
+
+def test_the_example_shapes_are_structurally_different():
+    """Four examples with one frame taught the model one frame. The
+    examples have to differ in shape, not just in wording."""
+    from contextquilt.services.relationship_lenses import (
+        STANDS_OUT_SYSTEM, opening_words,
+    )
+    import re
+    block = STANDS_OUT_SYSTEM.split("DIFFERENT SHAPES")[1]
+    examples = re.findall(r'"([A-Z][^"]{15,}?\.)"', block)
+    assert len(examples) >= 4
+    openers = {opening_words(e) for e in examples}
+    assert len(openers) == len(examples), f"examples share an opening: {openers}"
+
+
+# --- one bounded retry, only when the prompt actually changes ----------
+
+def test_a_retry_is_offered_for_the_two_recoverable_defects():
+    from contextquilt.services.relationship_lenses import retry_note
+    assert "shorter" in retry_note("claim_too_long", "x" * 75)
+    assert "75" in retry_note("claim_too_long", "x" * 75)
+    assert "opening" in retry_note("claim_repeats_another", "some claim")
+
+
+def test_no_retry_for_a_judgement_problem():
+    """#240: a pinned temperature makes a repeat of the SAME question
+    return the same answer. A correction that changes the prompt is a
+    different question; asking again about a character verdict or an
+    invented number just invites the model to argue."""
+    from contextquilt.services.relationship_lenses import retry_note
+    assert retry_note("character_word", "x") is None
+    assert retry_note("invented_number", "x") is None
+    assert retry_note("contrast_omitted", "x") is None
+    assert retry_note("", "x") is None
+
+
+def test_the_retry_is_bounded_to_one_extra_call():
+    import pathlib
+    worker = pathlib.Path("src/worker.py").read_text()
+    assert "for attempt in range(2):" in worker
+    assert "if claim or attempt:" in worker
+
+
+def test_the_prompt_says_to_shorten_rather_than_lengthen():
+    """Measured: 'say it differently' inside a 62 character ceiling made
+    the model add words, and 2 of 4 cards died. The reflex has to be
+    named and countered."""
+    from contextquilt.services.relationship_lenses import STANDS_OUT_SYSTEM
+    assert "GET SHORTER, NEVER LONGER" in STANDS_OUT_SYSTEM
