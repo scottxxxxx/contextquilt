@@ -2808,7 +2808,7 @@ class ColdPathWorker:
             claim = relationship_lenses.parse_stands_out_response(
                 response.content,
                 relationship_lenses.allowed_numbers(facts),
-                person_name=person_name, defects=defects,
+                person_name=person_name, defects=defects, facts=facts,
             )
         except Exception as exc:
             logger.warning("stands_out_failed", subject=subject_key,

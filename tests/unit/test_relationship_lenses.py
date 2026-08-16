@@ -379,3 +379,38 @@ def test_the_lens_ships_its_own_display_order():
     main = pathlib.Path("src/main.py").read_text()
     assert 'value["display_order"] = relationship_lenses.DISPLAY_ORDER' in worker
     assert '"display_order": iv.get("display_order")' in main
+
+
+# --- the contrast cannot be dropped from the sentence ------------------
+
+def test_a_claim_stating_only_this_persons_numbers_is_rejected():
+    """A comparison that states one side of itself is an accusation.
+    SS renders the claim verbatim and correctly refuses to police its
+    contents, so the guarantee lives here."""
+    defects = []
+    assert parse_stands_out_response(
+        _resp("12 of 22 closed items landed late.", "Ask for a real date."),
+        allowed_numbers(FACTS), person_name="Pallavi", defects=defects,
+        facts=FACTS,
+    ) is None
+    assert defects == ["contrast_omitted"]
+
+
+def test_a_claim_carrying_both_halves_survives():
+    got = parse_stands_out_response(
+        _resp("Closes late 12 times where others managed 20.",
+              "Ask for a real date."),
+        allowed_numbers(FACTS), person_name="Pallavi", facts=FACTS,
+    )
+    assert got is not None
+
+
+def test_a_claim_with_no_numbers_at_all_is_still_allowed():
+    """Not every true sentence needs digits, and a claim that states
+    neither side is not lopsided."""
+    got = parse_stands_out_response(
+        _resp("Closes late far more often than others you work with.",
+              "Ask for a real date."),
+        allowed_numbers(FACTS), person_name="Pallavi", facts=FACTS,
+    )
+    assert got is not None

@@ -358,6 +358,7 @@ def parse_stands_out_response(
     permitted: Optional[set] = None,
     person_name: Optional[str] = None,
     defects: Optional[list] = None,
+    facts: Optional[dict] = None,
 ) -> Optional[dict]:
     """{"lens", "text", "do"} or None for skip, refusal or garbage.
 
@@ -410,4 +411,18 @@ def parse_stands_out_response(
         if defects is not None:
             defects.append("character_word")
         return None
+    # A comparison that states only one side of itself is an accusation.
+    # "23 of 24 open items have gone quiet" reads as damning; the roster
+    # sits at 54 of 79, so the honest version cannot omit it. ShoulderSurf
+    # renders the claim sentence verbatim and correctly refuses to police
+    # its contents, so the guarantee has to live here.
+    if facts is not None:
+        stated = {int(n) for n in _INTEGER.findall(text)}
+        mine = {int(facts["numerator"]), int(facts["denominator"])}
+        theirs = {int(facts["roster_numerator"]),
+                  int(facts["roster_denominator"])}
+        if stated & mine and not stated & theirs:
+            if defects is not None:
+                defects.append("contrast_omitted")
+            return None
     return {"lens": LENS, "text": text, "do": do}
