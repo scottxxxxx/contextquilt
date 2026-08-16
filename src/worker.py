@@ -3165,6 +3165,14 @@ class ColdPathWorker:
             "source_person": person_patch_id,
             "about_person": person_name,
         }
+        # Where this card sits in the stack. ShoulderSurf sorts by
+        # whether a lens is NAMED rather than against a fixed list, so a
+        # lens this build considers primary would otherwise take an
+        # arbitrary position. An order that carries meaning has to ship
+        # as a field. Absent means "after the ordered ones", which is
+        # what every lens predating this does.
+        if lens == relationship_lenses.LENS:
+            value["display_order"] = relationship_lenses.DISPLAY_ORDER
         if entity_id:
             # The identity that does not move. `source_person` is a
             # PATCH id and which patch wins is an accident of extraction

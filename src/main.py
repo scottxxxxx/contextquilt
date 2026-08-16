@@ -5931,6 +5931,11 @@ async def get_person(
                     # against them. Null for a lens a model reasoned its
                     # way to: it counted nothing, so it has no counts.
                     "facts": iv.get("facts"),
+                    # Lower sorts earlier; absent means after the
+                    # ordered ones. Served because the client sorts by
+                    # whether a lens is named, so an order that carries
+                    # meaning cannot be inferred on their side.
+                    "display_order": iv.get("display_order"),
                     "derived_at": ir["created_at"].isoformat() if ir["created_at"] else None,
                     # live | aging | stale, the SAME open vocabulary and
                     # UTC-day bucketing the ledger items carry.

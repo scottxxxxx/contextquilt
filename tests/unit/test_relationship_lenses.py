@@ -366,3 +366,16 @@ def test_the_prompt_is_byte_stable():
     a = build_stands_out_content("Pallavi", FACTS, [{"text": "an item"}])
     b = build_stands_out_content("Pallavi", FACTS, [{"text": "an item"}])
     assert a == b
+
+
+# --- ordering on the wire ---------------------------------------------
+
+def test_the_lens_ships_its_own_display_order():
+    """SS sorts by whether a lens is NAMED, not against a fixed list, so
+    an order that carries meaning has to travel as a field rather than
+    be inferred on their side."""
+    import pathlib
+    worker = pathlib.Path("src/worker.py").read_text()
+    main = pathlib.Path("src/main.py").read_text()
+    assert 'value["display_order"] = relationship_lenses.DISPLAY_ORDER' in worker
+    assert '"display_order": iv.get("display_order")' in main
