@@ -45,7 +45,7 @@ import re
 from typing import Dict, List, Optional, Sequence
 
 from contextquilt.services.follow_through import character_word_in
-from contextquilt.services.insight_cards import card_defect
+from contextquilt.services.insight_cards import CARD_SHAPE_RULES, card_defect
 
 # Any run of digits. Used to check the writer only stated numbers the
 # arithmetic produced.
@@ -306,7 +306,7 @@ Rules:
 - Do not use the words "average", "typical" or "normal" about the comparison group. It is a count across named colleagues, not a statistical population.
 - Never name a topic, project, company or person that appears in none of the listed items.
 - NEVER use a dash of any kind as punctuation. No em dash, no en dash, no hyphen standing in for a pause or an aside. Use a comma, a colon, parentheses, or two sentences. Hyphens inside genuinely hyphenated words such as "follow-up" are the only acceptable use.
-""" + """
+""" + CARD_SHAPE_RULES + """
 - The do line says what the user should do differently in the next meeting, given this comparison.
 - No hedging prefixes like "It seems".
 - Write in the same language as the listed items.
