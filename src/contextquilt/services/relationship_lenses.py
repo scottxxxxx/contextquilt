@@ -66,6 +66,21 @@ MIN_GAP_POINTS = 15
 # so nothing ships.
 MIN_ROSTER_PEOPLE = 3
 
+# "Gone quiet" is only sayable when CQ can actually SEE the meetings the
+# item failed to come up in, and the proof that it can see them is that
+# OTHER items were stated inside the same window. Without this floor the
+# measure silently becomes "this item is older than the window", which is
+# a fact about the corpus rather than about the relationship.
+#
+# Measured 2026-08-16, and it is not hypothetical: the August flip split
+# this user's items across two app ids, and the consolidation pass is
+# ACL-scoped while `person_appearances` is not. Under the older app id
+# Vijay's open items drop from 49 to 24 while his quiet count stays 23,
+# because the scope truncates at the flip and every surviving item
+# predates the window. The rate goes from 47% to 96% without a single
+# thing changing about how the work actually went.
+MIN_RECENT_FOR_QUIET = 3
+
 # The lens id ShoulderSurf renders a heading for. Named for what the
 # card actually is: the one measure on which this working relationship
 # is unlike the others. Not a personality frame, and deliberately not a
@@ -155,6 +170,13 @@ def facts_for_person(counts: dict) -> List[Fact]:
         if num is None or den is None:
             continue
         if int(den) < MIN_DENOMINATOR:
+            continue
+        # An absence is only observable from inside a window CQ can see.
+        # See MIN_RECENT_FOR_QUIET: without this the fact degrades into
+        # "these items are older than the window", which is true of any
+        # truncated corpus and says nothing about the relationship.
+        if key == "went_quiet" and \
+                int(counts.get("recent_items") or 0) < MIN_RECENT_FOR_QUIET:
             continue
         facts.append(Fact(key, num, den, worse, FACT_SUBJECTS[key], ids))
     return facts

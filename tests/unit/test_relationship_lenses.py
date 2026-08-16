@@ -24,7 +24,10 @@ from contextquilt.services.relationship_lenses import (
 def counts(**kw):
     base = dict(total_items=40, open_items=20, quiet_items=5,
                 closed_items=20, closed_late=5, handed_back=2,
-                restated=2, dated_items=20, re_dated=2)
+                restated=2, dated_items=20, re_dated=2,
+                # items stated INSIDE the window: the proof the window
+                # is visible at all. See MIN_RECENT_FOR_QUIET.
+                recent_items=15)
     base.update(kw)
     return base
 
@@ -130,7 +133,7 @@ def test_being_unusually_good_earns_a_card_too():
 def test_the_most_unusual_fact_wins_not_the_first_one():
     all_facts = {
         "x": facts_for_person(counts(closed_items=20, closed_late=10,
-                                     open_items=20, quiet_items=19)),
+                                     open_items=20, quiet_items=19, recent_items=8)),
         "b": facts_for_person(counts(closed_items=20, closed_late=9,
                                      open_items=20, quiet_items=2)),
         "c": facts_for_person(counts(closed_items=20, closed_late=9,
@@ -140,7 +143,8 @@ def test_the_most_unusual_fact_wins_not_the_first_one():
     }
     base = roster_baseline(all_facts, exclude="x")
     chosen = best_fact(
-        counts(closed_items=20, closed_late=10, open_items=20, quiet_items=19),
+        counts(closed_items=20, closed_late=10, open_items=20,
+               quiet_items=19, recent_items=8),
         base,
     )
     assert chosen["fact"].key == "went_quiet"
@@ -221,19 +225,19 @@ def test_the_measured_production_roster_produces_four_different_stories():
     2026-08-16 counts. Before this lens all four of these people carried
     the same sentence."""
     people = {
-        "Sukumar": counts(total_items=117, open_items=51, quiet_items=16,
+        "Sukumar": counts(recent_items=35, total_items=117, open_items=51, quiet_items=16,
                           closed_items=33, closed_late=1, handed_back=6,
                           restated=9, dated_items=33, re_dated=3),
-        "Vijay": counts(total_items=110, open_items=49, quiet_items=23,
+        "Vijay": counts(recent_items=26, total_items=110, open_items=49, quiet_items=23,
                         closed_items=33, closed_late=7, handed_back=2,
                         restated=2, dated_items=33, re_dated=2),
-        "Pallavi": counts(total_items=81, open_items=41, quiet_items=11,
+        "Pallavi": counts(recent_items=30, total_items=81, open_items=41, quiet_items=11,
                           closed_items=22, closed_late=12, handed_back=5,
                           restated=5, dated_items=22, re_dated=3),
-        "Srikanth": counts(total_items=63, open_items=36, quiet_items=12,
+        "Srikanth": counts(recent_items=24, total_items=63, open_items=36, quiet_items=12,
                            closed_items=9, closed_late=1, handed_back=4,
                            restated=3, dated_items=9, re_dated=0),
-        "Suresh": counts(total_items=86, open_items=52, quiet_items=15,
+        "Suresh": counts(recent_items=37, total_items=86, open_items=52, quiet_items=15,
                          closed_items=20, closed_late=7, handed_back=6,
                          restated=7, dated_items=20, re_dated=5),
     }
@@ -414,3 +418,35 @@ def test_a_claim_with_no_numbers_at_all_is_still_allowed():
         allowed_numbers(FACTS), person_name="Pallavi", facts=FACTS,
     )
     assert got is not None
+
+
+# --- an absence needs a window you can see into ------------------------
+
+def test_gone_quiet_needs_items_stated_inside_the_window():
+    """Otherwise the fact degrades into 'these items are older than the
+    window', which is true of any truncated corpus. Real cause: the
+    August app-id split truncates the item scope at the flip while
+    person_appearances is not scoped, so every surviving item predates
+    the window and the rate goes 47% -> 96% with nothing changing about
+    how the work went."""
+    truncated = counts(open_items=24, quiet_items=23, recent_items=1)
+    assert "went_quiet" not in {f.key for f in facts_for_person(truncated)}
+
+
+def test_gone_quiet_is_emitted_when_the_window_is_visible():
+    healthy = counts(open_items=49, quiet_items=23, recent_items=26)
+    assert "went_quiet" in {f.key for f in facts_for_person(healthy)}
+
+
+def test_a_missing_recent_count_suppresses_the_fact_rather_than_assuming():
+    """Absent is 'not measured', and a claim about absence must not be
+    built on an unmeasured window."""
+    c = counts(open_items=49, quiet_items=23)
+    c.pop("recent_items", None)
+    assert "went_quiet" not in {f.key for f in facts_for_person(c)}
+
+
+def test_the_other_facts_are_unaffected_by_the_quiet_floor():
+    c = counts(open_items=24, quiet_items=23, recent_items=1)
+    assert {"closed_late", "re_dated", "handed_back", "restated"} <= \
+        {f.key for f in facts_for_person(c)}

@@ -2710,6 +2710,12 @@ class ColdPathWorker:
                        count(*) FILTER (WHERE status = 'active'
                                           AND window_start IS NOT NULL
                                           AND last_stated < window_start) AS quiet_items,
+                       -- Items stated INSIDE the window. This is the
+                       -- proof that CQ can see the meetings an absence
+                       -- is being claimed about; see MIN_RECENT_FOR_QUIET.
+                       count(*) FILTER (WHERE status = 'active'
+                                          AND window_start IS NOT NULL
+                                          AND last_stated >= window_start) AS recent_items,
                        count(*) FILTER (WHERE completed_at IS NOT NULL) AS closed_items,
                        count(*) FILTER (WHERE completed_at IS NOT NULL AND due IS NOT NULL
                                           AND due ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$'
