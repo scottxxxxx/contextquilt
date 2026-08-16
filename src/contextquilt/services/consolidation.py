@@ -88,6 +88,16 @@ CLUSTER_KEYS = {"cue", "person"}
 # coerced: the model does not get to invent lenses, and it does not get
 # to reach for a lens whose verdict is not its to make.
 MODEL_CHOSEN_LENSES = {"how_they_decide", "what_moves_them"}
+
+# The profile pass groups candidates by person PATCH and one human holds
+# several (one per surface form the extractor used), so the rows have to
+# be merged before the budget is spent or the budget is spent on
+# spellings rather than on people. Merging only ever REMOVES rows, so the
+# query over-fetches by this factor. 4 covers the worst live fan-out
+# measured on production (Suresh held five person patches on 2026-08-16)
+# with headroom, and the cost of over-fetching is one wider SELECT, not
+# an LLM call: the calls are gated after the merge.
+CLUSTER_OVERFETCH = 4
 # COMPUTED_LENSES are decided by arithmetic before any call happens. The
 # model writes the sentence; it never chooses the lens or the verdict.
 # services/follow_through.py has the whole argument for why the third

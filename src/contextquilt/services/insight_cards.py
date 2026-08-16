@@ -97,6 +97,42 @@ def card_defect(
     return None
 
 
+def one_card_per_lens(cards):
+    """At most one card per lens, newest first, order otherwise kept.
+
+    A person holds several `person` patches (one per surface form the
+    extractor used) and an insight stamps whichever was current when it
+    was derived, so widening the read to every form (#249) also
+    surfaced every form's card. Production 2026-08-16: Sukumar rendered
+    two HOW THEY DECIDE chips and two WHAT MOVES THEM, Vijay two
+    HOW THEY DECIDE, because each surface form had earned its own.
+
+    The write path no longer creates them (the profile pass merges
+    clusters by canonical entity first), but cards already derived are
+    in the database and would render forever, so the read collapses
+    them too. Newest wins: it was derived from the record as it stood
+    most recently, and after the merge it is the one derived from the
+    WHOLE record rather than a fraction of it.
+
+    Cards with no lens are passed through untouched rather than
+    collapsed into one bucket: an unknown shape is not evidence of
+    duplication, and the client renders unknown lenses neutrally.
+    """
+    seen: set = set()
+    kept = []
+    # `cards` arrives newest-first (the query orders by created_at DESC).
+    for card in cards or ():
+        lens = (card or {}).get("lens")
+        if not lens:
+            kept.append(card)
+            continue
+        if lens in seen:
+            continue
+        seen.add(lens)
+        kept.append(card)
+    return kept
+
+
 # The shared half of every card prompt. One text, so the two lens
 # families cannot drift on what a card is allowed to look like.
 CARD_SHAPE_RULES = f"""- The claim is ONE short sentence. AIM for about 7 words and {TARGET_CLAIM_CHARS} characters. The hard limit is {MAX_CLAIM_CHARS} characters: a claim over it is thrown away, not trimmed, so the card is lost entirely. Write the short version first rather than a full sentence you hope will fit. If a detail does not fit, drop the detail.

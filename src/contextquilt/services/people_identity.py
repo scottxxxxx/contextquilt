@@ -540,6 +540,95 @@ def build_entity_resolver(entity_rows: Sequence[dict], alias_rows: Sequence[dict
     return resolve
 
 
+def merge_person_clusters(
+    clusters: Sequence[dict],
+    resolve,
+) -> List[dict]:
+    """Collapse per-person-patch clusters into one cluster per HUMAN.
+
+    The profile pass groups its candidates by person patch, and the
+    extractor mints one person patch per surface form a transcript used,
+    so a single colleague arrives here as several clusters. Measured on
+    production 2026-08-16: Sukumar held 117 owned items split across
+    `Sukumar` and `Sukumar Gurugubelli`, Vijay 110 across `Vijay` and
+    `Vijay Rayudu`. Two consequences, and the second is the worse one:
+
+    - Each form earned its own card, so one human rendered two
+      HOW THEY DECIDE chips that were near paraphrases of each other.
+    - Each card was derived from roughly HALF that person's record,
+      because a cluster only ever saw the items hanging off its own
+      form. The duplicates were the visible symptom of a corpus split.
+
+    `resolve` maps a surface form to a canonical entity id (see
+    `build_entity_resolver`: exact name, then recorded alias, then
+    merged_into, and NO heuristic leg). A form that resolves to nothing
+    keeps its own cluster keyed on the patch id, so an unknown name is
+    still profiled rather than silently dropped; it simply cannot be
+    merged with anything, which is the honest outcome when CQ cannot
+    tell who it is.
+
+    The surviving primary is chosen by `choose_surviving_person_patch`,
+    so the id that identifies this person elsewhere does not change
+    under us. Every form's patch id rides along in
+    `person_patch_ids`, because the per-lens durable no is stamped
+    against whichever form was current when a card was derived and must
+    be read across all of them or a suppressed lens comes back.
+
+    Source patch ids are unioned and de-duplicated with insertion order
+    preserved, so the merged cluster is deterministic (a browse-adjacent
+    pass must not reshuffle its own inputs between cycles).
+    """
+    by_key: dict = {}
+    for cluster in clusters or ():
+        patch_id = str(cluster.get("person_patch_id") or "")
+        if not patch_id:
+            continue
+        name = cluster.get("person_name") or ""
+        entity_id = resolve(name) if resolve else None
+        # Unresolvable forms must not collapse into one another: key on
+        # the patch id so each stays its own cluster.
+        key = ("entity", entity_id) if entity_id else ("patch", patch_id)
+        slot = by_key.setdefault(key, {
+            "entity_id": entity_id,
+            "members": [],
+            "source_patch_ids": [],
+            "meeting_count": 0,
+        })
+        slot["members"].append({
+            "patch_id": patch_id,
+            "text": name,
+            "created_at": cluster.get("created_at"),
+        })
+        for pid in cluster.get("patch_ids") or ():
+            slot["source_patch_ids"].append(str(pid))
+        slot["meeting_count"] = max(
+            slot["meeting_count"], int(cluster.get("meeting_count") or 0)
+        )
+
+    merged: List[dict] = []
+    for slot in by_key.values():
+        members = slot["members"]
+        # The longest surface form is the best display name available
+        # here; the canonical entity name is not fetched by this pass.
+        canonical_name = max(
+            (m["text"] for m in members if m["text"]),
+            key=len, default="",
+        )
+        survivor, _ = choose_surviving_person_patch(members, canonical_name)
+        primary = survivor or members[0]
+        merged.append({
+            "person_patch_id": primary["patch_id"],
+            "person_patch_ids": [m["patch_id"] for m in members],
+            "person_name": canonical_name or primary["text"],
+            "entity_id": slot["entity_id"],
+            "patch_ids": list(dict.fromkeys(slot["source_patch_ids"])),
+            "meeting_count": slot["meeting_count"],
+        })
+    # Richest record first, then a stable tiebreak on the primary id.
+    merged.sort(key=lambda c: (-len(c["patch_ids"]), c["person_patch_id"]))
+    return merged
+
+
 def resolve_identity_source(source: str | None) -> str:
     """Normalise the caller's `source`, defaulting to user_confirmation.
 

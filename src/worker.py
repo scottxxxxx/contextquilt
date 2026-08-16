@@ -82,6 +82,7 @@ def network_node_cap() -> int:
 
 from contextquilt.services.consolidation import (
     CONSOLIDATION_SYSTEM,
+    CLUSTER_OVERFETCH,
     CLUSTER_WINDOW_DAYS,
     MAX_CLUSTERS_PER_USER_PER_CYCLE,
     MAX_SOURCE_TEXTS,
@@ -118,7 +119,11 @@ from contextquilt.services.corrections import (
     parse_correction_response,
 )
 from contextquilt.services.entity_aliasing import find_alias_candidate
-from contextquilt.services.people_identity import people_vocabulary
+from contextquilt.services.people_identity import (
+    build_entity_resolver,
+    merge_person_clusters,
+    people_vocabulary,
+)
 from contextquilt.services.person_appearances import observed_capacities
 from contextquilt.services.ingest_modes import is_interaction_allowed
 from contextquilt.services.decay_model import (
@@ -2588,6 +2593,34 @@ class ColdPathWorker:
         )
         return 1
 
+    async def _person_entity_resolver(self, user_id: str):
+        """Surface form -> canonical entity id, for this user.
+
+        The same resolution the quilt read uses to stamp
+        `owner_entity_id`: exact name, then recorded alias, then
+        merged_into, and NO heuristic leg. Built once per user per pass
+        rather than per cluster, and degrades to "resolves nothing" on a
+        database without the alias table so a profile pass can never
+        crash on an identity lookup.
+        """
+        try:
+            entity_rows = await self.db.fetch(
+                "SELECT entity_id, name, merged_into FROM entities "
+                "WHERE user_id = $1 AND entity_type = 'person'",
+                user_id,
+            )
+            alias_rows = await self.db.fetch(
+                "SELECT entity_id, alias FROM entity_aliases WHERE user_id = $1",
+                user_id,
+            )
+        except Exception as exc:
+            logger.warning("person_entity_resolver_unavailable",
+                           user=user_id, reason=str(exc)[:200])
+            return lambda _surface: None
+        return build_entity_resolver(
+            [dict(r) for r in entity_rows], [dict(r) for r in alias_rows]
+        )
+
     async def _consolidate_user_people(
         self, subject_key: str, app_id: str, rule: dict, budget: int
     ) -> int:
@@ -2628,10 +2661,12 @@ class ColdPathWorker:
             )
         except Exception:
             self_name = None  # pre-migration-35 DB: no exclusion basis
+        resolve_person_entity = await self._person_entity_resolver(user_id)
         clusters = await self.db.fetch(
             f"""
             SELECT op.patch_id AS person_patch_id,
                    op.value->>'text' AS person_name,
+                   op.created_at AS created_at,
                    array_agg(DISTINCT cp.patch_id) AS patch_ids,
                    count(DISTINCT cp.origin_id) AS meeting_count
             FROM patch_connections pc
@@ -2672,7 +2707,7 @@ class ColdPathWorker:
                     AND d.value->>'lens' = ANY($12::text[])
                     AND d.value->>'source_person' = op.patch_id::text
               ) < $11
-            GROUP BY op.patch_id, op.value->>'text'
+            GROUP BY op.patch_id, op.value->>'text', op.created_at
             HAVING count(DISTINCT cp.patch_id) >= $5
                AND count(DISTINCT cp.origin_id) >= $6
             ORDER BY count(DISTINCT cp.origin_id) DESC, op.patch_id ASC
@@ -2680,29 +2715,71 @@ class ColdPathWorker:
             """,
             subject_key, app_id, rule["from_types"], rule["produce_type"],
             rule["min_patches"], rule["min_meetings"],
-            vocab.ownership_label, vocab.person_type, self_name, budget,
+            vocab.ownership_label, vocab.person_type, self_name,
+            budget * CLUSTER_OVERFETCH,
             len(MODEL_CHOSEN_LENSES), sorted(MODEL_CHOSEN_LENSES),
         )
+        # One human, one cluster. The rows above are keyed on person
+        # PATCH and the extractor mints one per surface form, so a
+        # colleague arrives as several rows holding a fraction of their
+        # record each. Merge before spending an LLM call on any of them.
+        #
+        # The SQL lens gate stays per-patch and is deliberately the
+        # PERMISSIVE side of this: a second surface form carries no lens
+        # stamps of its own, so it always passes and the fully-covered
+        # human is dropped below instead, once the stamps of every form
+        # can be read together. That is also why the query over-fetches:
+        # merging only ever removes rows, and the budget must be spent
+        # on humans rather than on forms.
+        merged = merge_person_clusters(
+            [dict(c) for c in clusters], resolve_person_entity
+        )
         created = 0
-        for cluster in clusters:
+        for cluster in merged:
+            if created >= budget:
+                break
+            person_patch_ids = cluster["person_patch_ids"]
+            taken = await self._taken_lenses(
+                subject_key, rule["produce_type"], person_patch_ids
+            )
+            if not remaining_lenses(taken):
+                continue
             made = await self._synthesize_person_cluster(
                 subject_key, app_id, rule,
-                str(cluster["person_patch_id"]), cluster["person_name"],
-                [str(p) for p in cluster["patch_ids"]],
+                cluster["person_patch_id"], cluster["person_name"],
+                cluster["patch_ids"],
+                person_patch_ids=person_patch_ids,
+                entity_id=cluster["entity_id"],
             )
             if made:
                 created += 1
         return created
 
     async def _taken_lenses(
-        self, subject_key: str, produce_type: str, person_patch_id: str,
+        self, subject_key: str, produce_type: str,
+        person_patch_ids: "str | list",
     ) -> set:
         """Every lens already stamped for this person, in ANY status.
 
         No status predicate, deliberately: an archived (user-deleted)
         insight is the record of a lens the user said no to, and reading
         only active rows would re-derive the card they suppressed.
+
+        Takes every one of the person's surface-form patch ids, not one.
+        A card stamps `source_person` with whichever form was current
+        when it was derived, so reading a single form lets a suppressed
+        lens come back under a different spelling of the same human, and
+        lets a second card be derived for a lens they already carry.
+        A bare string is still accepted so existing callers do not have
+        to know about the fan-out.
         """
+        ids = (
+            [person_patch_ids]
+            if isinstance(person_patch_ids, str)
+            else [str(p) for p in person_patch_ids or ()]
+        )
+        if not ids:
+            return set()
         rows = await self.db.fetch(
             """
             SELECT DISTINCT d.value->>'lens' AS lens
@@ -2711,15 +2788,17 @@ class ColdPathWorker:
             WHERE dps.subject_key = $1
               AND d.patch_type = $2
               AND d.origin_mode = 'derived'
-              AND d.value->>'source_person' = $3
+              AND d.value->>'source_person' = ANY($3::text[])
             """,
-            subject_key, produce_type, person_patch_id,
+            subject_key, produce_type, ids,
         )
         return {r["lens"] for r in rows if r["lens"]}
 
     async def _synthesize_person_cluster(
         self, subject_key: str, app_id: str, rule: dict,
         person_patch_id: str, person_name: str, source_patch_ids: list,
+        person_patch_ids: "list | None" = None,
+        entity_id: "str | None" = None,
     ) -> bool:
         """One profile call + provenance write. Two invariants are
         re-checked here against fetched state (sanitizer-style second
@@ -2732,6 +2811,10 @@ class ColdPathWorker:
         taken, but a prompt is a hint and this is an invariant, so the
         answer is checked on the way in and a repeat lens is declined
         without a write."""
+        # Every surface form of this human, so the durable no is read
+        # across all of them. Falls back to the primary alone for callers
+        # that predate the merge (the computed-lens pass, and tests).
+        lens_key_ids = [str(p) for p in (person_patch_ids or [person_patch_id])]
         rows = await self.db.fetch(
             """
             SELECT value->>'text' AS text, origin_id, created_at
@@ -2749,7 +2832,7 @@ class ColdPathWorker:
         if len(dated) < rule["min_patches"] or len(distinct_origins) < rule["min_meetings"]:
             return False
         taken_lenses = await self._taken_lenses(
-            subject_key, rule["produce_type"], person_patch_id
+            subject_key, rule["produce_type"], lens_key_ids
         )
         if not remaining_lenses(taken_lenses):
             return False
@@ -2787,7 +2870,7 @@ class ColdPathWorker:
         # the LLM call is seconds of wall clock, and this is the one
         # place the per-lens durable no is actually enforced.
         taken_lenses = await self._taken_lenses(
-            subject_key, rule["produce_type"], person_patch_id
+            subject_key, rule["produce_type"], lens_key_ids
         )
         if profile["lens"] in taken_lenses:
             logger.debug(
@@ -2799,6 +2882,7 @@ class ColdPathWorker:
         await self._write_person_insight(
             subject_key, app_id, rule, person_patch_id, person_name,
             source_patch_ids, profile["lens"], profile["text"], profile["do"],
+            entity_id=entity_id,
         )
         logger.info(
             "profile_insight_created",
@@ -2812,6 +2896,7 @@ class ColdPathWorker:
         self, subject_key: str, app_id: str, rule: dict,
         person_patch_id: str, person_name: str, source_patch_ids: list,
         lens: str, text: str, do: str, facts: Optional[dict] = None,
+        entity_id: Optional[str] = None,
     ) -> str:
         """The provenance-carrying write, shared by every lens pass.
 
@@ -2835,6 +2920,14 @@ class ColdPathWorker:
             "source_person": person_patch_id,
             "about_person": person_name,
         }
+        if entity_id:
+            # The identity that does not move. `source_person` is a
+            # PATCH id and which patch wins is an accident of extraction
+            # history, which is what made a person's own page fail to
+            # find their own cards (#249). Stamped alongside rather than
+            # instead of, so nothing already keyed on source_person
+            # changes shape.
+            value["source_entity_id"] = str(entity_id)
         if facts:
             value["facts"] = facts
         value_json = json.dumps(value)
@@ -2927,6 +3020,7 @@ class ColdPathWorker:
             )
         except Exception:
             self_name = None  # pre-migration-35 DB: no exclusion basis
+        resolve_person_entity = await self._person_entity_resolver(user_id)
         # The candidate query counts the judged set the same way
         # follow_through.judge_item does, so the SQL gate and the Python
         # gate agree; the Python one is still the authority, sanitizer
@@ -2975,7 +3069,7 @@ class ColdPathWorker:
                     AND d.value->>'lens' = $9
                     AND d.value->>'source_person' = op.patch_id::text
               )
-            GROUP BY op.patch_id, op.value->>'text'
+            GROUP BY op.patch_id, op.value->>'text', op.created_at
             HAVING count(DISTINCT cp.patch_id) >= $10
                AND count(DISTINCT cp.origin_id) >= $5
             ORDER BY count(DISTINCT cp.patch_id) DESC, op.patch_id ASC
@@ -2983,14 +3077,28 @@ class ColdPathWorker:
             """,
             subject_key, app_id, source_types, rule["produce_type"],
             rule["min_meetings"], vocab.ownership_label, vocab.person_type,
-            self_name, FOLLOW_THROUGH_LENS, MIN_JUDGED_ITEMS, budget,
+            self_name, FOLLOW_THROUGH_LENS, MIN_JUDGED_ITEMS,
+            budget * CLUSTER_OVERFETCH,
+        )
+        # Same merge as the model pass, and it matters MORE here. This
+        # lens ships a count inside the claim, so a person split across
+        # two surface forms did not merely get two cards, the arithmetic
+        # on each was computed over a fraction of their items and the
+        # served number was wrong. Merging is the correctness fix; the
+        # de-duplication is a side effect.
+        merged = merge_person_clusters(
+            [dict(c) for c in candidates], resolve_person_entity
         )
         created = 0
-        for candidate in candidates:
+        for candidate in merged:
+            if created >= budget:
+                break
             made = await self._derive_person_follow_through(
                 subject_key, app_id, rule, source_types,
                 vocab.ownership_label,
-                str(candidate["person_patch_id"]), candidate["person_name"],
+                candidate["person_patch_id"], candidate["person_name"],
+                person_patch_ids=candidate["person_patch_ids"],
+                entity_id=candidate["entity_id"],
             )
             if made:
                 created += 1
@@ -2999,11 +3107,18 @@ class ColdPathWorker:
     async def _derive_person_follow_through(
         self, subject_key: str, app_id: str, rule: dict, source_types: list,
         ownership_label: str, person_patch_id: str, person_name: str,
+        person_patch_ids: "list | None" = None,
+        entity_id: "str | None" = None,
     ) -> bool:
         """One person's delivery record: compute, gate, write it up."""
+        owner_ids = [str(p) for p in (person_patch_ids or [person_patch_id])]
         rows = await self.db.fetch(
             f"""
-            SELECT cp.patch_id, cp.origin_id, cp.completed_at,
+            -- DISTINCT because a merged person is several patch ids and
+            -- one item can carry an owns edge from more than one of
+            -- them; without it the same item would be counted twice
+            -- inside a served number.
+            SELECT DISTINCT cp.patch_id, cp.origin_id, cp.completed_at,
                    COALESCE(cp.status, 'active') AS status,
                    cp.value->>'text' AS text,
                    cp.value->>'deadline_date' AS deadline_date,
@@ -3016,13 +3131,13 @@ class ColdPathWorker:
             JOIN context_patches cp ON cp.patch_id = pc.to_patch_id
             JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
             WHERE ps.subject_key = $1
-              AND pc.from_patch_id = $2::uuid
+              AND pc.from_patch_id = ANY($2::uuid[])
               AND pc.connection_label = $3
               AND COALESCE(pc.status, 'active') = 'active'
               AND cp.patch_type = ANY($4::text[])
               AND cp.created_at > NOW() - INTERVAL '{CLUSTER_WINDOW_DAYS} days'
             """,
-            subject_key, person_patch_id, ownership_label, source_types,
+            subject_key, owner_ids, ownership_label, source_types,
         )
         summary = summarize_follow_through(
             [dict(r) for r in rows],
@@ -3072,7 +3187,7 @@ class ColdPathWorker:
         # call is seconds of wall clock and the durable no is the thing
         # that must not lose a race with a suppression.
         if FOLLOW_THROUGH_LENS in await self._taken_lenses(
-            subject_key, rule["produce_type"], person_patch_id
+            subject_key, rule["produce_type"], owner_ids
         ):
             logger.debug("follow_through_lens_already_taken",
                          subject=subject_key, person=person_name)
@@ -3084,6 +3199,7 @@ class ColdPathWorker:
             subject_key, app_id, rule, person_patch_id, person_name,
             [i["patch_id"] for i in items],
             FOLLOW_THROUGH_LENS, claim["text"], claim["do"], facts=facts,
+            entity_id=entity_id,
         )
         logger.info(
             "follow_through_insight_created",

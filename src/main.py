@@ -44,6 +44,7 @@ from contextquilt.config import get_settings
 from dashboard.router import router as dashboard_router
 from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
+from contextquilt.services import insight_cards
 from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import facet_runtime
@@ -5936,6 +5937,7 @@ async def get_person(
                     "decay_state": ins_state,
                     "evidence": evidence,
                 })
+            insights = insight_cards.one_card_per_lens(insights)
         except Exception:
             # Serving must never fail the detail route. Null, not []:
             # a swallowed error is CQ not knowing, not CQ knowing there
