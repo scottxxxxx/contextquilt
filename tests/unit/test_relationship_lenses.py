@@ -450,3 +450,40 @@ def test_the_other_facts_are_unaffected_by_the_quiet_floor():
     c = counts(open_items=24, quiet_items=23, recent_items=1)
     assert {"closed_late", "re_dated", "handed_back", "restated"} <= \
         {f.key for f in facts_for_person(c)}
+
+
+# --- the ceiling and the contrast have to be satisfiable together ------
+
+def test_the_prompt_asks_for_a_claim_with_no_digits():
+    """Measured on the first live cycle 2026-08-16: four of four cards were
+    rejected `claim_too_long`. Requiring both halves of the contrast INSIDE
+    a 62 character claim is not satisfiable, and the counts are rendered
+    underneath the sentence anyway, so the claim names the pattern in
+    words and the arithmetic stays on the card where it is checkable."""
+    from contextquilt.services.relationship_lenses import STANDS_OUT_SYSTEM
+    assert "WRITE THE CLAIM WITHOUT DIGITS" in STANDS_OUT_SYSTEM
+
+
+def test_every_example_claim_in_the_prompt_would_actually_pass():
+    """A prompt that models an unshippable claim teaches the model to
+    write unshippable claims. The examples must clear the real ceiling."""
+    from contextquilt.services.insight_cards import MAX_CLAIM_CHARS
+    from contextquilt.services.relationship_lenses import STANDS_OUT_SYSTEM
+    import re
+    block = STANDS_OUT_SYSTEM.split("Claims of the right size and shape")[1]
+    examples = re.findall(r'"([^"]+)"', block)
+    assert examples, "the prompt should carry example claims"
+    for example in examples:
+        assert len(example) <= MAX_CLAIM_CHARS, (example, len(example))
+        assert not re.search(r"\d", example), example
+
+
+def test_a_wordy_claim_with_no_digits_still_passes_the_contrast_rule():
+    """The contrast guard must not fire on a claim that states neither
+    side, or the only shippable shape becomes unshippable."""
+    got = parse_stands_out_response(
+        _resp("Closes late far more often than others you work with.",
+              "Ask for the date she will actually hit."),
+        allowed_numbers(FACTS), person_name="Pallavi", facts=FACTS,
+    )
+    assert got is not None and got["lens"] == LENS
