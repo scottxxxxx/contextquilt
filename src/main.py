@@ -6102,6 +6102,97 @@ async def get_person(
     return detail
 
 
+async def _fold_person_patches(
+    conn, candidates: List[dict], canonical_name: str, source: str,
+) -> List[str]:
+    """Collapse one human's several `person` patches into one.
+
+    The extractor mints a person patch per surface form a transcript
+    used, so one colleague accumulates several and every join that keys
+    on a person patch then sees a fraction of them. Measured on
+    production 2026-08-16: Xhoi held five, Mike, Vijay and Sukumar four
+    each, and Suresh five.
+
+    Shared by MERGE (the user said two people are one) and CONFIRM (the
+    user said this person is who we think). Those are the same write with
+    different triggers, and a second implementation would drift from this
+    one the first time either was touched.
+
+    Returns the ids that were folded, which is what lets a caller tell
+    the user what their tap actually did.
+    """
+    survivor, patch_losers = choose_surviving_person_patch(
+        candidates, canonical_name
+    )
+    if not (survivor and patch_losers):
+        return []
+    survivor_id = survivor["patch_id"]
+    loser_ids = [c["patch_id"] for c in patch_losers]
+
+    # Connections follow the person. Same UNIQUE(from, to, role)
+    # collision the relationship repoint has, so guard with NOT EXISTS
+    # and sweep the true duplicates after.
+    for column, other in (("from_patch_id", "to_patch_id"),
+                          ("to_patch_id", "from_patch_id")):
+        await conn.execute(
+            f"""
+            UPDATE patch_connections pc SET {column} = $1
+            WHERE pc.{column} = ANY($2::uuid[])
+              AND NOT EXISTS (
+                  -- status-agnostic read, deliberately. This is a
+                  -- unique-constraint collision check, not a semantic
+                  -- one, and the index on (from, to, role) spans
+                  -- archived rows. Filtering to active here would let
+                  -- the repoint collide with an archived duplicate.
+                  SELECT 1 FROM patch_connections pc2
+                  WHERE pc2.{column} = $1
+                    AND pc2.{other} = pc.{other}
+                    AND pc2.connection_role = pc.connection_role
+              )
+            """,
+            survivor_id, loser_ids,
+        )
+    # Hard delete, deliberately. Migration 32 archives connections so a
+    # removal stays auditable, but these edges reference an identity that
+    # no longer exists as a distinct thing. Archiving them would preserve
+    # rows pointing at a patch this fold just retired.
+    await conn.execute(
+        "DELETE FROM patch_connections WHERE from_patch_id = ANY($1::uuid[]) "
+        "OR to_patch_id = ANY($1::uuid[])",
+        loser_ids,
+    )
+    await conn.execute(
+        "DELETE FROM patch_connections WHERE from_patch_id = $1 AND to_patch_id = $1",
+        survivor_id,
+    )
+    # The survivor speaks for the canonical identity now.
+    await conn.execute(
+        """
+        UPDATE context_patches
+        SET value = jsonb_set(value, '{text}', to_jsonb($1::text)),
+            updated_at = NOW()
+        WHERE patch_id = $2
+        """,
+        canonical_name, survivor_id,
+    )
+    # Archive, never delete: this is what puts the folded ids in the
+    # delta-sync `deleted` array, which SS has decoded since delta sync
+    # shipped.
+    await conn.execute(
+        """
+        UPDATE context_patches
+        SET status = 'archived', updated_at = NOW(),
+            value = value
+                || jsonb_build_object('merged_into_patch', $1::text)
+                || jsonb_build_object('merge_source', $2::text)
+                || jsonb_build_object('archive_cause', 'merge')
+        WHERE patch_id = ANY($3::uuid[])
+        """,
+        str(survivor_id), source, loser_ids,
+    )
+    return [str(p) for p in loser_ids]
+
+
 @app.post("/v1/people/{user_id}/merge", tags=["People"])
 async def merge_people(
     user_id: str,
@@ -6407,81 +6498,9 @@ async def merge_people(
                 """,
                 subject_key, keys, vocab.person_type,
             )]
-            survivor, patch_losers = choose_surviving_person_patch(
-                candidates, canonical["name"]
+            folded_patch_ids = await _fold_person_patches(
+                conn, candidates, canonical["name"], source
             )
-            folded_patch_ids: List[str] = []
-
-            if survivor and patch_losers:
-                survivor_id = survivor["patch_id"]
-                loser_ids = [c["patch_id"] for c in patch_losers]
-
-                # Connections follow the person. Same UNIQUE(from, to,
-                # role) collision the relationship repoint has, so guard
-                # with NOT EXISTS and sweep the true duplicates after.
-                for column, other in (("from_patch_id", "to_patch_id"),
-                                      ("to_patch_id", "from_patch_id")):
-                    await conn.execute(
-                        f"""
-                        UPDATE patch_connections pc SET {column} = $1
-                        WHERE pc.{column} = ANY($2::uuid[])
-                          AND NOT EXISTS (
-                              -- status-agnostic read, deliberately. This is a
-                              -- unique-constraint collision check, not a
-                              -- semantic one, and the index on
-                              -- (from, to, role) spans archived rows. Filtering
-                              -- to active here would let the repoint collide
-                              -- with an archived duplicate.
-                              SELECT 1 FROM patch_connections pc2
-                              WHERE pc2.{column} = $1
-                                AND pc2.{other} = pc.{other}
-                                AND pc2.connection_role = pc.connection_role
-                          )
-                        """,
-                        survivor_id, loser_ids,
-                    )
-                # Hard delete, deliberately. Migration 32 archives
-                # connections so a removal stays auditable, but these
-                # edges reference an identity that no longer exists as
-                # a distinct thing. Archiving them would preserve rows
-                # pointing at a patch the merge just retired.
-                await conn.execute(
-                    "DELETE FROM patch_connections WHERE from_patch_id = ANY($1::uuid[]) "
-                    "OR to_patch_id = ANY($1::uuid[])",
-                    loser_ids,
-                )
-                await conn.execute(
-                    "DELETE FROM patch_connections WHERE from_patch_id = $1 AND to_patch_id = $1",
-                    survivor_id,
-                )
-
-                # The survivor speaks for the canonical identity now.
-                await conn.execute(
-                    """
-                    UPDATE context_patches
-                    SET value = jsonb_set(value, '{text}', to_jsonb($1::text)),
-                        updated_at = NOW()
-                    WHERE patch_id = $2
-                    """,
-                    canonical["name"], survivor_id,
-                )
-
-                # Archive, never delete: this is what puts the folded ids
-                # in the delta-sync `deleted` array, which SS has decoded
-                # since delta sync shipped.
-                await conn.execute(
-                    """
-                    UPDATE context_patches
-                    SET status = 'archived', updated_at = NOW(),
-                        value = value
-                            || jsonb_build_object('merged_into_patch', $1::text)
-                            || jsonb_build_object('merge_source', $2::text)
-                            || jsonb_build_object('archive_cause', 'merge')
-                    WHERE patch_id = ANY($3::uuid[])
-                    """,
-                    str(survivor_id), source, loser_ids,
-                )
-                folded_patch_ids = [str(p) for p in loser_ids]
 
             # A user-asserted merge also vouches for the canonical.
             await conn.execute(
@@ -6656,9 +6675,44 @@ async def confirm_person(
                 source, resolved,
             )
 
+            # A confirmation is an identity assertion, so it does the
+            # identity write. Before this it stamped a timestamp and
+            # nothing else, which is why four people could be confirmed
+            # by a human and still hold four or five person patches
+            # each (measured 2026-08-16). The user had answered the
+            # question and the answer changed nothing.
+            #
+            # Same fold the merge does, because they are the same write:
+            # merge says two people are one, confirm says this person is
+            # who we think, and both mean one human owns every surface
+            # form the extractor minted for them.
+            alias_names = [r["alias"] for r in await conn.fetch(
+                "SELECT alias FROM entity_aliases "
+                "WHERE user_id = $1 AND entity_id = $2::uuid",
+                user_id, resolved,
+            )]
+            keys = sorted(owner_keys(updated["name"], alias_names))
+            candidates = [dict(r) for r in await conn.fetch(
+                """
+                SELECT cp.patch_id, cp.value->>'text' AS text, cp.created_at
+                FROM context_patches cp
+                JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                WHERE ps.subject_key = $1
+                  AND cp.patch_type = $3
+                  AND COALESCE(cp.status, 'active') = 'active'
+                  AND LOWER(cp.value->>'text') = ANY($2::text[])
+                ORDER BY cp.created_at
+                """,
+                f"user:{user_id}", keys, vocab.person_type,
+            )]
+            folded_patch_ids = await _fold_person_patches(
+                conn, candidates, updated["name"], source
+            )
+
+    await _rebuild_entity_index(user_id)
     logger.info(
         "person_confirmed", user_id=user_id, app_id=str(app_id),
-        entity_id=resolved, source=source,
+        entity_id=resolved, source=source, folded=len(folded_patch_ids),
     )
     return {
         "status": "confirmed",
@@ -6666,6 +6720,12 @@ async def confirm_person(
         "name": updated["name"],
         "confirmed_at": updated["confirmed_at"].isoformat() if updated["confirmed_at"] else None,
         "confirmation_source": updated["confirmation_source"],
+        # What the tap actually did. A confirmation that reports nothing
+        # is indistinguishable from one that did nothing, which is
+        # exactly how this surface read before: the user answers a
+        # question and the app has no way to say what changed.
+        "folded_patch_ids": folded_patch_ids,
+        "folded_count": len(folded_patch_ids),
     }
 
 
