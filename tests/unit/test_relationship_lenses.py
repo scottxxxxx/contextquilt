@@ -10,6 +10,7 @@ the corpus. Accuracy was never the problem. Being true of everybody was.
 import pytest
 
 from contextquilt.services.relationship_lenses import (
+    FACT_SUBJECTS,
     MIN_DENOMINATOR,
     MIN_GAP_POINTS,
     allowed_numbers,
@@ -525,16 +526,36 @@ def test_the_prompt_hands_over_the_short_phrase_not_the_long_label():
     assert FACT_PHRASES["closed_late"] in content
 
 
-def test_the_precise_label_still_reaches_the_card():
-    """The short phrase is for phrasing only. The counts still have to be
-    labelled with exactly what was measured."""
+def test_the_long_label_is_kept_OUT_of_the_prompt():
+    """Two available shapes is a coin flip. Measured in production:
+    Pallavi failed with the 75 character form built from the long label
+    on a cycle where the same facts produced the 53 character form in a
+    probe. The precise label ships on the wire, where the card labels its
+    own counts and there is room for it, and never reaches the writer."""
     content = build_stands_out_content("Pallavi", FACTS, [])
-    assert FACTS["subject"] in content
+    assert FACTS["subject"] not in content
+
+
+def test_the_precise_label_still_reaches_the_card_on_the_wire():
+    """Kept out of the PROMPT, never off the payload: the client needs to
+    say exactly what was counted underneath the sentence."""
+    all_facts = {
+        "a": facts_for_person(counts(closed_items=22, closed_late=12)),
+        "b": facts_for_person(counts(closed_items=40, closed_late=4)),
+        "c": facts_for_person(counts(closed_items=40, closed_late=4)),
+        "d": facts_for_person(counts(closed_items=40, closed_late=4)),
+    }
+    base = roster_baseline(all_facts, exclude="a")
+    served = served_facts(best_fact(counts(closed_items=22, closed_late=12), base),
+                          "Pallavi")
+    assert served["subject"] == FACT_SUBJECTS["closed_late"]
 
 
 def test_an_unknown_fact_key_falls_back_to_the_long_subject():
     """A new fact must never lose its description just because nobody
-    added a short phrase for it yet."""
+    added a short phrase for it yet. The fallback is verbose rather than
+    absent, which is the right way round: a long claim gets rejected, a
+    missing one gets invented."""
     from contextquilt.services.relationship_lenses import build_stands_out_content
     facts = dict(FACTS, fact_key="something_new")
     assert FACTS["subject"] in build_stands_out_content("X", facts, [])

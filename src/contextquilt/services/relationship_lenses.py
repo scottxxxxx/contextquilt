@@ -390,19 +390,25 @@ def build_stands_out_content(
     arrive already sampled by the caller and keep their order, so two
     identical calls build identical prompts.
     """
-    lines = [f"Person: {person_name}", ""]
-    # The SHORT phrase, not the card's precise label. The writer copies
-    # the shape of what it is given, so a long subject line comes back as
-    # a long claim; see FACT_PHRASES.
+    # ONE shape, everywhere. The precise label (`facts['subject']`) is
+    # deliberately NOT in this prompt at all: it ships on the wire, where
+    # the card labels its own counts and there is room for it.
+    #
+    # Leaving it here as well as the short phrase gave the writer two
+    # shapes to copy and it copied the wrong one intermittently. Measured
+    # in production: Pallavi's card failed with "Closes items after their
+    # due date far more often than others you work with" at 75 characters
+    # against a 62 ceiling, on a cycle where the same facts produced the
+    # 53 character version in a probe. Same person, same numbers, two
+    # available shapes, and a coin flip between them.
     phrase = FACT_PHRASES.get(facts.get("fact_key"), facts["subject"])
-    lines.append(f"What was measured: this person {phrase}.")
-    lines.append("")
+    lines = [f"Person: {person_name}", ""]
     lines.append(
         "Measured by ContextQuilt. These are the only numbers you may state:"
     )
     lines.append(
-        f"- {facts['subject']}: {facts['numerator']} out of "
-        f"{facts['denominator']} for this person"
+        f"- how often this person {phrase}: {facts['numerator']} out of "
+        f"{facts['denominator']}"
     )
     lines.append(
         f"- the same measure across the other {facts['roster_people']} people "
