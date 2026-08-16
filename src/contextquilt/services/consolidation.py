@@ -98,6 +98,13 @@ MODEL_CHOSEN_LENSES = {"how_they_decide", "what_moves_them"}
 # with headroom, and the cost of over-fetching is one wider SELECT, not
 # an LLM call: the calls are gated after the merge.
 CLUSTER_OVERFETCH = 4
+
+# How many recent meetings WITH A PERSON an open item must go unmentioned
+# in before it counts as having gone quiet. Counted in meetings rather
+# than days on purpose (doc 16 5.10): a month of not meeting somebody is
+# not the same claim as three meetings with them where it never came up.
+# Six is roughly a fortnight for an actively-met colleague on live data.
+QUIET_MEETING_WINDOW = 6
 # COMPUTED_LENSES are decided by arithmetic before any call happens. The
 # model writes the sentence; it never chooses the lens or the verdict.
 # services/follow_through.py has the whole argument for why the third

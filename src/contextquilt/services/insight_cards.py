@@ -31,6 +31,7 @@ safe here and silently shipping is not.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 # The collapsed capsule is one line. See the module docstring.
@@ -80,6 +81,26 @@ def opens_with_name(text: str, person_name: Optional[str]) -> bool:
     return bool(first) and first in tokens
 
 
+CLAIM_HAS_DASH = "claim_dash_punctuation"
+
+# An em dash, an en dash, or a hyphen with a space on either side. A
+# hyphen inside a word ("follow-up", "on-time") is genuine hyphenation
+# and stays.
+_DASH_PUNCTUATION = re.compile(r"[–—]|(?<=\s)-(?=\s)|(?<=\w)\s+-\s+(?=\w)")
+
+
+def dash_as_punctuation(text: str) -> bool:
+    """True when a dash is doing a comma's job somewhere in the text.
+
+    A served claim is model-written text that other models later READ:
+    GhostPour quotes it into composed surfaces, and a model copies the
+    punctuation in the material it is given. That is why this is checked
+    where the text is made rather than scrubbed downstream. A cleanup
+    pass fixes one surface; the copy has already happened by then.
+    """
+    return bool(_DASH_PUNCTUATION.search(text or ""))
+
+
 def card_defect(
     text: str, do: str, person_name: Optional[str] = None
 ) -> Optional[str]:
@@ -94,6 +115,8 @@ def card_defect(
         return DO_LENGTH
     if opens_with_name(text, person_name):
         return CLAIM_OPENS_WITH_NAME
+    if dash_as_punctuation(text) or dash_as_punctuation(do):
+        return CLAIM_HAS_DASH
     return None
 
 

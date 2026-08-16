@@ -84,6 +84,7 @@ from contextquilt.services.consolidation import (
     CONSOLIDATION_SYSTEM,
     CLUSTER_OVERFETCH,
     CLUSTER_WINDOW_DAYS,
+    QUIET_MEETING_WINDOW,
     MAX_CLUSTERS_PER_USER_PER_CYCLE,
     MAX_SOURCE_TEXTS,
     MAX_USERS_PER_APP_PER_CYCLE,
@@ -119,6 +120,7 @@ from contextquilt.services.corrections import (
     parse_correction_response,
 )
 from contextquilt.services.entity_aliasing import find_alias_candidate
+from contextquilt.services import relationship_lenses
 from contextquilt.services.people_identity import (
     build_entity_resolver,
     merge_person_clusters,
@@ -2455,6 +2457,14 @@ class ColdPathWorker:
                     subject_key, app_id, rule,
                     MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
                 )
+                # The contrastive pass runs LAST, and that ordering is
+                # deliberate rather than incidental: it is the only pass
+                # that needs every OTHER person measured before it can
+                # say anything about one of them.
+                created += await self._derive_stands_out(
+                    subject_key, app_id, rule,
+                    MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
+                )
                 continue
             clusters = await self.db.fetch(
                 f"""
@@ -2592,6 +2602,241 @@ class ColdPathWorker:
             user_id, snapshot["version"], json.dumps(snapshot),
         )
         return 1
+
+    async def _derive_stands_out(
+        self, subject_key: str, app_id: str, rule: dict, budget: int
+    ) -> int:
+        """The contrastive pass: what is unlike this user's other people.
+
+        Every other lens looks at ONE person and asks what can be said
+        about them. That is exactly why they all said the same thing: a
+        corpus of commitments and blockers describes dependencies, so
+        every person read alone "gates on dependencies", and on
+        2026-08-16 three of four people on Scott's pages carried that
+        sentence. Accurate about each of them, worthless about any of
+        them.
+
+        This pass measures the WHOLE roster first, then asks of one
+        person: on which measure are they unlike everybody else. A
+        person who is unremarkable gets no card at all, which is the
+        point rather than a shortfall.
+
+        The arithmetic is entirely in SQL and the ranking entirely in
+        `relationship_lenses`; the model only writes the sentence, and
+        may only use numbers it was handed. Same division of labour as
+        the follow-through lens, for the same reason: the model may
+        identify, it may not count.
+        """
+        if budget <= 0:
+            return 0
+        vocab = people_vocabulary(await self._app_manifest(app_id))
+        completables = (
+            await get_type_runtime(self.db.fetch)
+        ).completable_types
+        source_types = [t for t in rule["from_types"] if t in completables]
+        if not source_types:
+            return 0
+        user_id = subject_key.split(":", 1)[1] if ":" in subject_key else subject_key
+        try:
+            self_name = await self.db.fetchval(
+                "SELECT name FROM entities WHERE user_id = $1 AND self_at IS NOT NULL",
+                user_id,
+            )
+        except Exception:
+            self_name = None
+        try:
+            rows = await self.db.fetch(
+                f"""
+                WITH resolver AS (
+                    SELECT lower(e.name) AS surface,
+                           COALESCE(e.merged_into, e.entity_id) AS canonical_id
+                    FROM entities e
+                    WHERE e.user_id = $1 AND e.entity_type = 'person'
+                    UNION
+                    SELECT lower(a.alias) AS surface,
+                           COALESCE(e.merged_into, e.entity_id) AS canonical_id
+                    FROM entity_aliases a
+                    JOIN entities e ON e.entity_id = a.entity_id
+                    WHERE a.user_id = $1
+                ),
+                named AS (
+                    SELECT DISTINCT r.surface, r.canonical_id, ce.name AS canonical_name
+                    FROM resolver r
+                    JOIN entities ce ON ce.entity_id = r.canonical_id
+                    WHERE ce.suppressed_at IS NULL AND ce.self_at IS NULL
+                ),
+                -- The person's own meeting clock. "Gone quiet" is
+                -- counted in MEETINGS WITH THEM, never in elapsed days:
+                -- doc 16 5.10, because a month of not meeting someone is
+                -- not the same claim as three meetings without mention.
+                mtg AS (
+                    SELECT entity_id,
+                           max(last_seen_at) FILTER (WHERE rn = {QUIET_MEETING_WINDOW})
+                               AS window_start
+                    FROM (
+                        SELECT entity_id, last_seen_at,
+                               row_number() OVER (PARTITION BY entity_id
+                                                  ORDER BY last_seen_at DESC) AS rn
+                        FROM person_appearances WHERE user_id = $1
+                    ) t GROUP BY entity_id
+                ),
+                items AS (
+                    SELECT DISTINCT n.canonical_id, n.canonical_name, cp.patch_id,
+                           COALESCE(cp.status, 'active') AS status,
+                           COALESCE(cp.last_observed_at, cp.updated_at,
+                                    cp.created_at) AS last_stated,
+                           cp.completed_at,
+                           cp.value->>'deadline_date' AS due,
+                           (cp.value ? 'deadline_history') AS re_dated,
+                           (cp.value ? 'owner_restated_at') AS handed,
+                           (cp.value ? 'restatement_count') AS restated,
+                           m.window_start
+                    FROM context_patches cp
+                    JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                    JOIN context_patch_acl acl ON acl.patch_id = cp.patch_id
+                    JOIN named n ON n.surface = lower(cp.value->>'owner')
+                    LEFT JOIN mtg m ON m.entity_id = n.canonical_id
+                    WHERE ps.subject_key = $2
+                      AND acl.app_id = $3::uuid
+                      AND cp.patch_type = ANY($4::text[])
+                      AND cp.value->>'shelved_at' IS NULL
+                      AND cp.created_at > NOW() - INTERVAL '{CLUSTER_WINDOW_DAYS} days'
+                      AND ($5::text IS NULL
+                           OR lower(btrim(n.canonical_name)) <> lower(btrim($5)))
+                )
+                SELECT canonical_id, canonical_name,
+                       count(*) AS total_items,
+                       count(*) FILTER (WHERE status = 'active') AS open_items,
+                       count(*) FILTER (WHERE status = 'active'
+                                          AND window_start IS NOT NULL
+                                          AND last_stated < window_start) AS quiet_items,
+                       count(*) FILTER (WHERE completed_at IS NOT NULL) AS closed_items,
+                       count(*) FILTER (WHERE completed_at IS NOT NULL AND due IS NOT NULL
+                                          AND due ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$'
+                                          AND completed_at::date > due::date) AS closed_late,
+                       count(*) FILTER (WHERE due IS NOT NULL
+                                          AND due ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$') AS dated_items,
+                       count(*) FILTER (WHERE re_dated) AS re_dated,
+                       count(*) FILTER (WHERE handed) AS handed_back,
+                       count(*) FILTER (WHERE status = 'active' AND restated) AS restated,
+                       array_agg(patch_id) AS patch_ids
+                FROM items
+                GROUP BY canonical_id, canonical_name
+                """,
+                user_id, subject_key, app_id, source_types, self_name,
+            )
+        except Exception as exc:
+            logger.warning("stands_out_measure_failed",
+                           subject=subject_key, reason=str(exc)[:200])
+            return 0
+
+        counts_by_person = {
+            str(r["canonical_id"]): dict(r) for r in rows
+        }
+        all_facts = {
+            pid: relationship_lenses.facts_for_person(c)
+            for pid, c in counts_by_person.items()
+        }
+        created = 0
+        for pid, counts in counts_by_person.items():
+            if created >= budget:
+                break
+            # LEAVE ONE OUT. Unusual means unlike THE OTHERS, and on a
+            # roster this size a heavy owner left in their own baseline
+            # pulls it toward themselves and hides the very person the
+            # measure is loudest about.
+            baseline = relationship_lenses.roster_baseline(all_facts, exclude=pid)
+            chosen = relationship_lenses.best_fact(counts, baseline)
+            if not chosen:
+                continue
+            if await self._stands_out_taken(subject_key, rule["produce_type"], pid):
+                continue
+            made = await self._write_stands_out(
+                subject_key, app_id, rule, pid, counts, chosen,
+            )
+            if made:
+                created += 1
+        return created
+
+    async def _stands_out_taken(
+        self, subject_key: str, produce_type: str, entity_id: str
+    ) -> bool:
+        """The durable no for this lens, keyed on the ENTITY.
+
+        Status-blind like every other lens: an archived card is the
+        record of a claim the user rejected and it never comes back.
+        Keyed on `source_entity_id` rather than a person patch, because
+        that is the identity that does not move when the extractor
+        rephrases somebody.
+        """
+        return bool(await self.db.fetchval(
+            """
+            SELECT EXISTS(
+                SELECT 1 FROM context_patches d
+                JOIN patch_subjects dps ON dps.patch_id = d.patch_id
+                WHERE dps.subject_key = $1
+                  AND d.patch_type = $2
+                  AND d.origin_mode = 'derived'
+                  AND d.value->>'lens' = $3
+                  AND d.value->>'source_entity_id' = $4
+            )
+            """,
+            subject_key, produce_type, relationship_lenses.LENS, str(entity_id),
+        ))
+
+    async def _write_stands_out(
+        self, subject_key: str, app_id: str, rule: dict,
+        entity_id: str, counts: dict, chosen: dict,
+    ) -> bool:
+        """One contrast call, checked, then the provenance write."""
+        person_name = counts["canonical_name"]
+        facts = relationship_lenses.served_facts(chosen, person_name)
+        source_ids = [str(p) for p in (counts.get("patch_ids") or [])]
+        examples = await self.db.fetch(
+            "SELECT value->>'text' AS text FROM context_patches "
+            "WHERE patch_id = ANY($1::uuid[]) ORDER BY created_at ASC LIMIT $2",
+            source_ids, MAX_FACT_EXAMPLES,
+        )
+        defects: list = []
+        try:
+            response = await self.llm.extract(
+                system_prompt=relationship_lenses.STANDS_OUT_SYSTEM,
+                user_content=relationship_lenses.build_stands_out_content(
+                    person_name, facts, [dict(e) for e in examples],
+                ),
+            )
+            claim = relationship_lenses.parse_stands_out_response(
+                response.content,
+                relationship_lenses.allowed_numbers(facts),
+                person_name=person_name, defects=defects,
+            )
+        except Exception as exc:
+            logger.warning("stands_out_failed", subject=subject_key,
+                           person=person_name, reason=str(exc)[:200])
+            return False
+        if not claim:
+            logger.info("stands_out_card_rejected", subject=subject_key,
+                        person=person_name,
+                        defect=defects[0] if defects else "declined")
+            return False
+        # Post-check, same reason as every other lens: the call is
+        # seconds of wall clock and the durable no must not lose a race
+        # with a suppression.
+        if await self._stands_out_taken(subject_key, rule["produce_type"], entity_id):
+            return False
+        await self._write_person_insight(
+            subject_key, app_id, rule, str(entity_id), person_name,
+            source_ids, relationship_lenses.LENS, claim["text"], claim["do"],
+            facts=facts, entity_id=entity_id,
+        )
+        logger.info(
+            "stands_out_insight_created", subject=subject_key,
+            person=person_name, fact=chosen["fact"].key,
+            direction=chosen["direction"], gap_points=chosen["gap_points"],
+            them=f"{facts['numerator']}/{facts['denominator']}",
+            roster=f"{facts['roster_numerator']}/{facts['roster_denominator']}",
+        )
+        return True
 
     async def _person_entity_resolver(self, user_id: str):
         """Surface form -> canonical entity id, for this user.
