@@ -60,3 +60,30 @@ def test_the_fold_archives_rather_than_deletes():
     fold = MAIN.split("async def _fold_person_patches(")[1].split("@app.post")[0]
     assert "SET status = 'archived'" in fold
     assert "'archive_cause', 'merge'" in fold
+
+
+def test_the_fold_reports_the_items_it_moved_not_just_the_variants():
+    """A name variant is CQ bookkeeping. The items it carried are what
+    the user recognises as theirs. Measured: Vijay's two live forms held
+    98 and 37 ownership edges, so a fold brings 37 items under the same
+    person as the other 98, and "folded 1 variant" describes that badly."""
+    assert '"items_moved": items_moved,' in MAIN
+    fold = MAIN.split("async def _fold_person_patches(")[1].split("@app.post")[0]
+    assert "count(DISTINCT to_patch_id)" in fold
+
+
+def test_the_item_count_is_taken_before_the_repoint():
+    """Afterwards those edges hang off the survivor and cannot be told
+    apart from its own."""
+    fold = MAIN.split("async def _fold_person_patches(")[1].split("@app.post")[0]
+    before = fold.index("count(DISTINCT to_patch_id)")
+    after = fold.index("UPDATE patch_connections pc SET")
+    assert before < after
+
+
+def test_both_callers_unpack_the_pair():
+    """A caller that forgets the second element gets a tuple where it
+    expects a list, and the failure would be a confusing truthiness bug
+    rather than an error."""
+    assert "folded_patch_ids, _items_moved = await _fold_person_patches(" in MAIN
+    assert "folded_patch_ids, items_moved = await _fold_person_patches(" in MAIN

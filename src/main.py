@@ -6118,16 +6118,30 @@ async def _fold_person_patches(
     different triggers, and a second implementation would drift from this
     one the first time either was touched.
 
-    Returns the ids that were folded, which is what lets a caller tell
-    the user what their tap actually did.
+    Returns (folded_patch_ids, items_moved). The second number is the
+    one worth showing a human: "folded 1 name variant" undersells what
+    happened, because the variant carried work. Measured on production
+    2026-08-16, Vijay's two live forms held 98 and 37 ownership edges,
+    so folding them brings 37 items under the same person as the other
+    98 rather than leaving his record split in two.
     """
     survivor, patch_losers = choose_surviving_person_patch(
         candidates, canonical_name
     )
     if not (survivor and patch_losers):
-        return []
+        return ([], 0)
     survivor_id = survivor["patch_id"]
     loser_ids = [c["patch_id"] for c in patch_losers]
+    # Counted BEFORE the repoint, because afterwards these edges hang
+    # off the survivor and are indistinguishable from its own.
+    items_moved = await conn.fetchval(
+        """
+        SELECT count(DISTINCT to_patch_id) FROM patch_connections
+        WHERE from_patch_id = ANY($1::uuid[])
+          AND COALESCE(status, 'active') = 'active'
+        """,
+        loser_ids,
+    ) or 0
 
     # Connections follow the person. Same UNIQUE(from, to, role)
     # collision the relationship repoint has, so guard with NOT EXISTS
@@ -6190,7 +6204,7 @@ async def _fold_person_patches(
         """,
         str(survivor_id), source, loser_ids,
     )
-    return [str(p) for p in loser_ids]
+    return ([str(p) for p in loser_ids], int(items_moved))
 
 
 @app.post("/v1/people/{user_id}/merge", tags=["People"])
@@ -6498,7 +6512,7 @@ async def merge_people(
                 """,
                 subject_key, keys, vocab.person_type,
             )]
-            folded_patch_ids = await _fold_person_patches(
+            folded_patch_ids, _items_moved = await _fold_person_patches(
                 conn, candidates, canonical["name"], source
             )
 
@@ -6705,7 +6719,7 @@ async def confirm_person(
                 """,
                 f"user:{user_id}", keys, vocab.person_type,
             )]
-            folded_patch_ids = await _fold_person_patches(
+            folded_patch_ids, items_moved = await _fold_person_patches(
                 conn, candidates, updated["name"], source
             )
 
@@ -6726,6 +6740,11 @@ async def confirm_person(
         # question and the app has no way to say what changed.
         "folded_patch_ids": folded_patch_ids,
         "folded_count": len(folded_patch_ids),
+        # The number worth showing a human. A name variant is CQ
+        # bookkeeping; the items it carried are what the user recognises
+        # as theirs, and "brought 37 more items under Vijay" is an answer
+        # to "what did that buy me" where "folded 1 variant" is not.
+        "items_moved": items_moved,
     }
 
 
