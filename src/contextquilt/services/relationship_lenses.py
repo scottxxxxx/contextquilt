@@ -420,6 +420,32 @@ def build_stands_out_content(
     return "\n".join(lines)
 
 
+def card_still_qualifies(facts: dict) -> tuple:
+    """Would today's rules still write this already-written card?
+
+    Returns (keep, why). Judged from the card's OWN stored facts against
+    the current floors, so a rule tightening does not need a new script
+    and cannot drift from the rules it is enforcing.
+
+    A card whose facts cannot be read is KEPT. A card CQ cannot judge is
+    not a card CQ should withdraw, and the failure mode of guessing wrong
+    here is deleting somebody's true finding.
+    """
+    try:
+        numerator = int(facts["numerator"])
+        denominator = int(facts["denominator"])
+        direction = facts.get("direction")
+    except (KeyError, TypeError, ValueError):
+        return (True, "unreadable facts, left alone")
+
+    if denominator < MIN_DENOMINATOR:
+        return (False, f"denominator {denominator} under floor {MIN_DENOMINATOR}")
+    if direction == "worse" and numerator < MIN_INSTANCES_FOR_WORSE:
+        return (False, f"{numerator} instance(s) behind an unflattering claim, "
+                       f"floor is {MIN_INSTANCES_FOR_WORSE}")
+    return (True, "still qualifies")
+
+
 def allowed_numbers(facts: dict) -> set:
     """Every number the writer is permitted to put in a claim.
 

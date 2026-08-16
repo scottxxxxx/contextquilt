@@ -606,3 +606,49 @@ def test_a_flattering_claim_is_not_gated_on_instances():
     chosen = best_fact(counts(closed_items=30, closed_late=1), base)
     assert chosen is not None
     assert chosen["direction"] == "better" and chosen["fact"].numerator == 1
+
+
+# --- retraction is not suppression -------------------------------------
+
+def test_a_retracted_card_does_not_ban_the_person_from_the_lens():
+    """A rule tightening withdraws cards it would no longer write. Those
+    are CQ's decision, not the user's, and the durable no exists to
+    honour a user's no. Reading a retraction as a suppression would ban
+    somebody from a lens over a claim they never saw."""
+    import pathlib
+    worker = pathlib.Path("src/worker.py").read_text()
+    assert "COALESCE(d.value->>'archive_cause', '') <> 'retracted'" in worker
+
+
+def test_the_retraction_rule_reruns_the_current_floors():
+    """It must judge each card against today's floors rather than a
+    hardcoded list of ids, or the next tightening needs a new script."""
+    from contextquilt.services.relationship_lenses import (
+        MIN_DENOMINATOR, MIN_INSTANCES_FOR_WORSE, card_still_qualifies,
+    )
+    thin, why = card_still_qualifies(
+        {"numerator": 1, "denominator": 5, "direction": "worse"}
+    )
+    assert thin is False and str(MIN_INSTANCES_FOR_WORSE) in why
+
+    good, _ = card_still_qualifies(
+        {"numerator": 5, "denominator": 18, "direction": "worse"}
+    )
+    assert good is True
+
+    flattering, _ = card_still_qualifies(
+        {"numerator": 1, "denominator": 30, "direction": "better"}
+    )
+    assert flattering is True, "a low numerator IS the evidence here"
+
+    small, why = card_still_qualifies(
+        {"numerator": 2, "denominator": MIN_DENOMINATOR - 1, "direction": "worse"}
+    )
+    assert small is False
+
+
+def test_unreadable_facts_are_left_alone_rather_than_retracted():
+    """A card CQ cannot judge is not a card CQ should withdraw."""
+    from contextquilt.services.relationship_lenses import card_still_qualifies
+    keep, why = card_still_qualifies({})
+    assert keep is True and "left alone" in why
