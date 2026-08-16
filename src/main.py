@@ -5792,7 +5792,11 @@ async def get_person(
             )
         except Exception:
             readiness = None
-    if row.get("patch_id"):
+    # An entity is enough. A card keyed on the entity does not need the
+    # person to hold a `person` patch at all, and gating on one would
+    # hide it from exactly the thin people the lens can still speak
+    # about.
+    if row.get("patch_id") or row.get("entity_id"):
         try:
             # db_pool, NOT the _people_core conn: that connection's
             # acquire block has already closed by this point in the
@@ -5810,7 +5814,9 @@ async def get_person(
                 LEFT JOIN patch_usage_metrics pum ON pum.patch_id = cp.patch_id
                 WHERE ps.subject_key = $1
                   AND cp.origin_mode = 'derived'
-                  AND cp.value->>'source_person' = ANY($2::text[])
+                  AND (cp.value->>'source_person' = ANY($2::text[])
+                       OR ($3::text IS NOT NULL
+                           AND cp.value->>'source_entity_id' = $3))
                   AND COALESCE(cp.status, 'active') = 'active'
                 ORDER BY cp.created_at DESC
                 """,
@@ -5819,7 +5825,17 @@ async def get_person(
                 # primary. An insight stamps the patch that was current
                 # when it was derived, and which form that is changes as
                 # the extractor rephrases someone.
-                [str(pid) for pid in (row.get("_patch_ids") or [row["patch_id"]])],
+                [str(pid) for pid in (row.get("_patch_ids")
+                                      or ([row["patch_id"]] if row.get("patch_id") else []))],
+                # And the ENTITY, because the identity a card is keyed on
+                # depends on which pass wrote it. The two model lenses and
+                # follow-through stamp `source_person` with a person PATCH
+                # id; the contrastive pass keys on the entity, which is
+                # the identity that does not move when the extractor
+                # rephrases somebody. Matching only the patch ids meant
+                # three live cards sat in the database unreachable by the
+                # page they belong to (measured 2026-08-16).
+                str(row["entity_id"]) if row.get("entity_id") else None,
             )
             insights = []
             # Same runtime and registry TTLs the ledger's decay bands and
