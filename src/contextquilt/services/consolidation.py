@@ -47,6 +47,7 @@ from .follow_through import (
     judge_items,
 )
 from .insight_cards import CARD_SHAPE_RULES, card_defect
+from .relationship_lenses import opening_words
 
 # Bounds — cost and blast-radius caps, not tunables to chase.
 MIN_CLUSTER_SIZE_FLOOR = 2
@@ -265,6 +266,7 @@ def build_profile_content(
     dated_texts: List[tuple],
     guidance: Optional[str] = None,
     taken_lenses: Optional[Any] = None,
+    used_claims: Optional[Sequence[str]] = None,
 ) -> str:
     """User-content block for one person cluster's profile call.
     dated_texts is [(iso_date_str, text), ...] in chronological order;
@@ -275,6 +277,14 @@ def build_profile_content(
     is a hint for cost, never the invariant: the post-check in
     `_synthesize_person_cluster` is what actually holds the line, since
     the model is free to ignore anything in a prompt.
+
+    `used_claims` is what has already been said about this user's OTHER
+    people on the same lens. Without it these lenses converge hard:
+    measured 2026-08-16 across the live cards, `what_moves_them` held six
+    claims with TWO distinct opening words between them, "Responds to"
+    opened five cards spanning five different people, and two people
+    carried byte-identical text. A model cannot avoid a collision it
+    cannot see.
     """
     lines = [f"Person: {person_name}"]
     if guidance:
@@ -291,6 +301,20 @@ def build_profile_content(
             "Lenses still open: "
             + (", ".join(open_lenses) if open_lenses else "none, decline")
         )
+    if used_claims:
+        lines.append("")
+        lines.append(
+            "ALREADY SAID about this user's other people on this lens. Yours "
+            "must not open with the same words as any of these, and must not "
+            "be a rewording of one. A card that reads like the last card "
+            "teaches the reader to stop reading them, so a claim that sounds "
+            "like these has failed even when it is accurate. If the natural "
+            "sentence collides, say the same true thing another way, and get "
+            "SHORTER rather than longer while doing it: extra words break the "
+            "character limit and the card is thrown away entirely."
+        )
+        for claim in used_claims:
+            lines.append(f"- {claim}")
     lines.append("")
     lines.append("Observations (dated, oldest first):")
     # A spread across the window, not the oldest slice of it. The cap is
@@ -305,6 +329,7 @@ def parse_profile_response(
     content: Any,
     person_name: Optional[str] = None,
     defects: Optional[List[str]] = None,
+    used_claims: Optional[Sequence[str]] = None,
 ) -> Optional[Dict[str, str]]:
     """{"lens", "text", "do"} or None for skip/refusal/garbage.
 
@@ -347,6 +372,18 @@ def parse_profile_response(
         if defects is not None:
             defects.append(defect)
         return None
+    # Same invariant the contrastive lens carries, for the same reason
+    # and against harder evidence: these two lenses are the ones that
+    # actually converged in production. Only the OPENING is guarded,
+    # because demanding total novelty inside the claim ceiling would
+    # reject honest claims, and the opening is what a reader sees
+    # repeated down a page.
+    if used_claims:
+        opener = opening_words(text)
+        if opener and any(opening_words(u) == opener for u in used_claims):
+            if defects is not None:
+                defects.append("claim_repeats_another")
+            return None
     return {"lens": lens, "text": text, "do": do}
 
 
