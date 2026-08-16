@@ -560,3 +560,49 @@ def test_every_example_do_line_in_the_prompt_would_actually_pass():
     assert len(examples) >= 3, examples
     for example in examples:
         assert len(example) <= MAX_DO_CHARS, (example, len(example))
+
+
+# --- one occurrence is not a pattern ----------------------------------
+
+def test_an_unflattering_claim_needs_more_than_one_instance():
+    """Live on 2026-08-16 the pass wrote 'Hands work back to you more
+    often than others you work with' off ONE occurrence out of five. The
+    arithmetic was right and the sentence was still wrong: 'more often'
+    asserts a pattern nobody observed. Instances never traits."""
+    all_facts = {
+        "thin": facts_for_person(counts(total_items=5, handed_back=1)),
+        "b": facts_for_person(counts(total_items=200, handed_back=2)),
+        "c": facts_for_person(counts(total_items=200, handed_back=2)),
+        "d": facts_for_person(counts(total_items=200, handed_back=2)),
+    }
+    base = roster_baseline(all_facts, exclude="thin")
+    chosen = best_fact(counts(total_items=5, handed_back=1), base)
+    assert chosen is None or chosen["fact"].key != "handed_back"
+
+
+def test_two_instances_are_enough_for_an_unflattering_claim():
+    all_facts = {
+        "x": facts_for_person(counts(total_items=8, handed_back=2)),
+        "b": facts_for_person(counts(total_items=200, handed_back=2)),
+        "c": facts_for_person(counts(total_items=200, handed_back=2)),
+        "d": facts_for_person(counts(total_items=200, handed_back=2)),
+    }
+    base = roster_baseline(all_facts, exclude="x")
+    chosen = best_fact(counts(total_items=8, handed_back=2), base)
+    assert chosen is not None and chosen["fact"].key == "handed_back"
+
+
+def test_a_flattering_claim_is_not_gated_on_instances():
+    """A low numerator IS the evidence when the claim is that the thing
+    almost never happens. Sukumar closing late once in thirty is the
+    strongest card on the roster and must survive."""
+    all_facts = {
+        "star": facts_for_person(counts(closed_items=30, closed_late=1)),
+        "b": facts_for_person(counts(closed_items=30, closed_late=10)),
+        "c": facts_for_person(counts(closed_items=30, closed_late=10)),
+        "d": facts_for_person(counts(closed_items=30, closed_late=10)),
+    }
+    base = roster_baseline(all_facts, exclude="star")
+    chosen = best_fact(counts(closed_items=30, closed_late=1), base)
+    assert chosen is not None
+    assert chosen["direction"] == "better" and chosen["fact"].numerator == 1

@@ -66,6 +66,23 @@ MIN_GAP_POINTS = 15
 # so nothing ships.
 MIN_ROSTER_PEOPLE = 3
 
+# An unflattering claim needs at least this many INSTANCES behind it.
+#
+# The denominator floor alone is not enough, because it bounds the sample
+# and not the evidence. Live on 2026-08-16 the pass wrote "Hands work
+# back to you more often than others you work with" off 1 occurrence out
+# of 5, against a roster of 12 out of 402. The arithmetic is correct and
+# the sentence is still wrong: one event is an anecdote, and "more often"
+# asserts a pattern nobody observed. That is the panel's own rule,
+# instances never traits, failing at the point where a single instance
+# gets generalised.
+#
+# Only the unflattering direction is gated. A flattering claim says the
+# thing almost never happens, so a LOW numerator is the evidence rather
+# than a shortage of it: Sukumar closing late once in thirty is the
+# strongest card on the roster.
+MIN_INSTANCES_FOR_WORSE = 2
+
 # "Gone quiet" is only sayable when CQ can actually SEE the meetings the
 # item failed to come up in, and the proof that it can see them is that
 # OTHER items were stated inside the same window. Without this floor the
@@ -266,10 +283,15 @@ def rank_facts(facts: Sequence[Fact], baseline: Dict[str, dict]) -> List[dict]:
         gap = fact.rate_points - base["rate_points"]
         if abs(gap) < MIN_GAP_POINTS:
             continue
+        direction = "worse" if (gap > 0) == fact.higher_is_worse else "better"
+        # "More often than others" is a claim about a pattern, and one
+        # occurrence is not a pattern however unusual the rate looks.
+        if direction == "worse" and fact.numerator < MIN_INSTANCES_FOR_WORSE:
+            continue
         ranked.append({
             "fact": fact,
             "gap_points": gap,
-            "direction": "worse" if (gap > 0) == fact.higher_is_worse else "better",
+            "direction": direction,
             "roster": base,
         })
     ranked.sort(key=lambda r: (-abs(r["gap_points"]), r["fact"].key))
