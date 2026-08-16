@@ -3075,6 +3075,7 @@ class ColdPathWorker:
                     AND d.origin_mode = 'derived'
                     AND d.value->>'lens' = ANY($12::text[])
                     AND d.value->>'source_person' = op.patch_id::text
+                    AND COALESCE(d.value->>'archive_cause', '') <> 'retracted'
               ) < $11
             GROUP BY op.patch_id, op.value->>'text', op.created_at
             HAVING count(DISTINCT cp.patch_id) >= $5
@@ -3141,6 +3142,16 @@ class ColdPathWorker:
         lets a second card be derived for a lens they already carry.
         A bare string is still accepted so existing callers do not have
         to know about the fan-out.
+
+        A card CQ RETRACTED is not a user's no, and is skipped here for
+        the same reason the contrastive lens skips it (#255): a rule or
+        prompt change withdraws cards CQ would no longer write, and
+        reading those as suppressions bans the person from that lens
+        forever over a claim they never saw. Learned the hard way an hour
+        after building the distinction and applying it to one lens only:
+        six prose cards were retracted to clear repeated openings and the
+        next cycle created NOTHING, because this check still counted
+        them. `user_delete` and every other cause still block.
         """
         ids = (
             [person_patch_ids]
@@ -3158,6 +3169,7 @@ class ColdPathWorker:
               AND d.patch_type = $2
               AND d.origin_mode = 'derived'
               AND d.value->>'source_person' = ANY($3::text[])
+              AND COALESCE(d.value->>'archive_cause', '') <> 'retracted'
             """,
             subject_key, produce_type, ids,
         )
@@ -3487,6 +3499,7 @@ class ColdPathWorker:
                     AND d.origin_mode = 'derived'
                     AND d.value->>'lens' = $9
                     AND d.value->>'source_person' = op.patch_id::text
+                    AND COALESCE(d.value->>'archive_cause', '') <> 'retracted'
               )
             GROUP BY op.patch_id, op.value->>'text', op.created_at
             HAVING count(DISTINCT cp.patch_id) >= $10
