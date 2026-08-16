@@ -42,7 +42,7 @@ LIVE_CARDS = """
     SELECT patch_id, value
     FROM context_patches
     WHERE origin_mode = 'derived'
-      AND value->>'lens' = $1
+      AND value->>'lens' = ANY($1::text[])
       AND COALESCE(status, 'active') = 'active'
     ORDER BY created_at
 """
@@ -61,6 +61,21 @@ async def main() -> int:
     parser.add_argument("--apply", action="store_true",
                         help="write the retractions (default is a dry run)")
     parser.add_argument(
+        "--lens", action="append", default=None,
+        help=("lens id to operate on; repeatable. Defaults to the "
+              "contrastive lens. Use the prose lens ids to clear the "
+              "convergence measured on those."),
+    )
+    parser.add_argument(
+        "--dedupe-openings", action="store_true",
+        help=("retract only cards whose opening words collide with an "
+              "EARLIER card's, keeping the first. Surgical alternative to "
+              "--regenerate: the pass rebuilds roughly three cards a cycle, "
+              "so retracting every card leaves most people with a hole for "
+              "days, while retracting only the repeats targets exactly what "
+              "makes a page read as boilerplate."),
+    )
+    parser.add_argument(
         "--regenerate", action="store_true",
         help=("retract EVERY live card of this lens, not only the ones the "
               "current floors reject. For a prompt change: a stamped lens is "
@@ -72,8 +87,10 @@ async def main() -> int:
 
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
     try:
-        rows = await conn.fetch(LIVE_CARDS, rl.LENS)
+        lenses = args.lens or [rl.LENS]
+        rows = await conn.fetch(LIVE_CARDS, lenses)
         retract = []
+        seen_openings: dict = {}
         for row in rows:
             value = row["value"]
             if isinstance(value, str):
@@ -82,6 +99,15 @@ async def main() -> int:
             ok, why = card_still_qualifies(facts)
             if args.regenerate and ok:
                 ok, why = False, "regenerating under the current prompt"
+            if args.dedupe_openings and ok:
+                opener = rl.opening_words(value.get("text") or "")
+                first = seen_openings.get(opener)
+                if opener and first and first != value.get("about_person"):
+                    ok, why = False, (
+                        f"opens like {first}'s card: {opener!r}"
+                    )
+                elif opener:
+                    seen_openings.setdefault(opener, value.get("about_person"))
             who = value.get("about_person", "?")
             mark = "keep " if ok else "RETRACT"
             print(f"  [{mark}] {who}: {value.get('text', '')!r}")
