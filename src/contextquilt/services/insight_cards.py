@@ -140,20 +140,43 @@ def one_card_per_lens(cards):
     Cards with no lens are passed through untouched rather than
     collapsed into one bucket: an unknown shape is not evidence of
     duplication, and the client renders unknown lenses neutrally.
+
+    EVIDENCE BEATS RECENCY when both cards carry counts. Measured on
+    production 2026-08-16: this user's items are split across two app
+    ids by the August flip, 916 rows under the old gateway identity and
+    279 under the new one, and the consolidation pass is ACL-scoped, so
+    it runs once per app and each run sees a different slice of the same
+    person. Sukumar has 86 items on one side and 31 on the other. Taking
+    the newest card would hand the page whichever pass happened to
+    finish last, which is a coin flip on how much of the record the
+    claim was computed from. The card standing on the larger denominator
+    is the one computed from more of the truth, so it wins, and the
+    outcome stops depending on scheduling.
     """
-    seen: set = set()
-    kept = []
-    # `cards` arrives newest-first (the query orders by created_at DESC).
+    def _evidence(card):
+        facts = (card or {}).get("facts") or {}
+        try:
+            return int(facts.get("denominator") or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    best: dict = {}
+    order: list = []
+    passthrough = []
+    # `cards` arrives newest-first (the query orders by created_at DESC),
+    # which is the tiebreak when neither card carries counts.
     for card in cards or ():
         lens = (card or {}).get("lens")
         if not lens:
-            kept.append(card)
+            passthrough.append(card)
             continue
-        if lens in seen:
-            continue
-        seen.add(lens)
-        kept.append(card)
-    return kept
+        if lens not in best:
+            best[lens] = card
+            order.append(lens)
+        elif _evidence(card) > _evidence(best[lens]):
+            best[lens] = card
+    kept = [best[lens] for lens in order]
+    return kept + passthrough if passthrough else kept
 
 
 # The shared half of every card prompt. One text, so the two lens

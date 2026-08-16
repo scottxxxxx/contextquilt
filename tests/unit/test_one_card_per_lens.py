@@ -80,3 +80,49 @@ def test_an_unknown_lens_still_gets_a_card():
     served, not dropped."""
     cards = [_card("how_they_hand_work_back", "something new")]
     assert len(one_card_per_lens(cards)) == 1
+
+
+# --- evidence beats recency -------------------------------------------
+
+def _counted(lens, denominator, patch_id):
+    return {"patch_id": patch_id, "lens": lens, "text": "x",
+            "facts": {"numerator": 1, "denominator": denominator}}
+
+
+def test_the_card_computed_from_more_of_the_record_wins():
+    """The user's items are split across two app ids by the August flip
+    (916 rows one side, 279 the other) and the pass is ACL-scoped, so it
+    runs once per app over a different slice of the same person. Newest
+    would hand the page whichever pass finished last."""
+    cards = [_counted("what_stands_out", 3, "thin-but-newer"),
+             _counted("what_stands_out", 30, "rich-but-older")]
+    assert [c["patch_id"] for c in one_card_per_lens(cards)] == ["rich-but-older"]
+
+
+def test_newest_still_wins_when_neither_card_carries_counts():
+    cards = [_card("how_they_decide", "newest", "n"),
+             _card("how_they_decide", "older", "o")]
+    assert [c["patch_id"] for c in one_card_per_lens(cards)] == ["n"]
+
+
+def test_a_card_with_counts_beats_one_without_only_on_evidence():
+    """A missing facts block reads as zero evidence, so a counted card
+    outranks it, but two uncounted cards keep the recency rule."""
+    cards = [_card("what_stands_out", "no counts", "plain"),
+             _counted("what_stands_out", 12, "counted")]
+    assert [c["patch_id"] for c in one_card_per_lens(cards)] == ["counted"]
+
+
+def test_a_malformed_denominator_does_not_crash_the_page():
+    cards = [_counted("what_stands_out", 10, "good"),
+             {"patch_id": "bad", "lens": "what_stands_out",
+              "facts": {"denominator": "not a number"}}]
+    assert [c["patch_id"] for c in one_card_per_lens(cards)] == ["good"]
+
+
+def test_lens_order_is_first_appearance_not_winner_position():
+    """Swapping which card wins must not reorder the stack."""
+    cards = [_counted("a", 1, "a-thin"), _counted("b", 9, "b"),
+             _counted("a", 99, "a-rich")]
+    assert [c["lens"] for c in one_card_per_lens(cards)] == ["a", "b"]
+    assert [c["patch_id"] for c in one_card_per_lens(cards)] == ["a-rich", "b"]
