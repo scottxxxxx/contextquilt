@@ -2806,29 +2806,77 @@ class ColdPathWorker:
         """One contrast call, checked, then the provenance write."""
         person_name = counts["canonical_name"]
         facts = relationship_lenses.served_facts(chosen, person_name)
+        # What has already been said about this user's OTHER people on
+        # this lens. A card that reads like the last card teaches the
+        # reader to stop reading them, and the live prose lenses proved
+        # it: six claims with two distinct opening words between them,
+        # and two people carrying byte-identical text. The writer cannot
+        # avoid a collision it cannot see, so it is shown them.
+        used_claims = [
+            r["text"] for r in await self.db.fetch(
+                """
+                SELECT DISTINCT cp.value->>'text' AS text
+                FROM context_patches cp
+                JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                WHERE ps.subject_key = $1
+                  AND cp.origin_mode = 'derived'
+                  AND cp.value->>'lens' = $2
+                  AND COALESCE(cp.status, 'active') = 'active'
+                  AND COALESCE(cp.value->>'source_entity_id', '') <> $3
+                ORDER BY 1
+                LIMIT 12
+                """,
+                subject_key, relationship_lenses.LENS, str(entity_id),
+            ) if r["text"]
+        ]
         source_ids = [str(p) for p in (counts.get("patch_ids") or [])]
         examples = await self.db.fetch(
             "SELECT value->>'text' AS text FROM context_patches "
             "WHERE patch_id = ANY($1::uuid[]) ORDER BY created_at ASC LIMIT $2",
             source_ids, MAX_FACT_EXAMPLES,
         )
+        base_content = relationship_lenses.build_stands_out_content(
+            person_name, facts, [dict(e) for e in examples],
+            used_claims=used_claims,
+        )
         defects: list = []
-        try:
-            response = await self.llm.extract(
-                system_prompt=relationship_lenses.STANDS_OUT_SYSTEM,
-                user_content=relationship_lenses.build_stands_out_content(
-                    person_name, facts, [dict(e) for e in examples],
-                ),
+        claim = None
+        content = base_content
+        # ONE bounded retry, and only when the correction changes the
+        # PROMPT. A pinned temperature makes a repeat of the same
+        # question return the same answer (#240), so a blind retry is
+        # waste; telling the writer that its claim was N characters and
+        # must get shorter is a different question. Two recoverable
+        # defects qualify: too long, and collided with another person's
+        # opening. A character verdict or an invented number is a
+        # judgement problem, and asking again invites argument.
+        for attempt in range(2):
+            try:
+                response = await self.llm.extract(
+                    system_prompt=relationship_lenses.STANDS_OUT_SYSTEM,
+                    user_content=content,
+                )
+                claim = relationship_lenses.parse_stands_out_response(
+                    response.content,
+                    relationship_lenses.allowed_numbers(facts),
+                    person_name=person_name, defects=defects, facts=facts,
+                    used_claims=used_claims,
+                )
+            except Exception as exc:
+                logger.warning("stands_out_failed", subject=subject_key,
+                               person=person_name, reason=str(exc)[:200])
+                return False
+            if claim or attempt:
+                break
+            note = relationship_lenses.retry_note(
+                defects[0] if defects else "",
+                relationship_lenses.rejected_lengths(
+                    response.content).get("claim") or "",
             )
-            claim = relationship_lenses.parse_stands_out_response(
-                response.content,
-                relationship_lenses.allowed_numbers(facts),
-                person_name=person_name, defects=defects, facts=facts,
-            )
-        except Exception as exc:
-            logger.warning("stands_out_failed", subject=subject_key,
-                           person=person_name, reason=str(exc)[:200])
-            return False
+            if not note:
+                break
+            content = f"{base_content}\n\n{note}"
+            defects = []
         if not claim:
             # Carry the EVIDENCE, not just the verdict. A bare
             # `defect=claim_too_long` cost three deploys of guessing at
