@@ -300,9 +300,9 @@ What makes this card worth reading is the CONTRAST. The user sat through every o
 
 Rules:
 - Describe what happened to the WORK, never what kind of person the colleague is. "Closes late more often than anyone else you work with" is checkable against the items. "Unreliable" is a verdict about a human being, it is not a fact about anything, and it must never appear in any wording.
-- Never state a number the arithmetic did not produce. Every figure you write must be one of the numbers you were given. An invented one voids the whole answer.
+- WRITE THE CLAIM WITHOUT DIGITS. The card renders both counts underneath your sentence, this person's and the comparison group's, so the arithmetic is already on screen and repeating it spends the only line you have. Name the pattern in words instead: "Closes late far more often than others you work with".
+- If you do write a number, it must be one of the numbers you were given, AND you must give the comparison number too. A count on its own reads as an accusation when the reader cannot see what normal is. One-sided numbers void the whole answer, so the safe choice is no digits.
 - That rule covers the do line too. No number at all is always safe there.
-- Two numbers in the claim at most. The card shows the arithmetic underneath, so spending the line on it wastes the line.
 - Do not use the words "average", "typical" or "normal" about the comparison group. It is a count across named colleagues, not a statistical population.
 - Never name a topic, project, company or person that appears in none of the listed items.
 - NEVER use a dash of any kind as punctuation. No em dash, no en dash, no hyphen standing in for a pause or an aside. Use a comma, a colon, parentheses, or two sentences. Hyphens inside genuinely hyphenated words such as "follow-up" are the only acceptable use.
@@ -312,7 +312,7 @@ Rules:
 - Write in the same language as the listed items.
 - Skip only when the comparison genuinely supports nothing worth showing.
 
-Claims of the right size and shape: "Closes late far more often than others you work with." and "23 of 49 open items have gone quiet."
+Claims of the right size and shape, all under 62 characters and none of them carrying a digit: "Closes late far more often than others you work with." / "Almost never misses a date, unlike the rest of your roster." / "Due dates move on this work more than anyone else's."
 
 Respond with EXACTLY this raw JSON shape and nothing else:
 {"skip": <true|false>, "text": "<the claim, or empty string when skip is true>", "do": "<the actionable line, or empty string when skip is true>", "reason": "<one short sentence>"}"""
