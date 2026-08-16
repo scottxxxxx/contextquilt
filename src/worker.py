@@ -2755,7 +2755,10 @@ class ColdPathWorker:
             chosen = relationship_lenses.best_fact(counts, baseline)
             if not chosen:
                 continue
-            if await self._stands_out_taken(subject_key, rule["produce_type"], pid):
+            if await self._stands_out_taken(
+                subject_key, rule["produce_type"], pid,
+                chosen["fact"].denominator,
+            ):
                 continue
             made = await self._write_stands_out(
                 subject_key, app_id, rule, pid, counts, chosen,
@@ -2765,7 +2768,8 @@ class ColdPathWorker:
         return created
 
     async def _stands_out_taken(
-        self, subject_key: str, produce_type: str, entity_id: str
+        self, subject_key: str, produce_type: str, entity_id: str,
+        candidate_denominator: int = 0,
     ) -> bool:
         """The durable no for this lens, keyed on the ENTITY.
 
@@ -2782,22 +2786,66 @@ class ColdPathWorker:
         from a lens forever over a claim they never saw and never
         rejected. So `archive_cause = 'retracted'` is skipped here, while
         `user_delete` and every other cause still count.
+
+        AND THE THIN SLICE DOES NOT GET TO WIN A RACE. The consolidation
+        pass runs once per app id, and this user's items are split across
+        two of them by the August flip, so the same person is measured
+        twice over different slices of their own record. Measured
+        2026-08-16: the pass that sees 28 of Sukumar's items wrote his
+        card at 08:59, and the pass that sees 86 was then blocked by this
+        very check, so a 28 item slice beat an 86 item slice purely by
+        finishing first and he lost the strongest card on the roster.
+
+        So an ACTIVE card standing on FEWER items than the candidate does
+        not block it: the richer card is written and the thinner one is
+        retracted, which is the same preference the read already applies
+        (evidence beats recency) moved to where it decides what exists
+        rather than what shows. A user's no still blocks unconditionally,
+        because that is a decision rather than a measurement.
         """
-        return bool(await self.db.fetchval(
+        rows = await self.db.fetch(
             """
-            SELECT EXISTS(
-                SELECT 1 FROM context_patches d
-                JOIN patch_subjects dps ON dps.patch_id = d.patch_id
-                WHERE dps.subject_key = $1
-                  AND d.patch_type = $2
-                  AND d.origin_mode = 'derived'
-                  AND d.value->>'lens' = $3
-                  AND d.value->>'source_entity_id' = $4
-                  AND COALESCE(d.value->>'archive_cause', '') <> 'retracted'
-            )
+            SELECT d.patch_id,
+                   COALESCE(d.status, 'active') AS status,
+                   COALESCE((d.value->'facts'->>'denominator')::int, 0) AS den
+            FROM context_patches d
+            JOIN patch_subjects dps ON dps.patch_id = d.patch_id
+            WHERE dps.subject_key = $1
+              AND d.patch_type = $2
+              AND d.origin_mode = 'derived'
+              AND d.value->>'lens' = $3
+              AND d.value->>'source_entity_id' = $4
+              AND COALESCE(d.value->>'archive_cause', '') <> 'retracted'
             """,
             subject_key, produce_type, relationship_lenses.LENS, str(entity_id),
-        ))
+        )
+        if not rows:
+            return False
+        # An archived card is a decision (a user's no), never a
+        # measurement, so it blocks whatever the candidate stands on.
+        if any(r["status"] != "active" for r in rows):
+            return True
+        if not any(r["den"] < int(candidate_denominator or 0) for r in rows):
+            return True
+        # Every live card here stands on less evidence than the
+        # candidate. Withdraw them so the richer one can be written; the
+        # retraction cause keeps this from reading as a user's no later.
+        for row in rows:
+            await self.db.execute(
+                """
+                UPDATE context_patches
+                SET status = 'archived', updated_at = NOW(),
+                    value = jsonb_set(value, '{archive_cause}',
+                                      '"retracted"'::jsonb)
+                WHERE patch_id = $1
+                """,
+                row["patch_id"],
+            )
+        logger.info("stands_out_thin_card_retracted",
+                    subject=subject_key, entity=str(entity_id),
+                    replaced=[r["den"] for r in rows],
+                    candidate_denominator=int(candidate_denominator or 0))
+        return False
 
     async def _write_stands_out(
         self, subject_key: str, app_id: str, rule: dict,
@@ -2895,7 +2943,10 @@ class ColdPathWorker:
         # Post-check, same reason as every other lens: the call is
         # seconds of wall clock and the durable no must not lose a race
         # with a suppression.
-        if await self._stands_out_taken(subject_key, rule["produce_type"], entity_id):
+        if await self._stands_out_taken(
+            subject_key, rule["produce_type"], entity_id,
+            chosen["fact"].denominator,
+        ):
             return False
         await self._write_person_insight(
             subject_key, app_id, rule, str(entity_id), person_name,
