@@ -60,6 +60,14 @@ async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true",
                         help="write the retractions (default is a dry run)")
+    parser.add_argument(
+        "--regenerate", action="store_true",
+        help=("retract EVERY live card of this lens, not only the ones the "
+              "current floors reject. For a prompt change: a stamped lens is "
+              "never re-derived, so a card written under older wording stays "
+              "forever unless it is withdrawn. Retraction is not suppression, "
+              "so the next pass rewrites them."),
+    )
     args = parser.parse_args()
 
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
@@ -72,6 +80,8 @@ async def main() -> int:
                 value = json.loads(value)
             facts = value.get("facts") or {}
             ok, why = card_still_qualifies(facts)
+            if args.regenerate and ok:
+                ok, why = False, "regenerating under the current prompt"
             who = value.get("about_person", "?")
             mark = "keep " if ok else "RETRACT"
             print(f"  [{mark}] {who}: {value.get('text', '')!r}")
