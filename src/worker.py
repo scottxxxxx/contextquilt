@@ -3205,23 +3205,65 @@ class ColdPathWorker:
         )
         if not remaining_lenses(taken_lenses):
             return False
+        # What has already been said about this user's OTHER people on
+        # the prose lenses. Spans BOTH of them deliberately: this pass
+        # does not know which lens it will produce until the model
+        # answers, and the convergence measured in production crossed
+        # the lens boundary anyway ("Responds to" opened five cards,
+        # "Gates forward" three, across both).
+        used_claims = [
+            r["text"] for r in await self.db.fetch(
+                """
+                SELECT DISTINCT cp.value->>'text' AS text
+                FROM context_patches cp
+                JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                WHERE ps.subject_key = $1
+                  AND cp.origin_mode = 'derived'
+                  AND cp.value->>'lens' = ANY($2::text[])
+                  AND COALESCE(cp.status, 'active') = 'active'
+                  AND NOT (cp.value->>'source_person' = ANY($3::text[]))
+                ORDER BY 1
+                LIMIT 12
+                """,
+                subject_key, sorted(MODEL_CHOSEN_LENSES), lens_key_ids,
+            ) if r["text"]
+        ]
+        base_content = build_profile_content(
+            person_name, dated, rule.get("guidance"),
+            taken_lenses=taken_lenses, used_claims=used_claims,
+        )
         defects: list = []
-        try:
-            response = await self.llm.extract(
-                system_prompt=PROFILE_SYSTEM,
-                user_content=build_profile_content(
-                    person_name, dated, rule.get("guidance"),
-                    taken_lenses=taken_lenses,
-                ),
+        profile = None
+        content = base_content
+        # One bounded retry on a recoverable defect, same reasoning as
+        # the contrastive lens: a corrective changes the PROMPT, so the
+        # second attempt is a different question rather than another
+        # roll of a pinned temperature.
+        for attempt in range(2):
+            try:
+                response = await self.llm.extract(
+                    system_prompt=PROFILE_SYSTEM, user_content=content,
+                )
+                profile = parse_profile_response(
+                    response.content, person_name=person_name,
+                    defects=defects, used_claims=used_claims,
+                )
+            except Exception as exc:
+                logger.warning("profile_synthesis_failed",
+                               subject=subject_key, person=person_name,
+                               reason=str(exc)[:200])
+                return False
+            if profile or attempt:
+                break
+            note = relationship_lenses.retry_note(
+                defects[0] if defects else "",
+                relationship_lenses.rejected_lengths(
+                    response.content).get("claim") or "",
             )
-            profile = parse_profile_response(
-                response.content, person_name=person_name, defects=defects,
-            )
-        except Exception as exc:
-            logger.warning("profile_synthesis_failed",
-                           subject=subject_key, person=person_name,
-                           reason=str(exc)[:200])
-            return False
+            if not note:
+                break
+            content = f"{base_content}\n\n{note}"
+            defects = []
         if not profile:
             # A rejected FORMAT is not a model declining, it is a model
             # answering in a shape the card cannot hold, and a run of
