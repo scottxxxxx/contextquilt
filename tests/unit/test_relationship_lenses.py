@@ -652,3 +652,32 @@ def test_unreadable_facts_are_left_alone_rather_than_retracted():
     from contextquilt.services.relationship_lenses import card_still_qualifies
     keep, why = card_still_qualifies({})
     assert keep is True and "left alone" in why
+
+
+# --- a rejection has to carry its own evidence -------------------------
+
+def test_a_rejection_reports_what_was_actually_written():
+    """`defect=claim_too_long` names the verdict and hides the evidence,
+    which cost three deploys of guessing at a claim that was one query
+    away from being readable."""
+    from contextquilt.services.relationship_lenses import rejected_lengths
+    got = rejected_lengths(
+        {"skip": False, "text": "x" * 75, "do": "y" * 40, "reason": "r"}
+    )
+    assert got["claim_chars"] == 75
+    assert got["do_chars"] == 40
+    assert got["claim"].startswith("xxx")
+
+
+def test_the_reported_claim_is_trimmed_so_a_log_line_stays_a_log_line():
+    from contextquilt.services.relationship_lenses import rejected_lengths
+    got = rejected_lengths({"text": "z" * 500, "do": ""})
+    assert len(got["claim"]) <= 120
+
+
+def test_a_diagnostic_never_breaks_the_pass_it_diagnoses():
+    """Anything unreadable returns nulls rather than raising."""
+    from contextquilt.services.relationship_lenses import rejected_lengths
+    for junk in ("not json", None, 42, {"text": None, "do": None}, "{bad"):
+        got = rejected_lengths(junk)
+        assert set(got) == {"claim", "claim_chars", "do_chars"}

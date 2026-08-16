@@ -420,6 +420,37 @@ def build_stands_out_content(
     return "\n".join(lines)
 
 
+def rejected_lengths(content) -> dict:
+    """What the writer actually wrote, for the rejection log.
+
+    A log line saying `defect=claim_too_long` names the verdict and hides
+    the evidence, and that cost three deploys of guessing at a claim that
+    was one query away from being readable. This puts the lengths and a
+    trimmed claim beside the verdict so the next failure explains itself.
+
+    Never raises: a diagnostic that can break the pass it is diagnosing
+    is worse than no diagnostic.
+    """
+    obj = content
+    if isinstance(obj, str):
+        match = re.search(r"\{.*\}", obj, re.DOTALL)
+        if not match:
+            return {"claim": None, "claim_chars": None, "do_chars": None}
+        try:
+            obj = json.loads(match.group())
+        except json.JSONDecodeError:
+            return {"claim": None, "claim_chars": None, "do_chars": None}
+    if not isinstance(obj, dict):
+        return {"claim": None, "claim_chars": None, "do_chars": None}
+    text = obj.get("text") if isinstance(obj.get("text"), str) else ""
+    do = obj.get("do") if isinstance(obj.get("do"), str) else ""
+    return {
+        "claim": text[:120] or None,
+        "claim_chars": len(text) or None,
+        "do_chars": len(do) or None,
+    }
+
+
 def card_still_qualifies(facts: dict) -> tuple:
     """Would today's rules still write this already-written card?
 
