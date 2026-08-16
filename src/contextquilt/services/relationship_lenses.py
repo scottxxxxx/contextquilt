@@ -329,7 +329,11 @@ Rules:
 - Never name a topic, project, company or person that appears in none of the listed items.
 - NEVER use a dash of any kind as punctuation. No em dash, no en dash, no hyphen standing in for a pause or an aside. Use a comma, a colon, parentheses, or two sentences. Hyphens inside genuinely hyphenated words such as "follow-up" are the only acceptable use.
 """ + CARD_SHAPE_RULES + """
-- The do line says what the user should do differently in the next meeting, given this comparison.
+- The do line STARTS WITH A VERB and is one short instruction. Never open it with a preamble such as "In your next meeting," or "When you speak with them," or "Consider". The reader already knows when they will use it, and the preamble alone spends a third of the line. Working do lines, all under 90 characters:
+
+"Ask which open items still have a real date behind them." (56)
+"Ask how she keeps dates, and use it on the others." (50)
+"Ask what has to change for the next date to hold." (49)
 - No hedging prefixes like "It seems".
 - Write in the same language as the listed items.
 - Skip only when the comparison genuinely supports nothing worth showing.

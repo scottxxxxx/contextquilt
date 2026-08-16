@@ -538,3 +538,25 @@ def test_an_unknown_fact_key_falls_back_to_the_long_subject():
     from contextquilt.services.relationship_lenses import build_stands_out_content
     facts = dict(FACTS, fact_key="something_new")
     assert FACTS["subject"] in build_stands_out_content("X", facts, [])
+
+
+def test_the_prompt_forbids_the_preamble_it_used_to_invite():
+    """Measured live: 'The do line says what the user should do
+    differently IN THE NEXT MEETING' produced 'In your next meeting, ask
+    what blocks Pallavi...' at 125 characters against a 90 ceiling. The
+    model copied the phrase out of the instruction, which is the same
+    failure as the long subject label one paragraph earlier."""
+    from contextquilt.services.relationship_lenses import STANDS_OUT_SYSTEM
+    assert "STARTS WITH A VERB" in STANDS_OUT_SYSTEM
+    assert "In your next meeting," in STANDS_OUT_SYSTEM  # named as forbidden
+
+
+def test_every_example_do_line_in_the_prompt_would_actually_pass():
+    from contextquilt.services.insight_cards import MAX_DO_CHARS
+    from contextquilt.services.relationship_lenses import STANDS_OUT_SYSTEM
+    import re
+    block = STANDS_OUT_SYSTEM.split("STARTS WITH A VERB")[1]
+    examples = re.findall(r'"(Ask [^"]+?\.)"', block)
+    assert len(examples) >= 3, examples
+    for example in examples:
+        assert len(example) <= MAX_DO_CHARS, (example, len(example))
