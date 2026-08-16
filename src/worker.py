@@ -2830,9 +2830,19 @@ class ColdPathWorker:
                            person=person_name, reason=str(exc)[:200])
             return False
         if not claim:
+            # Carry the EVIDENCE, not just the verdict. A bare
+            # `defect=claim_too_long` cost three deploys of guessing at
+            # what the model had actually written, and the answer was
+            # visible the moment anyone looked. Same rule as doc 19.9's
+            # logging note: a count with the offending value makes
+            # somebody go looking, a bare label does not.
+            over = relationship_lenses.rejected_lengths(response.content)
             logger.info("stands_out_card_rejected", subject=subject_key,
                         person=person_name,
-                        defect=defects[0] if defects else "declined")
+                        defect=defects[0] if defects else "declined",
+                        claim_chars=over.get("claim_chars"),
+                        do_chars=over.get("do_chars"),
+                        claim=over.get("claim"))
             return False
         # Post-check, same reason as every other lens: the call is
         # seconds of wall clock and the durable no must not lose a race
