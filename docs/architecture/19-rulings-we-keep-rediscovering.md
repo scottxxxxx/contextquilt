@@ -223,6 +223,93 @@ are fine. Assuming restraint is not.
 
 ---
 
+## 19.8 A model describes the SHAPE of what it is given.
+
+**Rule.** Hand a model a body of material and ask it an open question, and
+the honest answer it finds will often be a description of how the material
+is organised rather than of what it says. This is not hallucination and it
+is not a weak model. The answer is usually correct. It is just an answer
+about the container.
+
+**Paid for twice in one week, by two teams, neither knowing the other had
+paid.**
+
+1. **CQ's prose person lenses** (2026-08-16). `how_they_decide` and
+   `what_moves_them` read a corpus of `commitment`, `blocker`, `decision`
+   and `takeaway`. Every one of those types records what is owed or what
+   is stuck, so read alone almost anybody "gates on dependencies", and
+   three of the four people on the user's own pages carried exactly that
+   sentence. Every claim was accurate. The model had described the schema.
+   Sampling was ruled out first: the same person was declined identically
+   at ten sources and at his full 39, with the same stated reason.
+2. **GhostPour's plan extraction** (same week). A prompt asking for every
+   task and milestone, run against source material grouped under meeting
+   headings, produced the MEETING CONTAINERS as task rows. Every bar came
+   out one day long and the progress line was dragged down by rows that
+   were never work. "Dates on 29 of 29" read like a perfect score and was
+   actually the symptom, since a meeting always has a date.
+
+**Applying it.** Two defences, and the second is the one that works.
+
+- Ask what the material is a record OF before asking a model what it
+  shows. If every row records an obligation, no amount of prompting
+  produces a claim about temperament.
+- **Contrast is the fix, not phrasing.** A fact computed but never
+  compared still reads as generic. CQ's replacement lens
+  (`what_stands_out`) measures the whole roster, then reports only the
+  measure on which one person is unlike everybody else, with the
+  comparison published beside the claim. A person who is unremarkable
+  gets no card. See `services/relationship_lenses.py`.
+
+Corollary worth keeping separately: **a claim that is true of the whole
+population carries no information even when it is perfectly accurate.**
+Accuracy was never what was wrong with those four cards.
+
+---
+
+## 19.9 A failure invisible from your side of a boundary stays invisible.
+
+**Rule.** Additive at the writer, additive at the gateway and additive at
+the reader are three different claims. Each side can prove its own half
+and none of them can see the failure that lives on the other side. This is
+the standing argument for the three-way check, stated as a rule rather
+than as a habit.
+
+**Paid for three times, across all three teams.**
+
+1. **The closed `PatchType` enum** (2026-08-16). CQ added a `behavior`
+   type; GhostPour proved their gateway carries an unknown `patch_type`
+   verbatim and pinned it with a test. Both halves correct. ShoulderSurf's
+   decoder held a CLOSED enum, so an unrecognised type threw, the lossy
+   per-patch wrapper caught it, and the ENTIRE patch vanished with one log
+   line reading "skipped malformed patch". That wording is the whole
+   lesson: it reads as corruption, so nobody would go looking for a
+   vocabulary they had not learned yet. It is believed to be why an
+   earlier card never appeared on any build. Found only because one team
+   went looking on another team's side.
+2. **The Japanese ordinal string** (2026-08-16). SS's string catalogue
+   already held `"%1$d of %2$d"` from a pagination surface, where the
+   Japanese translation is an ORDINAL: it reads "the 11th of 21". Reusing
+   that key for "11 out of 21 items closed late" would have turned a count
+   into a position for every Japanese reader while every English reader
+   watched it work perfectly. Caught by reading the existing translation
+   rather than trusting the English.
+3. **The `uncomplete` route** (2026-08-10, recorded in the ops runbook).
+   Direct-smoked on CQ's socket, declared live, and 404ing from every real
+   device, because GP's edge declares exact routes and CQ's own socket
+   cannot see a route-table miss.
+
+**Applying it.** When a change crosses a team boundary, name which side
+each claim was proved on, and get the far side checked by whoever stands
+there. GP's phrasing is the compact version: fields are additive at the
+reader, routes are additive only at the gateway, same word, different
+mechanism. And when a decoder drops something, log a COUNT at notice with
+the unrecognised value, never "malformed": the first is a vocabulary you
+have not learned, the second is corruption, and only one of them makes
+anyone go looking.
+
+---
+
 ## See also
 
 - **Doc 16 §5.10 / §5.13**: a served name may assert only what was
