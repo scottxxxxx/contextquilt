@@ -35,10 +35,36 @@ import re
 from typing import Optional
 
 # The collapsed capsule is one line. See the module docstring.
-MAX_CLAIM_CHARS = 62
+# RAISED FROM 62 on 2026-08-16, and the history matters because the
+# squeeze was a mistake worth not repeating.
+#
+# 62 was the 16a design's number for a ONE LINE collapsed capsule, and
+# it was correct for that. ShoulderSurf then shipped TWO LINE capsules
+# with word-boundary truncation and the full claim preserved for
+# VoiceOver and for the expanded card, which means the capsule is a
+# TEASER rather than the whole claim. The ceiling stayed at 62 anyway,
+# so for three days every claim was being compressed to fit a constraint
+# that no longer existed.
+#
+# What 62 cost, measured against the claims written before it (#240,
+# 2026-08-13): they ran 97 to 177 characters and every one carried an
+# "X rather than Y" contrast clause, which is the part that actually
+# characterises somebody. "Escalates and documents systemic issues
+# across environments RATHER THAN applying local fixes" tells a reader
+# what this person does and what they do instead. Squeezed to 62 the
+# same fact becomes "Gates forward movement until dependencies resolve",
+# which is true of most competent people in a delivery org.
+#
+# 180 covers the observed range of the claims that worked, with headroom.
+# The capsule truncates; the card does not.
+MAX_CLAIM_CHARS = 180
 MIN_CLAIM_CHARS = 10
 # One imperative read in the seconds before a meeting, not a paragraph.
-MAX_DO_CHARS = 90
+# Raised with the claim, and for the same reason: the do lines written
+# before the ceiling ran 94 to 148 characters. A do line has to name
+# something specific to be worth reading, and "Ask what is blocking
+# dates from holding" fits in 90 precisely because it names nothing.
+MAX_DO_CHARS = 150
 MIN_DO_CHARS = 5
 
 # What the PROMPT asks for, deliberately below what the parse ALLOWS.
@@ -48,8 +74,8 @@ MIN_DO_CHARS = 5
 # a person who never gets a card, so the ask has to absorb the overshoot
 # rather than the ceiling absorbing the model. Anchor low, enforce at the
 # real limit, and the habitual overshoot lands inside it.
-TARGET_CLAIM_CHARS = 45
-TARGET_DO_CHARS = 70
+TARGET_CLAIM_CHARS = 120
+TARGET_DO_CHARS = 110
 
 # Defect codes, so a systematic format failure is visible in the logs
 # instead of looking like a model that keeps changing its mind.
@@ -181,6 +207,8 @@ def one_card_per_lens(cards):
 
 # The shared half of every card prompt. One text, so the two lens
 # families cannot drift on what a card is allowed to look like.
-CARD_SHAPE_RULES = f"""- The claim is ONE short sentence. AIM for about 7 words and {TARGET_CLAIM_CHARS} characters. The hard limit is {MAX_CLAIM_CHARS} characters: a claim over it is thrown away, not trimmed, so the card is lost entirely. Write the short version first rather than a full sentence you hope will fit. If a detail does not fit, drop the detail.
-- NEVER begin the claim with the person's name. The card appears on that person's own page, under their name, so the name is the one word the reader already has and it spends characters you do not have. Write "Gates forward movement until verification is in place", never "Priya gates forward movement until verification is in place".
-- The do line is ONE imperative sentence, read in the seconds before a meeting. AIM for about 11 words and {TARGET_DO_CHARS} characters; the hard limit is {MAX_DO_CHARS} and the same rule applies. A claim never ships without one."""
+CARD_SHAPE_RULES = f"""- The claim is ONE sentence, and it should be SPECIFIC rather than short. Aim for about {TARGET_CLAIM_CHARS} characters; the hard limit is {MAX_CLAIM_CHARS} and a claim over it is thrown away rather than trimmed. You have room. Use it on detail that distinguishes this person, not on adjectives.
+- SAY WHAT THEY DO INSTEAD. The claims that actually characterise somebody carry a contrast: "escalates and documents systemic issues across environments RATHER THAN applying local fixes" tells a reader what this person does and what they do in place of the obvious alternative. "Gates forward movement until dependencies resolve" names a behaviour that is true of most competent people. The second half of that sentence is where the information is, so write it.
+- Name the SPECIFIC thing where the evidence gives you one. A named piece of work, a kind of decision, the particular condition they wait for. A claim a reader can check against something they remember beats a claim they have to take on trust.
+- NEVER begin the claim with the person's name. The card appears on that person's own page, under their name, so it is the one word the reader already has.
+- The do line is ONE imperative sentence, read in the seconds before a meeting. Aim for about {TARGET_DO_CHARS} characters; the hard limit is {MAX_DO_CHARS}. It should name something specific too: "Ask which of the open items still have a real date" beats "Ask about progress". A claim never ships without one."""

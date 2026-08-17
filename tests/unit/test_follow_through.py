@@ -625,12 +625,39 @@ CLAIM = "Lands about half of what he commits to, usually a week late."
 DO = "Ask for the date he will actually hit, not the one he wants."
 
 
-def test_the_shipped_claims_would_all_have_been_rejected():
-    """The four live insights ran 97 to 177 characters because nothing
-    told the model otherwise, and the collapsed capsule is one line."""
-    too_long = "Gates forward movement until verification is in place " * 3
-    assert card_defect(too_long, DO) == CLAIM_LENGTH
-    assert card_defect(CLAIM, "Do this. " * 20) == DO_LENGTH
+def test_the_claims_that_actually_characterised_someone_still_fit():
+    """INVERTED 2026-08-16, and the inversion is the point.
+
+    This test used to assert that the four claims written before the
+    ceiling WOULD be rejected. They ran 97 to 177 characters, and 62 was
+    the number for a ONE LINE capsule. ShoulderSurf then shipped two-line
+    capsules with word-boundary truncation and the full claim kept for
+    the expanded card, so the capsule became a teaser and the ceiling
+    stopped describing anything real.
+
+    A reviewer picked one of these out as the best characterisation the
+    product had produced. They are the target, not the failure mode, and
+    a ceiling that rejects them is the defect."""
+    shipped = [
+        "Srikanth escalates and documents systemic issues across "
+        "environments rather than applying local fixes, and defers "
+        "deployment decisions until upstream dependencies are clarified.",
+        "Gates forward movement on technical work until explicit "
+        "verification or approval is in place, rather than proceeding "
+        "on assumption.",
+        "Moves forward by collecting input from others before committing "
+        "to next steps, rather than deciding alone.",
+    ]
+    for claim in shipped:
+        assert card_defect(claim, DO) is None, f"{len(claim)} chars rejected"
+
+
+def test_an_unbounded_claim_is_still_refused():
+    """Room is not the same as no limit. The capsule truncates but the
+    expanded card does not, and a paragraph is not a claim."""
+    assert card_defect("Gates forward movement until verification. " * 8,
+                       DO) == CLAIM_LENGTH
+    assert card_defect(CLAIM, "Do this. " * 30) == DO_LENGTH
     assert card_defect(CLAIM, DO) is None
 
 
