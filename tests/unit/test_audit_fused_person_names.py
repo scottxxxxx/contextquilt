@@ -1,10 +1,16 @@
 """Unit tests for scripts/audit_fused_person_names.py.
 
-The receipt this was written from: `Pallavi Vijay` is not a person, it is
-`Pallavi Kandanu` and `Vijay Rayudu` welded together by the extractor.
-The first-token collision audit structurally cannot see that shape, so
-these tests pin both halves of the job: it must FIND the fusion, and it
-must not cry wolf on an ordinary full name that happens to share a token.
+The receipt this was written from: `Pallavi Vijay` is not a person. It is
+two colleagues addressed by name in one sentence ("Pallavi, Vijay, you
+guys are working on...") that an upstream caption pipeline promoted to a
+speaker. The first-token collision audit structurally cannot see that
+shape, so these tests pin both halves of the job: it must FIND the row,
+and it must not cry wolf on an ordinary full name that shares a token.
+
+The tests deliberately say nothing about CAUSE. The detector keys on name
+shape alone and cannot tell a caption artifact from an extraction fusion;
+pinning a cause here would re-assert the thing the docstring had to walk
+back.
 """
 
 from __future__ import annotations
