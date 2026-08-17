@@ -23,6 +23,7 @@ import asyncio
 import os
 import statistics
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -73,14 +74,24 @@ def histogram(counts: list) -> str:
 async def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--since", default=None,
-                        help="only meetings first ingested on or after this")
+                        help="only meetings first ingested on or after this "
+                             "(YYYY-MM-DD or a full ISO timestamp)")
     parser.add_argument("--limit", type=int, default=40,
                         help="how many per-meeting rows to print")
     args = parser.parse_args()
 
+    # asyncpg binds timestamptz strictly: a bare string raises rather
+    # than being coerced, which is how this shipped broken. Parsed here
+    # so the CLI can still take the obvious YYYY-MM-DD.
+    since = None
+    if args.since:
+        since = datetime.fromisoformat(args.since)
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+
     conn = await asyncpg.connect(os.environ["DATABASE_URL"])
     try:
-        rows = await conn.fetch(QUERY, args.since)
+        rows = await conn.fetch(QUERY, since)
     finally:
         await conn.close()
 

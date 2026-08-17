@@ -143,3 +143,27 @@ def test_a_failure_here_cannot_lose_the_meeting():
         "async def ")[0]
     assert "behavior_observations_failed" in body
     assert "return 0" in body
+
+
+# --- the ops tool has to actually run ---------------------------------
+
+def test_the_yield_tool_parses_its_own_since_argument():
+    """Shipped broken in #269 and found by running it against prod:
+    asyncpg binds timestamptz strictly, so a bare '2026-08-17' string
+    raises DataError rather than being coerced. The unit suite never
+    caught it because nothing exercised the CLI.
+
+    I had merged an ops tool without driving it, on the same day I told
+    two other teams that reading the code is not verifying the thing."""
+    tool = pathlib.Path("scripts/inspect_behavior_yield.py").read_text()
+    assert "datetime.fromisoformat(args.since)" in tool
+    assert "tzinfo=timezone.utc" in tool
+    assert "conn.fetch(QUERY, since)" in tool
+
+
+def test_the_yield_tool_still_accepts_no_since():
+    """The common call is no filter at all, which binds None and must
+    keep working."""
+    tool = pathlib.Path("scripts/inspect_behavior_yield.py").read_text()
+    assert "since = None" in tool
+    assert "if args.since:" in tool
