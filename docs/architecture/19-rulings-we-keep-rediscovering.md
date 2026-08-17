@@ -145,7 +145,7 @@ in another is a rule with one carrier (see 19.2).
 the types already there. A new type is not free, and a type that competes
 badly for attention will underperform its own capability.
 
-**Measured twice, on real transcripts.**
+**Measured three times; the third one is a near-miss rather than a cost.**
 
 1. The **entity types section** (PR #246) cost about 20% of patches and
    bought about 50% more entities: 14.7 down to 11.7 patches, 5.3 up to 8
@@ -157,8 +157,25 @@ badly for attention will underperform its own capability.
    model given a DEDICATED call with the same task produced 48. Twelve
    times the yield, no model change.
 
+3. **The behavior type again** (2026-08-16), and this is the first time
+   the rule PREVENTED a cost rather than explained one. Scott authorised
+   pulling GhostPour's 30-day transcript cache to rebuild the behavior
+   corpus, and GP was about to shorten that retention. The ask had
+   already been sent when a re-read of this entry showed the replay
+   would run under the inline configuration measured above: 41
+   perishable meetings for roughly twenty observations, spending the
+   only copy of those transcripts that expires. The pull was stopped,
+   the dedicated call was built and measured first (7.0 observations per
+   meeting against the 0.5 inline baseline, 14x), and only then did the
+   replay go ahead. **The receipt is the near-miss, not the yield.**
+
 **Applying it.** Before adding a type to extraction, ask whether it
-deserves its own call. Precedent already exists: the communication
+deserves its own call. And before spending a PERISHABLE input on an
+existing configuration, re-read what that configuration was last
+measured at: the transcripts were a one-shot resource and the
+configuration was a known-bad one, which is the combination that turns
+an ordinary inefficiency into an unrecoverable one. Precedent already
+exists: the communication
 profile has run as a separate lightweight call at ingest since early on,
 and the transcript is available exactly once, at ingest, which is also
 why speaker turn counts and question attribution are captured there
