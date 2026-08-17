@@ -522,20 +522,41 @@ def build_entity_resolver(entity_rows: Sequence[dict], alias_rows: Sequence[dict
             eid = forward[eid]
         return eid
 
-    by_name: dict = {}
+    # Collect EVERY entity a surface form could mean, rather than the
+    # first one seen. `setdefault` kept the first, and the query feeding
+    # this has no ORDER BY, so a contested name resolved to whichever row
+    # Postgres happened to return. That is not a policy, it is an
+    # accident, and on 2026-08-17 it was deciding which of three
+    # Pallavis on one project owned the work.
+    claims: dict = {}
     for r in entity_rows:
         name = (r.get("name") or "").strip().lower()
         if name:
-            by_name.setdefault(name, canonical(str(r["entity_id"])))
+            claims.setdefault(name, set()).add(canonical(str(r["entity_id"])))
     for r in alias_rows:
         alias = (r.get("alias") or "").strip().lower()
         if alias:
-            by_name.setdefault(alias, canonical(str(r["entity_id"])))
+            claims.setdefault(alias, set()).add(canonical(str(r["entity_id"])))
 
     def resolve(surface_form: "str | None") -> "str | None":
+        # The entity this form means, or None when more than one could.
+        #
+        # A CONTESTED form returns None. Two humans genuinely share a
+        # name on this roster (Mike DiTroia and Mike Rogers; three
+        # Pallavis on one project), and picking one is a coin flip that
+        # reads as certainty everywhere downstream: their items, their
+        # meeting counts, their cards. Null already means "CQ cannot
+        # tell", which is a claim we are allowed to make and the only
+        # honest one available here.
+        #
+        # Forms that merge to ONE canonical entity are not contested, so
+        # an alias and its canonical name still resolve normally.
         if not surface_form or not isinstance(surface_form, str):
             return None
-        return by_name.get(surface_form.strip().lower())
+        candidates = claims.get(surface_form.strip().lower())
+        if not candidates or len(candidates) > 1:
+            return None
+        return next(iter(candidates))
 
     return resolve
 

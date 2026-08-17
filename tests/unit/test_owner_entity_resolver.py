@@ -77,3 +77,52 @@ def test_resolution_is_set_based_and_vocabulary_aware():
     assert "DISTINCT ON (pc.to_patch_id)" in MAIN
     assert "vocab.ownership_label," in MAIN
     assert MAIN.count("vocab.person_entity_type,\n    )") >= 1 or "user_id, vocab.person_entity_type," in MAIN
+
+
+# --- a contested name resolves to nobody -------------------------------
+
+def test_two_people_sharing_a_name_resolve_to_neither():
+    """Measured on production 2026-08-17: Mike DiTroia and Mike Rogers
+    both have meetings on one project, and three Pallavis share another.
+    The resolver used to keep whichever row came first out of a query
+    with no ORDER BY, so a contested name resolved by accident and the
+    result read as certainty everywhere downstream."""
+    resolve = build_entity_resolver(
+        [{"entity_id": "e1", "name": "Mike", "merged_into": None},
+         {"entity_id": "e2", "name": "Mike", "merged_into": None}],
+        [],
+    )
+    assert resolve("Mike") is None
+
+
+def test_an_alias_colliding_with_another_entitys_name_is_contested_too():
+    """The collision does not have to be name-against-name to be real."""
+    resolve = build_entity_resolver(
+        [{"entity_id": "e1", "name": "Pallavi Vijay", "merged_into": None},
+         {"entity_id": "e2", "name": "Pallavi Kandanur", "merged_into": None}],
+        [{"entity_id": "e1", "alias": "Pallavi"},
+         {"entity_id": "e2", "alias": "Pallavi"}],
+    )
+    assert resolve("Pallavi") is None
+    # The unambiguous full names still work.
+    assert resolve("Pallavi Vijay") == "e1"
+
+
+def test_forms_that_merge_to_one_entity_are_not_contested():
+    """An alias and its canonical name point at the same human, so they
+    must keep resolving. Treating that as ambiguity would break every
+    merged identity on the roster."""
+    resolve = build_entity_resolver(
+        [{"entity_id": "old", "name": "Sukumar", "merged_into": "new"},
+         {"entity_id": "new", "name": "Sukumar Gurugubelli", "merged_into": None}],
+        [{"entity_id": "old", "alias": "Sukumar"}],
+    )
+    assert resolve("Sukumar") == "new"
+    assert resolve("Sukumar Gurugubelli") == "new"
+
+
+def test_an_unknown_form_still_resolves_to_nothing():
+    resolve = build_entity_resolver(
+        [{"entity_id": "e1", "name": "Denby", "merged_into": None}], [])
+    assert resolve("Nobody") is None
+    assert resolve(None) is None
