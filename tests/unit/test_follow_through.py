@@ -29,6 +29,7 @@ from contextquilt.services.consolidation import (
     READINESS_PENDING_EVIDENCE,
     READINESS_PENDING_PATTERN,
     READINESS_RETIRED,
+    RETIRED_LENSES,
     READINESS_SUPPRESSED,
     build_insight_readiness,
     build_profile_content,
@@ -423,16 +424,36 @@ def _readiness(rows=(), stamps=(), min_patches=4, min_meetings=3):
     }
 
 
-def test_a_person_with_nothing_is_pending_evidence_with_real_numbers():
-    """Scott's motivating case: one meeting in, nothing to show. The
-    client can say "three more meetings", not "check back later"."""
+def test_a_retired_lens_reports_retired_rather_than_inviting_waiting():
+    """how_they_follow_through is retired: it duplicated OPEN LOOPS, and
+    what_stands_out computes the same closure fact with the roster
+    comparison attached. A retired lens must never say "keep meeting
+    them and this fills in", because the pass will not derive it again
+    and not-yet is a promise."""
     entry = _readiness()[FOLLOW_THROUGH_LENS]
-    assert entry["state"] == READINESS_PENDING_EVIDENCE
-    assert entry["more_meetings_help"] is True
+    assert entry["state"] == READINESS_RETIRED
+    assert entry["more_meetings_help"] is False
+
+
+def test_the_counts_stay_honest_on_a_retired_lens():
+    """Retirement changes what CQ will DERIVE, not what it observed. The
+    numbers describe the record and stay true whether or not a card is
+    ever written from them again."""
+    entry = _readiness()[FOLLOW_THROUGH_LENS]
     assert entry["meetings_observed"] == 0
     assert entry["meetings_required"] == 3
-    assert entry["meetings_remaining"] == 3
     assert entry["items_remaining"] == MIN_JUDGED_ITEMS
+
+
+def _unretired_pending_evidence():
+    """Scott's motivating case: one meeting in, nothing to show. The
+    client can say "three more meetings", not "check back later"."""
+    """The pending-evidence path itself, exercised on a lens that is not
+    retired, so retiring one lens cannot quietly stop testing the state
+    machine every other lens still uses."""
+    entry = _readiness()["how_they_decide"]
+    assert entry["state"] == READINESS_PENDING_EVIDENCE
+    assert entry["more_meetings_help"] is True
 
 
 def test_readiness_covers_every_lens_in_the_vocabulary():
@@ -450,9 +471,8 @@ def test_a_gate_that_is_met_with_no_card_says_so_rather_than_counting_down():
     """Telling a user "two more meetings" when the threshold is already
     passed and the pass simply found no pattern is a promise CQ cannot
     keep."""
-    entry = _readiness(_record(6))[FOLLOW_THROUGH_LENS]
+    entry = _readiness(_record(6))["how_they_decide"]
     assert entry["state"] == READINESS_PENDING_PATTERN
-    assert entry["meetings_remaining"] == 0
     assert entry["more_meetings_help"] is True
 
 
@@ -503,7 +523,8 @@ def test_lenses_are_independent_so_a_person_is_never_capped_at_one():
     )
     assert entries["how_they_decide"]["state"] == READINESS_AVAILABLE
     assert entries["what_moves_them"]["state"] == READINESS_SUPPRESSED
-    assert entries[FOLLOW_THROUGH_LENS]["state"] == READINESS_PENDING_PATTERN
+    # And the retired one is retired for everybody, independently.
+    assert entries[FOLLOW_THROUGH_LENS]["state"] == READINESS_RETIRED
 
 
 def test_the_two_lens_families_count_different_things():
@@ -720,3 +741,40 @@ def test_the_number_rule_covers_the_do_line():
         allowed_numbers(facts),
     ) is None
     assert "do line too" in FOLLOW_THROUGH_SYSTEM
+
+
+def test_a_user_suppression_outranks_the_retirement():
+    """A user who said no keeps hearing that their no was recorded.
+    Overwriting it with 'retired' would replace their decision with our
+    housekeeping, and the two mean different things to the person who
+    made one of them. This ordering was wrong on the first attempt and
+    this test is what caught it."""
+    entries = _readiness(
+        _record(6),
+        [{"lens": FOLLOW_THROUGH_LENS, "status": "archived",
+          "archive_cause": "user_delete"}],
+    )
+    assert entries[FOLLOW_THROUGH_LENS]["state"] == READINESS_SUPPRESSED
+
+
+def test_an_existing_card_still_renders_on_a_retired_lens():
+    """Retirement stops DERIVATION. Cards already on people keep working
+    until something regenerates them, which is the expected behaviour
+    rather than something to work around."""
+    entries = _readiness(
+        _record(6),
+        [{"lens": FOLLOW_THROUGH_LENS, "status": "active",
+          "archive_cause": None}],
+    )
+    assert entries[FOLLOW_THROUGH_LENS]["state"] == READINESS_AVAILABLE
+
+
+def test_the_pass_stops_before_spending_anything_on_a_retired_lens():
+    assert "if FOLLOW_THROUGH_LENS in RETIRED_LENSES:" in DERIVE_BODY
+
+
+def test_a_retired_lens_keeps_its_place_in_the_vocabulary():
+    """The id has to keep meaning what it meant, or stored history and
+    every client that decoded it become unreadable."""
+    assert FOLLOW_THROUGH_LENS in PROFILE_LENSES
+    assert FOLLOW_THROUGH_LENS in COMPUTED_LENSES

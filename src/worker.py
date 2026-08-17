@@ -89,6 +89,7 @@ from contextquilt.services.consolidation import (
     MAX_SOURCE_TEXTS,
     MAX_USERS_PER_APP_PER_CYCLE,
     MODEL_CHOSEN_LENSES,
+    RETIRED_LENSES,
     PROFILE_SYSTEM,
     build_profile_content,
     build_synthesis_content,
@@ -3454,6 +3455,12 @@ class ColdPathWorker:
         removes the person from the candidate set forever.
         """
         if budget <= 0:
+            return 0
+        # Retired: the card it produced duplicated OPEN LOOPS, and
+        # what_stands_out computes the same closure fact with the roster
+        # comparison attached. Existing cards keep rendering until
+        # something regenerates them; only new derivation stops here.
+        if FOLLOW_THROUGH_LENS in RETIRED_LENSES:
             return 0
         vocab = people_vocabulary(await self._app_manifest(app_id))
         # Which of the rule's types can even carry a due date is the

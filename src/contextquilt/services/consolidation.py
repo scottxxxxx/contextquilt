@@ -111,6 +111,25 @@ QUIET_MEETING_WINDOW = 6
 # services/follow_through.py has the whole argument for why the third
 # lens had to be built this way round.
 COMPUTED_LENSES = {FOLLOW_THROUGH_LENS}
+
+# Lenses that stay in the VOCABULARY but are no longer derived.
+#
+# A retired lens is not a deleted one. Cards already stamped on people
+# keep rendering until something regenerates them, the readiness surface
+# reports `retired` (which clients render as nothing, never as a not-yet
+# card, because not-yet is a promise), and the id keeps its meaning so
+# stored history stays readable. Only new derivation stops.
+#
+# how_they_follow_through is retired because it says what OPEN LOOPS
+# already says. Measured on one live page: follow-through reads "9 of 20
+# due items closed; 11 remain open past deadline" while OPEN LOOPS reads
+# "8 of 55 open items are overdue", and both do-lines reduce to asking
+# for a date. `what_stands_out` computes closed_late as one of its five
+# facts WITH the roster comparison attached, which is the same fact with
+# the half that makes it worth reading. Two surfaces counting open work
+# with a date on it, and the third one telling you whether that count is
+# unusual.
+RETIRED_LENSES = {FOLLOW_THROUGH_LENS}
 # The whole vocabulary: what a person's stack can hold, what a lens stamp
 # may say, and what the readiness surface reports on.
 PROFILE_LENSES = MODEL_CHOSEN_LENSES | COMPUTED_LENSES
@@ -423,12 +442,25 @@ READINESS_WAITING_STATES = {READINESS_PENDING_EVIDENCE, READINESS_PENDING_PATTER
 USER_SUPPRESSION_CAUSE = "user_delete"
 
 
-def _lens_state(stamps: List[Mapping[str, Any]], gate_met: bool) -> str:
+def _lens_state(stamps: List[Mapping[str, Any]], gate_met: bool,
+                lens: Optional[str] = None) -> str:
     for stamp in stamps:
         if (stamp.get("status") or "active") == "active":
             return READINESS_AVAILABLE
+    # SUPPRESSION OUTRANKS RETIREMENT, and the order here is the whole
+    # point. A user who said no to this lens keeps hearing that their no
+    # was recorded; overwriting it with "retired" would replace their
+    # decision with our housekeeping, and the two mean different things
+    # to the person who made one of them. Caught by the test that pins
+    # it rather than by review.
     if any(stamp.get("archive_cause") == USER_SUPPRESSION_CAUSE for stamp in stamps):
         return READINESS_SUPPRESSED
+    # A retired lens reports retired even for somebody who never carried
+    # one. The alternative is telling a user that more meetings will earn
+    # a card the pass will never derive again, which is the not-yet
+    # promise made about a lens that no longer exists.
+    if lens and lens in RETIRED_LENSES:
+        return READINESS_RETIRED
     if stamps:
         return READINESS_RETIRED
     return READINESS_PENDING_PATTERN if gate_met else READINESS_PENDING_EVIDENCE
@@ -484,7 +516,7 @@ def build_insight_readiness(
             items, meetings = model_items, model_meetings
             need_items = min_patches
         gate_met = items >= need_items and meetings >= min_meetings
-        state = _lens_state(by_lens.get(lens, []), gate_met)
+        state = _lens_state(by_lens.get(lens, []), gate_met, lens)
         lenses.append({
             "lens": lens,
             "state": state,
