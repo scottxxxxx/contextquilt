@@ -340,6 +340,63 @@ anyone go looking.
 
 ---
 
+## 19.10 An absence is evidence only if the thing had a way to show up.
+
+**Rule.** A zero, a silence, an empty error log and a decision nobody
+reversed all look like confirmation, and none of them are until you can
+name the channel the contradicting result would have arrived through and
+show that it existed. Distinct from 19.9, which is about which SIDE of a
+boundary a claim was proved on: this one is about a signal that could not
+have reached any side, so every side reads the same reassuring nothing.
+
+The aggravating case is when the silence also produces an artifact.
+A missing record gets filled in later. A wrong one gets trusted, and the
+more it looks like a normal output of the system, the less anyone checks
+it.
+
+**Paid for four times in two days, across two teams.**
+
+1. **Zero reversals of the silent auto-close** (CQ, 2026-08-17). The
+   worker archived every commitment the extraction reported as resolved,
+   167 of them, 72% of every completion in the database. None had ever
+   been reversed, and the `uncomplete` lane had been available the whole
+   time. That reads as an accuracy result and it is not one: a closed
+   item leaves the open list, drops out of the ledger population, and
+   reappears in `completed_they_owe`, so the only person who could have
+   objected was never shown the thing to object to. Measuring the
+   evidence directly instead found that items were closing because the
+   promise was RESTATED, which doc 16 §5.12 already rules is not an
+   advance. The artifact was a delivery history: the system was
+   crediting people with work they had not done, in the exact surface a
+   reader would trust without checking. See
+   `services/closure_evidence.py`.
+2. **A test that passed because the thing it checks never ran**
+   (GhostPour, 2026-08-16). Green on every run, and green is what it
+   would also have been had the code under it been deleted.
+3. **A counter that read identically on total success and total
+   failure** (GhostPour, 2026-08-16). Any value it showed was consistent
+   with both, so no value it showed carried information.
+4. **A dossier that counted from a truncated set** (GhostPour,
+   2026-08-17) and reported a confident number, because nothing about a
+   truncated read looks different from a complete one at the point the
+   count is taken.
+
+**Applying it.** Before treating a null result as a pass, ask what the
+complaint would have had to travel through, and check that path rather
+than the count. A machine decision that no human sees is not
+uncontested, it is unexamined, so give the reversal somewhere to come
+from: surface the decision with its evidence attached, and prefer asking
+over deciding when the artifact would be a durable record about a person.
+Where the choice is between a wrong record and a missing one, ship the
+missing one.
+
+The corollary for instruments: a check whose passing and failing states
+look the same from where you stand is not a check. Prove it fails when
+it should, the way GP proved their passthrough tests by making the proxy
+behave like a middlebox and confirming four of them went red.
+
+---
+
 ## See also
 
 - **Doc 16 §5.10 / §5.13**: a served name may assert only what was
