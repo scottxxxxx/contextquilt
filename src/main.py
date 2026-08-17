@@ -1786,6 +1786,24 @@ class QuiltResponse(BaseModel):
                                    # originless (user-scoped) patches stay in the flat
                                    # arrays only
     server_time: Optional[str] = None  # use as `since` on next request
+    # Whether `limit` bit, and what the real total was.
+    #
+    # `limit` applied a SQL LIMIT and returned fewer rows with nothing
+    # saying so. GhostPour found the consequence from the far side: they
+    # pass a cap, build a cross-meeting topic tracker on the result, and
+    # the artifact is confidently wrong about the one thing it exists to
+    # measure. Their words, worth keeping: a silent cap means a busy
+    # project undercounts.
+    #
+    # Recall already solved this for its own truncation with a coverage
+    # line ("showing N of M stored patches for this project"), which is
+    # contract commitment E and always on. Same principle, structured
+    # because this surface is read by code rather than a model.
+    #
+    # Absent when no `limit` was passed, so a caller that never caps
+    # sees no change at all.
+    truncated: Optional[bool] = None
+    total_available: Optional[int] = None
 
 class PatchUpdate(BaseModel):
     fact: Optional[str] = None
@@ -1997,7 +2015,14 @@ async def get_user_quilt(
     else:
         query += " ORDER BY cp.created_at DESC, cp.patch_id ASC"
 
+    # Count BEFORE the cap, so the caller can tell an exhausted list from
+    # a truncated one. Only when a cap was actually passed: a caller that
+    # never limits pays nothing for a question it did not ask.
+    total_available: Optional[int] = None
     if limit:
+        total_available = await db_pool.fetchval(
+            f"SELECT count(*) FROM ({query}) AS unlimited", *params
+        )
         query += f" LIMIT ${len(params) + 1}"
         params.append(limit)
 
@@ -2249,6 +2274,12 @@ async def get_user_quilt(
         completed=completed_ids,
         meetings=meetings,
         server_time=server_time.isoformat() + "Z",
+        # None when no cap was passed. When one was, `truncated` answers
+        # the only question a caller building a count on this actually
+        # has, and `total_available` is what they should have counted.
+        truncated=(None if total_available is None
+                   else total_available > len(rows)),
+        total_available=total_available,
     )
 
 
