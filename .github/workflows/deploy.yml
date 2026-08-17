@@ -70,6 +70,26 @@ jobs:
             # .env.mcp) survive.
             sudo git reset --hard origin/main
 
+            # --- Disk headroom check, BEFORE anything writes ---
+            # 2026-08-17: the host hit 100% (81MB free of 29GB) and a
+            # build died on "unable to fill /var/lib/dpkg/updates/tmp.i
+            # with padding", which names dpkg rather than the disk and
+            # sent the first look in the wrong direction. A deploy that
+            # is going to fail for want of space should say so in those
+            # words, before it half-applies anything.
+            #
+            # Checked before the pull because the pull is the first step
+            # that needs room: one image is ~416MB and compose pulls the
+            # new one while the old is still referenced.
+            AVAIL_MB=$(df -Pm / | awk 'NR==2 {print $4}')
+            echo "Disk free: ${AVAIL_MB}MB"
+            if [ "$AVAIL_MB" -lt 2048 ]; then
+              echo "FATAL: only ${AVAIL_MB}MB free on /. A deploy needs about 2GB."
+              echo "Reclaim with: sudo docker builder prune -f   (pure cache, safe)"
+              echo "Then:         sudo docker image prune -a -f  (removes rollback targets)"
+              exit 1
+            fi
+
             # --- Pull image ---
             # /opt/cq-ops is mode 700 root:root — the compose file and
             # .env.prod live there with restricted perms. Every compose
@@ -113,6 +133,37 @@ jobs:
               fi
               sleep 1
             done
+
+            # --- Reclaim, AFTER the smoke test passes ---
+            # Deliberately last. Everything above can still roll back to
+            # the previous image; once this runs, the superseded layers
+            # may be gone. So it only executes on a deploy that has
+            # already proved itself healthy.
+            #
+            # BUILD CACHE ONLY here. Images are already handled by the
+            # `image prune -af --filter until=24h` at the end of this
+            # script, and a second image prune would just be two things
+            # to keep in step.
+            #
+            # The build cache was the gap. Nothing in this deploy had
+            # ever cleared it, and it was 2.97GB of the 6.7GB reclaimed
+            # by hand on 2026-08-17: the single largest category and the
+            # fastest-growing. It accrues from every project that builds
+            # on this host (GhostPour, Bifrost, the websites) plus any
+            # manual build, and it holds nothing that cannot be rebuilt.
+            #
+            # WHY THE EXISTING 24h FILTER DID NOT SAVE US, which is the
+            # part worth remembering: it exempts images younger than a
+            # day, and the failure is a BURST. 08-16 had 18 builds and
+            # 08-17 had 10, all inside one 24h window, so not one of them
+            # qualified while the disk went to 100%. An age filter cannot
+            # see a burst; that is what the headroom check above is for.
+            #
+            # Never fails the deploy: the app is already up and healthy,
+            # and housekeeping must not turn a good release into a red X.
+            echo "Reclaiming build cache…"
+            sudo docker builder prune -f 2>&1 | tail -1 || true
+            df -h / | tail -1
 
             # --- MCP stack (separate compose + env file) ---
             # DISABLED 2026-08-05. Gated off by default rather than
