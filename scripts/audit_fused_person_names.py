@@ -42,13 +42,23 @@ def tokens(name):
     return [t for t in TOKEN_RE.split(name.strip().lower()) if t]
 
 
-def fused_candidates(people):
+def fused_candidates(people, volumes=None):
     """people: iterable of (entity_id, name). Returns ranked candidates.
 
     A candidate is a two-token name "A B" where A is the first token of a
     different person and B is the first token of a third person. Confidence
     drops when B is ALSO attested as somebody's surname on this roster,
     because then B is a real family name and the coincidence is ordinary.
+
+    `volumes` maps entity_id -> meeting count. Optional, because the
+    structural rule stands without it, but supply it when you can: the
+    ratio of a candidate's volume to its biggest source is what says how
+    much a WRONG call costs, and therefore whether a hit is worth putting
+    in front of a human at all. A 6-meeting row beside an 87-meeting
+    source is a small artifact next to a real person and cheap to settle.
+    Three rows at 40 each is an expensive question, and a "fused" row as
+    substantial as its supposed sources undercuts the fusion story rather
+    than supporting it.
     """
     parsed = []
     for entity_id, name in people:
@@ -81,16 +91,43 @@ def fused_candidates(people):
         tail_as_surname = [p for p in last_token.get(tail, []) if p[0] != entity_id]
         confidence = "low" if tail_as_surname else "high"
 
-        out.append({
+        candidate = {
             "entity_id": entity_id,
             "name": name,
             "head_sources": head_sources,
             "tail_sources": tail_sources,
             "tail_also_a_surname_of": tail_as_surname,
             "confidence": confidence,
-        })
+            "meetings": None,
+            "biggest_source": None,
+            "volume_ratio": None,
+        }
 
-    out.sort(key=lambda c: (c["confidence"] != "high", c["name"].lower()))
+        if volumes:
+            mine = volumes.get(entity_id)
+            source_volumes = [
+                (volumes.get(p[0]) or 0, p[1])
+                for p in head_sources + tail_sources
+            ]
+            biggest = max(source_volumes, default=(0, None))
+            candidate["meetings"] = mine
+            candidate["biggest_source"] = biggest[1]
+            # Guard the denominator: a source with no appearances tells us
+            # nothing about cost, so leave the ratio honestly null rather
+            # than inventing an infinity.
+            if mine is not None and biggest[0] > 0:
+                candidate["volume_ratio"] = round(mine / biggest[0], 3)
+
+        out.append(candidate)
+
+    # High confidence first, then cheapest-to-settle first: a candidate
+    # dwarfed by its source is both more likely spurious and less costly
+    # to act on. Unknown ratio sorts mid, never ahead of a measured one.
+    out.sort(key=lambda c: (
+        c["confidence"] != "high",
+        c["volume_ratio"] if c["volume_ratio"] is not None else 0.5,
+        c["name"].lower(),
+    ))
     return out
 
 
@@ -102,13 +139,21 @@ SELECT_PEOPLE = """
       AND user_id = $1
 """
 
-EVIDENCE = """
-    SELECT
-      (SELECT count(*) FROM person_appearances pa
-        WHERE pa.entity_id = $1) AS meetings,
-      (SELECT count(*) FROM context_patches cp
-        WHERE cp.value->>'owner' = $2
-          AND COALESCE(cp.status,'active') = 'active') AS owned_patches
+# Every person's meeting count in one pass. Ranking needs the SOURCES'
+# volumes as well as each candidate's, so a per-candidate query would be
+# N+1 against a table that is cheap to read whole.
+SELECT_VOLUMES = """
+    SELECT entity_id, count(*) AS meetings
+    FROM person_appearances
+    WHERE user_id = $1
+    GROUP BY entity_id
+"""
+
+OWNED_PATCHES = """
+    SELECT count(*) AS owned_patches
+    FROM context_patches
+    WHERE value->>'owner' = $1
+      AND COALESCE(status,'active') = 'active'
 """
 
 
@@ -124,15 +169,21 @@ async def main() -> int:
         people = [(str(r["entity_id"]), r["name"]) for r in rows]
         print(f"{len(people)} live person entities for {args.user}\n")
 
-        candidates = fused_candidates(people)
+        vol_rows = await conn.fetch(SELECT_VOLUMES, args.user)
+        volumes = {str(r["entity_id"]): r["meetings"] for r in vol_rows}
+
+        candidates = fused_candidates(people, volumes=volumes)
         if not candidates:
             print("No fused-name candidates.")
             return 0
 
         for c in candidates:
-            ev = await conn.fetchrow(EVIDENCE, c["entity_id"], c["name"])
+            owned = await conn.fetchval(OWNED_PATCHES, c["name"])
             print(f"[{c['confidence']}] {c['name']}  ({c['entity_id']})")
-            print(f"    meetings={ev['meetings']}  owned_patches={ev['owned_patches']}")
+            print(f"    meetings={c['meetings']}  owned_patches={owned}")
+            if c["volume_ratio"] is not None:
+                print(f"    volume vs biggest source ({c['biggest_source']}): "
+                      f"{c['volume_ratio']}  <- cost of a wrong call")
             print(f"    head matches: {', '.join(n for _, n in c['head_sources'])}")
             print(f"    tail matches: {', '.join(n for _, n in c['tail_sources'])}")
             if c["tail_also_a_surname_of"]:

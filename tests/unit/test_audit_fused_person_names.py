@@ -32,6 +32,19 @@ ROSTER = [
 ]
 
 
+# Two candidates that differ only in how much a wrong call would cost.
+# `Rao Mehta` needs BOTH halves to head another name, hence Rao Sharma and
+# Mehta Gupta: a surname-only match is not a candidate at all.
+_TWO_TIER = [
+    ("a", "Pallavi Kandanu"),
+    ("b", "Vijay Rayudu"),
+    ("c", "Pallavi Vijay"),     # 6 beside 87 -> dwarfed, cheap to settle
+    ("d", "Rao Sharma"),
+    ("e", "Mehta Gupta"),
+    ("f", "Rao Mehta"),         # 36 beside 40 -> comparable, expensive
+]
+
+
 def _by_name(candidates):
     return {c["name"]: c for c in candidates}
 
@@ -90,6 +103,50 @@ def test_self_collision_is_not_a_fusion():
     name collides with itself across spellings is a merge case."""
     roster = [("a", "Vijay Rayudu"), ("b", "Vijay Vijay")]
     assert mod.fused_candidates(roster) == []
+
+
+def test_volume_ratio_measures_cost_of_a_wrong_call():
+    """The real shape: a 6-meeting fused row beside an 87-meeting source.
+    The ratio is what says a wrong call here is cheap."""
+    volumes = {"e1": 87, "e2": 3, "e3": 6}
+    hit = _by_name(mod.fused_candidates(ROSTER, volumes=volumes))["Pallavi Vijay"]
+    assert hit["meetings"] == 6
+    assert hit["biggest_source"] == "Pallavi Kandanu"   # 87 beats 3
+    assert hit["volume_ratio"] == round(6 / 87, 3)
+
+
+def test_ratio_is_null_when_volumes_absent():
+    """The structural rule stands without volumes; the ratio must not be
+    faked when nothing was measured."""
+    hit = _by_name(mod.fused_candidates(ROSTER))["Pallavi Vijay"]
+    assert hit["volume_ratio"] is None
+    assert hit["meetings"] is None
+    assert hit["biggest_source"] is None
+
+
+def test_zero_volume_source_leaves_ratio_null_not_infinite():
+    """A source with no appearances says nothing about cost. Honestly
+    null beats an invented infinity, and it must not crash."""
+    volumes = {"e1": 0, "e2": 0, "e3": 6}
+    hit = _by_name(mod.fused_candidates(ROSTER, volumes=volumes))["Pallavi Vijay"]
+    assert hit["volume_ratio"] is None
+
+
+def test_cheapest_to_settle_sorts_first_within_a_tier():
+    volumes = {"a": 87, "b": 3, "c": 6, "d": 40, "e": 38, "f": 36}
+    names = [x["name"] for x in mod.fused_candidates(_TWO_TIER, volumes=volumes)]
+    assert names.index("Pallavi Vijay") < names.index("Rao Mehta")
+
+
+def test_measured_ratio_never_sorts_behind_an_unmeasured_one():
+    """A candidate we could not measure sorts mid, so it neither jumps the
+    queue nor hides behind everything."""
+    volumes = {"a": 87, "b": 3, "c": 6}     # Rao Mehta unmeasured
+    ranked = mod.fused_candidates(_TWO_TIER, volumes=volumes)
+    by_name = {x["name"]: x for x in ranked}
+    assert by_name["Rao Mehta"]["volume_ratio"] is None
+    names = [x["name"] for x in ranked]
+    assert names.index("Pallavi Vijay") < names.index("Rao Mehta")
 
 
 def test_tokens_handles_punctuation_and_junk():
