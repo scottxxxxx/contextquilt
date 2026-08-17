@@ -1,15 +1,42 @@
-"""Find person entities that look like TWO people fused into one name.
+"""Find person entities whose NAME is two people's first names.
 
-The receipt: `Pallavi Vijay` is not a person. Scott's words: two people
-concatenated together. The roster also holds `Pallavi Kandanu` and
-`Vijay Rayudu`, so the extractor took two adjacent first names out of a
-transcript and welded them into one entity.
+WHAT THIS DETECTS, stated narrowly on purpose: a row whose name is built
+from two different people's first names. It does NOT detect, and cannot
+tell you, HOW that happened. Read the section on causes before acting on
+a hit.
+
+The receipt: `Pallavi Vijay` is not a person. It holds 7 appearance rows,
+all `speaker` capacity, all inside one day, and 2 already-archived
+commitments.
 
 WHY THE COLLISION AUDIT CANNOT SEE THIS. That audit groups entities that
 share a first token, so it finds `Pallavi` / `Pallavi Kandanu` (one human,
-two spellings). A fused row is the opposite shape: its two halves come
-from two DIFFERENT humans, so it collides with each of them on only one
-token and looks like a third person to any first-token grouping.
+two spellings). This shape is the opposite: its two halves come from two
+DIFFERENT humans, so it collides with each of them on only one token and
+looks like a third person to any first-token grouping.
+
+TWO CAUSES, AND THE AUDIT CANNOT DISTINGUISH THEM. An earlier draft of
+this file asserted the extractor had welded two names out of prose. That
+was a guess, and for the one row it was written from it was WRONG.
+
+  1. Extraction fusion: the LLM takes two adjacent names in a transcript
+     and emits one entity.
+  2. Client speaker labelling: an upstream caption pipeline reads the
+     name-shaped words at the start of a line as the SPEAKER and the rest
+     as the utterance. "Pallavi, Vijay, you guys are working on..."
+     becomes speaker `Pallavi Vijay` saying "guys are working on...".
+
+Cause 2 is what produced `Pallavi Vijay`. SS confirmed it from the raw
+captions, where the same session also produced `Vijay Rayudu Yea` (a name
+plus the next spoken word), `Did Vijay`, and `Horm Hel`. Every property
+measured on that row is explained by it: speaker capacity because it was
+labelled a speaker, one day because that session hit the failure mode
+repeatedly, almost no patches because it barely "spoke".
+
+This matters for what you DO with a hit. Under cause 1 there may be two
+people's facts tangled in one row. Under cause 2 there is no second
+person to rescue: the row was never anybody, and there is nothing to
+split. Establish which before touching anything.
 
 THE SIGNAL. On a roster, a surname is rarely also somebody else's first
 name. So a two-token name whose BOTH tokens are first names of other live
@@ -18,12 +45,15 @@ Peterson` is safe (nobody on the roster is named Peterson-first). `Pallavi
 Vijay` is not.
 
 THIS IS A CANDIDATE FINDER, NOT A FIXER, AND IT HAS NO --apply BY DESIGN.
-A fused row must be split or deleted, and only a human knows which of its
-patches belong to whom, if that is recoverable at all. Merging it into
-either source would move a second person's facts onto them, which is
-worse than leaving it. It also cannot be perfectly precise: a real person
-named `Ryan Thomas` trips the same rule when the roster holds a
-`Thomas Someone`, so every hit is ranked and evidenced for a human read.
+The right repair depends on the cause, which this script cannot see, so
+it can only hand a human the evidence. Merging a hit into either source
+would move a second person's facts onto them if the cause is fusion. It
+also cannot be perfectly precise: a real person named `Ryan Thomas` trips
+the same rule when the roster holds a `Thomas Someone`, so every hit is
+ranked and evidenced rather than acted on.
+
+Measured 2026-08-17: 1 candidate on a 361-person roster, zero false
+positives, and it was the known bad row.
 """
 import argparse
 import asyncio
@@ -131,11 +161,16 @@ def fused_candidates(people, volumes=None):
     return out
 
 
+# "Live person" as the read surface defines it (src/main.py:4849): a
+# merged entity is already somebody else, and a suppressed one is a
+# durable no. `entities` has no status column; guessing one from
+# 01_init.sql is how the first draft of this query crashed.
 SELECT_PEOPLE = """
     SELECT entity_id, name
     FROM entities
     WHERE entity_type = 'person'
-      AND COALESCE(status, 'active') = 'active'
+      AND merged_into IS NULL
+      AND suppressed_at IS NULL
       AND user_id = $1
 """
 
@@ -149,6 +184,9 @@ SELECT_VOLUMES = """
     GROUP BY entity_id
 """
 
+# context_patches carries no user_id; it is scoped through its origin and
+# entity graph. Owner text is the join here, and person names are already
+# user-scoped by the entity query above.
 OWNED_PATCHES = """
     SELECT count(*) AS owned_patches
     FROM context_patches
