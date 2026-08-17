@@ -2891,6 +2891,18 @@ async def vouch_patch(
     Vouching does NOT clear a shelf: the two states are orthogonal writes
     and un-shelving is `DELETE .../shelve`.
 
+    IT DOES CLEAR A BELIEVED COMPLETION, and that is the whole answer to
+    "looks done, confirm?". A meeting guessed the item was finished, the
+    person who knows says it is still live, and that answer must outrank
+    the guess. The stamps move to `prior_believed_*` rather than being
+    dropped, on the uncomplete route's discipline: the guess and its
+    correction are both facts, and a later pass that silently re-believed
+    the same item would look identical to a first belief without them.
+
+    The counterpart is `POST .../complete`, which is how a user CONFIRMS
+    the belief; it closes the item with `completion_source='app'`, so a
+    human answer is never recorded as the machine's.
+
     Any request body is accepted and ignored (the gateway forwards bodies
     untyped).
     """
@@ -2902,13 +2914,29 @@ async def vouch_patch(
         UPDATE context_patches
            SET updated_at = NOW(),
                value = jsonb_set(
-                           jsonb_set(value, '{last_vouched_at}', to_jsonb(to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))),
+                           jsonb_set(
+                               CASE WHEN value ? 'believed_complete_at'
+                               THEN (value
+                                     - 'believed_complete_at'
+                                     - 'believed_complete_evidence'
+                                     - 'believed_complete_reasons'
+                                     - 'believed_complete_origin_id')
+                                    || jsonb_build_object(
+                                        'prior_believed_complete_at',
+                                        value->'believed_complete_at',
+                                        'prior_believed_complete_evidence',
+                                        value->'believed_complete_evidence',
+                                        'believed_rejected_at',
+                                        to_jsonb(to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')))
+                               ELSE value END,
+                               '{last_vouched_at}', to_jsonb(to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))),
                            '{vouch_source}', '"app"'
                        )
          WHERE patch_id = $1
            AND COALESCE(status, 'active') = 'active'
            AND completed_at IS NULL
-        RETURNING value->>'last_vouched_at' AS last_vouched_at
+        RETURNING value->>'last_vouched_at' AS last_vouched_at,
+                  (value ? 'believed_rejected_at') AS cleared_belief
         """,
         patch_id
     )
@@ -2920,6 +2948,10 @@ async def vouch_patch(
         "status": "vouched",
         "patch_id": patch_id,
         "last_vouched_at": vouched_row["last_vouched_at"],
+        # True when this tap also answered a "looks done, confirm?" with
+        # a no. The client needs to tell the two apart: one is a routine
+        # "still live", the other retires a card.
+        "cleared_believed_completion": bool(vouched_row["cleared_belief"]),
     }
 
 
@@ -4905,6 +4937,14 @@ async def _people_core(
                cp.value->>'shelved_at' AS shelved_at,
                cp.value->>'shelved_source' AS shelved_source,
                cp.value->>'salience' AS salience,
+               -- A meeting said something that looked like this being
+               -- finished, but not well enough to close on. The item is
+               -- still open and still owed; these four are what the app
+               -- renders the "looks done, confirm?" state from.
+               cp.value->>'believed_complete_at' AS believed_complete_at,
+               cp.value->>'believed_complete_evidence' AS believed_complete_evidence,
+               cp.value->'believed_complete_reasons' AS believed_complete_reasons,
+               cp.value->>'believed_complete_origin_id' AS believed_complete_origin_id,
                -- The molt record: every later meeting that said this same
                -- item again, and the monotonic count that survives the
                -- array's cap. Empty on every item stored before the
@@ -4977,6 +5017,7 @@ async def _people_core(
                    cp.value->>'shelved_source' AS shelved_source,
                    cp.value->>'completion_source' AS completion_source,
                    cp.value->>'completion_evidence' AS completion_evidence,
+                   cp.value->>'completion_origin_id' AS completion_origin_id,
                    cp.value->'restatements' AS restatements,
                    cp.value->>'restatement_count' AS restatement_count,
                    cp.value->'deadline_history' AS deadline_history,

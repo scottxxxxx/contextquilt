@@ -90,6 +90,18 @@ from .people_signals import is_presence_grade
 # type deserves, which is the doc 15 split (CQ owns state, the app owns
 # wording) rather than CQ shipping seven synonyms.
 RESOLVED = "resolved"
+# A meeting produced something that LOOKS like this item being finished,
+# but the evidence was not good enough to close on (see
+# services/closure_evidence.py for what "not good enough" means and the
+# 167 receipts that defined it). The item is STILL OPEN and still owed:
+# this mode is a question for a human, not a verdict.
+#
+# Named for what was observed, on the same rule as `not_raised_since`.
+# "Believed" is a claim about OUR confidence and says so, where
+# "resolved" would be a claim about the world that nobody has checked.
+# The whole reason it exists is that closing on this evidence credited
+# people with work they had not done.
+BELIEVED_RESOLVED = "believed_resolved"
 # The one COMMITMENT-SPECIFIC mode, and the shape says so rather than
 # leaving a client to discover it: a due date that moved is meaningless
 # for an object that never had one. See `modes_for_object_type`.
@@ -131,11 +143,20 @@ OPEN = "open"
 # unraised for three meetings, be answered, or still be open. Only the
 # date mode is specific to objects that carry dates.
 UNIVERSAL_MODES = (
-    RESOLVED, ABSORBED_BY_USER, REASSIGNED, NOT_RAISED_SINCE, RESTATED, OPEN,
+    RESOLVED, BELIEVED_RESOLVED, ABSORBED_BY_USER, REASSIGNED,
+    NOT_RAISED_SINCE, RESTATED, OPEN,
 )
 
+# `believed_resolved` sits directly under `resolved` and above the
+# ownership modes, which is a deliberate exception to the reasoning
+# below. Everything else here describes what HAS HAPPENED to an item and
+# can wait; this one is an unanswered question about whether the item is
+# still owed at all, and the answer changes what every other mode on the
+# same item means. A client that does not know the mode degrades to
+# `open`, which is the safe direction to fail: it keeps chasing.
 MODE_PRECEDENCE = (
     RESOLVED,
+    BELIEVED_RESOLVED,
     ABSORBED_BY_USER,
     REASSIGNED,
     NOT_RAISED_SINCE,
@@ -263,6 +284,24 @@ def _as_list(value: Any) -> List[dict]:
             return []
     if isinstance(value, list):
         return [e for e in value if isinstance(e, dict)]
+    return []
+
+
+def _as_str_list(value: Any) -> List[str]:
+    """A list of STRINGS from jsonb or from a `->>` text select.
+
+    Deliberately not `_as_list`, which keeps only dicts and would return
+    [] for `["future_intent_only"]` without raising. The reasons behind a
+    belief are the part a human reads to decide, so silently emptying
+    them would leave a claim on screen with its justification stripped.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return []
+    if isinstance(value, list):
+        return [e for e in value if isinstance(e, str) and e.strip()]
     return []
 
 
@@ -580,9 +619,14 @@ def classify_item(
     is_open = completed_at is None
     shelved = bool(row.get("shelved_at"))
 
+    believed_at = row.get("believed_complete_at")
     modes: List[str] = []
     if completed_at is not None:
         modes.append(RESOLVED)
+    # Only ever on an OPEN item. A closed item's belief is spent: it was
+    # either confirmed (which set completed_at) or it never mattered.
+    if is_open and believed_at:
+        modes.append(BELIEVED_RESOLVED)
     if change is not None:
         modes.append(ABSORBED_BY_USER if change["to_user"] else REASSIGNED)
     # An OPEN item's mode only, and it needs three things at once: a date
@@ -665,6 +709,17 @@ def classify_item(
         else row.get("completed_at"),
         "completion_source": row.get("completion_source"),
         "completion_evidence": row.get("completion_evidence"),
+        # Which meeting closed it, so a client can name the meeting in the
+        # notice that offers the one tap reopen. Null on every completion
+        # stored before this shipped, and on every non-extraction lane.
+        "completion_origin_id": row.get("completion_origin_id"),
+        # The unanswered question. All four travel together or not at all:
+        # a belief with no evidence attached would be exactly the
+        # unfalsifiable claim this whole change exists to stop making.
+        "believed_complete_at": believed_at,
+        "believed_complete_evidence": row.get("believed_complete_evidence"),
+        "believed_complete_reasons": _as_str_list(row.get("believed_complete_reasons")),
+        "believed_complete_origin_id": row.get("believed_complete_origin_id"),
         "shelved_at": row.get("shelved_at"),
         # The receipts. Every count in the summary opens into these.
         "restatements": restatements[:RESTATEMENT_RECEIPT_CAP],

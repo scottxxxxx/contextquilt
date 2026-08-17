@@ -35,6 +35,7 @@ from contextquilt.services.extraction_prompts import (
     TRACE_SYSTEM,
     format_open_commitments_block,
 )
+from contextquilt.services.closure_evidence import BELIEVED, classify_closure
 from contextquilt.services.deadline_resolver import run_deadline_micropass
 from contextquilt.services.extraction_schema import (
     PATCH_TYPES,
@@ -5316,6 +5317,7 @@ class ColdPathWorker:
             # patch_ids are dropped with a warning.
             commitments_resolved = await self._apply_resolved_commitments(
                 user_id, response.content.get("resolved_commitments") or [],
+                origin_id=origin_id,
             )
 
             logger.info(
@@ -5641,15 +5643,37 @@ class ColdPathWorker:
 
     async def _apply_resolved_commitments(
         self, user_id: str, resolutions: list[dict[str, Any]],
+        origin_id: str | None = None,
     ) -> int:
-        """Mark resolved commitments as completed. Returns count actually
-        resolved. Validates ownership before UPDATE so a hallucinated or
-        cross-user patch_id can't accidentally close another user's
-        commitment."""
+        """Act on the closures the LLM reported. Returns the count CLOSED.
+
+        Validates ownership before any write so a hallucinated or
+        cross-user patch_id can't touch another user's commitment.
+
+        TWO OUTCOMES, ROUTED BY EVIDENCE (services/closure_evidence.py).
+        This used to archive every reported resolution on the spot, and
+        measured across all 167 of them on prod, most were not evidence
+        of anything being finished: items closed because the promise was
+        made AGAIN, or because somebody set a date, both of which doc 16
+        5.12 already rules are not advances.
+
+        A wrong close is not a lost obligation, it is a FABRICATED
+        DELIVERY: the row archives out of the ledger population and
+        reappears in `completed_they_owe` as something that person
+        handed over. So the unreadable, forward-looking and ambiguous
+        cases now stay OPEN carrying a belief stamp, and the app asks a
+        human. Only unambiguous completion language closes by itself,
+        and the app is told so it can offer a one tap reopen.
+
+        Never the reverse: nothing here re-opens or un-believes an item.
+        A human's answer outranks a later meeting's guess, so vouch and
+        complete are the only things that clear a belief.
+        """
         if not resolutions or not user_id:
             return 0
         subject_key = f"user:{user_id}"
         resolved_count = 0
+        believed_count = 0
         for item in resolutions:
             patch_id = (item.get("patch_id") or "").strip()
             evidence = (item.get("evidence") or "").strip()[:300]
@@ -5659,9 +5683,13 @@ class ColdPathWorker:
                 # Ownership gate + open-commitment gate in one query.
                 # Returns the patch_id only if all conditions hold; lets
                 # us avoid two round-trips.
-                gated = await self.db.fetchval(
+                # Owner comes back too: the evidence classifier needs it
+                # to ask whether the evidence is even about the person who
+                # owed the thing.
+                gated = await self.db.fetchrow(
                     """
-                    SELECT cp.patch_id::text
+                    SELECT cp.patch_id::text AS patch_id,
+                           cp.value->>'owner' AS owner
                       FROM context_patches cp
                       JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
                      WHERE cp.patch_id = $1::uuid
@@ -5688,27 +5716,77 @@ class ColdPathWorker:
                     reason="not_owned_or_not_open_or_unknown",
                 )
                 continue
+            verdict = classify_closure(gated["owner"], evidence)
             try:
+                if verdict["band"] == BELIEVED:
+                    # STAYS OPEN. completed_at is untouched, so this item
+                    # never enters the delivery history and never leaves
+                    # the ledger population. The stamps are what the app
+                    # renders the "looks done, confirm?" state from, and
+                    # `reasons` travels with them so the person deciding
+                    # can see WHY we were not sure.
+                    await self.db.execute(
+                        """
+                        UPDATE context_patches
+                           SET updated_at = NOW(),
+                               value = jsonb_set(
+                                   jsonb_set(
+                                       jsonb_set(
+                                           jsonb_set(value,
+                                               '{believed_complete_at}',
+                                               -- Same ISO shape as
+                                               -- shelved_at and
+                                               -- last_vouched_at.
+                                               -- NOW()::text renders
+                                               -- "2026-08-17 19:48:20.4+00",
+                                               -- which is not what any
+                                               -- client here parses.
+                                               to_jsonb(to_char(NOW() AT TIME ZONE 'UTC',
+                                                   'YYYY-MM-DD"T"HH24:MI:SS"Z"'))),
+                                           '{believed_complete_evidence}',
+                                           to_jsonb($2::text)),
+                                       '{believed_complete_reasons}',
+                                       $3::jsonb),
+                                   '{believed_complete_origin_id}',
+                                   to_jsonb($4::text))
+                         WHERE patch_id = $1::uuid
+                        """,
+                        patch_id, evidence,
+                        json.dumps(verdict["reasons"]),
+                        str(origin_id or ""),
+                    )
+                    believed_count += 1
+                    logger.info(
+                        "commitment_believed_complete",
+                        patch_id=patch_id, user_id=user_id,
+                        reasons=verdict["reasons"], evidence=evidence[:120],
+                    )
+                    continue
+
                 # completion_source/evidence stamped into value so apps
                 # can distinguish LLM auto-close ('extraction') from
                 # tap-to-complete ('app', via POST .../complete) from
                 # plain TTL decay (no completed_at at all).
+                # completion_origin_id says WHICH meeting closed it, so
+                # the app can name it in the notification that offers the
+                # one tap reopen.
                 await self.db.execute(
                     """
                     UPDATE context_patches
                        SET completed_at = NOW(),
                            status = 'archived',
                            updated_at = NOW(),
-                           value = CASE WHEN $2::text <> ''
-                                   THEN jsonb_set(
-                                            jsonb_set(value, '{completion_source}', '"extraction"'),
-                                            '{completion_evidence}', to_jsonb($2::text)
-                                        )
-                                   ELSE jsonb_set(value, '{completion_source}', '"extraction"')
-                                   END
+                           value = jsonb_set(
+                               jsonb_set(
+                                   CASE WHEN $2::text <> ''
+                                   THEN jsonb_set(value, '{completion_evidence}',
+                                                  to_jsonb($2::text))
+                                   ELSE value END,
+                                   '{completion_source}', '"extraction"'),
+                               '{completion_origin_id}', to_jsonb($3::text))
                      WHERE patch_id = $1::uuid
                     """,
-                    patch_id, evidence,
+                    patch_id, evidence, str(origin_id or ""),
                 )
                 resolved_count += 1
                 logger.info(
@@ -5720,6 +5798,11 @@ class ColdPathWorker:
                     "resolved_commitment_update_failed",
                     patch_id=patch_id, reason=str(exc)[:200], user_id=user_id,
                 )
+        if believed_count:
+            logger.info(
+                "commitments_believed_complete_batch",
+                user_id=user_id, believed=believed_count, closed=resolved_count,
+            )
         return resolved_count
 
     async def _maybe_alert_llm_failure(self, exc: Exception) -> None:
