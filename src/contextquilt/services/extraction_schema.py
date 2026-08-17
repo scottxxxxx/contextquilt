@@ -843,6 +843,24 @@ def drop_placeholder_and_self_person_patches(
     drop_names: set[str] = set()
     kept: list[dict] = []
 
+    # Names this SAME extraction called something other than a person.
+    # CIGNA reached the People list as a colleague on 2026-08-17: the
+    # model emitted it as an `org` entity AND as a `person` patch in one
+    # response, the person patch minted a person entity, and an insurance
+    # company appeared under NEW FACES with "Joined 1 of your rooms this
+    # week". The contradiction is visible inside the payload, so it does
+    # not need a database lookup to catch: a name cannot be a company and
+    # a colleague in the same meeting.
+    non_person_names: set[str] = set()
+    for ent in content.get("entities") or []:
+        if not isinstance(ent, dict):
+            continue
+        ent_type = ent.get("type")
+        ent_name = ent.get("name")
+        if (isinstance(ent_type, str) and ent_type != "person"
+                and isinstance(ent_name, str) and ent_name.strip()):
+            non_person_names.add(ent_name.strip().lower())
+
     for patch in patches:
         if patch.get("type") != "person":
             kept.append(patch)
@@ -854,6 +872,9 @@ def drop_placeholder_and_self_person_patches(
             continue
 
         if is_placeholder_or_self_person(text, user_label):
+            drop_names.add(text.strip().lower())
+            continue
+        if text.strip().lower() in non_person_names:
             drop_names.add(text.strip().lower())
             continue
         kept.append(patch)
