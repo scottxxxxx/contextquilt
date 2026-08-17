@@ -120,6 +120,7 @@ from contextquilt.services.corrections import (
     parse_correction_response,
 )
 from contextquilt.services.entity_aliasing import find_alias_candidate
+from contextquilt.services import behavior_extraction
 from contextquilt.services import relationship_lenses
 from contextquilt.services.people_identity import (
     build_entity_resolver,
@@ -5341,6 +5342,18 @@ class ColdPathWorker:
             if has_you_marker:
                 await self._extract_communication_profile(user_id, summary, app_id)
 
+            # Behavior observations: their own call, for the reason doc
+            # 19.5 records. Inline as one of fifteen types this produced
+            # 4 observations across 8 meetings on Haiku and 0 on Sonnet;
+            # a dedicated call with the same cheap model produced 48.
+            # Runs only when the manifest declares the type, so an app
+            # that never asked for it never pays for the call.
+            await self._extract_behavior_observations(
+                user_id, summary, app_id, origin_id, origin_type,
+                timestamp, project, project_id, user_label,
+                resolved_manifest,
+            )
+
             await self.hydrate_cache(user_id)
 
         except Exception as e:
@@ -5720,6 +5733,77 @@ class ColdPathWorker:
             )
         except Exception as alert_exc:
             logger.warning("alert_dispatch_failed", reason=str(alert_exc)[:200])
+
+    async def _extract_behavior_observations(
+        self, user_id: str, transcript: str, app_id, origin_id, origin_type,
+        timestamp, project, project_id, user_label, manifest,
+    ) -> int:
+        """One dedicated call for how people conducted themselves.
+
+        Writes through `store_connected_patches`, the same sink the main
+        extraction uses, deliberately: ownership edges, origin stamping,
+        ACLs, dedup and the manifest's per-type storage keys all live
+        there, and a second writer with its own path would be a second
+        source of truth about the same person.
+
+        Inert unless the app's manifest declares a `behavior` type, so
+        an app that never asked for it never pays for the call.
+
+        Never raises. This runs after the meeting's real extraction has
+        already been stored, so a failure here costs one call and the
+        user still has everything the main pass produced.
+        """
+        try:
+            if not behavior_extraction.worth_a_call(transcript):
+                return 0
+            declared = {
+                t.get("domain_type")
+                for t in (manifest or {}).get("patch_types", [])
+                if isinstance(t, dict)
+            }
+            if "behavior" not in declared:
+                return 0
+            guidance = None
+            for t in (manifest or {}).get("patch_types", []):
+                if isinstance(t, dict) and t.get("domain_type") == "behavior":
+                    rules = t.get("extraction_rules") or {}
+                    guidance = rules.get("guidance") or t.get("description")
+                    break
+
+            llm = await self._get_llm_for_app(app_id)
+            defects: list = []
+            response = await llm.extract(
+                system_prompt=behavior_extraction.BEHAVIOR_SYSTEM,
+                user_content=behavior_extraction.build_behavior_content(
+                    transcript, guidance
+                ),
+            )
+            patches = behavior_extraction.parse_behavior_response(
+                response.content, user_label=user_label, defects=defects,
+            )
+            if not patches:
+                logger.info("behavior_observations_none", user_id=user_id,
+                            origin=origin_id,
+                            defect=defects[0] if defects else "empty")
+                return 0
+
+            stored = await store_connected_patches(
+                self.db, user_id, patches, "behavior_observations", app_id,
+                timestamp, project, project_id, origin_id, origin_type,
+                user_label=user_label, llm=llm,
+                no_collapse_types=no_collapse_patch_types(manifest),
+                origin_scoped_types=origin_scoped_patch_types(manifest),
+            )
+            logger.info(
+                "behavior_observations_stored", user_id=user_id,
+                origin=origin_id, emitted=len(patches), stored=stored,
+                cost_usd=getattr(response, "cost_usd", None),
+            )
+            return stored
+        except Exception as exc:
+            logger.warning("behavior_observations_failed", user_id=user_id,
+                           origin=origin_id, reason=str(exc)[:200])
+            return 0
 
     async def _extract_communication_profile(self, user_id: str, transcript: str, app_id: str = None):
         """Extract communication style scores from the (you) speaker's dialogue.
