@@ -344,8 +344,8 @@ What makes this card worth reading is the CONTRAST. The user sat through every o
 
 Rules:
 - Describe what happened to the WORK, never what kind of person the colleague is. "Closes late more often than anyone else you work with" is checkable against the items. "Unreliable" is a verdict about a human being, it is not a fact about anything, and it must never appear in any wording.
-- WRITE THE CLAIM WITHOUT DIGITS. The card renders both counts underneath your sentence, this person's and the comparison group's, so the arithmetic is already on screen and repeating it spends the only line you have. Name the pattern in words instead: "Closes late far more often than others you work with".
-- If you do write a number, it must be one of the numbers you were given, AND you must give the comparison number too. A count on its own reads as an accusation when the reader cannot see what normal is. One-sided numbers void the whole answer, so the safe choice is no digits.
+- STATE THE NUMBERS. You have room now. "Closed 11 of 21 items after their due date, against 19 of 99 across everyone else" is the claim; "closes late more often than others" is a summary of the claim. Prefer the first.
+- Any number you write must be one you were given, and if you state this person's numbers you MUST state the comparison group's too. A count on its own reads as an accusation when the reader cannot see what normal is.
 - That rule covers the do line too. No number at all is always safe there.
 - Do not use the words "average", "typical" or "normal" about the comparison group. It is a count across named colleagues, not a statistical population.
 - Never name a topic, project, company or person that appears in none of the listed items.
@@ -369,7 +369,7 @@ These are four DIFFERENT SHAPES a claim can take, not four sentences to pick fro
 "Due dates here move more than on anyone else's work." (51, subject first)
 "Hands work back more than the rest of your roster does." (54, roster last)
 
-WHEN YOU AVOID A COLLISION, GET SHORTER, NEVER LONGER. The reflex is to add words to make a sentence different, and that is the one move guaranteed to fail: the extra words break the ceiling and the card is thrown away, so the reader gets nothing instead of something fresh. Change the VERB or the ORDER instead. "Closes late far more often than others" and "Due dates slip here more than elsewhere" say the same thing, share no opening, and both fit.
+WHEN YOU AVOID A COLLISION, CHANGE THE VERB OR THE ORDER, and check the character count before you answer. There is room for a specific sentence and there is not room for an unbounded one, and a claim over the limit is thrown away whole rather than trimmed, so the reader gets nothing instead of something fresh.
 
 SAY IT DIFFERENTLY FROM THE OTHERS. You will be shown the claims already written about this user's OTHER people. Yours must not open with the same words as any of them and must not be a rewording of one. Every card that reads like the last card teaches the reader to stop reading them, so a claim that sounds like the others has failed even when its arithmetic is perfect. If the natural sentence collides with one already used, find another way to say the same true thing.
 

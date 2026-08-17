@@ -455,14 +455,15 @@ def test_the_other_facts_are_unaffected_by_the_quiet_floor():
 
 # --- the ceiling and the contrast have to be satisfiable together ------
 
-def test_the_prompt_asks_for_a_claim_with_no_digits():
-    """Measured on the first live cycle 2026-08-16: four of four cards were
-    rejected `claim_too_long`. Requiring both halves of the contrast INSIDE
-    a 62 character claim is not satisfiable, and the counts are rendered
-    underneath the sentence anyway, so the claim names the pattern in
-    words and the arithmetic stays on the card where it is checkable."""
+def test_the_prompt_now_asks_for_the_numbers():
+    """REVERSED 2026-08-16 with the ceiling. Banning digits was a
+    consequence of 62 characters, not a principle: both halves of a
+    contrast would not fit, so the claim had to summarise itself. At 180
+    they fit, and "closed 11 of 21 after their due date against 19 of 99
+    across everyone else" is the claim rather than a summary of it."""
     from contextquilt.services.relationship_lenses import STANDS_OUT_SYSTEM
-    assert "WRITE THE CLAIM WITHOUT DIGITS" in STANDS_OUT_SYSTEM
+    assert "STATE THE NUMBERS" in STANDS_OUT_SYSTEM
+    assert "WRITE THE CLAIM WITHOUT DIGITS" not in STANDS_OUT_SYSTEM
 
 
 def test_every_example_claim_in_the_prompt_would_actually_pass():
@@ -796,9 +797,11 @@ def test_the_retry_is_bounded_to_one_extra_call():
     assert "if claim or attempt:" in worker
 
 
-def test_the_prompt_says_to_shorten_rather_than_lengthen():
-    """Measured: 'say it differently' inside a 62 character ceiling made
-    the model add words, and 2 of 4 cards died. The reflex has to be
-    named and countered."""
+def test_the_prompt_still_tells_the_writer_a_limit_exists():
+    """Softened with the ceiling rather than dropped. At 62 the advice
+    had to be 'get shorter'; at 180 it is 'change the verb and count the
+    characters', because the failure mode is still a claim thrown away
+    whole rather than trimmed."""
     from contextquilt.services.relationship_lenses import STANDS_OUT_SYSTEM
-    assert "GET SHORTER, NEVER LONGER" in STANDS_OUT_SYSTEM
+    assert "CHANGE THE VERB OR THE ORDER" in STANDS_OUT_SYSTEM
+    assert "thrown away whole" in STANDS_OUT_SYSTEM
