@@ -195,27 +195,30 @@ Clear project scope from one origin's patches — the mirror of assign-project (
 
 Project-deletion form: clears project scope from ALL of a user's patches carrying this project_id. Patches survive as unscoped memory — deleting a project container never deletes what was learned. Returns `patches_updated`.
 
-### GET /v1/quilt/{user_id}/graph
+### GET /v1/quilt/{user_id}/graph (REMOVED 2026-08-17)
 
-Render a visual graph of a user's entire quilt — all patches and connections displayed as a colorful, quilt-like diagram. Returns an image directly.
+Rendered the whole quilt as one force-directed graphviz image on the
+request path. Deleted, along with the `graphviz` dependency and the
+pango/cairo/gd stack the Dockerfile pulled in for it.
 
-**Query params:** `?format=svg|png` (default: `svg`)
+**Why, measured on prod before removal:** 3,550 nodes and 6,180 edges
+took **60.3 seconds**, of which the database was 91ms and the `sfdp`
+layout was 60.2s. Every caller timed out well before that, so CQ logged
+`200 OK` while the device showed `504`, and the 6MB SVG was never once
+delivered to a user. It also ran `dot.pipe()`, a blocking subprocess,
+inside an `async def` with no thread offload, freezing one of four
+uvicorn event loops and pegging one of the host's two cores for the
+duration, next to a recall path budgeted in single-digit milliseconds.
 
-**Response:** `image/svg+xml` or `image/png`
+It could not have been fixed by tuning. A tenfold speedup is still six
+seconds for an image of 3,550 labels on a phone screen, which is a
+texture rather than information.
 
-The graph uses a force-directed layout with:
-- **Project clustering** — patches grouped into labeled sub-boxes by project
-- **User centering** — the submitting user's person patch is pinned at the center
-- **Color-coded types** — each patch type has a distinct color (project=blue, commitment=amber, blocker=red, decision=purple, person=green, trait=pink, preference=cyan, takeaway=lime)
-- **Connection edges** — colored by structural role (parent=blue, depends_on=red, resolves=green, replaces=orange, informs=purple)
-
-The user's person patch automatically connects to all project patches via `works_on` edges, even if the extraction didn't create them explicitly.
-
-**Example:**
-```
-GET /v1/quilt/fa4d903c-24c0-45d5-9fdb-b5496e32501b/graph?format=svg
-→ image/svg+xml (full quilt visualization)
-```
+**If you want a graph, the working pattern is
+`GET /v1/people/{user_id}/network`:** the worker computes the snapshot
+and the read path serves stored bytes, so nothing expensive happens
+while a client is waiting. Scope any future graph to one project or one
+person's neighborhood, where the node count is in the tens.
 
 ---
 

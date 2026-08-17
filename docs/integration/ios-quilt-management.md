@@ -253,26 +253,27 @@ The quilt is **transparent**. Users should understand:
 - Project-specific patches stay scoped to that project
 - Old projects and completed tasks naturally fade away
 
-### Quilt Graph Visualization
+### Quilt Graph Visualization (REMOVED 2026-08-17)
 
-Render the user's entire quilt as an SVG image — patches color-coded by type, grouped by project, with connections drawn between them.
+`GET /v1/quilt/{user_id}/graph` is gone. Do not call it; it will 404.
 
-```
-GET /v1/quilt/{user_id}/graph
-GET /v1/quilt/{user_id}/graph?format=png
-```
+It rendered every active patch as one graphviz image on the request
+path. Measured on prod before removal: 3,550 nodes took 60.3 seconds,
+of which 60.2s was the layout. Every client timed out first, so the
+Memory tab showed "Showing cached graph, server error (HTTP 504)" every
+single time while CQ logged a success nobody received.
 
-Returns `image/svg+xml` (default) or `image/png`. The graph includes all active patches across all projects, with the user's person patch at the center.
+**If you are still calling it,** remove the call. The endpoint never
+successfully delivered an image to a device, so there is no behaviour to
+preserve and nothing to fall back from: the cached-graph path your
+client already shows on error is the only thing users have ever seen.
 
-**iOS usage:** Load the SVG in a `WKWebView` for native pan/zoom, or render as a static image. GhostPour can proxy this endpoint or ShoulderSurf can call CQ directly.
-
-```swift
-// Load quilt graph in a WKWebView
-let url = URL(string: "\(cqBaseURL)/v1/quilt/\(userId)/graph?format=svg")!
-var request = URLRequest(url: url)
-request.addValue("Bearer \(jwtToken)", forHTTPHeaderField: "Authorization")
-webView.load(request)
-```
+**If a graph is wanted again,** use
+`GET /v1/people/{user_id}/network`, which serves a snapshot the worker
+computed in the background rather than laying anything out while you
+wait. Scope it to one project or one person's neighborhood: 3,550
+labelled nodes on a phone screen is a texture, not information, and that
+was the deeper problem with the old view regardless of speed.
 
 ## How It All Flows
 
