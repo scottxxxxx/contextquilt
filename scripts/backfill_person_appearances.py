@@ -216,7 +216,16 @@ async def tier_ownership(conn, forms, user_id: str | None):
     owner_rows = await conn.fetch(
         """
         SELECT ps.subject_key, cp.origin_id, cp.origin_type, cp.project_id,
-               cp.created_at, cp.value->>'owner' AS owner
+               -- The MEETING's clock, not this patch's. A presence row is
+               -- dated by the meeting (#247, doc 19.4), and the meeting's
+               -- clock is the EARLIEST patch anchored to it. Using each
+               -- patch's own created_at with the upsert's GREATEST lands
+               -- the row on the LATEST patch instead, which on a REPLAYED
+               -- meeting is the replay: 160 rows were re-dated to the
+               -- replay this way on 2026-08-17, hours after #247 fixed
+               -- the identical bug in the ingest path.
+               min(cp.created_at) OVER (PARTITION BY cp.origin_id) AS created_at,
+               cp.value->>'owner' AS owner
         FROM context_patches cp
         JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
         WHERE cp.origin_id IS NOT NULL
@@ -238,7 +247,9 @@ async def tier_ownership(conn, forms, user_id: str | None):
     owns_rows = await conn.fetch(
         """
         SELECT ps.subject_key, tgt.origin_id, tgt.origin_type, tgt.project_id,
-               tgt.created_at, src.value->>'text' AS person_text
+               -- Meeting clock, same reason as 1a above.
+               min(tgt.created_at) OVER (PARTITION BY tgt.origin_id) AS created_at,
+               src.value->>'text' AS person_text
         FROM patch_connections pc
         JOIN context_patches src ON src.patch_id = pc.from_patch_id
         JOIN context_patches tgt ON tgt.patch_id = pc.to_patch_id
