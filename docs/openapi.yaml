@@ -828,42 +828,6 @@ paths:
               schema:
                 $ref: "#/components/schemas/UserDeleteResponse"
 
-  /v1/quilt/{user_id}/graph:
-    get:
-      operationId: getQuiltGraph
-      summary: Visual Quilt Graph
-      description: >
-        Render the user's quilt as a visual graph. Supports SVG, PNG, and
-        interactive HTML formats.
-      tags: [Quilt]
-      parameters:
-        - name: user_id
-          in: path
-          required: true
-          schema:
-            type: string
-        - name: format
-          in: query
-          required: false
-          schema:
-            type: string
-            enum: [svg, png, html]
-            default: svg
-      responses:
-        "200":
-          description: Graph rendered.
-          content:
-            image/svg+xml:
-              schema:
-                type: string
-            image/png:
-              schema:
-                type: string
-                format: binary
-            text/html:
-              schema:
-                type: string
-
   /v1/quilt/{user_id}/patches:
     post:
       operationId: createPatch

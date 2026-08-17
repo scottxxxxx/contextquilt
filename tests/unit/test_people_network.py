@@ -122,4 +122,26 @@ def test_endpoint_serves_stored_bytes_and_an_honest_empty():
 
 def test_route_name_avoids_the_taken_graph_path():
     assert '@app.get("/v1/people/{user_id}/network"' in MAIN
-    assert '"/v1/quilt/{user_id}/graph"' in MAIN  # the legacy render stays put
+
+
+def test_the_synchronous_whole_quilt_render_stays_deleted():
+    """`GET /v1/quilt/{user_id}/graph` was removed 2026-08-17.
+
+    It laid out every active patch with graphviz sfdp on the request
+    path. Measured on prod: 3,550 nodes and 6,180 edges took 60.3s, of
+    which 60.2s was the layout and 91ms was the database. Every caller
+    timed out long before that, so CQ logged 200 while the phone showed
+    504, and the 6MB result was never once delivered to a user.
+
+    Worse than slow: `dot.pipe()` is a blocking subprocess inside an
+    `async def` with no thread offload, so each call froze one of four
+    uvicorn event loops and pegged one of the host's two cores for a
+    minute, next to a recall path budgeted in single digit ms.
+
+    This test exists so the shape does not come back. If a graph is
+    wanted again, `people_network` above is the pattern: the worker
+    computes it and the read path serves stored bytes.
+    """
+    assert '"/v1/quilt/{user_id}/graph"' not in MAIN
+    assert "import graphviz" not in MAIN
+    assert "sfdp" not in MAIN

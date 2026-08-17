@@ -36,26 +36,20 @@ RUN useradd -m -u 1000 contextquilt && \
 WORKDIR /app
 
 # Install runtime dependencies
-# Graphviz from Debian apt is 2.42.4 which has a known SVG viewBox bug
-# (regression from 2.38.0, fixed in 13.0.0). Install the official
-# graphviz release deb to get correct SVG output.
+#
+# This used to also pull a graphviz 14.1.4 release deb from GitLab, plus
+# the pango/cairo/gd/gts stack it renders text with, for one endpoint:
+# GET /v1/quilt/{user_id}/graph. That endpoint is gone (it took 60s of
+# CPU to lay out 3,550 nodes and every caller timed out before it
+# finished), so the whole chain goes with it. Nothing else in
+# requirements.txt links against those libraries.
+#
+# `curl` stays: the deploy workflow smoke-tests /health by execing curl
+# inside this container, so removing it breaks the deploy rather than
+# the app, which is a worse place to find out.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
-    libltdl7 \
-    libgts-0.7-5 \
-    libexpat1 \
-    libgd3 \
-    libpango-1.0-0 \
-    libpangocairo-1.0-0 \
-    libcairo2 \
-    fontconfig \
-    fonts-dejavu-core \
-    && curl -fsSL \
-       "https://gitlab.com/api/v4/projects/4207231/packages/generic/graphviz-releases/14.1.4/ubuntu_22.04_graphviz-14.1.4-cmake.deb" \
-       -o /tmp/graphviz.deb \
-    && apt-get install -y /tmp/graphviz.deb \
-    && rm /tmp/graphviz.deb \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder
