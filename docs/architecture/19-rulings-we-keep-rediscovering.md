@@ -115,7 +115,8 @@ only where the documentation would naturally put it.
 evidence. Nothing that measures recency, freshness or frequency may move
 because a transcript arrived a second time.
 
-**Paid for three times, at three different doors, found one at a time.**
+**Paid for FOUR times, at four different doors, found one at a time. The
+fourth was opened by the fix for the third.**
 
 1. The **ledger's same-origin restatement guard** (PR #243): one meeting
    can only restate an item once, so a re-ingest cannot read as a second
@@ -131,8 +132,20 @@ because a transcript arrived a second time.
    of presence to the replay, so people last met in July rendered as met
    that afternoon. 361 rows required repair.
 
+4. **The presence BACKFILL** (2026-08-17), hours after #3 shipped. The
+   ingest path was fixed; the backfill was not, because it was not the
+   path that had failed. It supplied each PATCH's own `created_at` while
+   the upsert takes `GREATEST(existing, incoming)`, so a row landed on
+   the LATEST patch anchored to the meeting. Within one ingest that is
+   seconds. On a REPLAYED meeting it is the replay, because the meeting
+   then holds patches from both. Running the ownership tier took the
+   table from 0 wrongly-dated rows to 160.
+
 **Applying it.** When adding any timestamp written at ingest, ask what it
-does on the second ingest of the same origin. Doc 16 §6.2a already stated
+does on the second ingest of the same origin. And when you FIX one such
+path, enumerate the other writers of the same table before closing it:
+the fourth door above was opened by the third's repair, by a script
+nobody re-read because it had not been the thing that broke. Doc 16 §6.2a already stated
 this rule for presence and only the relabel routes implemented it, which
 is why the ingest path failed: a rule stated in one place and implemented
 in another is a rule with one carrier (see 19.2).
