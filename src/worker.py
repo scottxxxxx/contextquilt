@@ -2726,7 +2726,28 @@ class ColdPathWorker:
                        count(*) FILTER (WHERE re_dated) AS re_dated,
                        count(*) FILTER (WHERE handed) AS handed_back,
                        count(*) FILTER (WHERE status = 'active' AND restated) AS restated,
-                       array_agg(patch_id) AS patch_ids
+                       array_agg(patch_id) AS patch_ids,
+                       -- The specific items behind each fact, not only
+                       -- the count. `Fact.patch_ids` has read these five
+                       -- keys since the lens shipped and the query
+                       -- produced none of them, so every fact carried an
+                       -- empty list: a contract with no carrier (19.2)
+                       -- inside the code that cites 19.2. Without them a
+                       -- claim can say "moves due dates more often than
+                       -- others" and can never say WHICH ONE, which is
+                       -- the difference between characterising somebody
+                       -- and showing the reader the thing.
+                       array_agg(patch_id) FILTER (
+                           WHERE status = 'active' AND window_start IS NOT NULL
+                             AND last_stated < window_start) AS quiet_patch_ids,
+                       array_agg(patch_id) FILTER (
+                           WHERE completed_at IS NOT NULL AND due IS NOT NULL
+                             AND due ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$'
+                             AND completed_at::date > due::date) AS late_patch_ids,
+                       array_agg(patch_id) FILTER (WHERE re_dated) AS re_dated_patch_ids,
+                       array_agg(patch_id) FILTER (WHERE handed) AS handed_patch_ids,
+                       array_agg(patch_id) FILTER (
+                           WHERE status = 'active' AND restated) AS restated_patch_ids
                 FROM items
                 GROUP BY canonical_id, canonical_name
                 """,
