@@ -78,8 +78,10 @@ from contextquilt.services.people_network import (
     NODE_CAP as NETWORK_NODE_CAP,
     SNAPSHOT_VERSION as NETWORK_SNAPSHOT_VERSION,
 )
+from contextquilt.services.entity_aliasing import person_candidates
 from contextquilt.services.people_identity import (
     IdentityRequestError,
+    candidate_payload,
     canonical_pair,
     capability_report,
     choose_surviving_person_patch,
@@ -3572,6 +3574,14 @@ class ReassignSpeakerRequest(BaseModel):
     # changes; this is what makes ONE meeting-scoped verb cover both
     # naming an unknown speaker and correcting a misattribution.
     to_name: Optional[str] = None
+    # Set after the caller has SEEN the candidates and chosen "someone
+    # new". Without it a contested name is refused, which is the point;
+    # with it the caller is asserting this is a different person and CQ
+    # records what they say. It never hard-requires a distinguishing
+    # surname: refusing to record a real colleague because we wanted a
+    # tidier graph is the wrong trade, and sometimes you genuinely only
+    # know "Mike".
+    create_new: Optional[bool] = None
 
 
 def _reassign_error(code: str, message: str, **extra) -> HTTPException:
@@ -3852,10 +3862,26 @@ async def reassign_speaker(
             # onto a speaker and the same name typed into the "+" sheet
             # cannot produce two different people.
             if requested_name is not None:
+                # The meetings being relabelled give the picker its
+                # strongest ordering signal: a Mike already in THIS
+                # project is the likelier answer. Ranking only, never
+                # resolution, which is the line Scott drew.
+                scope_projects = [
+                    r["project_id"] for r in await conn.fetch(
+                        """
+                        SELECT DISTINCT project_id FROM context_patches
+                        WHERE origin_id = ANY($1::text[])
+                          AND project_id IS NOT NULL
+                        """,
+                        meeting_ids,
+                    )
+                ]
                 person = await _resolve_or_create_person(
                     conn, user_id, app_id, requested_name, "",
                     resolve_identity_source("speaker_reassign"), vocab,
                     datetime.utcnow(), "speaker_reassign",
+                    create_new=bool(req.create_new),
+                    scope_project_ids=scope_projects,
                 )
                 target_owner = person["name"]
                 person_presence_id = person["entity_id"]
@@ -4355,6 +4381,14 @@ class PersonCreate(BaseModel):
     name: str
     description: Optional[str] = None
     source: Optional[str] = None
+    # Set after the caller has SEEN the candidates and chosen "someone
+    # new". Without it a contested name is refused, which is the point;
+    # with it the caller is asserting this is a different person and CQ
+    # records what they say. It never hard-requires a distinguishing
+    # surname: refusing to record a real colleague because we wanted a
+    # tidier graph is the wrong trade, and sometimes you genuinely only
+    # know "Mike".
+    create_new: Optional[bool] = None
 
 
 class PersonRenameRequest(BaseModel):
@@ -7018,9 +7052,82 @@ async def unsuppress_person(
     }
 
 
+async def _name_candidates(conn, user_id: str, name: str, person_type: str):
+    """Every live person a typed name could denote, with ranking signals.
+
+    Two sources, unioned, because they catch different things:
+
+      STRUCTURAL  first-name and initial matching against the live
+                  roster, so "Mike" finds every Mike and "Mike P" finds
+                  only the P ones (services/entity_aliasing.py).
+      ALIAS       every recorded alias row that matches, not the first.
+                  This is what catches "VJ", which no amount of token
+                  matching would, AND it is the exact lookup that caused
+                  the damage: a bare `LIMIT 1` on it meant
+                  'Mike' -> Mike DiTroia resolved forever.
+
+    Returns [] for a name nobody holds, which is a NEW PERSON and must
+    stay creatable. One candidate resolves. More than one is a question
+    for a human.
+    """
+    rows = await conn.fetch(
+        """
+        SELECT e.entity_id, e.name,
+               (SELECT count(*) FROM person_appearances pa
+                 WHERE pa.entity_id = e.entity_id) AS meetings,
+               (SELECT max(pa.last_seen_at)::date FROM person_appearances pa
+                 WHERE pa.entity_id = e.entity_id) AS last_met,
+               (SELECT array_agg(DISTINCT pa.project_id) FROM person_appearances pa
+                 WHERE pa.entity_id = e.entity_id
+                   AND pa.project_id IS NOT NULL) AS projects
+        FROM entities e
+        WHERE e.user_id = $1 AND e.entity_type = $2
+          AND e.merged_into IS NULL AND e.suppressed_at IS NULL
+        """,
+        user_id, person_type,
+    )
+    by_id = {str(r["entity_id"]): r for r in rows}
+    roster = [(str(r["entity_id"]), r["name"]) for r in rows]
+
+    hits = {eid for eid, _ in person_candidates(name, roster)}
+
+    try:
+        alias_rows = await conn.fetch(
+            """
+            SELECT e.entity_id FROM entity_aliases a
+            JOIN entities e ON e.entity_id = a.entity_id
+            WHERE a.user_id = $1 AND LOWER(a.alias) = LOWER($2)
+              AND e.entity_type = $3
+              AND e.merged_into IS NULL AND e.suppressed_at IS NULL
+            """,
+            user_id, name, person_type,
+        )
+        hits |= {str(r["entity_id"]) for r in alias_rows}
+    except Exception as exc:
+        # entity_aliases can lag on the MCP deployment's separate
+        # Postgres. Degrading to structural matching only is safe: it
+        # errs toward asking rather than toward guessing.
+        logger.debug("alias_candidates_unavailable", error=str(exc)[:120])
+
+    out = []
+    for eid in hits:
+        r = by_id.get(eid)
+        if not r:
+            continue
+        out.append({
+            "entity_id": eid,
+            "name": r["name"],
+            "meetings": r["meetings"] or 0,
+            "last_met": r["last_met"].isoformat() if r["last_met"] else None,
+            "projects": [p for p in (r["projects"] or []) if p],
+        })
+    return out
+
+
 async def _resolve_or_create_person(
     conn, user_id: str, app_id: str, name: str, description: str,
     source: str, vocab, now, source_prompt: str,
+    create_new: bool = False, scope_project_ids=(),
 ) -> dict:
     """Resolve a user-supplied person name, creating the person if new.
 
@@ -7049,17 +7156,37 @@ async def _resolve_or_create_person(
         user_id, name, vocab.person_entity_type,
     )
     if row is None:
-        row = await conn.fetchrow(
-            """
-            SELECT e.entity_id
-            FROM entity_aliases a
-            JOIN entities e ON e.entity_id = a.entity_id
-            WHERE a.user_id = $1 AND LOWER(a.alias) = LOWER($2)
-              AND e.entity_type = $3
-            LIMIT 1
-            """,
-            user_id, name, vocab.person_entity_type,
+        # A CONTESTED TYPED NAME IS A QUESTION, NOT A GUESS.
+        #
+        # This used to be a bare alias lookup with LIMIT 1, and that is
+        # the line that put an interview candidate's description on a
+        # Kore.ai colleague's page: 'Mike' was a recorded alias of Mike
+        # DiTroia, so typing "Mike" onto any speaker resolved to him
+        # forever. Ingest stopped guessing in #283; this is the other
+        # door, the one where a HUMAN is typing and can simply be asked.
+        #
+        # 409 rather than 422: this is not a malformed request, it is a
+        # fork the caller must resolve, and it carries the ranked
+        # candidates to resolve it with.
+        candidates = await _name_candidates(
+            conn, user_id, name, vocab.person_entity_type
         )
+        if len(candidates) > 1 and not create_new:
+            payload = candidate_payload(candidates, scope_project_ids)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "CONTESTED_NAME",
+                    "message": (
+                        f"{name!r} could be more than one person. "
+                        "Pick one, or send create_new to add someone new."
+                    ),
+                    "name": name,
+                    **payload,
+                },
+            )
+        if len(candidates) == 1 and not create_new:
+            row = {"entity_id": candidates[0]["entity_id"]}
 
     created = False
     if row is not None:
@@ -7187,6 +7314,7 @@ async def create_person(
             resolved = await _resolve_or_create_person(
                 conn, user_id, app_id, name, description, source, vocab,
                 now, "people_create",
+                create_new=bool(req.create_new),
             )
     entity_uuid = resolved["entity_id"]
     name = resolved["name"]
