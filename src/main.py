@@ -1765,6 +1765,27 @@ class QuiltPatchResponse(BaseModel):
     # band for the same row. Null = decay does not apply here (not a
     # completable). Day-bucketed: stable within a UTC day.
     decay_state: Optional[str] = None
+    # THE THREE A TRIAGE HEADER NEEDS, all of which existed in the value
+    # blob and none of which reached a client until 2026-08-18.
+    #
+    # Measured on ABM the day this shipped: 472 open items carrying 99
+    # overdue, 55 high salience and 23 restated, and the app could see
+    # none of it. A client asked to build "what needs attention" had
+    # literally nothing to sort on but a raw deadline.
+    #
+    # `overdue_since` is stamped by the worker's deadline sweep, so it is
+    # the server's own answer rather than a client re-deriving "past
+    # today" against its own clock and drifting across timezones.
+    overdue_since: Optional[str] = None
+    # low | high, absent means normal. Set by extraction, and it also
+    # stretches or shrinks the decay TTL, so a client showing it is
+    # showing the same thing that governs the item's lifetime.
+    salience: Optional[str] = None
+    # How many times this item came back WITHOUT closing. Monotonic, and
+    # it survives the restatements array's cap. A thing said four times
+    # and still open is the strongest "this is not moving" signal we
+    # hold; doc 16 5.12 is the ruling on what it does and does not mean.
+    restatement_count: Optional[int] = None
     connections: List[PatchConnectionResponse] = []
 
 class MeetingGroup(BaseModel):
@@ -1841,6 +1862,28 @@ class TierChangeEvent(BaseModel):
 # can only WIDEN this set. The constant remains as the degraded-mode
 # fallback and for error messages when the registry is unreachable.
 COMPLETABLE_PATCH_TYPES = facet_runtime.FALLBACK_COMPLETABLE_TYPES
+
+
+def _as_optional_int(value):
+    """A non negative int from an int or a numeric string, else None.
+
+    `value.restatement_count` crosses the wire as text from a `->>`
+    select and as an int from a jsonb one, and a hand-written or
+    backfilled value could be neither. A read route returns absent
+    rather than raising on any of those. Mirrors item_ledger._as_int,
+    which serves the same field to the People surfaces.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str):
+        try:
+            n = int(value.strip())
+        except (ValueError, AttributeError):
+            return None
+        return n if n >= 0 else None
+    return None
 
 
 async def _completable_types() -> tuple:
@@ -1934,6 +1977,7 @@ async def get_user_quilt(
     group_by: Optional[str] = Query(None, description="'origin' adds a `meetings` array grouping origin-anchored patches by meeting (newest meeting first, capture order inside). Flat arrays are unchanged."),
     project_id: Optional[str] = Query(None, description="Project rundown view (context-flow contract, 2026-07): only patches carrying this stable project id. Combine with group_by=origin for a complete per-meeting project dossier. NOTE: meeting views stay keyed on origin_id per the SS contract; this filter serves the gateway's rundown route and only works when ingest stamped project_id (see docs/architecture/13)."),
     limit: Optional[int] = Query(None, ge=1, le=500, description="Cap the patches array (applied after ordering). For prompt injection use — a large project must not blow the caller's prompt budget."),
+    order: Optional[str] = Query(None, description="'attention' ranks open work by what needs looking at (overdue, then high salience, then items that keep coming back, then soonest due) instead of by recency. Pair it with `limit` so a capped project view returns the important N rather than an arbitrary N. Omit for the existing recency order; `origin_id` meeting views ignore it and stay in capture order."),
     app_id: str = Depends(verify_application_access),
 ):
     """
@@ -1951,6 +1995,19 @@ async def get_user_quilt(
     Both keyed on the meeting UUID, never project_id (SS's call, due to
     their CloudKit project-id drift).
     """
+    # Reject an unknown order rather than falling back to recency. A
+    # client that ships `order=priority` would otherwise get a plausible
+    # list, in the wrong order, with a 200 and nothing to notice.
+    if order is not None and order not in ("attention",):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "UNKNOWN_ORDER",
+                "message": "order must be 'attention' or omitted",
+                "received": order[:40],
+            },
+        )
+
     subject_key = f"user:{user_id}"
     server_time = datetime.utcnow()
 
@@ -2012,6 +2069,31 @@ async def get_user_quilt(
     # both modes — microsecond-equal batch inserts gave undefined order.
     if origin_id:
         query += " ORDER BY cp.created_at ASC, cp.patch_id ASC"
+    elif order == "attention":
+        # OPT IN, and deliberately not the default: GP's rundown route
+        # reads this endpoint into a prompt, and reordering underneath a
+        # caller who never asked would change their bytes for free.
+        #
+        # Exists because a capped rundown was returning AN arbitrary N
+        # rather than the important N. On ABM the day this shipped, 472
+        # open items carried 99 overdue and 55 high salience, and a
+        # client asking for the top 40 by recency would surface almost
+        # none of them.
+        #
+        # No casts anywhere in here on purpose. `restatement_count` is
+        # text from a `->>` select and could be a hand-written value, and
+        # an ORDER BY that raises takes down a read route for whoever
+        # happens to hold one bad row. The regex answers the only
+        # question the sort needs, "has this come back at all", without
+        # trusting the contents. ISO dates sort correctly as text.
+        query += (
+            " ORDER BY"
+            " (cp.value->>'overdue_since' IS NOT NULL) DESC,"
+            " (cp.value->>'salience' = 'high') DESC,"
+            " (cp.value->>'restatement_count' ~ '^[1-9]') DESC,"
+            " (cp.value->>'deadline_date') ASC NULLS LAST,"
+            " cp.created_at DESC, cp.patch_id ASC"
+        )
     else:
         query += " ORDER BY cp.created_at DESC, cp.patch_id ASC"
 
@@ -2228,6 +2310,12 @@ async def get_user_quilt(
             ),
             owned_by_self=_owned_by_self(pid, value, row["patch_type"]),
             decay_state=_decay_state(pid, value, row),
+            overdue_since=value.get("overdue_since"),
+            salience=value.get("salience"),
+            # Text from a `->>` select, int from a jsonb one, and a
+            # hand-written value could be neither. Absent beats raising
+            # on a read route.
+            restatement_count=_as_optional_int(value.get("restatement_count")),
             connections=connections_by_patch.get(pid, []),
         )
 
