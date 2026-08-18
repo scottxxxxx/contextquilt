@@ -127,6 +127,7 @@ from contextquilt.services.entity_aliasing import (
     person_candidates,
 )
 from contextquilt.services import behavior_extraction
+from contextquilt.services import described_as
 from contextquilt.services import relationship_lenses
 from contextquilt.services.people_identity import (
     build_entity_resolver,
@@ -1590,6 +1591,76 @@ async def store_entities(
             except Exception as e:
                 logger.debug("self_entity_stamp_skipped", error=str(e)[:120])
 
+        async def _record_description(entity_id) -> None:
+            """Append this meeting's description to the person's series.
+
+            Brian's ask: keep every iteration of who we thought someone
+            was, not just the latest. `entities.description` stays the
+            CURRENT value (nothing that reads it changes); this is the
+            record that used to be destroyed by the overwrite.
+
+            Only a genuinely different description appends. The same
+            perception reworded bumps a confirmation count instead, and
+            the same meeting arriving twice does nothing at all (doc
+            19.4). See services/described_as.py for the decision.
+
+            People only, and it NEVER raises: a series is a nice-to-have
+            and an ingest is not. The table can also be absent on the MCP
+            deployment's separate Postgres, which lags migrations.
+            """
+            if entity_type != person_entity_type:
+                return
+            if not described_as.usable(description):
+                return
+            meta = metadata or {}
+            origin_id = meta.get("origin_id")
+            try:
+                latest = await db.fetchrow(
+                    """
+                    SELECT description_id, description, last_origin_id
+                    FROM entity_descriptions
+                    WHERE user_id = $1 AND entity_id = $2
+                    ORDER BY first_observed_at DESC
+                    LIMIT 1
+                    """,
+                    user_id, entity_id,
+                )
+                verdict = described_as.classify_observation(
+                    description, dict(latest) if latest else None, origin_id,
+                )
+                if verdict["action"] == described_as.IGNORE:
+                    return
+                if verdict["action"] == described_as.CONFIRM:
+                    await db.execute(
+                        """
+                        UPDATE entity_descriptions
+                           SET last_observed_at = NOW(),
+                               observation_count = observation_count + 1,
+                               last_origin_id = COALESCE($2, last_origin_id)
+                         WHERE description_id = $1
+                        """,
+                        latest["description_id"], origin_id,
+                    )
+                    return
+                await db.execute(
+                    """
+                    INSERT INTO entity_descriptions (
+                        user_id, entity_id, description,
+                        first_origin_id, first_origin_type, last_origin_id, source
+                    ) VALUES ($1, $2, $3, $4, $5, $4, $6)
+                    """,
+                    user_id, entity_id, description.strip(),
+                    origin_id, meta.get("origin_type"),
+                    meta.get("source") or "meeting_summary",
+                )
+                logger.info(
+                    "described_as_changed",
+                    user_id=user_id, entity_id=str(entity_id),
+                    similarity=verdict["similarity"], reason=verdict["reason"],
+                )
+            except Exception as exc:
+                logger.debug("described_as_skipped", error=str(exc)[:140])
+
         async def _reobserve(entity_id) -> None:
             await db.execute(
                 """
@@ -1604,6 +1675,7 @@ async def store_entities(
             )
             await _record_appearance(entity_id)
             await _maybe_stamp_self(entity_id)
+            await _record_description(entity_id)
 
         # 1. Exact match, case-insensitive (the old ON CONFLICT only
         #    caught exact case, so "lockridge abrams" vs "Lockridge Abrams"

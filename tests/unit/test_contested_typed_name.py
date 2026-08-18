@@ -137,3 +137,27 @@ def test_alias_lookup_failure_degrades_to_asking():
     helper = MAIN.split("async def _name_candidates")[1].split("\nasync def ")[0]
     assert "alias_candidates_unavailable" in helper
     assert "except Exception" in helper
+
+
+def test_the_409_is_not_swallowed_and_rolls_back():
+    """The refusal is raised INSIDE the transaction that would have
+    created the person, so a contested name never strands a half-made
+    one. A broad `except` anywhere between the transaction and the
+    resolver would convert the 409 into a 500 and hand GP a status their
+    picker cannot branch on."""
+    body = MAIN.split("async def reassign_speaker")[1].split("\n@app.")[0]
+    i_tx = body.index("async with conn.transaction():")
+    i_call = body.index("person = await _resolve_or_create_person(")
+    assert i_tx < i_call, "the resolver must run inside the transaction"
+    between = body[i_tx:i_call]
+    assert "except" not in between, "nothing may catch the CONTESTED_NAME 409"
+
+
+def test_create_new_is_a_modifier_not_a_target():
+    """`to_name` + `create_new` must still count as ONE target. If
+    create_new joined the exactly-one gate, the retry after a picker
+    would be refused as ambiguous."""
+    gate = MAIN.split("targets_given = sum(")[1].split(")")[0]
+    assert "create_new" not in gate
+    for field in ("to_self", "to_person_id", "to_name"):
+        assert field in gate
