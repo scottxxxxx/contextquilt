@@ -5370,7 +5370,7 @@ class ColdPathWorker:
             # patch ownership and that the patch is actually an open
             # commitment before marking completed. Unknown or cross-user
             # patch_ids are dropped with a warning.
-            commitments_resolved = await self._apply_resolved_commitments(
+            commitments_believed = await self._apply_resolved_commitments(
                 user_id, response.content.get("resolved_commitments") or [],
                 origin_id=origin_id,
             )
@@ -5382,7 +5382,7 @@ class ColdPathWorker:
                 actions_stored=actions_stored,
                 entities_stored=entities_stored,
                 relationships_stored=relationships_stored,
-                commitments_resolved=commitments_resolved,
+                commitments_believed=commitments_believed,
                 cost_usd=response.cost_usd,
                 model=response.model,
             )
@@ -5705,12 +5705,21 @@ class ColdPathWorker:
         Validates ownership before any write so a hallucinated or
         cross-user patch_id can't touch another user's commitment.
 
-        TWO OUTCOMES, ROUTED BY EVIDENCE (services/closure_evidence.py).
+        NOTHING CLOSES HERE ANY MORE. Every reported resolution becomes
+        a BELIEF a human answers.
+
         This used to archive every reported resolution on the spot, and
         measured across all 167 of them on prod, most were not evidence
         of anything being finished: items closed because the promise was
         made AGAIN, or because somebody set a date, both of which doc 16
         5.12 already rules are not advances.
+
+        A first pass kept a "confident" band that still auto-closed, 13
+        of the 167. Reading all 13 by hand against the item they closed
+        found at least two wrong, so the band labelled confident was
+        running 15% to 46% wrong on exactly the population marked
+        trustworthy. 13-of-167 measures ABSTENTION, not accuracy, and it
+        reads like rigour, which is what made it dangerous.
 
         A wrong close is not a lost obligation, it is a FABRICATED
         DELIVERY: the row archives out of the ledger population and
@@ -5727,7 +5736,6 @@ class ColdPathWorker:
         if not resolutions or not user_id:
             return 0
         subject_key = f"user:{user_id}"
-        resolved_count = 0
         believed_count = 0
         for item in resolutions:
             patch_id = (item.get("patch_id") or "").strip()
@@ -5773,29 +5781,46 @@ class ColdPathWorker:
                 continue
             verdict = classify_closure(gated["owner"], evidence)
             try:
-                if verdict["band"] == BELIEVED:
-                    # STAYS OPEN. completed_at is untouched, so this item
-                    # never enters the delivery history and never leaves
-                    # the ledger population. The stamps are what the app
-                    # renders the "looks done, confirm?" state from, and
-                    # `reasons` travels with them so the person deciding
-                    # can see WHY we were not sure.
-                    await self.db.execute(
-                        """
-                        UPDATE context_patches
-                           SET updated_at = NOW(),
-                               value = jsonb_set(
+                # NOTHING AUTO-CLOSES ANY MORE, and the band no longer
+                # decides that. It survives only as a hint for the app's
+                # card ORDER, so strong evidence reaches a quick yes
+                # first.
+                #
+                # Why the confident band was collapsed on 2026-08-18:
+                # it was 13 of 167, which reads as rigour and is actually
+                # a measure of how often the classifier ABSTAINS, not of
+                # how often it is right when it does not. Reading all 13
+                # by hand against the item they closed found at least two
+                # wrong, so precision on the band labelled "confident"
+                # was somewhere between 85% and 54%:
+                #
+                #   item     Validate SDK deployment for history and search
+                #   evidence "...deployed to Dev and QA. Joy TO VALIDATE in QA."
+                #
+                #   item     DELIVER asset management hardware POC
+                #   evidence "shared analysis; RECOMMENDS ... as separate POC"
+                #
+                # Both failures are about the VERB, not the nouns, which
+                # is why a shared-token check would not have caught
+                # either. And both of the last two items were closed by
+                # the SAME piece of evidence: one person reporting work,
+                # closing two items, one of which was not done.
+                #
+                # The costs are not symmetric. A wrong close fabricates
+                # delivery history, in the artifact people are least
+                # likely to question. A missed close leaves an item open
+                # and someone chases it. Eleven good auto-closes over
+                # five months do not buy two fabricated delivery records.
+                await self.db.execute(
+                    """
+                    UPDATE context_patches
+                       SET updated_at = NOW(),
+                           value = jsonb_set(
+                               jsonb_set(
                                    jsonb_set(
                                        jsonb_set(
                                            jsonb_set(value,
                                                '{believed_complete_at}',
-                                               -- Same ISO shape as
-                                               -- shelved_at and
-                                               -- last_vouched_at.
-                                               -- NOW()::text renders
-                                               -- "2026-08-17 19:48:20.4+00",
-                                               -- which is not what any
-                                               -- client here parses.
                                                to_jsonb(to_char(NOW() AT TIME ZONE 'UTC',
                                                    'YYYY-MM-DD"T"HH24:MI:SS"Z"'))),
                                            '{believed_complete_evidence}',
@@ -5803,50 +5828,22 @@ class ColdPathWorker:
                                        '{believed_complete_reasons}',
                                        $3::jsonb),
                                    '{believed_complete_origin_id}',
-                                   to_jsonb($4::text))
-                         WHERE patch_id = $1::uuid
-                        """,
-                        patch_id, evidence,
-                        json.dumps(verdict["reasons"]),
-                        str(origin_id or ""),
-                    )
-                    believed_count += 1
-                    logger.info(
-                        "commitment_believed_complete",
-                        patch_id=patch_id, user_id=user_id,
-                        reasons=verdict["reasons"], evidence=evidence[:120],
-                    )
-                    continue
-
-                # completion_source/evidence stamped into value so apps
-                # can distinguish LLM auto-close ('extraction') from
-                # tap-to-complete ('app', via POST .../complete) from
-                # plain TTL decay (no completed_at at all).
-                # completion_origin_id says WHICH meeting closed it, so
-                # the app can name it in the notification that offers the
-                # one tap reopen.
-                await self.db.execute(
-                    """
-                    UPDATE context_patches
-                       SET completed_at = NOW(),
-                           status = 'archived',
-                           updated_at = NOW(),
-                           value = jsonb_set(
-                               jsonb_set(
-                                   CASE WHEN $2::text <> ''
-                                   THEN jsonb_set(value, '{completion_evidence}',
-                                                  to_jsonb($2::text))
-                                   ELSE value END,
-                                   '{completion_source}', '"extraction"'),
-                               '{completion_origin_id}', to_jsonb($3::text))
+                                   to_jsonb($4::text)),
+                               '{believed_evidence_strength}',
+                               to_jsonb($5::text))
                      WHERE patch_id = $1::uuid
                     """,
-                    patch_id, evidence, str(origin_id or ""),
+                    patch_id, evidence,
+                    json.dumps(verdict["reasons"]),
+                    str(origin_id or ""),
+                    verdict["band"],
                 )
-                resolved_count += 1
+                believed_count += 1
                 logger.info(
-                    "commitment_resolved",
-                    patch_id=patch_id, user_id=user_id, evidence=evidence[:120],
+                    "commitment_believed_complete",
+                    patch_id=patch_id, user_id=user_id,
+                    strength=verdict["band"], reasons=verdict["reasons"],
+                    evidence=evidence[:120],
                 )
             except Exception as exc:
                 logger.warning(
@@ -5856,9 +5853,14 @@ class ColdPathWorker:
         if believed_count:
             logger.info(
                 "commitments_believed_complete_batch",
-                user_id=user_id, believed=believed_count, closed=resolved_count,
+                user_id=user_id, believed=believed_count,
             )
-        return resolved_count
+        # Beliefs RAISED, not closures. Nothing closes on this path any
+        # more, so returning a permanently-zero "resolved" count would be
+        # a metric that reads the same whether the pass worked or never
+        # ran, which is the exact instrument failure this change came
+        # from.
+        return believed_count
 
     async def _maybe_alert_llm_failure(self, exc: Exception) -> None:
         """Fire a critical-failure alert when an LLM call fails with an
