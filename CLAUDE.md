@@ -70,7 +70,56 @@ Redis entity index (names ∪ aliases, self-healing) + cue index (`cue_index:{us
 
 ### Cross-team note
 
-ContextQuilt is consumed by ShoulderSurf (iOS) through the GhostPour gateway. **Verify additive API changes through GP's proxied path, not just CQ's socket** — GP middleboxes have eaten metadata keys and query params before. Coordination details live in the private ops dossier (see global CLAUDE.md pointer).
+ContextQuilt is consumed by ShoulderSurf (iOS) through the GhostPour gateway. **Verify additive API changes through GP's proxied path, not just CQ's socket.** GP middleboxes have eaten metadata keys and query params before. Coordination details live in the private ops dossier (see global CLAUDE.md pointer).
+
+### How the three teams talk to each other
+
+Identical wording lives in CQ's, SS's and GP's CLAUDE.md, because shared
+literal text is itself drift resistance. Every rule below was paid for in
+the week of 2026-08-11, and each carries its receipt. Add one only after
+it has cost something.
+
+1. **Send the mechanism, not the summary.** A merge relocated identity
+   because CQ's API could not express a name choice while SS's client
+   expressed it by moving the surviving row. Both bugs produced the
+   identical observable, so from either side the other was invisible and
+   more private rigour would not have found it. What found it was one
+   team describing a fix in enough detail that the other could check
+   their half against it. When both parties hold a COHERENT account,
+   nobody is confused, so nobody asks.
+
+2. **Prove the test can fail.** GP verified their passthrough tests by
+   making the proxy behave like a middlebox (dropping 4xx bodies,
+   re-sorting arrays, flattening nested ones) and confirming each test
+   went red. SS sabotaged a survivor rule to confirm three tests caught
+   the exact bug shape. Both found real defects. A test that cannot fail
+   on the bug it was written for is decoration.
+
+3. **A response-side test cannot see a request-side hole.** `to_name`
+   was sent by SS and silently dropped by an unmodelled field in GP's
+   schema for about a week. SS saw a correct send; CQ saw a complete
+   request that simply lacked a name. The evidence existed only on the
+   middle hop, so only a request-side test there could find it.
+
+4. **Check the echo, not the status.** A 200 says the request was
+   processed, never that it did what the caller meant. A merge reported
+   success while the chosen name never travelled, and an endpoint logged
+   `200 OK` for sixty seconds while every device saw a 504. Where a
+   write has an outcome worth confirming, serve it back and have the
+   caller compare.
+
+5. **Name which side each claim was proved on.** Additive at the writer,
+   at the gateway and at the reader are three different claims, and each
+   side can prove its own half while the failure lives on another. This
+   is doc 19.9 stated as a habit rather than a ruling.
+
+6. **Say what you have NOT done, and correct your own numbers out
+   loud.** "I have not started it tonight and I am not going to pretend
+   otherwise" is worth more than a hedge. A cost estimate that was 4x
+   wrong, a scope of 41 meetings that was really 150, and a "13 of 167
+   close cleanly" that was really an abstention rate were all corrected
+   by the team that produced them, which is the only way any of them
+   could have been.
 
 ## Documentation
 
