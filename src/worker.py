@@ -121,7 +121,11 @@ from contextquilt.services.corrections import (
     parse_completion_response,
     parse_correction_response,
 )
-from contextquilt.services.entity_aliasing import find_alias_candidate
+from contextquilt.services.entity_aliasing import (
+    find_alias_candidate,
+    is_contested_person_name,
+    person_candidates,
+)
 from contextquilt.services import behavior_extraction
 from contextquilt.services import relationship_lenses
 from contextquilt.services.people_identity import (
@@ -1300,6 +1304,30 @@ async def store_entities(
 
     stored = 0
     self_key = self_label.strip().lower() if self_label else None
+    # Live people, fetched at most ONCE per ingest and only if a person
+    # actually turns up, so a meeting full of orgs pays nothing.
+    person_roster: list | None = None
+
+    async def _live_person_roster() -> list:
+        nonlocal person_roster
+        if person_roster is None:
+            try:
+                rows = await db.fetch(
+                    """
+                    SELECT entity_id, name FROM entities
+                    WHERE user_id = $1 AND entity_type = $2
+                      AND merged_into IS NULL AND suppressed_at IS NULL
+                    """,
+                    user_id, person_entity_type,
+                )
+                person_roster = [(r["entity_id"], r["name"]) for r in rows]
+            except Exception as exc:
+                # Never let the guard's own failure block an ingest. No
+                # roster means no contest, which is today's behaviour.
+                logger.debug("person_roster_unavailable", error=str(exc)[:120])
+                person_roster = []
+        return person_roster
+
     for ent in entities:
         name = ent.get("name", "").strip()
         entity_type = ent.get("type", "").strip()
@@ -1597,6 +1625,33 @@ async def store_entities(
             await _reobserve(await _resolve_merged_forward(db, row["entity_id"]))
             stored += 1
             continue
+
+        # 1b. CONTESTED NAME GUARD, people only, after the exact match
+        # and before every heuristic. An exact full-name hit above is
+        # decisive and never reaches here.
+        #
+        # A surface form that could honestly mean more than one live
+        # person resolves to NOBODY: no alias match, no heuristic, and
+        # no new row either, because minting a second "Mike" is its own
+        # corruption. The entity is dropped and the meeting keeps its
+        # patches, whose `value.owner` holds the raw string. Naming the
+        # speaker later attaches all of it retroactively.
+        #
+        # Receipt (2026-08-17): 'Mike' -> Mike DiTroia is a recorded
+        # alias, so an EMIDS interview candidate saying "Mike" gave a
+        # Kore.ai colleague a meeting he was never in. 17 bare first
+        # names on that roster resolve to one person while others share
+        # the name.
+        if entity_type == person_entity_type:
+            roster = await _live_person_roster()
+            if is_contested_person_name(name, roster):
+                logger.info(
+                    "entity_name_contested",
+                    user_id=user_id, name=name[:60],
+                    candidates=[n for _, n in person_candidates(name, roster)][:6],
+                    origin_id=str((metadata or {}).get("origin_id") or "")[:40],
+                )
+                continue
 
         try:
             # 2. Recorded alias
