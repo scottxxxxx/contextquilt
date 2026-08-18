@@ -98,3 +98,47 @@ def test_person_patches_follow_the_new_name():
     rename = _merge_body().split("if (req.canonical_name")[1]
     assert "UPDATE context_patches cp" in rename
     assert "updated_at = NOW()" in rename
+
+
+# ---------------------------------------------------------------
+# Direction: a merge must not relocate identity onto a smaller row.
+# ---------------------------------------------------------------
+
+def test_folding_a_bigger_row_into_a_smaller_one_is_refused():
+    """SS hit this twice in an hour: once in commitMerge, and again in
+    the fix, because a property they believed ranked by relationship
+    size actually ranked by TOKEN COUNT OF THE NAME. "Pallavi Kandanu"
+    outranked "Pallavi" on name shape while holding 4 meetings to 88."""
+    body = _merge_body()
+    assert "MERGE_DIRECTION" in body
+    assert "larger_entities" in body
+
+
+def test_the_direction_check_runs_before_the_separation_check():
+    """Both can fire. A wrong direction is a client bug and a separation
+    is a user decision, so surface the one the caller can fix in code."""
+    body = _merge_body()
+    assert body.index("MERGE_DIRECTION") < body.index("SEPARATION_CONFLICT")
+
+
+def test_direction_is_overridable_but_not_by_default():
+    body = _merge_body()
+    assert "if bigger and not req.allow_smaller_canonical:" in body
+    model = MAIN.split("class PeopleMergeRequest")[1].split("class ")[0]
+    assert "allow_smaller_canonical: Optional[bool]" in model
+
+
+def test_the_refusal_names_the_fix_not_just_the_problem():
+    """The caller's remedy is to swap canonical_entity_id and use
+    canonical_name for the name they wanted, which only became possible
+    earlier the same day."""
+    body = _merge_body()
+    msg = body.split('"code": "MERGE_DIRECTION"')[1][:600]
+    assert "canonical_name" in msg
+
+
+def test_equal_sizes_are_not_refused():
+    """Strictly greater, so a tie or a near-tie merges without an
+    override. The guard is for identity relocation, not for tidiness."""
+    body = _merge_body()
+    assert "sizes.get(lid, 0) > canonical_size" in body

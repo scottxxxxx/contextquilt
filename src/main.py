@@ -4393,6 +4393,11 @@ class PeopleMergeRequest(BaseModel):
     # just contradicted it and leaving it would refuse the next merge
     # for a reason he already answered.
     override_separation: Optional[bool] = None
+    # Proceed even though a row being folded in is BIGGER than the
+    # survivor. Almost always a client bug rather than an intent, so it
+    # is refused by default; see the direction check below for why that
+    # became safe to enforce only on 2026-08-18.
+    allow_smaller_canonical: Optional[bool] = None
 
 
 class KeepSeparateRequest(BaseModel):
@@ -6239,6 +6244,62 @@ async def merge_people(
                 }
 
             loser_uuids = [str(r["entity_id"]) for r in losers]
+            # DIRECTION CHECK. Folding a bigger relationship into a
+            # smaller one relocates identity: the surviving entity_id
+            # changes, SS's navigation goes stale, and our own
+            # `source_entity_id` insight references point at the row
+            # that lost.
+            #
+            # Refusing by default became correct only once
+            # `canonical_name` existed, earlier the same day. Before
+            # that, sending the smaller row as canonical was the ONLY
+            # way to end up with its name, so it was a legitimate if
+            # lossy move. Now the name is independent, and picking the
+            # smaller survivor buys nothing.
+            #
+            # SS hit this twice in an hour: once in the original
+            # `commitMerge`, and again in the fix, because a property
+            # they believed ranked by relationship size actually ranked
+            # by token count of the NAME, so "Pallavi Kandanu" outranked
+            # "Pallavi" while holding 4 meetings against 88. Audited on
+            # prod first: 13 merges on record, none in the wrong
+            # direction, so this guard rejects nothing that has ever
+            # happened.
+            sizes = {
+                str(r["entity_id"]): r["meetings"]
+                for r in await conn.fetch(
+                    """
+                    SELECT e.entity_id,
+                           (SELECT count(*) FROM person_appearances pa
+                             WHERE pa.entity_id = e.entity_id) AS meetings
+                    FROM entities e WHERE e.entity_id = ANY($1::uuid[])
+                    """,
+                    [canonical_uuid] + loser_uuids,
+                )
+            }
+            canonical_size = sizes.get(canonical_uuid, 0)
+            bigger = [
+                {"entity_id": lid, "meetings": sizes.get(lid, 0)}
+                for lid in loser_uuids
+                if sizes.get(lid, 0) > canonical_size
+            ]
+            if bigger and not req.allow_smaller_canonical:
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "MERGE_DIRECTION",
+                        "message": (
+                            "The surviving person has fewer meetings than one "
+                            "being folded into them, which relocates identity. "
+                            "Send the larger row as canonical_entity_id, and "
+                            "canonical_name to keep the other name."
+                        ),
+                        "canonical_entity_id": canonical_uuid,
+                        "canonical_meetings": canonical_size,
+                        "larger_entities": bigger,
+                    },
+                )
+
             separated = await _read_separations(
                 conn, user_id, [canonical_uuid] + loser_uuids
             )
