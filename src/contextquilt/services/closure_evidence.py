@@ -48,6 +48,25 @@ Both bands carry `reasons`, so the wire says WHY an item landed where it
 did and the thresholds can be retuned against real data rather than
 re-argued from taste.
 
+WHAT "CONFIDENT" DOES NOT MEAN. This checks that the evidence carries
+the marks of a completed thing. It does NOT check that the completed
+thing is THIS item. Those are different claims and the band name flatters
+the weaker one, so: a citation is evidence something was consulted, not
+that it was understood.
+
+The receipt is already in this file's own history. A standup commitment
+owed by Karthik closed on "Scott commits to testing the Happy Path agent
+today". Real past-tense reading, wrong subject entirely. The owner gate
+catches that one only by accident, because the evidence named the wrong
+person; it would not catch the same error where the RIGHT person
+completed a DIFFERENT thing.
+
+So the 13-of-167 confident band is a provenance number, not an accuracy
+number. Closing that gap needs a subject-overlap check between the
+evidence and the item text, which is a heavier thing than tense matching
+and is deliberately not attempted here. Do not read `confident` as
+`correct` when extending this.
+
 English markers only, deliberately, and `classify_closure` returns
 BELIEVED for text it cannot read. Same call as the behavior sanitizer's
 English-only denylist: a marker list that silently passes everything in
