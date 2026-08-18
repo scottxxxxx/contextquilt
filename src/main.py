@@ -4367,6 +4367,32 @@ class PeopleMergeRequest(BaseModel):
     canonical_entity_id: str
     merge_entity_ids: List[str]
     source: Optional[str] = None
+    # WHICH NAME THE SURVIVING PERSON KEEPS.
+    #
+    # Missing until 2026-08-18, and SS had shipped a picker for it. The
+    # sheet said "Keep the name: Pallavi / Pallavi Kandanu", the user
+    # chose the full name, and there was nowhere to send the answer, so
+    # the survivor kept its own name and the choice looked ignored.
+    #
+    # It is a DISPLAY choice, deliberately separate from
+    # canonical_entity_id, which decides identity. The 88-meeting row
+    # must stay the surviving row: clients hold its id and insights
+    # reference it. Folding 88 meetings into a 4-meeting row to acquire
+    # a surname would be a bad trade for a rename.
+    #
+    # Must name one of the entities in the merge, by name or alias.
+    # Anything else is refused rather than silently ignored.
+    canonical_name: Optional[str] = None
+    # Proceed even though the user previously answered "keep separate"
+    # for one of these pairs. Set only after they have been TOLD, which
+    # is what the 409 SEPARATION_CONFLICT exists to make possible.
+    #
+    # A durable no should be hard to overturn, not impossible: Scott
+    # recorded one on 2026-08-07, changed his mind, and had no way to
+    # say so. Overturning also DELETES the separation, because he has
+    # just contradicted it and leaving it would refuse the next merge
+    # for a reason he already answered.
+    override_separation: Optional[bool] = None
 
 
 class KeepSeparateRequest(BaseModel):
@@ -6217,6 +6243,26 @@ async def merge_people(
                 conn, user_id, [canonical_uuid] + loser_uuids
             )
             conflicts = separation_conflicts(canonical_uuid, loser_uuids, separated)
+            if conflicts and req.override_separation:
+                # The user has been shown the 409 and said merge anyway.
+                # Drop the record: it has been contradicted, and keeping
+                # it would refuse the next merge on an answer they have
+                # already changed.
+                for a, b in conflicts:
+                    lo, hi = canonical_pair(a, b)
+                    await conn.execute(
+                        """
+                        DELETE FROM entity_separations
+                        WHERE user_id = $1 AND entity_id_lo = $2::uuid
+                          AND entity_id_hi = $3::uuid
+                        """,
+                        user_id, lo, hi,
+                    )
+                logger.info(
+                    "separation_overturned", user_id=user_id,
+                    pairs=[[a, b] for a, b in conflicts], source=source,
+                )
+                conflicts = []
             if conflicts:
                 raise HTTPException(
                     status_code=409,
@@ -6465,6 +6511,88 @@ async def merge_people(
                 source, canonical_uuid,
             )
 
+            # WHICH NAME SURVIVES, if the caller chose one. Runs LAST,
+            # inside the same transaction, so the losers' names are
+            # already aliases and the chosen one may be any of them.
+            #
+            # Identity does not move: the canonical row stays canonical
+            # and keeps its id. Only the display name changes, and the
+            # name it had becomes an alias, so recall by either spelling
+            # keeps working and nothing holding the id is disturbed.
+            renamed_to = None
+            if (req.canonical_name or "").strip():
+                wanted = req.canonical_name.strip()
+                current = await conn.fetchval(
+                    "SELECT name FROM entities WHERE entity_id = $1::uuid",
+                    canonical_uuid,
+                )
+                known = {(current or "").strip().lower()}
+                known |= {
+                    (r["alias"] or "").strip().lower()
+                    for r in await conn.fetch(
+                        "SELECT alias FROM entity_aliases "
+                        "WHERE user_id = $1 AND entity_id = $2::uuid",
+                        user_id, canonical_uuid,
+                    )
+                }
+                if wanted.lower() not in known:
+                    # Refused rather than ignored. Silently keeping the
+                    # old name is the bug this field exists to fix, so
+                    # an unrecognised choice must not do the same thing
+                    # by a different route.
+                    raise HTTPException(
+                        status_code=422,
+                        detail={
+                            "code": "UNKNOWN_CANONICAL_NAME",
+                            "message": (
+                                "canonical_name must be a name or alias of "
+                                "one of the people being merged."
+                            ),
+                            "canonical_name": wanted,
+                            "known": sorted(k for k in known if k),
+                        },
+                    )
+                if wanted.lower() != (current or "").strip().lower():
+                    await conn.execute(
+                        "DELETE FROM entity_aliases WHERE user_id = $1 "
+                        "AND entity_id = $2::uuid AND LOWER(alias) = LOWER($3)",
+                        user_id, canonical_uuid, wanted,
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO entity_aliases (user_id, entity_id, alias, source)
+                        VALUES ($1, $2::uuid, $3, $4)
+                        ON CONFLICT (user_id, LOWER(alias))
+                        DO UPDATE SET entity_id = EXCLUDED.entity_id,
+                                      source = EXCLUDED.source
+                        """,
+                        user_id, canonical_uuid, current, source,
+                    )
+                    await conn.execute(
+                        "UPDATE entities SET name = $1 WHERE entity_id = $2::uuid",
+                        wanted, canonical_uuid,
+                    )
+                    # The person patches say what the entity says, the
+                    # same match set the rename route uses: name plus
+                    # every alias, because a patch whose text is an old
+                    # spelling is still this person's patch.
+                    keys = list(known)
+                    await conn.execute(
+                        """
+                        UPDATE context_patches cp
+                        SET value = jsonb_set(value, '{text}', to_jsonb($1::text)),
+                            updated_at = NOW()
+                        FROM patch_subjects ps
+                        WHERE ps.patch_id = cp.patch_id
+                          AND ps.subject_key = $2
+                          AND cp.patch_type = $4
+                          AND COALESCE(cp.status, 'active') = 'active'
+                          AND LOWER(cp.value->>'text') = ANY($3::text[])
+                        """,
+                        wanted, subject_key, keys, vocab.person_type,
+                    )
+                    renamed_to = wanted
+
             alias_rows = await conn.fetch(
                 "SELECT alias FROM entity_aliases WHERE user_id = $1 AND entity_id = $2::uuid ORDER BY alias",
                 user_id, canonical_uuid,
@@ -6474,11 +6602,17 @@ async def merge_people(
     logger.info(
         "people_merged", user_id=user_id, app_id=str(app_id),
         canonical_entity_id=canonical_uuid, merged=loser_uuids, source=source,
+        renamed_to=renamed_to,
     )
     return {
         "status": "merged",
         "canonical_entity_id": canonical_uuid,
-        "canonical_name": canonical["name"],
+        # The name AFTER any rename, not the one captured before the
+        # merge began. Echoing the stale one would tell a client the
+        # choice was ignored, or that it landed when it did not, which
+        # is the whole class of bug this field was added to fix.
+        "canonical_name": renamed_to or canonical["name"],
+        "renamed": renamed_to is not None,
         "merged": loser_uuids,
         "aliases": [r["alias"] for r in alias_rows],
         # Archived duplicate person patches. They ride the delta-sync
