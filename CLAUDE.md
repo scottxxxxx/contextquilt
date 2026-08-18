@@ -97,9 +97,12 @@ it has cost something.
 
 3. **A response-side test cannot see a request-side hole.** `to_name`
    was sent by SS and silently dropped by an unmodelled field in GP's
-   schema for about a week. SS saw a correct send; CQ saw a complete
-   request that simply lacked a name. The evidence existed only on the
-   middle hop, so only a request-side test there could find it.
+   schema. SS saw a correct send; CQ saw a complete request that simply
+   lacked a name, so neither endpoint held evidence that anything was
+   wrong. It lived only on the middle hop, and only a request-side test
+   there could find it. (How long it sat is unmeasured. An early draft
+   said "about a week", which nobody had counted; GP caught it, which is
+   rule 6 working before this text had even shipped.)
 
 4. **Check the echo, not the status.** A 200 says the request was
    processed, never that it did what the caller meant. A merge reported
