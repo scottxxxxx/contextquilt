@@ -163,3 +163,88 @@ def find_alias_candidate(
     if len(matches) == 1:
         return matches[0]
     return None
+
+
+# ---------------------------------------------------------------
+# Contested names.
+#
+# `find_alias_candidate` above already refuses to act on ambiguity, and
+# that guard held. The leak was the RECORDED alias path, which is an
+# exact lookup with a LIMIT 1 and no ambiguity check, so once
+# 'Mike' -> Mike DiTroia exists it resolves forever, including in an
+# interview with a completely different Mike.
+#
+# Receipt, 2026-08-17: an EMIDS interview candidate said "Mike" in
+# passing. The recorded alias attached the transcript to a Kore.ai
+# colleague, who acquired a meeting he was never in and a description
+# reading "VP of Engineering at IMIT, on day 3 at the company". On that
+# roster 17 bare first names resolve to one person while other live
+# people share the name.
+#
+# WHAT WAS TRIED AND REJECTED, so it does not get re-proposed:
+#   - "exactly one candidate is a SPEAKER in this meeting" is not just
+#     weak, it is backwards. The person in the room gets addressed
+#     directly; a third-person "Mike" is usually the Mike who is absent.
+#   - "exactly one candidate has appeared in this PROJECT" is an
+#     argument from absence (doc 19.10). A person who has never been in
+#     a meeting has no way to show up in the data, so their absence is
+#     ignorance, not evidence.
+# Neither survives contact with two colleagues who share a first name.
+# ---------------------------------------------------------------
+
+def _surname_initial(tokens_) -> str:
+    """The letter a shorthand like "Mike P" is asking about, or ''."""
+    if len(tokens_) == 2 and len(tokens_[1]) == 1:
+        return tokens_[1]
+    return ""
+
+
+def person_candidates(surface: str, roster) -> List[Tuple[Any, str]]:
+    """Every live person `surface` could plausibly denote.
+
+    `roster` is (entity_id, name) for the user's live people. Returns the
+    candidates; the caller decides what more than one means.
+
+    Three forms, and the SAME counting rule covers all of them, which is
+    why "Mike P" needs no special case:
+
+      "Mike DiTroia"  a full name. Exact match only, so it is decisive
+                      even when six Mikes exist.
+      "Mike P"        first name plus a surname INITIAL. Matches every
+                      Mike whose surname starts with P. Unique on most
+                      rosters, and honestly contested when it is not.
+      "Mike"          a bare first name. Matches every Mike there is.
+    """
+    toks = tokenize_name(surface or "")
+    if not toks:
+        return []
+
+    exact = [(eid, n) for eid, n in roster
+             if tokenize_name(n or "") == toks]
+    if exact:
+        # A full name that names somebody is never contested, however
+        # many people share its first token.
+        return exact[:1] if len(toks) > 1 else exact
+
+    initial = _surname_initial(toks)
+    out: List[Tuple[Any, str]] = []
+    for eid, n in roster:
+        cand = tokenize_name(n or "")
+        if not cand or cand[0] != toks[0]:
+            continue
+        if len(toks) == 1:
+            out.append((eid, n))            # bare first name
+        elif initial and len(cand) > 1 and cand[-1].startswith(initial):
+            out.append((eid, n))            # "Mike P" against Piotrowski
+    return out
+
+
+def is_contested_person_name(surface: str, roster) -> bool:
+    """True when `surface` could honestly mean more than one live person.
+
+    The ingest path must not resolve these to anybody. A wrong
+    attribution is a claim about a real colleague that reads as
+    plausible and is invisible to anyone who does not know them; a
+    missing one is a gap the next sentence fills.
+    """
+    return len(person_candidates(surface, roster)) > 1
