@@ -660,3 +660,62 @@ def resolve_identity_source(source: str | None) -> str:
     """
     cleaned = (source or "").strip()
     return cleaned or DEFAULT_IDENTITY_SOURCE
+
+
+# ---------------------------------------------------------------
+# Ranking the candidates behind a contested typed name.
+#
+# SS asked for this explicitly and their reasoning decided it: they do
+# not hold project membership, and a client-side guess at "likely" would
+# be a second entity-resolution opinion on the device, which is exactly
+# what `owner_entity_id` exists to prevent. So the server ranks and the
+# client renders in the order it is sent.
+# ---------------------------------------------------------------
+
+# How many we hand a picker. Past this a list stops being a choice, and
+# "someone new" has to stay reachable without scrolling.
+MAX_NAME_CANDIDATES = 6
+
+
+def rank_person_candidates(candidates, scope_project_ids=()):
+    """Most likely answer first, by three observed signals in order.
+
+    Same project as the meeting being labelled, then most recently met,
+    then most meetings, then name for a stable tie break.
+
+    Note what is NOT in here: any claim about who the speaker probably
+    is. Ordering a picker is a convenience, and being wrong costs a
+    scroll. Resolving on the same signals would be a claim about a
+    colleague, and Scott found the holes in both of the obvious ones
+    (presence is backwards, project history is an argument from
+    absence). Ranking may use what resolution must not.
+
+    Implemented as successive stable sorts, least significant first,
+    because a single tuple key cannot express "descending string"
+    without inverting the value.
+    """
+    out = list(candidates or [])
+    scope = {p for p in (scope_project_ids or ()) if p}
+
+    out.sort(key=lambda c: ((c.get("name") or "").lower()))
+    out.sort(key=lambda c: (c.get("meetings") or 0), reverse=True)
+    out.sort(key=lambda c: (c.get("last_met") or ""), reverse=True)
+    if scope:
+        out.sort(key=lambda c: not (scope & set(c.get("projects") or ())))
+    return out
+
+
+def candidate_payload(candidates, scope_project_ids=(), cap=MAX_NAME_CANDIDATES):
+    """The wire shape for a contested name: ranked, capped, and honest
+    about the cap.
+
+    `total` is counted BEFORE the cap so a long tail is visible as a
+    number rather than silently dropped, the same reason /v1/quilt
+    counts before it truncates.
+    """
+    ranked = rank_person_candidates(candidates, scope_project_ids)
+    return {
+        "candidates": ranked[:cap],
+        "total": len(ranked),
+        "truncated": len(ranked) > cap,
+    }
