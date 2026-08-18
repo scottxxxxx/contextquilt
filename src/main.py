@@ -78,6 +78,7 @@ from contextquilt.services.people_network import (
     NODE_CAP as NETWORK_NODE_CAP,
     SNAPSHOT_VERSION as NETWORK_SNAPSHOT_VERSION,
 )
+from contextquilt.services import described_as
 from contextquilt.services.entity_aliasing import person_candidates
 from contextquilt.services.people_identity import (
     IdentityRequestError,
@@ -5864,8 +5865,46 @@ async def get_person(
             # are none. This is now the ONLY path that serves null.
             insights = None
 
+    # How this person has been DESCRIBED over time, newest first. The
+    # `changed_from` field is the indicator: non-null means the
+    # perception moved and there is something to show under the name.
+    #
+    # Degrades to None, never raises: the table is migration 39 and the
+    # MCP deployment's separate Postgres can lag migrations, and a
+    # missing series must not take down a person page.
+    described_as_series = None
+    try:
+        desc_rows = await conn.fetch(
+            """
+            SELECT description, first_origin_id, observation_count,
+                   first_observed_at, last_observed_at
+            FROM entity_descriptions
+            WHERE user_id = $1 AND entity_id = $2::uuid
+            ORDER BY first_observed_at DESC
+            """,
+            user_id, entity_id,
+        )
+        described_as_series = described_as.series_payload([
+            {
+                "description": r["description"],
+                "first_origin_id": r["first_origin_id"],
+                "observation_count": r["observation_count"],
+                "first_observed_at": r["first_observed_at"].isoformat()
+                if r["first_observed_at"] else None,
+                "last_observed_at": r["last_observed_at"].isoformat()
+                if r["last_observed_at"] else None,
+            }
+            for r in desc_rows
+        ])
+    except Exception as exc:
+        logger.debug("described_as_series_unavailable", error=str(exc)[:140])
+
     detail = _public_person(row)
     detail.update({
+        # The series behind the description, so a client can show that a
+        # perception changed and open the history. Null = cannot tell
+        # (fetch failed); iterations 0 = we have never described them.
+        "described_as": described_as_series,
         # A list (possibly empty) unless the fetch failed, which is the
         # only cannot-tell. See capabilities.insights for whether this
         # app can ever produce them at all.
