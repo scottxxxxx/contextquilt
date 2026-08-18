@@ -83,6 +83,7 @@ from contextquilt.services.entity_aliasing import person_candidates
 from contextquilt.services.people_identity import (
     IdentityRequestError,
     candidate_payload,
+    owner_names_multiple,
     canonical_pair,
     capability_report,
     choose_surviving_person_patch,
@@ -1789,6 +1790,24 @@ class QuiltPatchResponse(BaseModel):
     # and still open is the strongest "this is not moving" signal we
     # hold; doc 16 5.12 is the ruling on what it does and does not mean.
     restatement_count: Optional[int] = None
+    # Does `owner` name more than one live person? Three valued, matching
+    # the null-means-cannot-tell convention on this surface.
+    #
+    # SS needs it because a project view must tell "Pradeep & Suresh"
+    # from "Steven": the first cannot be assigned to anybody without
+    # lying, so it lives in the project permanently, while the second is
+    # a resolvable gap. Rendering "Which Pradeep & Suresh?" is not
+    # merely unhelpful, it is incoherent.
+    #
+    # CQ does NOT know this at extraction time; the model writes `owner`
+    # as free text and never says how many humans are in it. What CQ has
+    # that a client does not is the ROSTER, so True means two or more
+    # parts were CONFIRMED against live people, never inferred from
+    # punctuation. Null is "looks compound, cannot confirm", which is
+    # where a client-side heuristic belongs: the server proves what it
+    # can, the client presents what it cannot, and no name heuristic
+    # goes near the identity path.
+    owner_names_multiple: Optional[bool] = None
     connections: List[PatchConnectionResponse] = []
 
 class MeetingGroup(BaseModel):
@@ -2319,6 +2338,10 @@ async def get_user_quilt(
             # hand-written value could be neither. Absent beats raising
             # on a read route.
             restatement_count=_as_optional_int(value.get("restatement_count")),
+            owner_names_multiple=(
+                owner_names_multiple(value.get("owner"), resolve_owner_entity)
+                if row["patch_type"] in completable else None
+            ),
             connections=connections_by_patch.get(pid, []),
         )
 

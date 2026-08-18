@@ -16,6 +16,7 @@ decided.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence, Set, Tuple
 
@@ -719,3 +720,59 @@ def candidate_payload(candidates, scope_project_ids=(), cap=MAX_NAME_CANDIDATES)
         "total": len(ranked),
         "truncated": len(ranked) > cap,
     }
+
+
+# ---------------------------------------------------------------
+# Owner strings that name more than one person.
+#
+# SS asked for a marker so a project view can tell "Pradeep & Suresh"
+# from "Steven", and was careful to say they would keep a punctuation
+# heuristic if this was expensive. It is not, and CQ can do something
+# they cannot: CONFIRM the parts against the roster.
+#
+# What CQ does NOT have is knowledge of this at extraction time. The
+# model writes `value.owner` as free text and never says how many humans
+# are in it, so a server-side punctuation guess would be the same guess
+# SS can make, just further from the user. The roster is the only real
+# advantage, and it is what this uses.
+# ---------------------------------------------------------------
+
+# Only the separators that actually mean "and another person". A slash
+# is deliberately absent: "QA/dev" is one team, not two colleagues.
+_OWNER_SPLIT = re.compile(r"\s*(?:&|,|\band\b|\+)\s*", re.IGNORECASE)
+
+
+def split_owner_string(owner: Optional[str]) -> List[str]:
+    """The candidate person names inside one owner string."""
+    if not owner or not isinstance(owner, str):
+        return []
+    return [p.strip() for p in _OWNER_SPLIT.split(owner) if p.strip()]
+
+
+def owner_names_multiple(owner: Optional[str], resolve) -> Optional[bool]:
+    """Does this owner string name more than one LIVE person?
+
+    Three valued on purpose, matching the null-means-cannot-tell
+    convention everywhere else on this surface:
+
+      False  no separator at all. One name, whoever it is.
+      True   two or more parts each resolve to a live person. CONFIRMED
+             by the roster, not inferred from punctuation.
+      None   it looks compound but fewer than two parts resolve. Could be
+             "Pradeep & the vendor", could be a name containing a comma.
+             CQ cannot tell, and says so rather than guessing.
+
+    The None case is where SS's punctuation heuristic belongs: the server
+    confirms what it can prove, the client presents what it cannot. That
+    split keeps a name heuristic away from the identity path, which is
+    how "Pallavi Vijay" happened.
+    """
+    parts = split_owner_string(owner)
+    if len(parts) < 2:
+        return False
+    if not callable(resolve):
+        return None
+    resolved = sum(1 for p in parts if resolve(p))
+    if resolved >= 2:
+        return True
+    return None
