@@ -124,6 +124,15 @@ it has cost something.
    by the team that produced them, which is the only way any of them
    could have been.
 
+7. **Verify the property you assert, do not just name it.** SS wrote
+   "the BIGGER relationship survives, always" in a comment above code
+   that chose the survivor by how many words were in the NAME, and
+   shipped it; the comment was true of the intent and false of the code.
+   CQ wrote `getattr(body, ...)` for a parameter actually named `req`,
+   which passed a syntax check and would have been a NameError on the
+   first real call. Two teams, one day, one shape: a name that sounded
+   right and was never opened. A comment cannot be wrong out loud.
+
 ## Documentation
 
 `docs/architecture/00-19` (overview, memory model, pipeline, queue, recall, integration, configuration, API reference, connected quilt, domain mapping, security, model selection, structured ingest, app onboarding/templates, consolidation, context-flow contract, people, prompt composition authority, app memory isolation, recurring rulings) and `docs/openapi.yaml`. Five of these carry decisions rather than description, so read them before touching what they cover.
