@@ -257,3 +257,53 @@ def test_reasons_are_stable_identifiers_not_prose():
         assert reason == reason.lower()
         assert " " not in reason
         assert "—" not in reason and "–" not in reason
+
+
+# ---------------------------------------------------------------
+# The collapse: nothing auto-closes any more.
+# ---------------------------------------------------------------
+
+from pathlib import Path  # noqa: E402
+
+WORKER = (Path(__file__).resolve().parents[2] / "src" / "worker.py").read_text()
+
+
+def _apply_body():
+    return WORKER.split("async def _apply_resolved_commitments")[1].split(
+        "\n    async def "
+    )[0]
+
+
+def test_the_extraction_path_never_closes_an_item():
+    """The audit that ended the confident band: 13 of 167 auto-closed and
+    at least two were wrong, including one whose own evidence read "Joy
+    TO VALIDATE in QA". A wrong close fabricates delivery history in the
+    artifact people are least likely to question."""
+    body = _apply_body()
+    assert "completed_at = NOW()" not in body
+    assert "status = 'archived'" not in body
+    assert "'\"extraction\"'" not in body, "no completion_source may be stamped here"
+
+
+def test_every_reported_resolution_becomes_a_belief():
+    body = _apply_body()
+    assert "believed_complete_at" in body
+    assert "believed_complete_evidence" in body
+    assert "believed_complete_reasons" in body
+
+
+def test_the_band_survives_only_as_a_presentation_hint():
+    """Keeping it is what lets the app put likely-yes cards first. It
+    must not be reachable as a close decision again."""
+    body = _apply_body()
+    assert "believed_evidence_strength" in body
+    assert 'if verdict["band"] == BELIEVED' not in body, "band must not branch behaviour"
+
+
+def test_the_return_value_is_beliefs_raised_not_closures():
+    """A permanently-zero 'resolved' count reads identically whether the
+    pass worked or never ran, which is the instrument failure this whole
+    change came from."""
+    body = _apply_body()
+    assert "return believed_count" in body
+    assert "resolved_count" not in body

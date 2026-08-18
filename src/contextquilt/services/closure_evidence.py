@@ -41,8 +41,17 @@ evidence either contains the marks of a completed thing or it does not,
 and a number would imply a precision the markers cannot carry (doc 16's
 rule against synthesized confidence floats applies here too).
 
-    CONFIDENT  close it, tell the app, one tap reopens
-    BELIEVED   leave it OPEN, surface it as "looks done, confirm?"
+    CONFIDENT  strong evidence. Still does NOT close anything; it only
+               hints that this card is likely a quick yes, so the app can
+               put it first.
+    BELIEVED   weak or ambiguous evidence.
+
+NEITHER BAND CLOSES AN ITEM as of 2026-08-18. Both become a card a human
+answers. The confident band did auto-close at first, 13 of 167, and
+reading all 13 by hand against the item they closed found at least two
+wrong. 13-of-167 measures how often this ABSTAINS, not how often it is
+right when it does not, and abstention wearing a precision costume is
+how a 15% error rate reached a delivery history nobody re-reads.
 
 Both bands carry `reasons`, so the wire says WHY an item landed where it
 did and the thresholds can be retuned against real data rather than
