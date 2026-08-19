@@ -564,6 +564,62 @@ EXTRACTION RULES:
 # Open-commitments injection block (worker cold path)
 # ============================================================
 
+def select_open_commitments(project_recent, general, cap):
+    """Choose which open commitments get the scarce injection slots.
+
+    THE BUG THIS EXISTS FOR, 2026-08-19. Scott watched a colleague ask,
+    in a live meeting, to close an item from the previous day's call.
+    The ingest did not detect it, and not because extraction missed the
+    sentence: the item was never in the prompt. The fetch ordered
+    `overdue first, then newest` under a cap of 20, and he holds 124
+    overdue commitments, so the cap was exhausted before any non-overdue
+    item was considered. The code comment said overdue sorts first "so
+    the injection cap never crowds them out", which was true and was the
+    intent. Nobody wrote down the inverse: past 20 overdue items, they
+    crowd out everyone else, permanently.
+
+    Measured on his data at the time: 376 open commitments, 207 with NO
+    deadline_date at all. A commitment with no deadline can never become
+    overdue, so it could never reach the injected set by either arm of
+    the window, at any point in its life. That is 55% of his open
+    commitments structurally invisible to closure detection.
+
+    Scoping to the meeting's project alone does NOT fix it, which is why
+    this function exists rather than one more ORDER BY key: ABM by
+    itself holds 279 open commitments of which 103 are overdue, so a
+    project-scoped overdue-first sort still fills all 20 slots before
+    reaching yesterday's item.
+
+    So recency gets a RESERVED share rather than a lower sort key.
+    `project_recent` is this meeting's project, newest first, and takes
+    up to half the cap; `general` is the existing overdue-first ordering
+    and takes the rest. Both lists keep their own order, project-recent
+    leads, and duplicates resolve to their first appearance so an item
+    that is both recent and overdue is not paid for twice.
+
+    Pure so the sharing rule can be exercised against inputs. The two
+    queries live in the worker.
+    """
+    if cap <= 0:
+        return []
+    reserved = cap // 2
+    out = []
+    seen = set()
+    for c in (project_recent or [])[:reserved]:
+        pid = c.get("patch_id")
+        if pid and pid not in seen:
+            seen.add(pid)
+            out.append(c)
+    for c in general or []:
+        if len(out) >= cap:
+            break
+        pid = c.get("patch_id")
+        if pid and pid not in seen:
+            seen.add(pid)
+            out.append(c)
+    return out[:cap]
+
+
 def format_open_commitments_block(commits, now=None):
     """Render the `Open commitments` block prepended to extraction input.
 
