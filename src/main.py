@@ -84,6 +84,8 @@ from contextquilt.services.people_identity import (
     IdentityRequestError,
     candidate_payload,
     owner_names_multiple,
+    owner_is_placeholder,
+    owned_by_self_verdict,
     canonical_pair,
     capability_report,
     choose_surviving_person_patch,
@@ -1808,6 +1810,7 @@ class QuiltPatchResponse(BaseModel):
     # can, the client presents what it cannot, and no name heuristic
     # goes near the identity path.
     owner_names_multiple: Optional[bool] = None
+    owner_is_placeholder: Optional[bool] = None
     connections: List[PatchConnectionResponse] = []
 
 class MeetingGroup(BaseModel):
@@ -2296,9 +2299,21 @@ async def get_user_quilt(
         owner_entity = resolve_owner_entity(
             owner_text_by_item.get(pid)
         ) or resolve_owner_entity(value.get("owner"))
-        if owner_entity is not None:
-            return owner_entity == self_entity_id
-        return not value.get("owner")
+        # The verdict itself lives in people_identity so it can be tested
+        # against inputs instead of grepped. "Speaker 3" abstains there:
+        # it is somebody, so the ownerless rule must not hand it to the
+        # user, and it is nobody CQ can name, so False would be a
+        # confident answer CQ has not earned. The insights follow-up rate
+        # keeps saying not-self for the same input, which is the same
+        # substance for a rate (in or out of the numerator and the
+        # denominator together) without the distinction a per-item chip
+        # needs.
+        return owned_by_self_verdict(
+            owner_entity,
+            self_entity_id,
+            owner_text_by_item.get(pid) or value.get("owner"),
+            value.get("owner"),
+        )
 
     for row in rows:
         value = row["value"]
@@ -2340,6 +2355,10 @@ async def get_user_quilt(
             restatement_count=_as_optional_int(value.get("restatement_count")),
             owner_names_multiple=(
                 owner_names_multiple(value.get("owner"), resolve_owner_entity)
+                if row["patch_type"] in completable else None
+            ),
+            owner_is_placeholder=(
+                owner_is_placeholder(value.get("owner"))
                 if row["patch_type"] in completable else None
             ),
             connections=connections_by_patch.get(pid, []),

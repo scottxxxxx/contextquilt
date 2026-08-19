@@ -33,11 +33,20 @@ def test_same_rule_as_the_insights_rate():
     """Edge-first owns resolution, owner-text fallback, ownerless on the
     user's own quilt counts as theirs (reassign-speaker's to_self
     contract). The quilt chips and the follow-up rate must share this
-    verdict or the surfaces drift."""
+    verdict or the surfaces drift.
+
+    The resolution inputs are still assembled here, in the route, because
+    they need the request-scoped resolver. The VERDICT moved to
+    people_identity.owned_by_self_verdict on 2026-08-19 so it could be
+    tested against inputs rather than grepped; the ownerless rule this
+    used to search for by name now lives there and is exercised in
+    tests/unit/test_owner_is_placeholder.py. Grepping for it here would
+    only prove a copy exists in this file, which is the opposite of what
+    "one rule" means."""
     body = MAIN.split("def _owned_by_self")[1].split("for row in rows:")[0]
     assert "owner_text_by_item" in body
     assert 'resolve_owner_entity(value.get("owner"))' in body
-    assert re.search(r"return not value\.get\(.owner.\)", body)
+    assert "owned_by_self_verdict(" in body
 
 
 def test_quilt_route_survives_a_pre_migration_db():
