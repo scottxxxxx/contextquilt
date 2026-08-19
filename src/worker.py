@@ -34,6 +34,7 @@ from contextquilt.services.extraction_prompts import (
     MEETING_SUMMARY_SYSTEM,
     TRACE_SYSTEM,
     format_open_commitments_block,
+    select_open_commitments,
 )
 from contextquilt.services.closure_evidence import BELIEVED, classify_closure
 from contextquilt.services.deadline_resolver import run_deadline_micropass
@@ -5021,8 +5022,12 @@ class ColdPathWorker:
         # Inject the user's open commitments so the LLM can detect
         # completion mentions in this transcript and report them back
         # in the resolved_commitments output. See _fetch_open_commitments
-        # for the lookback window + cap.
-        open_commits_block = await self._build_open_commitments_block(user_id)
+        # for the lookback window + cap, and select_open_commitments for
+        # why this meeting's project gets reserved slots rather than a
+        # sort key.
+        open_commits_block = await self._build_open_commitments_block(
+            user_id, metadata.get("project_id")
+        )
 
         # Meeting date anchor for deadline resolution. The extraction
         # prompt asks the model to resolve relative deadlines ("tomorrow",
@@ -5711,7 +5716,9 @@ class ColdPathWorker:
     # window will stay well under this on real traffic.
     OPEN_COMMITS_MAX_INJECTED = 20
 
-    async def _fetch_open_commitments(self, user_id: str) -> list[dict[str, Any]]:
+    async def _fetch_open_commitments(
+        self, user_id: str, project_id: str | None = None
+    ) -> list[dict[str, Any]]:
         """Return list of {patch_id, text, created_at, deadline_date} for
         this user's open commitment patches. Open = status='active' AND
         completed_at IS NULL. Window: within the lookback OR overdue —
@@ -5748,24 +5755,63 @@ class ColdPathWorker:
                 """,
                 subject_key, self.OPEN_COMMITS_MAX_INJECTED,
             )
-            return [
-                {
+
+            # This meeting's project, newest first, INDEPENDENT of the
+            # overdue window. Separate query rather than another ORDER BY
+            # key because the slots are reserved, not merely preferred:
+            # see select_open_commitments for the measurement that
+            # settles why a sort key cannot fix this. Same `=` match the
+            # quilt route uses on project_id (text, case-sensitive), so
+            # the read and the write agree on what "this project" means.
+            project_rows = []
+            if project_id:
+                project_rows = await self.db.fetch(
+                    f"""
+                    SELECT cp.patch_id::text AS patch_id,
+                           cp.value->>'text' AS text,
+                           cp.value->>'deadline_date' AS deadline_date,
+                           cp.created_at
+                      FROM context_patches cp
+                      JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                     WHERE ps.subject_key = $1
+                       AND cp.patch_type = 'commitment'
+                       AND COALESCE(cp.status, 'active') = 'active'
+                       AND cp.completed_at IS NULL
+                       AND cp.project_id = $2
+                       AND cp.created_at >= NOW() - INTERVAL '{int(self.OPEN_COMMITS_LOOKBACK_DAYS)} days'
+                     ORDER BY cp.created_at DESC
+                     LIMIT $3
+                    """,
+                    subject_key, project_id, self.OPEN_COMMITS_MAX_INJECTED,
+                )
+
+            def _row(r):
+                return {
                     "patch_id": r["patch_id"], "text": r["text"],
                     "created_at": r["created_at"], "deadline_date": r["deadline_date"],
                 }
-                for r in rows
-            ]
+
+            return select_open_commitments(
+                [_row(r) for r in project_rows],
+                [_row(r) for r in rows],
+                self.OPEN_COMMITS_MAX_INJECTED,
+            )
         except Exception as exc:
             logger.warning("open_commitments_fetch_failed", reason=str(exc)[:200], user_id=user_id)
             return []
 
-    async def _build_open_commitments_block(self, user_id: str) -> str:
+    async def _build_open_commitments_block(
+        self, user_id: str, project_id: str | None = None
+    ) -> str:
         """Format the open commitments into the prompt-ready block that
         prefixes user_content. Returns empty string when there are none,
         so callers can prepend unconditionally. Rendering lives in
         extraction_prompts.format_open_commitments_block (pure,
-        unit-tested); this method just fetches and delegates."""
-        commits = await self._fetch_open_commitments(user_id)
+        unit-tested); this method just fetches and delegates.
+
+        `project_id` is the meeting's own project. Absent (a meeting with
+        no project) degrades to exactly the previous behaviour."""
+        commits = await self._fetch_open_commitments(user_id, project_id)
         return format_open_commitments_block(commits, now=datetime.utcnow())
 
     async def _apply_resolved_commitments(
