@@ -2135,6 +2135,17 @@ async def get_user_quilt(
 
     rows = await db_pool.fetch(query, *params)
 
+    # No cap means the rows ARE the population, so the count is free and
+    # the field is always present. GP asked for this (2026-08-19) and the
+    # reason is better than the convenience: the one field that says "you
+    # are seeing a partial view" used to disappear exactly when a caller
+    # stopped asking for a partial view, so the day anything server side
+    # caps a response, a consumer that had been reading total_available
+    # would see absence and have no way to tell it apart from the absence
+    # it has always seen. Absence cannot carry that news. A number can.
+    if total_available is None:
+        total_available = len(rows)
+
     # Find patches deleted or archived since the timestamp. completed_at
     # separates "resolved" (worker auto-close or app-initiated completion)
     # from "decayed" (TTL archival) — both land in `deleted` for backward
@@ -2407,11 +2418,12 @@ async def get_user_quilt(
         completed=completed_ids,
         meetings=meetings,
         server_time=server_time.isoformat() + "Z",
-        # None when no cap was passed. When one was, `truncated` answers
-        # the only question a caller building a count on this actually
-        # has, and `total_available` is what they should have counted.
-        truncated=(None if total_available is None
-                   else total_available > len(rows)),
+        # Both always present now. `truncated` answers the only question a
+        # caller building a count on this actually has, and
+        # `total_available` is what they should have counted: the rows
+        # that matched BEFORE any cap, which on an uncapped read is the
+        # rows themselves and on a delta is the size of that delta.
+        truncated=total_available > len(rows),
         total_available=total_available,
     )
 

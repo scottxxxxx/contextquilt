@@ -34,14 +34,29 @@ def test_the_total_is_counted_before_the_cap():
 
 
 def test_a_caller_that_passes_no_limit_pays_nothing():
-    """The extra count query runs only when a cap was actually passed:
-    a caller that never limits should not fund a question it did not
-    ask, and should see no change in the response either."""
+    """The extra COUNT query still runs only when a cap was actually
+    passed. That was always the real cost concern, and it is unchanged:
+    an uncapped read gets its total from the rows it already fetched."""
     assert "total_available: Optional[int] = None\n    if limit:" in MAIN
-    assert "truncated=(None if total_available is None" in MAIN
+
+
+def test_the_total_is_present_even_when_nothing_capped():
+    """Changed 2026-08-19 on GP's ask, and the reason is better than the
+    convenience. The one field that says "you are seeing a partial view"
+    used to disappear exactly when a caller stopped asking for a partial
+    view. So the day anything SERVER side caps a response, a consumer
+    that had been reading total_available sees absence, which is the
+    same thing it has always seen, and has no way to tell the two apart.
+    Absence cannot carry that news; a number can.
+
+    Free on an uncapped read: the rows fetched ARE the population."""
+    body = MAIN.split("rows = await db_pool.fetch(query, *params)")[1][:900]
+    assert "if total_available is None:" in body
+    assert "total_available = len(rows)" in body
 
 
 def test_truncated_is_a_comparison_not_an_assumption():
     """Passing limit=500 against 12 patches is not truncation. The flag
-    reports whether the cap BIT, not whether one was supplied."""
-    assert "else total_available > len(rows))" in MAIN
+    reports whether the cap BIT, not whether one was supplied, and on an
+    uncapped read it is a true False rather than an absence."""
+    assert "truncated=total_available > len(rows)," in MAIN
