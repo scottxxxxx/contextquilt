@@ -776,3 +776,72 @@ def owner_names_multiple(owner: Optional[str], resolve) -> Optional[bool]:
     if resolved >= 2:
         return True
     return None
+
+
+def owner_is_placeholder(owner: Optional[str]) -> Optional[bool]:
+    """Is this owner string a diarization label rather than a name?
+
+    Measured on prod 2026-08-19: 51 OPEN completables across 10 projects
+    carry an owner of "Speaker 3", "Speaker 8", "Unknown" and friends. A
+    client cannot tell those from a real name without running a name
+    heuristic on the device, which is the one thing this boundary keeps
+    off the device, so the server says it.
+
+    Sibling of owner_names_multiple, same three-valued convention and the
+    same division of labour: CQ proves what it can, the client presents
+    what it cannot.
+
+      None   no owner string at all. Nothing to judge, and NOT the same
+             claim as "the owner is a real person".
+      True   a diarization placeholder. Somebody owns this and CQ does
+             not know who; it is not unowned and it is not nobody.
+      False  an ordinary owner string, whoever it turns out to name.
+
+    The predicate itself is `is_placeholder_or_self_person`, shared with
+    the ingest sanitizers, because a second copy of "what counts as a
+    placeholder" is how the two halves drift apart. The self half is
+    deliberately not engaged here: no user_label is passed, so a user's
+    own name is a different question answered elsewhere (is_self_owned).
+    """
+    if not owner or not isinstance(owner, str) or not owner.strip():
+        return None
+    return is_placeholder_or_self_person(owner)
+
+
+def owned_by_self_verdict(
+    owner_entity: Optional[str],
+    self_entity_id: Optional[str],
+    owner_text: Optional[str],
+    value_owner: object,
+) -> Optional[bool]:
+    """Whose completable is this: the user's, someone else's, or unknown?
+
+    Lifted out of the quilt route so the rule can be exercised rather
+    than read. It was a closure over a request-scoped resolver, so the
+    only test that could reach it was one that grepped the source, and a
+    source-reading test stays green while the branch it describes goes
+    the other way.
+
+    Three values, and the middle one is the whole point:
+
+      True   the owner resolves to the ego entity, or nobody was named
+             at all (the extraction contract strips the owner on the
+             user's own items, so ownerless on the user's own quilt is
+             theirs; same rule reassign-speaker's to_self relies on).
+      False  the owner resolves to a live person who is not the user.
+      None   CQ cannot tell. A diarization placeholder lands here: it
+             names somebody, so the ownerless rule must not claim it for
+             the user, and it names nobody CQ can identify, so calling
+             it a third party's would be a confident answer to a
+             question nobody asked.
+
+    `owner_text` is the edge-or-value text the placeholder check reads;
+    `value_owner` is the patch's own owner field, which alone decides the
+    ownerless case. They differ when an owns-edge names someone the
+    patch text does not.
+    """
+    if owner_entity is not None:
+        return owner_entity == self_entity_id
+    if owner_is_placeholder(owner_text):
+        return None
+    return not value_owner
