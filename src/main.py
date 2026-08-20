@@ -55,6 +55,10 @@ from contextquilt.services.consolidation import (
     person_insight_rule,
 )
 from contextquilt.services.extraction_schema import is_user_reference
+from contextquilt.services.completion_time import (
+    CompletedAtError,
+    parse_completed_at,
+)
 from contextquilt.services.recall_formatter import (
     format_people_scope,
     CHARS_PER_TOKEN,
@@ -1811,6 +1815,26 @@ class QuiltPatchResponse(BaseModel):
     # goes near the identity path.
     owner_names_multiple: Optional[bool] = None
     owner_is_placeholder: Optional[bool] = None
+    # The believed-completion question (#279/#284: nothing auto-closes,
+    # every meeting-detected closure is a card a human answers). These
+    # were stamped by the worker and served on the People detail, and
+    # NEVER on this route, so the project-section confirm queue and the
+    # meeting-review card, both fed by /v1/quilt, starved by
+    # construction. Found 2026-08-19 by the local two-meeting
+    # simulation: the worker logged the stamp and the quilt served
+    # null. GP's 08-17 middle-hop proof was real but proved the fields
+    # SURVIVE the hop, not that the origin emits them here (rule 5:
+    # name which side each claim was proved on).
+    believed_complete_at: Optional[str] = None
+    # The quote from the meeting. Load-bearing, not decoration: one
+    # line of evidence is what makes the confirm answer obvious.
+    believed_complete_evidence: Optional[str] = None
+    believed_complete_reasons: Optional[List[str]] = None
+    # The meeting that produced the belief, so the quote can be traced.
+    believed_complete_origin_id: Optional[str] = None
+    # confident | believed. A presentation ordering hint only; it must
+    # never render as a badge (the auto-close lesson with typography).
+    believed_evidence_strength: Optional[str] = None
     connections: List[PatchConnectionResponse] = []
 
 class MeetingGroup(BaseModel):
@@ -1861,6 +1885,12 @@ class PatchUpdate(BaseModel):
 
 class PatchCompletionRequest(BaseModel):
     evidence: Optional[str] = None  # short free-text note on what completed it (e.g. "user tapped done")
+    # ISO 8601 date or datetime: when the thing was ACTUALLY finished,
+    # user-declared. Absent means the server clock, which is the
+    # "completed today" default. Future values are rejected with a 422
+    # whose body names the field and the reason. Scott's ruling
+    # 2026-08-19: default today, overridable.
+    completed_at: Optional[str] = None
 
 
 class TierChangeEvent(BaseModel):
@@ -1909,6 +1939,21 @@ def _as_optional_int(value):
             return None
         return n if n >= 0 else None
     return None
+
+
+def _as_str_list(value):
+    """A list of strings, else None.
+
+    `value.believed_complete_reasons` is written by the worker as a
+    list of strings, but a hand-edited or backfilled value could be
+    anything. A read route serves absent rather than raising, and
+    non-string members are dropped rather than coerced (a reason that
+    is not a string is not a reason).
+    """
+    if not isinstance(value, list):
+        return None
+    strings = [v for v in value if isinstance(v, str)]
+    return strings if strings or value == [] else None
 
 
 async def _completable_types() -> tuple:
@@ -2372,6 +2417,26 @@ async def get_user_quilt(
                 owner_is_placeholder(value.get("owner"))
                 if row["patch_type"] in completable else None
             ),
+            believed_complete_at=(
+                value.get("believed_complete_at")
+                if row["patch_type"] in completable else None
+            ),
+            believed_complete_evidence=(
+                value.get("believed_complete_evidence")
+                if row["patch_type"] in completable else None
+            ),
+            believed_complete_reasons=(
+                _as_str_list(value.get("believed_complete_reasons"))
+                if row["patch_type"] in completable else None
+            ),
+            believed_complete_origin_id=(
+                value.get("believed_complete_origin_id")
+                if row["patch_type"] in completable else None
+            ),
+            believed_evidence_strength=(
+                value.get("believed_evidence_strength")
+                if row["patch_type"] in completable else None
+            ),
             connections=connections_by_patch.get(pid, []),
         )
 
@@ -2599,28 +2664,41 @@ async def complete_patch(
 
     evidence = ((completion.evidence if completion else None) or "").strip()[:300]
 
+    # User-declared completion time (absent = server clock = today).
+    # Validated in pure logic; the 422 body carries code, field, reason
+    # and the received value so the device has the words to explain it.
+    try:
+        completed_at_override = parse_completed_at(
+            completion.completed_at if completion else None
+        )
+    except CompletedAtError as exc:
+        raise HTTPException(status_code=422, detail=exc.detail())
+
     # The open-state predicate is repeated in the UPDATE so a concurrent
     # completion (e.g. worker auto-close racing a user tap) can't double-
-    # apply; the loser of the race gets 409.
+    # apply; the loser of the race gets 409. A backdated completed_at is
+    # safe for delta sync because the `completed` array keys on
+    # updated_at, which stays NOW(). $2 carries the value stamps below.
+    stamps = {"completion_source": "app"}
+    if evidence:
+        stamps["completion_evidence"] = evidence
+    if completed_at_override is not None:
+        # A backdated completed_at is a declaration, not an observation;
+        # the stamp keeps the two distinguishable on the record.
+        stamps["completed_at_source"] = "user"
     completed_row = await db_pool.fetchrow(
         """
         UPDATE context_patches
-           SET completed_at = NOW(),
+           SET completed_at = COALESCE($3::timestamptz, NOW()),
                status = 'archived',
                updated_at = NOW(),
-               value = CASE WHEN $2::text <> ''
-                       THEN jsonb_set(
-                                jsonb_set(value, '{completion_source}', '"app"'),
-                                '{completion_evidence}', to_jsonb($2::text)
-                            )
-                       ELSE jsonb_set(value, '{completion_source}', '"app"')
-                       END
+               value = value || $2::jsonb
          WHERE patch_id = $1
            AND COALESCE(status, 'active') = 'active'
            AND completed_at IS NULL
         RETURNING completed_at
         """,
-        patch_id, evidence
+        patch_id, json.dumps(stamps), completed_at_override
     )
     if not completed_row:
         raise HTTPException(status_code=409, detail="Patch is already completed or archived")
@@ -2765,12 +2843,8 @@ async def vouch_patch(
            SET updated_at = NOW(),
                value = jsonb_set(
                            jsonb_set(
-                               CASE WHEN value ? 'believed_complete_at'
-                               THEN (value
-                                     - 'believed_complete_at'
-                                     - 'believed_complete_evidence'
-                                     - 'believed_complete_reasons'
-                                     - 'believed_complete_origin_id')
+                               (CASE WHEN value ? 'believed_complete_at'
+                               THEN value
                                     || jsonb_build_object(
                                         'prior_believed_complete_at',
                                         value->'believed_complete_at',
@@ -2778,7 +2852,12 @@ async def vouch_patch(
                                         value->'believed_complete_evidence',
                                         'believed_rejected_at',
                                         to_jsonb(to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')))
-                               ELSE value END,
+                               ELSE value END)
+                               - 'believed_complete_at'
+                               - 'believed_complete_evidence'
+                               - 'believed_complete_reasons'
+                               - 'believed_complete_origin_id'
+                               - 'believed_evidence_strength',
                                '{last_vouched_at}', to_jsonb(to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'))),
                            '{vouch_source}', '"app"'
                        )
@@ -2971,13 +3050,27 @@ async def uncomplete_patch(
            SET status = 'active',
                completed_at = NULL,
                updated_at = NOW(),
-               value = (value - 'completion_source' - 'completion_evidence' - 'archive_cause')
+               value = (CASE WHEN value ? 'believed_complete_at'
+                        THEN value || jsonb_build_object(
+                                    'prior_believed_complete_at',
+                                    value->'believed_complete_at',
+                                    'prior_believed_complete_evidence',
+                                    value->'believed_complete_evidence')
+                        ELSE value END
+                        - 'believed_complete_at'
+                        - 'believed_complete_evidence'
+                        - 'believed_complete_reasons'
+                        - 'believed_complete_origin_id'
+                        - 'believed_evidence_strength'
+                        - 'completion_source' - 'completion_evidence'
+                        - 'archive_cause' - 'completed_at_source')
                        || jsonb_build_object(
                               'uncompleted_at', to_char(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                               'uncompletion_source', 'app',
                               'prior_completed_at', to_char(completed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
                               'prior_completion_source', value->>'completion_source',
-                              'prior_completion_evidence', value->>'completion_evidence'
+                              'prior_completion_evidence', value->>'completion_evidence',
+                              'prior_completed_at_source', value->>'completed_at_source'
                           )
          WHERE patch_id = $1
            AND completed_at IS NOT NULL
