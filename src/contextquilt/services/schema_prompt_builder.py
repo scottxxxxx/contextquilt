@@ -483,7 +483,15 @@ def _entity_types_section(manifest: Dict[str, Any]) -> str:
         "- Use the fullest form of a name the transcript gives, and use it "
         "consistently: one entity per person, not one per surface form.\n"
         "- `relationships` may only reference names that appear in "
-        "`entities`."
+        "`entities`.\n"
+        "- `description` states only what this transcript SHOWS about the "
+        "entity: a role or title the person gave themselves or was given by "
+        "name, or what they were seen doing here. Never infer a profession, "
+        "title or affiliation from the topic. A person discussing "
+        "immigration law is NOT thereby an immigration attorney, and a "
+        "person asking about a budget is NOT thereby in finance. If no role "
+        "was stated, describe the conduct: \"raised privilege concerns about "
+        "AI in legal drafting\", not \"attorney\"."
     )
     lines.append(body)
     return "\n".join(lines).rstrip()
