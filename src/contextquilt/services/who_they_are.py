@@ -325,12 +325,17 @@ def served(card_value: Mapping[str, Any]) -> Dict[str, Any]:
         src = by_id.get(sid)
         if not src:
             continue
+        stated = sid.startswith("R")
         receipts.append({
-            "kind": "stated" if sid.startswith("R") else "observed",
+            "kind": "stated" if stated else "observed",
             "text": src.get("text"),
             "origin_id": src.get("origin_id"),
             "date": src.get("date") or src.get("last_seen"),
-            "times": src.get("times"),
+            # A guarantee, not a convention (SS decodes it optional and
+            # renders "seen N times" only when present): a stated role is
+            # a patch with no confirmation count, so null; an observed
+            # perception always carries its count, so an int.
+            "times": None if stated else int(src.get("times") or 1),
         })
     return {
         "summary": card_value.get("text"),
