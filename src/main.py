@@ -84,6 +84,7 @@ from contextquilt.services.people_network import (
     SNAPSHOT_VERSION as NETWORK_SNAPSHOT_VERSION,
 )
 from contextquilt.services import described_as
+from contextquilt.services import who_they_are
 from contextquilt.services.entity_aliasing import person_candidates
 from contextquilt.services.people_identity import (
     IdentityRequestError,
@@ -5904,6 +5905,7 @@ async def get_person(
     # blank screen. It is [] now, with `insight_readiness` saying how far
     # along the person is.
     insights: Optional[list] = []
+    who_they_are_card: Optional[dict] = None
     # Per lens: where this person stands and whether waiting helps.
     # Null when the app cannot produce insights at all (capabilities
     # explains that) or when the fetch failed.
@@ -5964,6 +5966,7 @@ async def get_person(
                 str(row["entity_id"]) if row.get("entity_id") else None,
             )
             insights = []
+            who_they_are_card = None
             # Same runtime and registry TTLs the ledger's decay bands and
             # the worker's decay loop read, so an insight's band and the
             # archival CQ will actually perform come from one authority.
@@ -5982,6 +5985,16 @@ async def get_person(
                 iv = ir["value"]
                 if isinstance(iv, str):
                     iv = json.loads(iv)
+                # The synthesis lens is a short paragraph with its own
+                # receipts, not a one-line capsule; it leaves the card
+                # stack here and is served as `who_they_are` below. The
+                # newest wins if the worker's replace ever left two.
+                if iv.get("lens") == who_they_are.LENS:
+                    if who_they_are_card is None:
+                        who_they_are_card = who_they_are.served(iv) | {
+                            "patch_id": str(ir["patch_id"]),
+                        }
+                    continue
                 # Evidence is the source patches' meetings: the receipts
                 # the 12a design demands, one row per DISTINCT meeting.
                 #
@@ -6201,6 +6214,12 @@ async def get_person(
         # doing". `stated_roles.items` are the receipts.
         "stated_roles": stated_roles,
         "title": stated_roles["title"] if stated_roles else None,
+        # The synthesis across stated roles and the description series,
+        # written by the worker's who_they_are lens on its own model and
+        # regenerated only when the inputs change. Null = not generated
+        # yet (or the insights fetch failed); a client shows the series
+        # and the title and waits. Receipts are the cited inputs.
+        "who_they_are": who_they_are_card,
         # A list (possibly empty) unless the fetch failed, which is the
         # only cannot-tell. See capabilities.insights for whether this
         # app can ever produce them at all.
