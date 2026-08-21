@@ -3276,7 +3276,8 @@ class ColdPathWorker:
                 logger.info("who_they_are_rejected", subject=subject_key,
                             person=person["name"],
                             defect=defects[0] if defects else "declined",
-                            raw=(response.content or "")[:240])
+                            raw=(json.dumps(response.content) if isinstance(response.content, dict)
+                                 else str(response.content or ""))[:240])
                 continue
             # Replace the prior card: a synthesis supersedes, it does not
             # accumulate, and the cause says so, so it never reads as a
