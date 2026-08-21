@@ -455,3 +455,61 @@ def test_every_loser_is_returned_for_a_three_way_merge():
     )
     assert survivor["patch_id"] == "a"
     assert sorted(l["patch_id"] for l in losers) == ["b", "c"]
+
+
+# ============================================================
+# Stated roles and the title (2026-08-21)
+# ============================================================
+
+from src.contextquilt.services.people_identity import (
+    title_from_stated_role,
+    stated_roles_payload,
+    people_vocabulary,
+)
+
+
+def test_title_strips_own_name_and_copula():
+    assert title_from_stated_role("Suresh is scrum master on ABM project", ["Suresh Muchakurti", "Suresh"]) == "scrum master on ABM project"
+    assert title_from_stated_role("Xhoi is business analyst and QA on ABM project", ["Xhoi"]) == "business analyst and QA on ABM project"
+    assert title_from_stated_role("Suresh: scrum master", ["Suresh"]) == "scrum master"
+    assert title_from_stated_role("Suresh, scrum master on ABM", ["Suresh"]) == "scrum master on ABM"
+
+
+def test_title_prefers_longest_name_so_a_full_name_is_not_split():
+    # "Suresh Muchakurti is..." must not strip only "Suresh" and leave
+    # "Muchakurti is scrum master".
+    assert title_from_stated_role("Suresh Muchakurti is scrum master", ["Suresh", "Suresh Muchakurti"]) == "scrum master"
+
+
+def test_title_without_a_leading_name_is_the_text_itself():
+    assert title_from_stated_role("Head coach of the U12 team", ["Sam"]) == "Head coach of the U12 team"
+
+
+def test_title_never_invents_and_handles_empty():
+    assert title_from_stated_role("", ["Suresh"]) is None
+    assert title_from_stated_role(None, ["Suresh"]) is None
+    assert title_from_stated_role("Suresh is ", ["Suresh"]) is None
+
+
+def test_stated_roles_payload_newest_first_wins_title():
+    rows = [
+        {"patch_id": "p2", "text": "Suresh is scrum master on ABM project", "origin_id": "m2", "stated_at": "2026-08-17"},
+        {"patch_id": "p1", "text": "Suresh is a developer on Kore", "origin_id": "m1", "stated_at": "2026-06-01"},
+    ]
+    out = stated_roles_payload(rows, ["Suresh"])
+    assert out["title"] == "scrum master on ABM project"
+    assert out["title_source"] == {"patch_id": "p2", "origin_id": "m2", "stated_at": "2026-08-17"}
+    assert [i["text"] for i in out["items"]] == [r["text"] for r in rows]  # raw text kept, never rewritten
+
+
+def test_stated_roles_payload_empty_is_tracked_but_none():
+    out = stated_roles_payload([], ["Suresh"])
+    assert out == {"title": None, "title_source": None, "items": []}
+
+
+def test_vocabulary_stated_role_type_floor_and_explicit_null():
+    assert people_vocabulary({}).stated_role_type == "role"
+    assert people_vocabulary({"people": {"person_type": "person"}}).stated_role_type == "role"
+    # An explicit null is "we do not track stated roles", not the floor.
+    assert people_vocabulary({"people": {"person_type": "person", "stated_role_type": None}}).stated_role_type is None
+    assert people_vocabulary({"people": {"person_type": "contact", "stated_role_type": "position"}}).stated_role_type == "position"
