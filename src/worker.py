@@ -130,6 +130,7 @@ from contextquilt.services.entity_aliasing import (
 from contextquilt.services import behavior_extraction
 from contextquilt.services import described_as
 from contextquilt.services import relationship_lenses
+from contextquilt.services import who_they_are
 from contextquilt.services.people_identity import (
     build_entity_resolver,
     merge_person_clusters,
@@ -1957,6 +1958,11 @@ async def _rebuild_entity_index(db, redis_client, user_id: str):
         logger.warning("cue_index_rebuild_failed", user_id=user_id, error=str(e))
 
 
+def who_they_are_opening(text: str, words: int = 2) -> str:
+    """First words of a served summary, for the collision list."""
+    return " ".join((text or "").split()[:words])
+
+
 def _build_default_llm_client(*, alert_db=None):
     """Construct the default LLM client per CQ_LLM_PRIMARY_PROVIDER.
 
@@ -2596,6 +2602,13 @@ class ColdPathWorker:
                     subject_key, app_id, rule,
                     MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
                 )
+                # The synthesis lens runs on its own model and its own
+                # fingerprint gate, so it spends nothing on a person
+                # whose inputs have not moved.
+                created += await self._derive_who_they_are(
+                    subject_key, app_id, rule,
+                    MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
+                )
                 continue
             clusters = await self.db.fetch(
                 f"""
@@ -3114,6 +3127,191 @@ class ColdPathWorker:
         )
         return True
 
+    async def _derive_who_they_are(
+        self, subject_key: str, app_id: str, rule: dict, budget: int
+    ) -> int:
+        """Who they are: one synthesis per person across stated roles and
+        the description series, regenerated only when the inputs change.
+
+        Scott, 2026-08-21: "average it out to get the best comprehensive
+        summary that goes beyond a simply title." The title (#301) is a
+        rule, this is the model step, and it is the ONLY model step in
+        the description story: the 08-13 experiment showed cross-meeting
+        synthesis is what a model adds and that Haiku fails it invisibly,
+        so this lens runs on its own model (CQ_WHO_THEY_ARE_MODEL, Sonnet
+        by default) behind its own kill switch (CQ_WHO_THEY_ARE_ENABLED).
+
+        The arithmetic is in `services/who_they_are`; the model writes
+        from inputs it was handed and the parse refuses anything that
+        drops the stated role, invents a number, or opens with the name.
+        A card carries the fingerprint of its inputs; a person whose
+        roles and perceptions have not moved costs nothing per cycle.
+        """
+        if budget <= 0:
+            return 0
+        if os.getenv("CQ_WHO_THEY_ARE_ENABLED", "true").lower() in ("0", "false", "no"):
+            return 0
+        model = os.getenv("CQ_WHO_THEY_ARE_MODEL") or who_they_are.DEFAULT_MODEL
+        vocab = people_vocabulary(await self._app_manifest(app_id))
+        if not vocab.stated_role_type:
+            role_type = None
+        else:
+            role_type = vocab.stated_role_type
+        user_id = subject_key.split(":", 1)[1] if ":" in subject_key else subject_key
+        try:
+            people = await self.db.fetch(
+                """
+                SELECT e.entity_id, e.name, e.mention_count,
+                       e.first_seen_at, e.last_seen_at,
+                       (SELECT array_agg(DISTINCT a.alias) FROM entity_aliases a
+                         WHERE a.entity_id = e.entity_id) AS aliases,
+                       (SELECT count(*) FROM entity_descriptions d
+                         WHERE d.entity_id = e.entity_id) AS perceptions,
+                       (SELECT count(*) FROM person_appearances pa
+                         WHERE pa.entity_id = e.entity_id) AS meetings,
+                       (SELECT array_agg(DISTINCT pr.name) FROM person_appearances pa
+                         JOIN projects pr ON pr.project_id = pa.project_id
+                         WHERE pa.entity_id = e.entity_id) AS projects
+                FROM entities e
+                WHERE e.user_id = $1 AND e.entity_type = $2
+                  AND e.merged_into IS NULL AND e.suppressed_at IS NULL
+                  AND e.self_at IS NULL
+                ORDER BY e.last_seen_at DESC NULLS LAST
+                LIMIT 400
+                """,
+                user_id, vocab.person_entity_type,
+            )
+        except Exception as exc:
+            logger.debug("who_they_are_roster_unavailable", error=str(exc)[:140])
+            return 0
+        created = 0
+        for person in people:
+            if created >= budget:
+                break
+            eid = str(person["entity_id"])
+            names = [person["name"]] + list(person["aliases"] or [])
+            keys = [n.strip().lower() for n in names if n and n.strip()]
+            roles = []
+            if role_type:
+                roles = [dict(r) for r in await self.db.fetch(
+                    """
+                    SELECT cp.patch_id, cp.value->>'text' AS text, cp.origin_id,
+                           cp.created_at AS stated_at,
+                           COALESCE(pr.name, cp.project) AS project
+                    FROM context_patches cp
+                    JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                    LEFT JOIN projects pr ON pr.project_id = cp.project_id
+                    WHERE ps.subject_key = $1 AND cp.patch_type = $2
+                      AND COALESCE(cp.status, 'active') = 'active'
+                      AND LOWER(cp.value->>'text') LIKE ANY($3::text[])
+                    ORDER BY cp.created_at DESC
+                    LIMIT 8
+                    """,
+                    subject_key, role_type, [k + "%" for k in keys],
+                )]
+            percs = [dict(r) for r in await self.db.fetch(
+                """
+                SELECT description, first_origin_id, observation_count,
+                       first_observed_at, last_observed_at
+                FROM entity_descriptions
+                WHERE user_id = $1 AND entity_id = $2::uuid
+                ORDER BY first_observed_at DESC
+                LIMIT 20
+                """,
+                user_id, eid,
+            )]
+            if not who_they_are.eligible(roles, percs):
+                continue
+            facts = who_they_are.build_facts(
+                person["name"], roles, percs,
+                int(person["meetings"] or 0), person["first_seen_at"],
+                person["last_seen_at"], list(person["projects"] or []),
+            )
+            # Fingerprint gate: the standing card for this person, if any.
+            existing = await self.db.fetch(
+                """
+                SELECT d.patch_id, COALESCE(d.status, 'active') AS status,
+                       d.value->'facts'->>'fingerprint' AS fp
+                FROM context_patches d
+                JOIN patch_subjects dps ON dps.patch_id = d.patch_id
+                WHERE dps.subject_key = $1 AND d.origin_mode = 'derived'
+                  AND d.value->>'lens' = $2 AND d.value->>'source_entity_id' = $3
+                  AND COALESCE(d.value->>'archive_cause', '') <> 'replaced'
+                """,
+                subject_key, who_they_are.LENS, eid,
+            )
+            # A user's no (archived, not by replacement) is a decision and
+            # blocks regeneration outright, same as every other lens.
+            if any(r["status"] != "active" for r in existing):
+                continue
+            if any(r["fp"] == facts["fingerprint"] for r in existing):
+                continue
+            used_openings = [
+                who_they_are_opening(r["text"]) for r in await self.db.fetch(
+                    """
+                    SELECT cp.value->>'text' AS text FROM context_patches cp
+                    JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                    WHERE ps.subject_key = $1 AND cp.origin_mode = 'derived'
+                      AND cp.value->>'lens' = $2
+                      AND COALESCE(cp.status, 'active') = 'active'
+                      AND COALESCE(cp.value->>'source_entity_id', '') <> $3
+                    ORDER BY cp.created_at DESC LIMIT 12
+                    """,
+                    subject_key, who_they_are.LENS, eid,
+                ) if r["text"]
+            ]
+            content = who_they_are.build_content(facts, used_openings)
+            defects: list = []
+            try:
+                response = await self.llm.extract(
+                    system_prompt=who_they_are.SYSTEM,
+                    user_content=content, model=model,
+                )
+                parsed = who_they_are.parse_response(response.content, facts, defects)
+            except Exception as exc:
+                logger.warning("who_they_are_failed", subject=subject_key,
+                               person=person["name"], reason=str(exc)[:200])
+                continue
+            if not parsed:
+                logger.info("who_they_are_rejected", subject=subject_key,
+                            person=person["name"],
+                            defect=defects[0] if defects else "declined",
+                            raw=(response.content or "")[:240])
+                continue
+            # Replace the prior card: a synthesis supersedes, it does not
+            # accumulate, and the cause says so, so it never reads as a
+            # user's no later.
+            for r in existing:
+                await self.db.execute(
+                    """
+                    UPDATE context_patches
+                    SET status = 'archived', updated_at = NOW(),
+                        value = jsonb_set(value, '{archive_cause}', '"replaced"'::jsonb)
+                    WHERE patch_id = $1
+                    """,
+                    r["patch_id"],
+                )
+            source_ids = [r["patch_id"] for r in roles if r.get("patch_id")]
+            await self._write_person_insight(
+                subject_key, app_id, rule, "", person["name"],
+                [str(x) for x in source_ids], who_they_are.LENS,
+                parsed["summary"], parsed["trajectory"] or "",
+                facts=facts, entity_id=eid,
+                extra={
+                    "trajectory": parsed["trajectory"],
+                    "sources": parsed["sources"],
+                    "generated_at": datetime.utcnow().isoformat(),
+                    "model": getattr(response, "model", None) or model,
+                    "output_language": parsed.get("output_language"),
+                },
+            )
+            created += 1
+            logger.info("who_they_are_created", subject=subject_key,
+                        person=person["name"], roles=len(roles),
+                        perceptions=len(percs), model=model,
+                        replaced=len(existing))
+        return created
+
     async def _person_entity_resolver(self, user_id: str):
         """Surface form -> canonical entity id, for this user.
 
@@ -3471,7 +3669,7 @@ class ColdPathWorker:
         self, subject_key: str, app_id: str, rule: dict,
         person_patch_id: str, person_name: str, source_patch_ids: list,
         lens: str, text: str, do: str, facts: Optional[dict] = None,
-        entity_id: Optional[str] = None,
+        entity_id: Optional[str] = None, extra: Optional[dict] = None,
     ) -> str:
         """The provenance-carrying write, shared by every lens pass.
 
@@ -3513,6 +3711,12 @@ class ColdPathWorker:
             value["source_entity_id"] = str(entity_id)
         if facts:
             value["facts"] = facts
+        if extra:
+            # Lens-specific fields (who_they_are: trajectory, sources,
+            # generated_at, model). Merged last so a lens cannot
+            # overwrite the provenance keys above by accident.
+            for k, v in extra.items():
+                value.setdefault(k, v)
         value_json = json.dumps(value)
         async with self.db.acquire() as conn:
             async with conn.transaction():
