@@ -7862,6 +7862,23 @@ async def update_project(
             "UPDATE context_patches SET project = $1, updated_at = NOW() WHERE project_id = $2",
             update.name, project_id
         )
+        # And the project patch's own text. The people surface resolves
+        # OBSERVED projects through `projects.name`, but a person who is
+        # only STATED on a project (a works-on edge, no appearance) takes
+        # the name from this patch's value.text, which nothing else
+        # rewrites. Found 2026-08-21 while tracing a rename that never
+        # arrived (SS sent it, GP had no route, seven swallowed since
+        # 07-31); this is the one CQ-side copy the rename missed.
+        await db_pool.execute(
+            """
+            UPDATE context_patches
+               SET value = jsonb_set(value, '{text}', to_jsonb($1::text)),
+                   updated_at = NOW()
+             WHERE project_id = $2 AND patch_type = 'project'
+               AND COALESCE(status, 'active') = 'active'
+            """,
+            update.name, project_id
+        )
 
     if update.status == "archived":
         await db_pool.execute(
