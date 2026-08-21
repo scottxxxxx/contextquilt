@@ -2077,6 +2077,7 @@ async def get_user_quilt(
     project_id: Optional[str] = Query(None, description="Project rundown view (context-flow contract, 2026-07): only patches carrying this stable project id. Combine with group_by=origin for a complete per-meeting project dossier. NOTE: meeting views stay keyed on origin_id per the SS contract; this filter serves the gateway's rundown route and only works when ingest stamped project_id (see docs/architecture/13)."),
     limit: Optional[int] = Query(None, ge=1, le=500, description="Cap the patches array (applied after ordering). For prompt injection use — a large project must not blow the caller's prompt budget."),
     order: Optional[str] = Query(None, description="'attention' ranks open work by what needs looking at (overdue, then high salience, then items that keep coming back, then soonest due) instead of by recency. Pair it with `limit` so a capped project view returns the important N rather than an arbitrary N. Omit for the existing recency order; `origin_id` meeting views ignore it and stay in capture order."),
+    max_age_days: Optional[int] = Query(None, ge=1, le=3650, description="Tier recall window, same contract as recall's metadata.max_age_days: only meeting-bound patches whose most recent observation (last_observed_at, else created_at) falls within the last N UTC days; universal self-disclosure types are exempt. `total_available` counts inside the window. For the gateway's rundown/dossier leg into a prompt; a sync caller never passes it, so delta sync is untouched."),
     app_id: str = Depends(verify_application_access),
 ):
     """
@@ -2161,6 +2162,23 @@ async def get_user_quilt(
     if project_id:
         query += f" AND cp.project_id = ${len(params) + 1}"
         params.append(project_id)
+
+    # Tier recall window on the dossier leg (2026-08-21). The chat
+    # context flow has TWO CQ legs, /v1/recall and this rundown, and a
+    # window applied to one of them is a window with a hole in it: a Plus
+    # user would lose March from the recall block and get it back from the
+    # dossier. Same predicate as recall, same exemption, same day bucket,
+    # applied BEFORE the count so total_available is the windowed
+    # population. Absent = untouched, which is every sync caller.
+    if max_age_days is not None:
+        window_runtime = await facet_runtime.get_type_runtime(db_pool.fetch)
+        query += (
+            f" AND (cp.patch_type = ANY(${len(params) + 1}::text[])"
+            f" OR COALESCE(cp.last_observed_at, cp.created_at)::date"
+            f" >= ((NOW() AT TIME ZONE 'utc')::date - ${len(params) + 2}::int))"
+        )
+        params.append(list(window_runtime.universal_recall_types))
+        params.append(max_age_days)
 
     # Meeting view = capture order (oldest first), per the SS contract:
     # a browse surface wants deterministic ordering, not ranking. The
