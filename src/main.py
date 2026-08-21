@@ -106,6 +106,7 @@ from contextquilt.services.people_identity import (
     PeopleVocabulary,
     build_entity_resolver,
     people_vocabulary,
+    stated_roles_payload,
 )
 from contextquilt.services.recall_signals import (
     build_coverage_line,
@@ -6099,7 +6100,15 @@ async def get_person(
     # missing series must not take down a person page.
     described_as_series = None
     try:
-        desc_rows = await conn.fetch(
+        # db_pool, NOT conn: the acquire block closed above, and this
+        # fetch on the released connection raised "connection has been
+        # released back to the pool" into a guard written for a missing
+        # table, which logged at debug and served null. Receipt
+        # 2026-08-21: Suresh had four rows in entity_descriptions and
+        # described_as: null on the wire, for every person, since #286.
+        # The guard hid it because null is the honest answer to a lagging
+        # DB and the same dishonest answer to a programming error.
+        desc_rows = await db_pool.fetch(
             """
             SELECT description, first_origin_id, observation_count,
                    first_observed_at, last_observed_at
@@ -6122,7 +6131,62 @@ async def get_person(
             for r in desc_rows
         ])
     except Exception as exc:
-        logger.debug("described_as_series_unavailable", error=str(exc)[:140])
+        logger.warning("described_as_series_unavailable", error=str(exc)[:140])
+
+    # What this person has STATED they are, as opposed to what a meeting
+    # showed them doing. A stated role ("Suresh is scrum master on ABM
+    # project") is a `role` patch linked to its project, not to the
+    # person, so nothing here ever saw it; the card served the last
+    # meeting's inference instead. Matched the way every other people
+    # read matches patches: by name and alias, here as the opening of
+    # the text or via a `describes` edge to the person's patch. Null =
+    # the app does not track stated roles, or the fetch failed; an empty
+    # list = tracked, none stated.
+    stated_roles = None
+    if vocab.stated_role_type:
+        try:
+            subject_key = f"user:{user_id}"
+            role_names = [row["name"]] + list(row.get("aliases") or [])
+            keys = [n.strip().lower() for n in role_names if n and n.strip()]
+            role_rows = await db_pool.fetch(
+                """
+                SELECT DISTINCT ON (cp.patch_id)
+                       cp.patch_id, cp.value->>'text' AS text, cp.origin_id,
+                       cp.created_at, cp.project_id,
+                       COALESCE(pr.name, cp.project) AS project
+                FROM context_patches cp
+                JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                LEFT JOIN projects pr ON pr.project_id = cp.project_id
+                LEFT JOIN patch_connections pc
+                       ON pc.from_patch_id = cp.patch_id
+                      AND pc.connection_label = 'describes'
+                      AND COALESCE(pc.status, 'active') = 'active'
+                LEFT JOIN context_patches person_p
+                       ON person_p.patch_id = pc.to_patch_id
+                WHERE ps.subject_key = $1
+                  AND cp.patch_type = $2
+                  AND COALESCE(cp.status, 'active') = 'active'
+                  AND (
+                        LOWER(cp.value->>'text') LIKE ANY($3::text[])
+                     OR LOWER(person_p.value->>'text') = ANY($4::text[])
+                  )
+                ORDER BY cp.patch_id, cp.created_at DESC
+                """,
+                subject_key, vocab.stated_role_type,
+                [k + "%" for k in keys], keys,
+            )
+            role_rows = sorted(role_rows, key=lambda r: r["created_at"], reverse=True)
+            stated_roles = stated_roles_payload([
+                {
+                    "patch_id": r["patch_id"], "text": r["text"],
+                    "project": r["project"], "project_id": r["project_id"],
+                    "origin_id": r["origin_id"],
+                    "stated_at": r["created_at"].isoformat() if r["created_at"] else None,
+                }
+                for r in role_rows
+            ], role_names)
+        except Exception as exc:
+            logger.warning("stated_roles_unavailable", error=str(exc)[:140])
 
     detail = _public_person(row)
     detail.update({
@@ -6130,6 +6194,13 @@ async def get_person(
         # perception changed and open the history. Null = cannot tell
         # (fetch failed); iterations 0 = we have never described them.
         "described_as": described_as_series,
+        # PRECEDENCE RULE, on the wire: a role the person STATED beats a
+        # description a meeting INFERRED. `title` is the newest stated
+        # role with the person's own name and copula stripped; a client
+        # shows it under the name and keeps `description` as "last seen
+        # doing". `stated_roles.items` are the receipts.
+        "stated_roles": stated_roles,
+        "title": stated_roles["title"] if stated_roles else None,
         # A list (possibly empty) unless the fetch failed, which is the
         # only cannot-tell. See capabilities.insights for whether this
         # app can ever produce them at all.

@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Iterable, List, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 from contextquilt.services.extraction_schema import (
     is_placeholder_or_self_person,
@@ -257,6 +257,11 @@ class PeopleVocabulary:
     ownership_label: str
     works_on_label: str
     counterparty_label: "str | None"
+    # The patch type that carries a STATED role ("Suresh is scrum master
+    # on ABM project"), as opposed to the per-meeting description the
+    # entity carries. None = this app does not track stated roles and
+    # `title` stays null on every person, honestly.
+    stated_role_type: "str | None" = "role"
 
 
 # The SS floor, and the resolution for every manifest registered before
@@ -296,6 +301,11 @@ def people_vocabulary(manifest: object) -> PeopleVocabulary:
         or DEFAULT_PEOPLE_VOCABULARY.ownership_label,
         works_on_label=block.get("works_on_label")
         or DEFAULT_PEOPLE_VOCABULARY.works_on_label,
+        # Explicit null = "we do not track stated roles"; absent = floor.
+        stated_role_type=(
+            block["stated_role_type"] if "stated_role_type" in block
+            else DEFAULT_PEOPLE_VOCABULARY.stated_role_type
+        ),
         # Deliberately NOT defaulted: an explicit block without a
         # counterparty label is the app saying "not tracked".
         counterparty_label=block.get("counterparty_label"),
@@ -845,3 +855,78 @@ def owned_by_self_verdict(
     if owner_is_placeholder(owner_text):
         return None
     return not value_owner
+
+
+# ---------------------------------------------------------------
+# Stated roles and the title (2026-08-21).
+#
+# Suresh introduced himself as scrum master on 08-17 and the quilt
+# stored it as a `role` patch. Four meetings later his card read
+# "Meeting facilitator and lead", because the description under a
+# person's name is whatever the LAST meeting's extraction said they
+# did, and nothing on the person surface ever consulted the role. A
+# statement the person made about themselves must beat an inference
+# about one hour of conduct, every time. That is the whole rule here.
+# Synthesis across the series (a better title learned over time) is a
+# separate, model-bearing step and is deliberately not this.
+# ---------------------------------------------------------------
+
+_ROLE_LEADS = (" is ", " was ", " serves as ", " works as ", " acts as ", ": ")
+
+
+def title_from_stated_role(text: Optional[str], names: Sequence[str]) -> Optional[str]:
+    """Strip the person's own name and the copula from a stated-role
+    text, so "Suresh is scrum master on ABM project" serves as
+    "scrum master on ABM project". Returns the text unchanged when it
+    does not open with one of the person's names (the role may be
+    phrased without the name), and None for empty input. Never invents
+    words: the output is a substring of the input or the input itself."""
+    if not text or not text.strip():
+        return None
+    raw = text.strip()
+    low = raw.lower()
+    for n in sorted({(n or "").strip().lower() for n in names if n and n.strip()}, key=len, reverse=True):
+        if not low.startswith(n):
+            continue
+        rest = raw[len(n):]
+        rest_low = rest.lower()
+        for lead in _ROLE_LEADS:
+            # Pad so a text that ENDS on the copula ("Suresh is") still
+            # matches the lead and resolves to None rather than to the
+            # name plus a verb.
+            if (rest_low + " ").startswith(lead):
+                out = rest[len(lead):].strip()
+                return out or None
+        # "Suresh, scrum master on ABM" / "Suresh (scrum master)"
+        if rest.startswith(",") or rest.startswith(" ("):
+            out = rest.lstrip(", (").rstrip(")").strip()
+            return out or None
+    return raw
+
+
+def stated_roles_payload(rows: Sequence[Mapping[str, Any]], names: Sequence[str]) -> Dict[str, Any]:
+    """{"title", "title_source", "items": [...]} from role rows ordered
+    newest first. `title` is the newest stated role, derived by
+    title_from_stated_role; `title_source` carries its patch_id and
+    origin so a client can open the receipt. Items keep the raw text:
+    a served name may assert only what was observed (doc 16 section
+    5.10), and the raw text IS the observation."""
+    items = []
+    for r in rows:
+        items.append({
+            "patch_id": str(r.get("patch_id")) if r.get("patch_id") else None,
+            "text": r.get("text"),
+            "project": r.get("project"),
+            "project_id": r.get("project_id"),
+            "origin_id": r.get("origin_id"),
+            "stated_at": r.get("stated_at"),
+        })
+    title = None
+    source = None
+    for it in items:
+        t = title_from_stated_role(it["text"], names)
+        if t:
+            title = t
+            source = {"patch_id": it["patch_id"], "origin_id": it["origin_id"], "stated_at": it["stated_at"]}
+            break
+    return {"title": title, "title_source": source, "items": items}
