@@ -900,6 +900,18 @@ second lands on the next 24h pass.
   of this same field and survives as an alias, because the served surface
   is additive only (doc 17 section 6); it is the same ingest date and
   carries no other meaning.
+
+  **The same rule binds every dated field on the person surface, and
+  the client's join is the PRIMARY path, not a nicety.** Stated in
+  ShoulderSurf's own words (their `PERSON_INSIGHT_STACK.md`, adopted
+  verbatim on 2026-08-21 so the two documents say one thing): "the date
+  is the patch INGEST date, not the meeting date. CQ does not persist
+  meeting dates at all. Join `origin_id` to the local MeetingStore and
+  render OUR date. The served date is a labelled fallback only, rendered
+  as 'ADDED JUN 02' in the muted token so a bulk import cannot dress its
+  import day up as when the thing happened." This covers `ingested_on`,
+  `described_as.history[].first_observed_at` / `last_observed_at`, and
+  `stated_roles.items[].stated_at` alike.
 * Archived sources are NOT served as evidence: a decayed or superseded
   patch is not a live receipt. This can drop the list below the
   `min_meetings` that created the insight. The honest list is served
@@ -2475,3 +2487,56 @@ only show a count it can back with a tappable row and it holds meetings
 CQ never ingested (pre-upgrade, imported recordings) and possibly the
 reverse. Expected, not a defect on either side. `meeting_count` means
 "meetings CQ knows this person appeared in", nothing more.
+
+
+## 5.14 The line under the name: `title`, `description`, `described_as`, `stated_roles` (2026-08-21)
+
+Brian saw Suresh's description change between meetings (2026-08-18);
+Scott saw "scrum master", stated by Suresh himself on 08-17, replaced
+four meetings later by "Meeting facilitator and lead" (2026-08-21). The
+description under a name was whatever the LAST meeting's extraction said
+the person did, and nothing on the person surface consulted the role
+patch that held what they SAID.
+
+**Precedence rule, on the wire: a role the person STATED beats a
+description a meeting INFERRED.** Person detail serves:
+
+* `description`: unchanged, what the last meeting showed them doing.
+  Kept as its own field because it is true and useful, just not the job.
+* `described_as`: the `entity_descriptions` series (migration 39): one
+  row per distinct perception with an `observation_count` of
+  confirmations, never rewritten once appended. `{current,
+  changed_from, iterations, history[], truncated}`, newest first, capped
+  20. `changed_from` non-null is the "it moved" indicator. NOTE: this
+  field was served `null` to every client from #286 (08-18) until #301
+  (08-21) because the fetch ran on a released pool connection and the
+  lagging-DB guard swallowed the error at debug level. A null here is now
+  logged at WARNING. Null is the honest answer to a missing table and the
+  same dishonest answer to a programming error; the log level is how the
+  two are told apart.
+* `stated_roles`: the active patches of the manifest's
+  `people.stated_role_type` (SS floor `role`; an explicit manifest null
+  means "not tracked" and the field serves null), matched by the
+  person's name or alias as the opening of the text, or via a
+  `describes` edge to the person's patch. Items keep the raw text, with
+  project, origin and date as receipts. `title` is the newest item with
+  the person's own name and copula stripped ("Suresh is scrum master on
+  ABM project" serves as "scrum master on ABM project"); `title_source`
+  is its receipt. The derivation never invents words: the output is a
+  substring of the input or the input itself.
+* `title` is also served top-level for the client's convenience.
+
+Client rendering (contract sent to SS 2026-08-21): the line under the
+name is `title` when non-null, else `description`; `description` stays
+as a secondary "last meeting" line with a changed mark off
+`changed_from`; tapping it opens `described_as.history` with the count
+per row and a tap-through by `origin_id`; `stated_roles.items` renders
+beneath as "what they told us" with the `title_source` row marked.
+Instances, never summaries; counts, never confidence; null as absence.
+
+Measured on prod the day it shipped: 24 of 498 people gain a `title`
+from the 79 stated roles. The other 474 still show the last meeting's
+inference until a role is stated. Synthesis of a better title across the
+series is a model-bearing step and is deliberately NOT this; the 08-13
+person-analyzer experiment showed cross-meeting synthesis needs Sonnet
+and fails invisibly on Haiku. Decide it against that number.
