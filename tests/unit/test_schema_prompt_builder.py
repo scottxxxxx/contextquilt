@@ -290,3 +290,52 @@ def test_killed_sections_not_advertised_in_shapes(minimal_manifest):
     assert "cues" not in shape_line
     assert "salience" not in shape_line
     assert "deadline_date" in shape_line  # no kill switch for deadlines
+
+
+# ============================================================
+# Entity description: observed, never inferred (2026-08-21)
+# ============================================================
+#
+# Steven Williams was served as "Immigration attorney" because he spent
+# a meeting discussing immigration tooling and privilege; he is not one.
+# The model described the shape of the conversation and called it the
+# person. The rule lives in the DEFAULT entity guidance, which is what
+# every app without its own `entity_guidance` renders.
+
+_DESC_RULE_MARKER = "Never infer a profession, title or affiliation from the topic"
+
+
+def test_description_rule_renders_for_ss_manifest():
+    import json
+    from pathlib import Path
+
+    fixture_path = (
+        Path(__file__).resolve().parent.parent.parent
+        / "init-db"
+        / "11_shouldersurf_schema.json"
+    )
+    if not fixture_path.exists():
+        pytest.skip("SS manifest fixture not found")
+    with open(fixture_path) as f:
+        manifest = json.load(f)
+    # SS declares no entity_guidance override, so the default rules (and
+    # this one) are what its extractions see. If SS ever adds an
+    # override, this test is the reminder to carry the rule across.
+    assert "entity_guidance" not in (manifest.get("extraction_prompt_guidance") or {})
+    prompt = build_prompt(manifest)
+    assert _DESC_RULE_MARKER in prompt
+    # The contrast pair is the part that moves a model (doc 19.8), so it
+    # must survive any future trimming of the rule text.
+    assert "NOT thereby an immigration attorney" in prompt
+
+
+def test_description_rule_is_part_of_default_guidance_not_bolted_on(minimal_manifest):
+    # A manifest that supplies its own entity_guidance REPLACES the
+    # default block. The rule must vanish with it, which proves the
+    # assertion above is testing the default guidance path and not some
+    # unconditional string the builder always emits.
+    m = copy.deepcopy(minimal_manifest)
+    m.setdefault("extraction_prompt_guidance", {})["entity_guidance"] = "RULES: custom."
+    prompt = build_prompt(m)
+    assert "RULES: custom." in prompt
+    assert _DESC_RULE_MARKER not in prompt
