@@ -3260,24 +3260,50 @@ class ColdPathWorker:
                     subject_key, who_they_are.LENS, eid,
                 ) if r["text"]
             ]
-            content = who_they_are.build_content(facts, used_openings)
+            base_content = who_they_are.build_content(facts, used_openings)
+            content = base_content
             defects: list = []
-            try:
-                response = await self.llm.extract(
-                    system_prompt=who_they_are.SYSTEM,
-                    user_content=content, model=model,
-                )
-                parsed = who_they_are.parse_response(response.content, facts, defects)
-            except Exception as exc:
-                logger.warning("who_they_are_failed", subject=subject_key,
-                               person=person["name"], reason=str(exc)[:200])
-                continue
+            parsed = None
+            response = None
+            # ONE bounded retry, and only when the correction changes the
+            # prompt (same discipline as the stands_out lens). The first
+            # prod cycle (2026-08-21 23:09Z) rejected 5 of 5: four over
+            # length, one stated role "dropped" because the role text
+            # ended in a period; and the raw answers showed Sonnet
+            # opening with the name despite the instruction. A retry
+            # that names the defect turns most of those into cards.
+            for attempt in range(2):
+                try:
+                    response = await self.llm.extract(
+                        system_prompt=who_they_are.SYSTEM,
+                        user_content=content, model=model,
+                    )
+                    parsed = who_they_are.parse_response(response.content, facts, defects)
+                except Exception as exc:
+                    logger.warning("who_they_are_failed", subject=subject_key,
+                                   person=person["name"], reason=str(exc)[:200])
+                    parsed = None
+                    break
+                if parsed or attempt:
+                    break
+                defect = defects[0] if defects else ""
+                if defect not in who_they_are.RETRYABLE:
+                    break
+                note = who_they_are.retry_note(
+                    defect, facts, who_they_are.summary_chars(response.content))
+                if not note:
+                    break
+                content = f"{base_content}\n\n{note}"
+                defects = []
             if not parsed:
+                if response is None:
+                    continue
                 logger.info("who_they_are_rejected", subject=subject_key,
                             person=person["name"],
                             defect=defects[0] if defects else "declined",
+                            summary_chars=who_they_are.summary_chars(response.content),
                             raw=(json.dumps(response.content) if isinstance(response.content, dict)
-                                 else str(response.content or ""))[:240])
+                                 else str(response.content or ""))[:700])
                 continue
             # Replace the prior card: a synthesis supersedes, it does not
             # accumulate, and the cause says so, so it never reads as a
