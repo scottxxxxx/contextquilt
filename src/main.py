@@ -64,6 +64,7 @@ from contextquilt.services.recall_formatter import (
     CHARS_PER_TOKEN,
     format_category_grouped,
     format_flat_ranked_with_stats,
+    resolve_max_age_days,
     resolve_token_budget,
 )
 from contextquilt.services.people_signals import (
@@ -250,7 +251,7 @@ class RecallRequest(BaseModel):
     """Request to recall relevant context from the graph"""
     user_id: str = Field(..., description="User ID")
     text: str = Field(..., description="Query or transcript text to match entities against")
-    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional hints: project_id/project (scope), locale (grouped-mode labels), token_budget (int, flat-mode context size, default 700, clamped 100-2000), memory_signals (truthy: append explicit metamemory gap lines to the context block)")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional hints: project_id/project (scope), locale (grouped-mode labels), token_budget (int, flat-mode context size, default 700, clamped 100-2000), max_age_days (int >= 1: serve meeting-bound memory observed in the last N UTC days only; universal self-disclosure types exempt; absent = no window), memory_signals (truthy: append explicit metamemory gap lines to the context block)")
     max_hops: Optional[int] = Field(default=2, description="Graph traversal depth")
     output_format: Optional[str] = Field(
         default="flat",
@@ -1011,6 +1012,26 @@ async def recall_context(
     # pinned floor, so every byte of SS output is unchanged.
     type_runtime = await facet_runtime.get_type_runtime(db_pool.fetch)
 
+    # Recall age window (tier contract, 2026-08-21). metadata.max_age_days
+    # bounds meeting-bound memory to the last N days: a row is served when
+    # its most recent observation, COALESCE(last_observed_at, created_at),
+    # falls on or after (today_utc - N). Universal self-disclosure types
+    # are exempt (a preference does not expire on day 31). One predicate,
+    # applied to EVERY leg below including the overdue guarantee, the cue
+    # leg and the coverage denominator, so "showing N of M" is M as this
+    # tier sees it. NULL means no window, and the predicate short-circuits
+    # to TRUE, so an unwindowed request returns exactly the pre-window
+    # rows. Day-bucketed like the scorer's clock: byte-stable within a
+    # UTC day. The number is the gateway's per-tier dial; CQ never
+    # defaults it. Same SQL text either way, so the planner sees one shape.
+    max_age_days = resolve_max_age_days(request.metadata)
+    universal_types = list(type_runtime.universal_recall_types)
+    AGE = (
+        "AND ({d}::int IS NULL OR cp.patch_type = ANY({u}::text[]) "
+        "OR COALESCE(cp.last_observed_at, cp.created_at)::date "
+        ">= ((NOW() AT TIME ZONE 'utc')::date - {d}::int))"
+    )
+
     # Step 4a: Flat patch query (works for both V1 and V2 patches)
     # cp.patch_id is the secondary sort everywhere — created_at ties on
     # microsecond-equal inserts (workers batching) gave undefined order,
@@ -1025,10 +1046,11 @@ async def recall_context(
             WHERE ps.subject_key = $1
               AND (cp.project_id = $2 OR cp.project_id IS NULL OR cp.patch_type = ANY($3::text[]))
               AND COALESCE(cp.status, 'active') = 'active'
+              {AGE}
             ORDER BY cp.created_at DESC, cp.patch_id ASC
             LIMIT 20
-            """,
-            subject_key, recall_project_id, list(type_runtime.universal_recall_types)
+            """.replace("{AGE}", AGE.format(d="$4", u="$3")),
+            subject_key, recall_project_id, universal_types, max_age_days
         )
     elif recall_project:
         # Fallback: filter by project display name (backward compat)
@@ -1041,10 +1063,11 @@ async def recall_context(
             WHERE ps.subject_key = $1
               AND (cp.project = $2 OR cp.project IS NULL OR cp.patch_type = ANY($3::text[]))
               AND COALESCE(cp.status, 'active') = 'active'
+              {AGE}
             ORDER BY cp.created_at DESC, cp.patch_id ASC
             LIMIT 20
-            """,
-            subject_key, recall_project, list(type_runtime.universal_recall_types)
+            """.replace("{AGE}", AGE.format(d="$4", u="$3")),
+            subject_key, recall_project, universal_types, max_age_days
         )
     else:
         # No project context — only return universal patches (traits, preferences).
@@ -1104,9 +1127,10 @@ async def recall_context(
                 WHERE pc.to_patch_id = $1 AND pc.connection_role = 'parent'
                   AND COALESCE(cp.status, 'active') = 'active'
                   AND COALESCE(pc.status, 'active') = 'active'
+                  {AGE}
                 ORDER BY cp.created_at DESC, cp.patch_id ASC
-                """,
-                project_patch["patch_id"]
+                """.replace("{AGE}", AGE.format(d="$3", u="$2")),
+                project_patch["patch_id"], universal_types, max_age_days
             )
 
     # Overdue guarantee: an overdue commitment/blocker in this project
@@ -1143,10 +1167,12 @@ async def recall_context(
               AND cp.value->>'deadline_date' ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}$'
               AND (cp.value->>'deadline_date')::date < (NOW() AT TIME ZONE 'utc')::date
               AND (cp.value->>'deadline_date')::date >= ((NOW() AT TIME ZONE 'utc')::date - 30)
+              {AGE.format(d='$5', u='$4')}
             ORDER BY cp.value->>'deadline_date' ASC, cp.patch_id ASC
             LIMIT 5
             """,
-            subject_key, proj_val, list(type_runtime.completable_types)
+            subject_key, proj_val, list(type_runtime.completable_types),
+            universal_types, max_age_days
         )
 
     # Cue fetch leg: patches indexed under a matched cue surface directly,
@@ -1165,10 +1191,11 @@ async def recall_context(
                 JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
                 WHERE ps.subject_key = $1 AND pc.cue = ANY($2)
                   AND COALESCE(cp.status, 'active') = 'active'
+                  {AGE}
                 ORDER BY cp.created_at DESC, cp.patch_id ASC
                 LIMIT 10
-                """,
-                subject_key, matched_cues
+                """.replace("{AGE}", AGE.format(d="$4", u="$3")),
+                subject_key, matched_cues, universal_types, max_age_days
             )
         except Exception:
             cue_rows = []  # lagging DB — see cue-index rehydrate above
@@ -1247,8 +1274,9 @@ async def recall_context(
                     JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
                     WHERE ps.subject_key = $1 AND cp.project_id = $2
                       AND COALESCE(cp.status, 'active') = 'active'
-                    """,
-                    subject_key, recall_project_id,
+                      {AGE}
+                    """.replace("{AGE}", AGE.format(d="$4", u="$3")),
+                    subject_key, recall_project_id, universal_types, max_age_days,
                 ) or 0
             elif recall_project:
                 scoped_total = await db_pool.fetchval(
@@ -1257,8 +1285,9 @@ async def recall_context(
                     JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
                     WHERE ps.subject_key = $1 AND cp.project = $2
                       AND COALESCE(cp.status, 'active') = 'active'
-                    """,
-                    subject_key, recall_project,
+                      {AGE}
+                    """.replace("{AGE}", AGE.format(d="$4", u="$3")),
+                    subject_key, recall_project, universal_types, max_age_days,
                 ) or 0
         except Exception:
             scoped_total = 0

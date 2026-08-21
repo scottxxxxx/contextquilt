@@ -47,6 +47,35 @@ def resolve_token_budget(metadata: "Optional[Dict[str, Any]]") -> int:
     return max(MIN_RECALL_TOKEN_BUDGET, min(MAX_RECALL_TOKEN_BUDGET, budget))
 
 
+# Recall age window (tier contract, 2026-08-21): metadata.max_age_days
+# bounds MEETING-BOUND memory to the last N days; universal self-
+# disclosure types (the manifest's universal_recall_types) are exempt
+# because a preference does not expire on day 31. The number is owned by
+# the gateway's tier config and never defaulted here: absent means no
+# window, which is the pre-window behavior byte for byte. Clamped above
+# so a typo cannot request a multi-century window that forces a full
+# scan for no reason.
+MAX_RECALL_AGE_DAYS = 3650
+
+
+def resolve_max_age_days(metadata: "Optional[Dict[str, Any]]") -> Optional[int]:
+    """Resolve metadata.max_age_days to a positive int, or None for no
+    window. Never raises and never defaults to a number: a malformed or
+    non-positive value means "no window", never a 4xx, same posture as
+    resolve_token_budget. Booleans are rejected explicitly because
+    int(True) == 1 would turn a stray `true` into a one-day window."""
+    raw = (metadata or {}).get("max_age_days")
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if days < 1:
+        return None
+    return min(MAX_RECALL_AGE_DAYS, days)
+
+
 def _today_utc() -> date:
     """Day-grain 'now' for deadline status. Day granularity keeps the
     rendered context byte-stable across a UTC day, matching the scorer's

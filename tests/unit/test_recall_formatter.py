@@ -302,3 +302,36 @@ def test_wrapper_back_compat_same_string():
     patches = [(1.0, _patch("1", "takeaway", "just one thing"))]
     ctx, _ = format_flat_ranked_with_stats(patches, [], [], max_chars=1600)
     assert format_flat_ranked(patches, [], [], max_chars=1600) == ctx
+
+
+# --- Recall age window (metadata.max_age_days) ---------------------------
+
+def test_max_age_days_absent_means_no_window():
+    from contextquilt.services.recall_formatter import resolve_max_age_days
+    assert resolve_max_age_days(None) is None
+    assert resolve_max_age_days({}) is None
+    assert resolve_max_age_days({"max_age_days": None}) is None
+
+
+def test_max_age_days_passthrough_and_clamp():
+    from contextquilt.services.recall_formatter import (
+        MAX_RECALL_AGE_DAYS, resolve_max_age_days,
+    )
+    assert resolve_max_age_days({"max_age_days": 30}) == 30
+    assert resolve_max_age_days({"max_age_days": "30"}) == 30
+    assert resolve_max_age_days({"max_age_days": 1}) == 1
+    assert resolve_max_age_days({"max_age_days": 10 ** 6}) == MAX_RECALL_AGE_DAYS
+
+
+def test_max_age_days_malformed_or_nonpositive_is_no_window_not_4xx():
+    from contextquilt.services.recall_formatter import resolve_max_age_days
+    for bad in ("thirty", "", 0, -5, [], {}, 2.5 * 0 - 1):
+        assert resolve_max_age_days({"max_age_days": bad}) is None, bad
+
+
+def test_max_age_days_boolean_is_rejected():
+    # int(True) == 1 would otherwise turn a stray JSON `true` into a
+    # one-day window, which is the worst possible silent default.
+    from contextquilt.services.recall_formatter import resolve_max_age_days
+    assert resolve_max_age_days({"max_age_days": True}) is None
+    assert resolve_max_age_days({"max_age_days": False}) is None
