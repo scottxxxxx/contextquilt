@@ -900,6 +900,18 @@ second lands on the next 24h pass.
   of this same field and survives as an alias, because the served surface
   is additive only (doc 17 section 6); it is the same ingest date and
   carries no other meaning.
+
+  **The same rule binds every dated field on the person surface, and
+  the client's join is the PRIMARY path, not a nicety.** Stated in
+  ShoulderSurf's own words (their `PERSON_INSIGHT_STACK.md`, adopted
+  verbatim on 2026-08-21 so the two documents say one thing): "the date
+  is the patch INGEST date, not the meeting date. CQ does not persist
+  meeting dates at all. Join `origin_id` to the local MeetingStore and
+  render OUR date. The served date is a labelled fallback only, rendered
+  as 'ADDED JUN 02' in the muted token so a bulk import cannot dress its
+  import day up as when the thing happened." This covers `ingested_on`,
+  `described_as.history[].first_observed_at` / `last_observed_at`, and
+  `stated_roles.items[].stated_at` alike.
 * Archived sources are NOT served as evidence: a decayed or superseded
   patch is not a live receipt. This can drop the list below the
   `min_meetings` that created the insight. The honest list is served
