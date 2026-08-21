@@ -123,3 +123,23 @@ def test_content_lists_roles_before_perceptions_with_ids():
     assert 'R1: "Suresh is scrum master on ABM project" [project: ABM] (stated 2026-08-17)' in c
     assert 'P1: "Meeting facilitator and lead" (seen 2026-08-21, confirmed 1x)' in c
     assert "do not open with any of them" in c
+
+
+def test_parse_accepts_the_client_s_dict_content():
+    # The real LLM clients hand over parsed JSON, not text. The first prod
+    # cycle failed on every person because the parse assumed a string.
+    f = _facts()
+    obj = json.loads(_ok_response())
+    out = w.parse_response(obj, f)
+    assert out is not None and out["sources"] == ["R1", "P1", "P3"]
+    d = []
+    assert w.parse_response({"facts": [], "action_items": [], "_parse_error": True}, f, d) is None
+    assert d == ["not_json"]
+
+
+def test_receipt_times_is_null_for_stated_and_int_for_observed():
+    f = _facts()
+    value = {"text": "s", "trajectory": None, "sources": ["R1", "P2"], "facts": f}
+    r = w.served(value)["receipts"]
+    assert r[0]["kind"] == "stated" and r[0]["times"] is None
+    assert r[1]["kind"] == "observed" and isinstance(r[1]["times"], int)

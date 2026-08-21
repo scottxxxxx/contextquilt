@@ -234,23 +234,36 @@ def parse_response(
     """Validate or decline. Returns {summary, trajectory, sources,
     output_language} or None, appending the first defect found."""
     defects = defects if defects is not None else []
-    text = (raw or "").strip()
+    # The LLM clients parse JSON before handing it over: `content` is a
+    # dict when the model answered cleanly and a string only in the
+    # fixture stub. Receipt 2026-08-21 22:52Z: the first prod cycle
+    # failed on every person with "'dict' object has no attribute
+    # 'strip'" because this parse assumed text. Accept both.
+    if isinstance(raw, dict):
+        if raw.get("_parse_error"):
+            defects.append("not_json")
+            return None
+        obj = raw
+        text = ""
+    else:
+        text = (raw or "").strip()
     if text.startswith("```"):
         text = text.strip("`")
         if text.lower().startswith("json"):
             text = text[4:]
-    try:
-        obj = json.loads(text)
-    except Exception:
-        m = re.search(r"\{.*\}", text, re.S)
-        if not m:
-            defects.append("not_json")
-            return None
+    if text:
         try:
-            obj = json.loads(m.group(0))
+            obj = json.loads(text)
         except Exception:
-            defects.append("not_json")
-            return None
+            m = re.search(r"\{.*\}", text, re.S)
+            if not m:
+                defects.append("not_json")
+                return None
+            try:
+                obj = json.loads(m.group(0))
+            except Exception:
+                defects.append("not_json")
+                return None
     summary = (obj.get("summary") or "").strip() if isinstance(obj, dict) else ""
     trajectory = obj.get("trajectory") if isinstance(obj, dict) else None
     trajectory = trajectory.strip() if isinstance(trajectory, str) and trajectory.strip() else None
@@ -312,12 +325,17 @@ def served(card_value: Mapping[str, Any]) -> Dict[str, Any]:
         src = by_id.get(sid)
         if not src:
             continue
+        stated = sid.startswith("R")
         receipts.append({
-            "kind": "stated" if sid.startswith("R") else "observed",
+            "kind": "stated" if stated else "observed",
             "text": src.get("text"),
             "origin_id": src.get("origin_id"),
             "date": src.get("date") or src.get("last_seen"),
-            "times": src.get("times"),
+            # A guarantee, not a convention (SS decodes it optional and
+            # renders "seen N times" only when present): a stated role is
+            # a patch with no confirmation count, so null; an observed
+            # perception always carries its count, so an int.
+            "times": None if stated else int(src.get("times") or 1),
         })
     return {
         "summary": card_value.get("text"),
