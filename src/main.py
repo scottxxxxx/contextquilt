@@ -7241,10 +7241,48 @@ async def rename_person(
                     user_id, resolved, old_name, source,
                 )
 
+            # A merged-away row keeps its name as a forward pointer, so
+            # the collision check above rightly ignores it, and then the
+            # UPDATE below walks into it on the (user, name, type) unique
+            # index. Receipt 2026-08-21: "Pallavi Kandanur" was merged
+            # INTO "Pallavi" (the bare form won the merge), and renaming
+            # the survivor back to her full name 500d against her own
+            # ghost. Swap instead of fail: the ghost parks on a unique
+            # placeholder, the survivor takes the name, then the ghost
+            # takes the survivor's OLD name, so an exact-hit lookup on the
+            # old form still forwards to the survivor through merged_into
+            # and nothing a user can type stops resolving. Case-only
+            # renames leave the ghost parked: old and new are the same
+            # surface form and the alias insert above already covers it.
+            ghosts = await conn.fetch(
+                """
+                SELECT entity_id FROM entities
+                WHERE user_id = $1 AND entity_type = $3
+                  AND merged_into IS NOT NULL
+                  AND LOWER(name) = LOWER($2)
+                """,
+                user_id, new_name, vocab.person_entity_type,
+            )
+            for g in ghosts:
+                await conn.execute(
+                    "UPDATE entities SET name = $1 WHERE entity_id = $2::uuid",
+                    f"{new_name} [merged {str(g['entity_id'])[:8]}]", g["entity_id"],
+                )
+
             await conn.execute(
                 "UPDATE entities SET name = $1 WHERE entity_id = $2::uuid",
                 new_name, resolved,
             )
+
+            if ghosts and not case_only:
+                # Only the first ghost can take the old name (unique
+                # index); any further ones stay parked, which is harmless
+                # because they are dead rows whose forward pointer is
+                # what matters.
+                await conn.execute(
+                    "UPDATE entities SET name = $1 WHERE entity_id = $2::uuid",
+                    old_name, ghosts[0]["entity_id"],
+                )
 
             # Rewrite the person patch(es). The match set is name plus
             # aliases, the same join _people_core and the merge fold use:
