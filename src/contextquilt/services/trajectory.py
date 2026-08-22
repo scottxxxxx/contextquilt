@@ -86,7 +86,19 @@ MIN_WINDOW_DENOMINATOR = 5
 # How far apart the two windows must sit before the difference is worth
 # a card, in percentage points. Below it the honest answer is that
 # nothing has changed, and saying so is not a shortfall.
+#
+# PROPORTIONS ONLY. Applying this to a rate is not conservative, it is
+# vacuous: 214 turns over 8 meetings is 2675 "points" against 1200, so
+# every rate difference on record clears a 20 point floor and the gate
+# silently stops existing. Rates get their own floor below.
 MIN_GAP_POINTS = 20
+
+# The same gate for a RATE, as a relative change against the earlier
+# rate. Forty percent, because a rate has no natural ceiling to measure
+# distance against and "he spoke a bit less" is not a finding. A person
+# whose turns move from 27 a meeting to 24 has not changed; one who moves
+# from 27 to 12 has.
+MIN_RATE_RELATIVE_CHANGE = 0.40
 
 # An unflattering claim needs instances behind it in the RECENT window,
 # not merely a rate. `relationship_lenses.MIN_INSTANCES_FOR_WORSE` in its
@@ -116,16 +128,36 @@ class Measure:
     bad direction and the writer may say so; "neutral" means neither
     direction is a judgement and the writer must describe the movement
     without grading it.
+
+    `pair_kind` is the distinction that nearly shipped nonsense. A
+    PROPORTION's numerator is a subset of its denominator ("8 of the 11
+    dated items he closed"). A RATE's is not ("214 turns across 8
+    meetings"), and 214 out of 8 is an impossible sentence. Both models
+    in the selection eval REFUSED every rate case, correctly, saying the
+    numbers were mathematically impossible: the eval was measuring this
+    defect and reporting it as model quality. ShoulderSurf found the same
+    conflation from the other end on the same afternoon, that a rate
+    pinned flat against the top of a 0..1 axis and could not be drawn.
+    Two sides, one bug, neither able to see the other's half.
+
+    `counted_noun` names what the NUMERATOR counts, for the rate
+    sentence. Deriving it from `unit` by string surgery produced "214
+    meetings across 8 meetings", which is what a field that does not
+    exist looks like when it is faked from one that does.
     """
 
-    __slots__ = ("key", "subject", "phrase", "unit", "valence")
+    __slots__ = ("key", "subject", "phrase", "unit", "valence",
+                 "pair_kind", "counted_noun")
 
-    def __init__(self, key, subject, phrase, unit, valence):
+    def __init__(self, key, subject, phrase, unit, valence, pair_kind,
+                 counted_noun=""):
         self.key = key
         self.subject = subject
         self.phrase = phrase
         self.unit = unit
         self.valence = valence
+        self.pair_kind = pair_kind
+        self.counted_noun = counted_noun
 
 
 # The precise `subject` labels the counts ON THE CARD, where there is
@@ -139,6 +171,8 @@ MEASURES = {
         "closes late",
         "items closed with a date on them",
         "unflattering_up",
+        "proportion",
+        "items",
     ),
     "speaking_turns": Measure(
         "speaking_turns",
@@ -146,6 +180,8 @@ MEASURES = {
         "takes fewer or more turns",
         "meetings where turns were counted",
         "neutral",
+        "rate",
+        "speaking turns",
     ),
     "questions_to_you": Measure(
         "questions_to_you",
@@ -153,6 +189,8 @@ MEASURES = {
         "asks you questions",
         "meetings where questions were counted",
         "neutral",
+        "rate",
+        "questions to you",
     ),
 }
 
@@ -244,8 +282,23 @@ def change_for_measure(key: str, earlier: Window, recent: Window) -> Optional[di
     span = _span_meetings(earlier, recent)
     if span < MIN_SPAN_MEETINGS:
         return None
-    gap = recent.rate_points - earlier.rate_points
-    if abs(gap) < MIN_GAP_POINTS:
+    # Distance is measured differently for the two kinds of pair, and
+    # conflating them is how the gate stops biting. See MIN_GAP_POINTS.
+    if measure.pair_kind == "proportion":
+        gap = recent.rate_points - earlier.rate_points
+        if abs(gap) < MIN_GAP_POINTS:
+            return None
+        relative = None
+    else:
+        if earlier.rate_points <= 0:
+            # No baseline to be a multiple of. "Up from nothing" is a
+            # different claim and this lens does not make it.
+            return None
+        gap = recent.rate_points - earlier.rate_points
+        relative = gap / earlier.rate_points
+        if abs(relative) < MIN_RATE_RELATIVE_CHANGE:
+            return None
+    if gap == 0:
         return None
     movement = "up" if gap > 0 else "down"
     if measure.valence == "unflattering_up":
@@ -262,6 +315,7 @@ def change_for_measure(key: str, earlier: Window, recent: Window) -> Optional[di
         "earlier": earlier,
         "recent": recent,
         "gap_points": gap,
+        "relative_change": relative,
         "movement": movement,
         "direction": direction,
         "span_meetings": span,
@@ -291,7 +345,18 @@ def best_change(windows: Dict[str, tuple]) -> Optional[dict]:
             candidates.append(found)
     if not candidates:
         return None
-    candidates.sort(key=lambda c: (-abs(c["gap_points"]), c["measure_key"]))
+    # Rank on RELATIVE distance so a proportion and a rate are comparable.
+    # Sorting on raw gap_points would hand every contest to whichever
+    # measure happens to have the larger units, which is a fact about
+    # turns versus items and not about the person.
+    def _distance(c):
+        if c.get("relative_change") is not None:
+            return abs(c["relative_change"])
+        earlier_points = c["earlier"].rate_points
+        if earlier_points <= 0:
+            return abs(c["gap_points"]) / 100.0
+        return abs(c["gap_points"]) / earlier_points
+    candidates.sort(key=lambda c: (-_distance(c), c["measure_key"]))
     return candidates[0]
 
 
@@ -358,6 +423,13 @@ def served_trajectory(
         "subject": measure.subject,
         "unit": measure.unit,
         "valence": measure.valence,
+        # Served rather than inferred, at ShoulderSurf's request and for
+        # their reason as much as mine: a client that guesses will draw a
+        # rate on a 0..1 axis and pin both windows flat against the top.
+        # A proportion may be rendered as a percentage; A RATE MAY NOT,
+        # ever, because its numerator is not a subset of its denominator.
+        "pair_kind": measure.pair_kind,
+        "counted_noun": measure.counted_noun,
         "direction": chosen["direction"],
         "movement": chosen["movement"],
         "span_meetings": chosen["span_meetings"],
@@ -402,6 +474,29 @@ def allowed_numbers(facts: dict) -> set:
     return out
 
 
+# The expanded card's body. Longer than a claim, shorter than a screen.
+MAX_NARRATIVE_CHARS = 320
+MIN_NARRATIVE_CHARS = 20
+
+# What the PROMPT asks for, deliberately below what the parse ALLOWS.
+# This is `insight_cards.TARGET_CLAIM_CHARS`'s rule applied to the one
+# field that did not have it, and it was NOT applied by foresight: the
+# first model-selection run rejected cards on `narrative_too_long` for
+# both models, which is the same overshoot insight_cards measured at
+# temperature 0 (asked for "at most 62", returned 65, five times out of
+# five). A model asked for a limit writes to the limit and slightly past
+# it. Anchor low, enforce at the real ceiling, and the habitual overshoot
+# lands inside it.
+# LOWERED FROM 240 after the second model-selection run. Haiku overshot
+# 320 on 14 of 30 first attempts and 7 survived the retry, while Sonnet
+# overshot on 1. That is the same overshoot insight_cards measured, at a
+# larger magnitude on a smaller model, and the documented remedy is to
+# anchor the ask further below the ceiling rather than to buy a bigger
+# model to obey the ask. 180 leaves 140 characters of habitual overshoot
+# inside the limit.
+TARGET_NARRATIVE_CHARS = 180
+
+
 TRAJECTORY_SYSTEM = """You are the memory-consolidation stage of ContextQuilt, a persistent memory system. You are given ONE measured thing about how work has gone between the user and one colleague, counted over two stretches of their meetings together: an earlier stretch and a recent one. ContextQuilt computed both by arithmetic. Your job is to write that change as one sentence the user can read before their next meeting, one short paragraph explaining what it means for them, and one line telling them what to do about it.
 
 You are not deciding what is interesting. The measurement already decided. You are putting it into words.
@@ -417,7 +512,7 @@ Rules:
 - SOME MEASURES HAVE NO GOOD OR BAD DIRECTION. You will be told whether this one does. When you are told the direction is neutral, describe the movement and do not grade it: taking fewer turns or asking fewer questions is a change in how meetings are running, not a fault and not an improvement. Do not imply decline, disengagement, withdrawal, or effort.
 - NEVER use a dash of any kind as punctuation. No em dash, no en dash, no hyphen standing in for a pause or an aside. Use a comma, a colon, parentheses, or two sentences. Hyphens inside genuinely hyphenated words such as "follow-up" are the only acceptable use.
 """ + CARD_SHAPE_RULES + """
-- The narrative is ONE short paragraph, at most 320 characters, expanding the claim into what it means for the user's own next meeting. It is the only place you may say anything about the SHAPE of the change (that it happened gradually, that it is visible only in aggregate). It still may not state a number you were not given, and the ban on weeks and months applies to it in full.
+- The narrative is ONE short paragraph. Aim for about """ + str(TARGET_NARRATIVE_CHARS) + """ characters; the hard limit is """ + str(MAX_NARRATIVE_CHARS) + """ and a narrative over it is thrown away rather than trimmed. It expands the claim into what it means for the user's own next meeting. It is the only place you may say anything about the SHAPE of the change (that it happened gradually, that it is visible only in aggregate). It still may not state a number you were not given, and the ban on weeks and months applies to it in full.
 - The do line STARTS WITH A VERB and is one short instruction. Never open it with a preamble such as "In your next meeting," or "Consider". The reader already knows when they will use it.
 - No hedging prefixes like "It seems".
 - Write in the same language as the listed items.
@@ -425,13 +520,141 @@ Rules:
 
 BUILD THE CLAIM FROM THE SHORT PHRASE YOU WERE GIVEN, not from the long label beside the counts. The label is precise so the card can show what was measured; it is far too long to put in a sentence.
 
+COUNT THE CHARACTERS BEFORE YOU ANSWER. Each field is thrown away WHOLE when it is over its limit, not trimmed to fit, and the card is then not shown at all. A shorter blunter sentence always beats a fuller one that does not fit. This applies to all three fields and the narrative is the one most often lost.
+
 Respond with EXACTLY this raw JSON shape and nothing else:
 {"skip": <true|false>, "text": "<the claim, or empty string when skip is true>", "narrative": "<the paragraph, or empty string when skip is true>", "do": "<the actionable line, or empty string when skip is true>", "reason": "<one short sentence>"}"""
+
+
+def build_trajectory_content(
+    person_name: str,
+    facts: dict,
+    examples: Sequence[dict] = (),
+    note: Optional[str] = None,
+) -> str:
+    """User-content block for one person's change call.
+
+    Deterministic byte for byte given the same inputs: examples arrive
+    already sampled by the caller and keep their order, so two identical
+    calls build identical prompts and a pinned temperature means an
+    identical answer.
+
+    The writer gets the SHORT phrase, never the precise `subject` label.
+    The roster lens paid three deploys to learn that a 50 character
+    subject becomes a 75 character sentence and the card is then thrown
+    away whole; the precise label ships on the wire instead, where the
+    card labels its own counts and there is room for it.
+
+    Note what is deliberately absent from every line below: any date, any
+    week, any month. There is no such thing on this path, so the writer
+    is never shown one it could copy.
+    """
+    measure = MEASURES.get(facts.get("measure_key"))
+    phrase = measure.phrase if measure else facts.get("subject", "")
+    earlier = facts.get("earlier") or {}
+    recent = facts.get("recent") or {}
+    valence = facts.get("valence") or "neutral"
+    lines = [f"Person: {person_name}", ""]
+    lines.append(
+        "Measured by ContextQuilt across their meetings together, in "
+        "meeting order. These are the only numbers you may state:"
+    )
+    # "N out of M" is only true of a PROPORTION. Saying it of a rate
+    # produces "214 out of 8", which both models in the selection eval
+    # correctly refused to write as impossible. The pair kind decides the
+    # sentence, not the caller.
+    if (measure.pair_kind if measure else "proportion") == "proportion":
+        lines.append(
+            f"- EARLIER stretch, {earlier.get('meetings')} meetings: this "
+            f"person {phrase} {earlier.get('numerator')} out of "
+            f"{earlier.get('denominator')}"
+        )
+        lines.append(
+            f"- RECENT stretch, {recent.get('meetings')} meetings: "
+            f"{recent.get('numerator')} out of {recent.get('denominator')}"
+        )
+    else:
+        lines.append(
+            f"- EARLIER stretch: {earlier.get('numerator')} "
+            f"{measure.counted_noun} across "
+            f"{earlier.get('denominator')} meetings"
+        )
+        lines.append(
+            f"- RECENT stretch: {recent.get('numerator')} "
+            f"{measure.counted_noun} across "
+            f"{recent.get('denominator')} meetings"
+        )
+        lines.append(
+            "- THESE ARE TOTALS ACROSS MEETINGS, NOT PROPORTIONS. The "
+            "first number is not a share of the second and must never be "
+            "written as a percentage or as \"N out of M\"."
+        )
+    lines.append(
+        f"- the two stretches together span {facts.get('span_meetings')} "
+        "meetings"
+    )
+    key = (valence, facts.get("movement"))
+    lines.append(f"- so this is {DIRECTION_PHRASES.get(key, 'different now')}")
+    if valence == "neutral":
+        lines.append(
+            "- THIS MEASURE HAS NO GOOD OR BAD DIRECTION. Describe the "
+            "movement. Do not grade it, and do not imply decline, "
+            "withdrawal, disengagement or improvement."
+        )
+    else:
+        lines.append(
+            "- On this measure the direction above IS unflattering, and "
+            "you may say so plainly about the work. Never about the person."
+        )
+    lines.append(
+        "- YOU DO NOT KNOW WHEN ANY OF THIS HAPPENED. No dates were "
+        "recorded. You know the order of the meetings and how many there "
+        "were. Do not name a month, a season, a number of weeks or days, "
+        "and do not write \"lately\" or \"recently\"."
+    )
+    if examples:
+        lines.append("")
+        lines.append("Items behind the recent count:")
+        for item in examples:
+            # Tolerant on purpose. The worker passes dicts, but an
+            # example that is the wrong shape must not raise inside the
+            # one function standing between a measured change and a card:
+            # the whole cost of a bad example is a less specific
+            # sentence, and the cost of raising is the person gets
+            # nothing. Caught in the model eval, where a caller passing
+            # plain strings took the whole run down on the first case.
+            if isinstance(item, dict):
+                text = item.get("text")
+            else:
+                text = item if isinstance(item, str) else None
+            lines.append(f"- {text or '(no text stored)'}")
+    if note:
+        lines.append("")
+        lines.append(note)
+    return "\n".join(lines)
 
 
 # The expanded card's body. Longer than a claim, shorter than a screen.
 MAX_NARRATIVE_CHARS = 320
 MIN_NARRATIVE_CHARS = 20
+
+# What the PROMPT asks for, deliberately below what the parse ALLOWS.
+# This is `insight_cards.TARGET_CLAIM_CHARS`'s rule applied to the one
+# field that did not have it, and it was NOT applied by foresight: the
+# first model-selection run rejected cards on `narrative_too_long` for
+# both models, which is the same overshoot insight_cards measured at
+# temperature 0 (asked for "at most 62", returned 65, five times out of
+# five). A model asked for a limit writes to the limit and slightly past
+# it. Anchor low, enforce at the real ceiling, and the habitual overshoot
+# lands inside it.
+# LOWERED FROM 240 after the second model-selection run. Haiku overshot
+# 320 on 14 of 30 first attempts and 7 survived the retry, while Sonnet
+# overshot on 1. That is the same overshoot insight_cards measured, at a
+# larger magnitude on a smaller model, and the documented remedy is to
+# anchor the ask further below the ceiling rather than to buy a bigger
+# model to obey the ask. 180 leaves 140 characters of habitual overshoot
+# inside the limit.
+TARGET_NARRATIVE_CHARS = 180
 NARRATIVE_LENGTH = "narrative_too_long"
 WINDOW_OMITTED = "one_window_only"
 GRADED_NEUTRAL = "graded_a_neutral_measure"

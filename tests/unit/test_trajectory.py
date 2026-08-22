@@ -465,3 +465,122 @@ def test_every_measure_declares_a_valence():
     """A measure added without one would default to being graded."""
     for key, measure in MEASURES.items():
         assert measure.valence in ("unflattering_up", "neutral"), key
+
+
+# --------------------------------------------------------------------
+# Proportions and rates are different animals
+#
+# The defect these prevent nearly shipped, and it was found from two
+# sides at once. The model-selection eval showed BOTH writers refusing
+# every rate case as "mathematically impossible", because the prompt said
+# "214 out of 8"; the eval was measuring this bug and reporting it as
+# model quality. ShoulderSurf hit the same conflation the same afternoon
+# from the rendering end: a rate pinned flat against the top of a 0..1
+# axis and the chart said nothing. Neither side could see the other's
+# half, which is why it took both.
+# --------------------------------------------------------------------
+
+from contextquilt.services.trajectory import (           # noqa: E402
+    MIN_RATE_RELATIVE_CHANGE,
+    build_trajectory_content,
+)
+
+
+def test_a_rate_is_not_phrased_as_a_proportion():
+    """"214 out of 8" is an impossible sentence and a model is right to
+    refuse it. The pair kind decides the phrasing, not the caller."""
+    chosen = change_for_measure("speaking_turns", window(214, 8, "a"),
+                                window(96, 8, "b"))
+    content = build_trajectory_content("Suresh", served_trajectory(chosen, "Suresh"))
+    assert "214 speaking turns across 8 meetings" in content
+    # Scoped to the DATA lines. The prompt's own prohibition names the
+    # forbidden phrasing ("must never be written as N out of M"), so a
+    # whole-content assertion trips on the guardrail it is checking for.
+    stretch = [l for l in content.split("\n") if "stretch" in l]
+    assert stretch and not any("out of" in l for l in stretch)
+
+
+def test_a_proportion_is_still_phrased_as_one():
+    chosen = change_for_measure("closed_late", window(2, 12, "a"), window(8, 11, "b"))
+    content = build_trajectory_content("Suresh", served_trajectory(chosen, "Suresh"))
+    assert "2 out of 12" in content
+
+
+def test_the_rate_gate_actually_bites():
+    """The proportion gate is VACUOUS on a rate and this is the proof.
+
+    216 turns over 8 meetings is 2700 "percentage points" against 2400,
+    a gap of 300, so the 20 point floor clears trivially and stops
+    existing. As a relative change it is 11 percent and is not a finding.
+    """
+    earlier, recent = window(216, 8, "a"), window(192, 8, "b")
+    assert abs(recent.rate_points - earlier.rate_points) >= MIN_GAP_POINTS
+    assert abs(recent.rate_points - earlier.rate_points) / earlier.rate_points \
+        < MIN_RATE_RELATIVE_CHANGE
+    assert change_for_measure("speaking_turns", earlier, recent) is None
+
+
+def test_a_large_relative_rate_change_qualifies():
+    """Proves the previous test fails for the reason it claims."""
+    found = change_for_measure("speaking_turns", window(214, 8, "a"),
+                               window(96, 8, "b"))
+    assert found is not None
+    assert abs(found["relative_change"]) >= MIN_RATE_RELATIVE_CHANGE
+
+
+def test_a_rate_with_no_earlier_baseline_is_declined():
+    """"Up from nothing" is a different claim and this lens does not make
+    it. It is also a division by zero waiting to happen."""
+    assert change_for_measure("speaking_turns", window(0, 8, "a"),
+                              window(96, 8, "b")) is None
+
+
+def test_pair_kind_is_served_rather_than_inferred():
+    """A client that guesses draws a rate on a 0..1 axis."""
+    prop = served_trajectory(
+        change_for_measure("closed_late", window(2, 12, "a"), window(8, 11, "b")), "X")
+    rate = served_trajectory(
+        change_for_measure("speaking_turns", window(214, 8, "a"), window(96, 8, "b")), "X")
+    assert prop["pair_kind"] == "proportion"
+    assert rate["pair_kind"] == "rate"
+    assert rate["counted_noun"] == "speaking turns"
+
+
+def test_ranking_compares_kinds_on_relative_distance():
+    """Raw gap_points would hand every contest to whichever measure has
+    the bigger units, which is a fact about turns versus items and not
+    about the person. Here the proportion is the larger RELATIVE change
+    and must win despite a far smaller raw gap.
+    """
+    windows = {
+        # 17 points to 73: a 4.3x relative change, raw gap 56.
+        "closed_late": (window(2, 12, "a"), window(8, 11, "b")),
+        # 2675 to 1738: a 0.35 relative change, raw gap 937.
+        "speaking_turns": (window(214, 8, "a"), window(139, 8, "b")),
+    }
+    chosen = best_change(windows)
+    assert chosen is not None
+    assert chosen["measure_key"] == "closed_late"
+
+
+def test_every_measure_declares_a_pair_kind_and_a_noun():
+    for key, measure in MEASURES.items():
+        assert measure.pair_kind in ("proportion", "rate"), key
+        assert measure.counted_noun, key
+
+
+@pytest.mark.parametrize("phrase", [
+    "across your last 8 meetings this quarter",
+    "in the 8 meetings before those, back in June",
+    "over your last 6 meetings together, about a month ago",
+])
+def test_a_legitimate_meeting_count_cannot_smuggle_a_calendar(phrase):
+    """ShoulderSurf's suggested shape, and worth pinning explicitly.
+
+    "across your last 8 meetings" is a legitimate frame and the tail is
+    not. The risk they named is a check that whitelists the known-good
+    frame and lets the trailing "this quarter" ride along. This one does
+    not whitelist anything: it looks for the forbidden UNIT wherever it
+    appears, so a valid prefix buys the rest of the sentence nothing.
+    """
+    assert states_elapsed_time(phrase)
