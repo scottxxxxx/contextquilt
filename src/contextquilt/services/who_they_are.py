@@ -54,7 +54,7 @@ LENS = "who_they_are"
 # `insights` and serves it as `who_they_are`.
 MAX_SUMMARY_CHARS = 600
 MIN_SUMMARY_CHARS = 40
-MAX_TRAJECTORY_CHARS = 300
+MAX_TRAJECTORY_CHARS = 400
 
 # Eligibility: something stated, or enough observed to have a shape.
 MIN_PERCEPTIONS_WITHOUT_ROLE = 2
@@ -358,13 +358,21 @@ def served(card_value: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-RETRYABLE = {"summary_too_long", "opens_with_name", "dash_punctuation", "stated_role_dropped"}
+RETRYABLE = {"summary_too_long", "trajectory_too_long", "opens_with_name", "dash_punctuation", "stated_role_dropped", "invented_number"}
 
 
 def retry_note(defect: str, facts: Mapping[str, Any], summary_chars: int = 0) -> Optional[str]:
     """A correction that CHANGES THE PROMPT, for one bounded retry. A
     blind repeat returns the same answer; telling the writer what was
     wrong is a different question. Only defects a rewrite can fix."""
+    if defect.startswith("invented_number"):
+        nums = sorted(allowed_numbers(facts), key=lambda x: (len(x), x))
+        return ("Your previous answer used a number that was not in the inputs. The model may "
+                "identify, it may not count. The ONLY numbers you may write are: "
+                + ", ".join(nums) + ". Rewrite without any other number, or without numbers at all.")
+    if defect == "trajectory_too_long":
+        return (f"Your previous trajectory was over {MAX_TRAJECTORY_CHARS} characters. "
+                "Rewrite it as one short sentence.")
     if defect == "summary_too_long":
         return (f"Your previous summary was {summary_chars} characters. The limit is "
                 f"{MAX_SUMMARY_CHARS}. Rewrite it shorter: two sentences, no restating of the inputs.")
