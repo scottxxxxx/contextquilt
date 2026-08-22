@@ -584,3 +584,122 @@ def test_a_legitimate_meeting_count_cannot_smuggle_a_calendar(phrase):
     appears, so a valid prefix buys the rest of the sentence nothing.
     """
     assert states_elapsed_time(phrase)
+
+
+# --------------------------------------------------------------------
+# Splitting a relationship into two stretches
+# --------------------------------------------------------------------
+
+from contextquilt.services.trajectory import (          # noqa: E402
+    MAX_WINDOW_MEETINGS,
+    split_meetings,
+)
+
+
+def test_split_gives_two_adjacent_disjoint_stretches_oldest_first():
+    ids = [f"m{i}" for i in range(20, 0, -1)]   # newest first: m20..m1
+    earlier, recent = split_meetings(ids)
+    assert len(recent) == MAX_WINDOW_MEETINGS
+    assert len(earlier) == MAX_WINDOW_MEETINGS
+    assert not set(earlier) & set(recent)
+    # oldest first within each, and earlier sits immediately before recent
+    assert recent == [f"m{i}" for i in range(13, 21)]
+    assert earlier == [f"m{i}" for i in range(5, 13)]
+
+
+def test_split_declines_a_relationship_too_short_to_split():
+    assert split_meetings([f"m{i}" for i in range(5)]) is None
+
+
+def test_split_never_returns_a_lopsided_pair():
+    """Eleven meetings could give 8 and 3. It gives 5 and 5 instead: two
+    windows of different weight are not a before and an after, and the
+    smaller one would carry the whole claim."""
+    earlier, recent = split_meetings([f"m{i}" for i in range(11)])
+    assert len(earlier) == len(recent) == 5
+
+
+def test_split_caps_the_window_so_drift_is_not_averaged_away():
+    earlier, recent = split_meetings([f"m{i}" for i in range(60)])
+    assert len(earlier) == len(recent) == MAX_WINDOW_MEETINGS
+
+
+def test_split_dedupes_repeated_meeting_ids():
+    """One person can hold several rows for a meeting. A repeated id
+    would inflate a window with no extra evidence behind it."""
+    ids = ["m9", "m9", "m8", "m7", "m6", "m5", "m5", "m4", "m3", "m2", "m1"]
+    earlier, recent = split_meetings(ids)
+    assert len(set(earlier) | set(recent)) == len(earlier) + len(recent)
+
+
+# --------------------------------------------------------------------
+# What the mechanical checks used to miss
+#
+# Both of these were found by the writer-selection eval rather than by
+# review, and both had SHIPPED on the smaller model, because every number
+# in them is permitted and every word is allowed. They are the residue
+# after "the model may not count": a model that cannot invent a number
+# can still attach a real one to the wrong noun.
+# --------------------------------------------------------------------
+
+from contextquilt.services.trajectory import (          # noqa: E402
+    conflates_the_denominator,
+    opens_with_a_preamble,
+)
+
+
+def test_a_proportion_denominator_may_not_be_called_meetings():
+    """Measured live: "Closes work after its date in 11 of the last 11
+    meetings, against 1 of 30 across the earlier 12 meetings." The
+    denominator counts ITEMS. Both 11s are permitted numbers, so the
+    invented-number check cannot see it, and the sentence is false."""
+    assert conflates_the_denominator(
+        "Closes work after its date in 11 of the last 11 meetings.", "proportion")
+
+
+def test_a_rate_denominator_IS_meetings_and_must_not_be_rejected():
+    """The guard that stops this being 'fixed' into rejecting the honest
+    rate phrasing, where the denominator really is a meeting count."""
+    assert not conflates_the_denominator(
+        "Took 96 turns across your last 8 meetings, against 214 before.", "rate")
+
+
+def test_a_proportion_may_still_reference_meetings_legitimately():
+    """"across the 8 meetings before that" is a span, not a denominator."""
+    assert not conflates_the_denominator(
+        "Closed 7 of 11 dated items late, against 3 of 12 across the 8 "
+        "meetings before that.", "proportion")
+
+
+@pytest.mark.parametrize("do", [
+    "In your next meeting, ask which of the open items have a hard deadline.",
+    "Consider asking which dates still hold.",
+    "Next time, confirm the runbook handover date.",
+    "When you next speak, ask what changed.",
+])
+def test_do_line_preambles_are_rejected(do):
+    assert opens_with_a_preamble(do)
+
+
+@pytest.mark.parametrize("do", [
+    "Ask which of the open items still have a date behind them that holds.",
+    "Confirm the due date for the runbook handover.",
+    "Leave a beat after your update and ask her directly for the read.",
+])
+def test_a_verb_first_do_line_passes(do):
+    assert not opens_with_a_preamble(do)
+
+
+def test_both_new_defects_reject_a_whole_card():
+    facts = facts_for_parse()
+    for over, expect in [
+        ({"text": "Closes late in 8 of the last 11 meetings, against 2 of 12 before."},
+         "denominator_wrong_unit"),
+        ({"do": "In your next meeting, ask which items still have a date."},
+         "do_line_preamble"),
+    ]:
+        defects = []
+        assert parse_trajectory_response(
+            good_answer(**over), allowed_numbers(facts), "Suresh",
+            defects=defects, facts=facts) is None
+        assert expect in defects

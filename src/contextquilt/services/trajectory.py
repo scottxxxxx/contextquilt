@@ -121,6 +121,49 @@ MIN_SPAN_MEETINGS = 8
 MIN_WINDOW_MEETINGS = 3
 
 
+# The most meetings either window will hold. A window is a sample of how
+# things are going, not the whole record: without a cap, a person with 60
+# meetings gets an "earlier" window of 30 that averages away the very
+# drift the card exists to find, and the two windows converge on the same
+# long-run number. Eight is the recent window ShoulderSurf's own recency
+# chip already uses, so the two surfaces talk about the same stretch.
+MAX_WINDOW_MEETINGS = 8
+
+
+def split_meetings(newest_first: Sequence[str]) -> Optional[tuple]:
+    """(earlier_ids, recent_ids), each oldest first, or None.
+
+    Two ADJACENT and DISJOINT stretches of the same relationship, taken
+    from the most recent meetings backwards. Adjacent because a gap
+    between them would let an unexamined middle carry the change;
+    disjoint because an overlap double counts the items in it and would
+    drag both windows toward each other.
+
+    The split is on MEETING ORDER, never on elapsed time, and there is no
+    date anywhere in this function on purpose. See the module docstring:
+    nothing in this system knows when a meeting happened.
+
+    Returns None rather than a lopsided pair when there is not enough
+    relationship to split. A card is not owed to everybody.
+    """
+    ids = [str(o) for o in (newest_first or ()) if o]
+    # Dedup preserving order: one person can hold several rows for a
+    # meeting, and a repeated id would inflate a window with no evidence.
+    seen, ordered = set(), []
+    for oid in ids:
+        if oid not in seen:
+            seen.add(oid)
+            ordered.append(oid)
+    per = min(MAX_WINDOW_MEETINGS, len(ordered) // 2)
+    if per < MIN_WINDOW_MEETINGS:
+        return None
+    if per * 2 < MIN_SPAN_MEETINGS:
+        return None
+    recent = list(reversed(ordered[:per]))
+    earlier = list(reversed(ordered[per:per * 2]))
+    return earlier, recent
+
+
 class Measure:
     """One thing whose change over time is worth a sentence.
 
@@ -659,6 +702,46 @@ NARRATIVE_LENGTH = "narrative_too_long"
 WINDOW_OMITTED = "one_window_only"
 GRADED_NEUTRAL = "graded_a_neutral_measure"
 ELAPSED_TIME = "stated_elapsed_time"
+UNIT_CONFLATED = "denominator_wrong_unit"
+DO_PREAMBLE = "do_line_preamble"
+
+# "11 of the last 11 meetings" written about a denominator that counts
+# ITEMS. Both numbers are permitted, every word is allowed, and the
+# sentence is false. Measured in the writer-selection eval: the smaller
+# model produced it on 1 of 14 proportion cards and shipped it, because
+# nothing could see it. This is the shape the invented-number check
+# cannot reach, since the model did not invent a number, it attached a
+# real one to the wrong noun.
+_UNIT_CONFLATION = re.compile(
+    r"\d+\s+of\s+(?:the\s+)?(?:last\s+|first\s+)?\d+\s+meetings", re.IGNORECASE)
+
+# Openers the prompt forbids and nothing enforced. A do line is read in
+# the seconds before a meeting; the reader already knows when they will
+# use it, and the preamble alone spends a third of the line. Measured in
+# the same eval at 4 of 21 accepted cards on the smaller model, 0 of 25
+# on the larger. The roster lens states the same rule in ITS prompt and
+# also enforces it nowhere, which is worth fixing there too.
+_DO_PREAMBLE = re.compile(
+    r"^\s*(in your next meeting|at your next|next time|when you (?:next |)"
+    r"(?:speak|meet|see)|before your|consider|during the|try to|you (?:might|should|could))\b",
+    re.IGNORECASE)
+
+
+def conflates_the_denominator(text: str, pair_kind: str) -> bool:
+    """True when a proportion's denominator has been called meetings.
+
+    Only checked on a PROPORTION. On a rate, "96 turns across your last 8
+    meetings" is the correct sentence and the denominator IS meetings, so
+    running this there would reject the honest phrasing.
+    """
+    if pair_kind != "proportion":
+        return False
+    return bool(_UNIT_CONFLATION.search(text or ""))
+
+
+def opens_with_a_preamble(do: str) -> bool:
+    """True when the do line spends its opening on saying "later"."""
+    return bool(_DO_PREAMBLE.match(do or ""))
 
 # Any word that turns an ordered list of meetings into a calendar. CQ
 # holds no meeting date, so every one of these is invented however
@@ -769,7 +852,15 @@ def parse_trajectory_response(
         if defects is not None:
             defects.append(ELAPSED_TIME)
         return None
+    if opens_with_a_preamble(do):
+        if defects is not None:
+            defects.append(DO_PREAMBLE)
+        return None
     if facts is not None:
+        if conflates_the_denominator(text, facts.get("pair_kind") or ""):
+            if defects is not None:
+                defects.append(UNIT_CONFLATED)
+            return None
         if (facts.get("valence") or "neutral") == "neutral" \
                 and grades_a_neutral_measure(whole):
             if defects is not None:
@@ -834,6 +925,19 @@ def retry_note(defect: str, attempt_text: str = "") -> Optional[str]:
             "direction. What was observed is that a count moved. Describe "
             "the movement without words like declined, improved, slipped "
             "or disengaged."
+        )
+    if defect == UNIT_CONFLATED:
+        return (
+            "Your last answer called the denominator a number of "
+            "meetings. It is not. Read the units you were given and name "
+            "them exactly: the denominator counts items, and the meeting "
+            "counts are separate numbers."
+        )
+    if defect == DO_PREAMBLE:
+        return (
+            "Your last answer's do line opened with a preamble. Start it "
+            "with a verb, and cut any opening that says when to use it. "
+            "The reader already knows."
         )
     if defect == ELAPSED_TIME:
         return (
