@@ -3287,7 +3287,7 @@ class ColdPathWorker:
                 if parsed or attempt:
                     break
                 defect = defects[0] if defects else ""
-                if defect not in who_they_are.RETRYABLE:
+                if defect.split(":")[0] not in who_they_are.RETRYABLE:
                     break
                 note = who_they_are.retry_note(
                     defect, facts, who_they_are.summary_chars(response.content))
