@@ -52,7 +52,7 @@ LENS = "who_they_are"
 # stack: the stack's capsule is a one-line teaser with a 180-char claim
 # and this is a short paragraph. The read filters this lens out of
 # `insights` and serves it as `who_they_are`.
-MAX_SUMMARY_CHARS = 420
+MAX_SUMMARY_CHARS = 600
 MIN_SUMMARY_CHARS = 40
 MAX_TRAJECTORY_CHARS = 300
 
@@ -65,6 +65,17 @@ MIN_PERCEPTIONS_WITHOUT_ROLE = 2
 DEFAULT_MODEL = "claude-sonnet-4-6"
 
 _INTEGER = re.compile(r"\d+")
+_PUNCT = re.compile(r"[^\w\s]")
+
+
+def _norm(text: str) -> str:
+    """Lowercase, punctuation stripped, whitespace collapsed. The stated
+    role check compares on this, because the first prod cycle rejected
+    "Described as the new HR manager for the West Coast region, a role
+    stated..." against a role text that ended in a period."""
+    return " ".join(_PUNCT.sub(" ", (text or "").lower()).split())
+
+
 _ROLE_LEADS = (" is ", " was ", " serves as ", " works as ", " acts as ", ": ")
 
 
@@ -295,8 +306,8 @@ def parse_response(
     # Rule 1: the newest stated role's title phrase must survive.
     roles = facts.get("roles") or []
     if roles:
-        phrase = title_phrase(roles[0]["text"], person).lower()
-        if phrase and phrase not in summary.lower():
+        phrase = _norm(title_phrase(roles[0]["text"], person))
+        if phrase and phrase not in _norm(summary):
             defects.append("stated_role_dropped")
             return None
     valid_ids = {r["id"] for r in roles} | {p["id"] for p in facts.get("perceptions", [])}
@@ -345,3 +356,33 @@ def served(card_value: Mapping[str, Any]) -> Dict[str, Any]:
         "generated_at": card_value.get("generated_at"),
         "model": card_value.get("model"),
     }
+
+
+RETRYABLE = {"summary_too_long", "opens_with_name", "dash_punctuation", "stated_role_dropped"}
+
+
+def retry_note(defect: str, facts: Mapping[str, Any], summary_chars: int = 0) -> Optional[str]:
+    """A correction that CHANGES THE PROMPT, for one bounded retry. A
+    blind repeat returns the same answer; telling the writer what was
+    wrong is a different question. Only defects a rewrite can fix."""
+    if defect == "summary_too_long":
+        return (f"Your previous summary was {summary_chars} characters. The limit is "
+                f"{MAX_SUMMARY_CHARS}. Rewrite it shorter: two sentences, no restating of the inputs.")
+    if defect == "opens_with_name":
+        return (f"Your previous summary opened with the person's name ({facts.get('person')}). "
+                "It renders under their name, so do not begin with it; begin with the role or the read.")
+    if defect == "dash_punctuation":
+        return "Your previous answer used a dash as punctuation. Use a comma, a colon, or two sentences."
+    if defect == "stated_role_dropped" and facts.get("roles"):
+        phrase = title_phrase(facts["roles"][0]["text"], facts.get("person") or "")
+        return (f"Your previous summary did not contain the newest stated role word for word. "
+                f"It must include this phrase exactly: \"{phrase}\".")
+    return None
+
+
+def summary_chars(raw: Any) -> int:
+    try:
+        obj = raw if isinstance(raw, dict) else json.loads(raw)
+        return len((obj.get("summary") or "").strip())
+    except Exception:
+        return 0

@@ -143,3 +143,22 @@ def test_receipt_times_is_null_for_stated_and_int_for_observed():
     r = w.served(value)["receipts"]
     assert r[0]["kind"] == "stated" and r[0]["times"] is None
     assert r[1]["kind"] == "observed" and isinstance(r[1]["times"], int)
+
+
+def test_stated_role_check_ignores_punctuation_and_case():
+    # First prod cycle: role text ended in a period, summary had a comma.
+    roles = [{"patch_id": "p", "text": "Jared is the new HR manager for the West Coast region.", "stated_at": "2026-08-12", "origin_id": "m"}]
+    f = w.build_facts("Jared", roles, [], 2, "2026-08-12", "2026-08-12", [])
+    out = w.parse_response(_ok_response(
+        summary="Described as the New HR Manager for the West Coast region, a role stated directly in August 2026 with nothing yet to complicate that picture.",
+        sources=("R1",)), f)
+    assert out is not None
+
+
+def test_retry_note_names_the_defect_and_only_for_retryable_ones():
+    f = _facts()
+    assert "characters" in w.retry_note("summary_too_long", f, 712)
+    assert "Suresh Muchakurti" in w.retry_note("opens_with_name", f)
+    assert "scrum master on ABM project" in w.retry_note("stated_role_dropped", f)
+    assert w.retry_note("invented_number:47", f) is None
+    assert "invented_number:47" not in w.RETRYABLE
