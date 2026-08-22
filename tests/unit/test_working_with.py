@@ -196,6 +196,22 @@ def test_both_numbers_are_needed_to_trip_it():
     assert restates_the_measurement("1 of your 12 items", 1, 12)
 
 
+def test_one_of_the_pair_as_a_DIGIT_still_does_not_trip_it():
+    """The control the previous test does not provide, and a sabotage
+    found the gap rather than review.
+
+    "One blocker" contains no digit at all, so it passes a widened check
+    by accident and cannot tell a correct rule from an over-broad one.
+    This case puts a real digit from the pair into a script that is
+    plainly not reciting a measurement: widening the check to "either
+    number present" goes red here and nowhere else.
+    """
+    assert not restates_the_measurement(
+        "Give me 11 minutes at the top of the call.", 7, 11)
+    assert not restates_the_measurement(
+        "Can we take the first 7 minutes for this?", 7, 11)
+
+
 def test_a_headline_may_carry_a_count_even_though_a_script_may_not():
     """The distinction IS the rule, so it gets its own test. Without
     this, someone bans numbers everywhere and the card loses the thing
