@@ -292,7 +292,22 @@ _INTEGER = re.compile(r"\d+")
 # your 46 open items" is accurate, checkable, and would end a working
 # relationship. The counts are the reason the card exists; they are not
 # the words.
-SAY_HAS_NUMBER = "script_quotes_a_number"
+#
+# NARROWED, at ShoulderSurf's request and they were right. The first
+# version banned ANY digit in a script, which also bans "One blocker, one
+# decision, 90 seconds. Auth is blocked and I recommend option B." That is
+# the reference design's own best script and there is nothing wrong with
+# it: a request about the next five minutes is not a statistic about a
+# colleague. What ends a working relationship is RESTATING THE
+# MEASUREMENT, so that is what is checked. "90 seconds" against a 7 of 11
+# situation passes; "6 of the last 12" against a 6 of 12 situation does
+# not.
+#
+# The looser rule was also the more dangerous one in a second way: a
+# guard that eventually rejects a GOOD script gets loosened by whoever
+# hits it, and they will loosen it in whatever direction makes their case
+# pass rather than in the direction that keeps the real prohibition.
+SAY_HAS_NUMBER = "script_restates_the_measurement"
 SAY_TOO_LONG = "script_too_long"
 HEADLINE_TOO_LONG = "headline_too_long"
 CONTEXT_TOO_LONG = "context_too_long"
@@ -316,7 +331,26 @@ def claims_it_works_on_them(text: str) -> bool:
     return bool(_WORKS_ON_THEM.search(text or ""))
 
 
-def move_defect(context: str, headline: str, say: str) -> Optional[str]:
+def restates_the_measurement(say: str, numerator, denominator) -> bool:
+    """True when the script recites the situation's own pair back.
+
+    BOTH numbers, not either. A script that happens to contain the
+    numerator alone ("one blocker") is not quoting a statistic, and a
+    check that fired on it would be the over-broad rule again wearing a
+    narrower name.
+    """
+    try:
+        pair = {int(numerator), int(denominator)}
+    except (TypeError, ValueError):
+        return False
+    stated = {int(n) for n in _INTEGER.findall(say or "")}
+    return pair <= stated
+
+
+def move_defect(
+    context: str, headline: str, say: str,
+    numerator=None, denominator=None,
+) -> Optional[str]:
     """The first reason this move cannot ship, or None."""
     if not (1 <= len(context) <= MAX_CONTEXT_CHARS):
         return CONTEXT_TOO_LONG
@@ -331,8 +365,8 @@ def move_defect(context: str, headline: str, say: str) -> Optional[str]:
         return "character_word"
     if claims_it_works_on_them(whole):
         return CLAIMS_IT_WORKS
-    # The script only. A headline may carry a count; a spoken line may
-    # not, and the distinction is the point.
-    if _INTEGER.search(say):
+    # The script only. A headline may carry the count; a spoken line may
+    # not recite it back, and the distinction is the point.
+    if restates_the_measurement(say, numerator, denominator):
         return SAY_HAS_NUMBER
     return None

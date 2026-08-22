@@ -30,6 +30,7 @@ from contextquilt.services.working_with import (
     Move,
     claims_it_works_on_them,
     move_defect,
+    restates_the_measurement,
     rank_moves,
     served_move,
     your_half,
@@ -161,13 +162,38 @@ def test_a_claim_about_the_practice_itself_is_fine(phrase):
 # The script
 # --------------------------------------------------------------------
 
-def test_a_script_may_not_quote_a_statistic_at_a_colleague():
+def test_a_script_may_not_recite_the_measurement_back():
     """"You have gone quiet on 23 of your 46 open items" is accurate,
     checkable, and would end a working relationship."""
     assert move_defect(
         "When items carry over", "Hand over the method",
         "You have gone quiet on 23 of your 46 open items.",
-    ) == "script_quotes_a_number"
+        numerator=23, denominator=46,
+    ) == "script_restates_the_measurement"
+
+
+def test_a_script_may_carry_a_number_that_is_not_the_measurement():
+    """ShoulderSurf's correction, and the control that makes the guard
+    above mean something. The first version of this rule banned ANY digit,
+    which also bans the reference design's own best script. A request
+    about the next five minutes is not a statistic about a colleague.
+
+    A guard that only ever fires is as wrong as one that never does, and
+    without this case nobody could tell which had been built.
+    """
+    assert move_defect(
+        "Opening your update", "Lead with the blocker",
+        "One blocker, one decision, 90 seconds. Auth is blocked and I "
+        "recommend option B.",
+        numerator=7, denominator=11,
+    ) is None
+
+
+def test_both_numbers_are_needed_to_trip_it():
+    """Either alone is a coincidence. "One blocker" against a 1 of 12
+    situation must not be read as reciting the measurement."""
+    assert not restates_the_measurement("One blocker, one decision.", 1, 12)
+    assert restates_the_measurement("1 of your 12 items", 1, 12)
 
 
 def test_a_headline_may_carry_a_count_even_though_a_script_may_not():
