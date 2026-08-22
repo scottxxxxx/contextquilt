@@ -160,8 +160,11 @@ def test_retry_note_names_the_defect_and_only_for_retryable_ones():
     assert "characters" in w.retry_note("summary_too_long", f, 712)
     assert "Suresh Muchakurti" in w.retry_note("opens_with_name", f)
     assert "scrum master on ABM project" in w.retry_note("stated_role_dropped", f)
-    assert w.retry_note("invented_number:47", f) is None
-    assert "invented_number:47" not in w.RETRYABLE
+    # Changed 2026-08-21 after the second cycle: an invented number IS a
+    # rewrite-fixable defect once the note lists the allowed numbers.
+    assert "may not count" in w.retry_note("invented_number:47", f)
+    assert w.retry_note("no_sources", f) is None
+    assert "no_sources" not in w.RETRYABLE
 
 
 def test_invented_number_and_trajectory_are_retryable_with_a_naming_note():
