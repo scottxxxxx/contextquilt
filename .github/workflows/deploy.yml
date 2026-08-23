@@ -5,6 +5,30 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# SERIALISE DEPLOYS. Two pushes to main close together used to run this
+# workflow concurrently against one VM, and `compose up -d` is not safe
+# to run twice at once: on 2026-08-23 two merges three seconds apart
+# raced, the second hit
+#   Conflict. The container name "/<hash>_contextquilt-worker" is already
+#   in use
+# because the first was mid-recreate, and it failed.
+#
+# THE FAILED RUN IS NOT THE DANGEROUS PART. The OLDER commit's deploy
+# finished LAST and succeeded, so prod ended up serving the older image
+# while main had already moved past it. The history showed one green
+# deploy and one red one, and nothing anywhere said "the thing running in
+# production is behind main". That time the newer commit was docs-only so
+# nothing was actually stale; the next time it will not be.
+#
+# cancel-in-progress is FALSE deliberately. Cancelling a deploy that is
+# mid `compose up` is how you get exactly the half-recreated container
+# this exists to prevent. Runs queue instead, and GitHub keeps only the
+# most recent PENDING run in the group, so a burst of merges deploys the
+# newest commit once rather than each of them in turn.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
 env:
   REGISTRY: ghcr.io
 
