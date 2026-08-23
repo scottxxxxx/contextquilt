@@ -275,3 +275,30 @@ def test_the_escape_is_scoped_to_the_shape_that_asks():
     ask = body.index("if row is not None and not create_new")
     assert body[escape:ask].count("len(tokenize_name(name)) == 1") == 1
     assert "len(tokenize_name(name)) == 1" in body[ask:ask + 200]
+
+
+def test_someone_new_is_a_keep_separate_against_every_offered_candidate():
+    """The 409 offered every person sharing the first token; "Someone new"
+    answers "none of these". The separation is stamped in the CREATE
+    branch, against the same widened candidate set the ask used, and
+    echoed because SS's veto is local and reads no CQ surface."""
+    body = _resolver_source()
+    escape = body.index("if row is not None and create_new")
+    ask = body.index("if row is not None and not create_new")
+    block = body[escape:ask]
+    assert "all_sharing_first_token=True" in block
+    assert "separated_from = [" in block
+    create = body.index("created = True")
+    patch = body.index("# The person patch.")
+    assert "INSERT INTO entity_separations" in body[create:patch]
+    assert "for other in separated_from" in body[create:patch]
+    assert '"separated_from": separated_from' in body
+
+
+def test_separated_from_has_a_carrier_on_both_doors():
+    """A contract with one carrier disappears silently (19.2); here the
+    fact must reach the client on whichever door it used."""
+    import pathlib
+    text = (pathlib.Path(__file__).resolve().parents[2] / "src" / "main.py").read_text()
+    assert '"separated_from": person["separated_from"]' in text      # reassign-speaker
+    assert '"separated_from": resolved["separated_from"]' in text    # POST /v1/people
