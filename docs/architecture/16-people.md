@@ -2785,6 +2785,49 @@ surname, because refusing to record a real colleague for the sake of a
 tidier graph is the wrong trade and sometimes you genuinely only know
 "Mike".
 
+### What `create_new` does on the bare-first-name case (2026-08-23, PR #315)
+
+Found by checking CQ's half against SS's picker mechanism before the
+first real 409: the flag skipped the ask and then fell into the
+exact-match resolve, so "Someone new" for a second John landed on the
+first John. The unit mirror had asserted "create" the whole time.
+
+Now, when `create_new` is set and the typed name is a single token that
+exactly matches an existing person (the only shape the bare ask fires
+on), CQ:
+
+1. creates a NEW entity with that name (two entities literally named
+   "John" is the intended outcome; SS's list keys rows by `entity_id`),
+2. records a Keep separate (`entity_separations`) between the new entity
+   and **every** person the 409 offered, because "Someone new" is the
+   user answering "none of these" and the merge endpoint must refuse to
+   fold them later,
+3. echoes those ids as `separated_from`.
+
+```json
+// reassign-speaker 200, inside the existing object
+"resolved_person": {
+  "entity_id": "<new uuid>", "name": "John", "patch_id": "...",
+  "status": "created",
+  "separated_from": ["<uuid>", "..."]     // [] unless create_new escaped a bare exact hit
+}
+// POST /v1/people 200, top level
+{ "status": "created", "entity_id": "...", "patch_id": "...", "name": "John",
+  "separated_from": ["<uuid>", "..."] }
+```
+
+Why it is echoed rather than only stored: SS's duplicate scan vetoes a
+proposed pair from a LOCAL record (`peopleDismissedMergePairs`,
+UserDefaults, per device) and consults no CQ read surface, so a
+separation stored only server-side is invisible to the client and the
+list would ask "are these the same John?" right after the user said
+no. The echo lets SS record the veto from the same call; the server row
+makes the merge refuse. Both halves on the hop that can prove them.
+Known limit, not made worse here: the client veto is per device.
+`entity_separations` is still not served on any read surface; a
+`separations` array on the list read is the durable fix if that ever
+matters.
+
 ### Known client gap as of 2026-08-23
 
 **SS has no handler.** A 409 falls through `reassignSpeaker`'s switch into

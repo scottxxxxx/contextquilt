@@ -232,3 +232,73 @@ def test_the_ask_carries_EVERY_John_not_just_the_exact_one():
 
 def test_the_first_token_widening_does_not_leak_into_other_names():
     assert first_token_matches("John", ["Johnny Vance", "Jon Marsh"]) == []
+
+
+# --------------------------------------------------------------------
+# The escape must escape (2026-08-23, found checking CQ's half against
+# SS's picker mechanism).
+#
+# `exact_decides` above returned "create" for create_new on a bare
+# exact hit, and the real function did NOT: the flag skipped the ask and
+# then fell into the `if row is not None:` resolve, attaching "Someone
+# new" to the existing John. The mirror cannot catch a mirror, so this
+# reads the source: the flag must null the exact hit for the single
+# token shape, BEFORE the ask, and only for that shape.
+# --------------------------------------------------------------------
+
+def _resolver_source():
+    import inspect, pathlib, re
+    src = pathlib.Path(__file__).resolve().parents[2] / "src" / "main.py"
+    text = src.read_text()
+    start = text.index("async def _resolve_or_create_person(")
+    end = text.index("\n@app.post(", start)
+    return text[start:end]
+
+
+def test_create_new_nulls_the_bare_exact_hit_before_the_ask():
+    body = _resolver_source()
+    escape = body.index("if row is not None and create_new")
+    ask = body.index("if row is not None and not create_new")
+    resolve = body.index("if row is not None:\n        resolved = await _load_active_person")
+    assert escape < ask < resolve
+    escape_block = body[escape:ask]
+    assert "len(tokenize_name(name)) == 1" in escape_block
+    assert "row = None" in escape_block
+
+
+def test_the_escape_is_scoped_to_the_shape_that_asks():
+    """A two-token exact match never 409s, so create_new can never be a
+    considered answer there; a stray flag must not duplicate "John
+    Kirker". The escape and the ask share one predicate."""
+    body = _resolver_source()
+    escape = body.index("if row is not None and create_new")
+    ask = body.index("if row is not None and not create_new")
+    assert body[escape:ask].count("len(tokenize_name(name)) == 1") == 1
+    assert "len(tokenize_name(name)) == 1" in body[ask:ask + 200]
+
+
+def test_someone_new_is_a_keep_separate_against_every_offered_candidate():
+    """The 409 offered every person sharing the first token; "Someone new"
+    answers "none of these". The separation is stamped in the CREATE
+    branch, against the same widened candidate set the ask used, and
+    echoed because SS's veto is local and reads no CQ surface."""
+    body = _resolver_source()
+    escape = body.index("if row is not None and create_new")
+    ask = body.index("if row is not None and not create_new")
+    block = body[escape:ask]
+    assert "all_sharing_first_token=True" in block
+    assert "separated_from = [" in block
+    create = body.index("created = True")
+    patch = body.index("# The person patch.")
+    assert "INSERT INTO entity_separations" in body[create:patch]
+    assert "for other in separated_from" in body[create:patch]
+    assert '"separated_from": separated_from' in body
+
+
+def test_separated_from_has_a_carrier_on_both_doors():
+    """A contract with one carrier disappears silently (19.2); here the
+    fact must reach the client on whichever door it used."""
+    import pathlib
+    text = (pathlib.Path(__file__).resolve().parents[2] / "src" / "main.py").read_text()
+    assert '"separated_from": person["separated_from"]' in text      # reassign-speaker
+    assert '"separated_from": resolved["separated_from"]' in text    # POST /v1/people
