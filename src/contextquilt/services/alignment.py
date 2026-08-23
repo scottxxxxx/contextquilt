@@ -341,12 +341,20 @@ def private_instruction(topic: str, change_count: int) -> str:
     )
 
 
+def _superseded_something(e: dict) -> bool:
+    """A change is a change whether what it displaced was a prior
+    alignment event or a decision patch from before the record existed
+    (prod, 2026-08-23: the first two real events both superseded
+    patches and a count on `supersedes` alone read 0)."""
+    return bool(e.get("supersedes") or e.get("superseded_patch_ids"))
+
+
 def topic_change_count(events: list[dict], topic: str) -> int:
     """How many events on this topic superseded something. Computed from
     stored rows, which is the only place a count is allowed to come from."""
     return sum(
         1 for e in events
-        if e.get("topic") == topic and (e.get("supersedes") or []) and e.get("status") != "expired"
+        if e.get("topic") == topic and _superseded_something(e) and e.get("status") != "expired"
     )
 
 
@@ -379,12 +387,12 @@ def project_record(events: list[dict]) -> dict:
 
     history = sorted(events, key=lambda r: r["proposed_at"])
     change_count = sum(
-        1 for e in events if e["status"] == "confirmed" and (e.get("supersedes") or [])
+        1 for e in events if e["status"] == "confirmed" and _superseded_something(e)
     )
     cumulative: list[dict] = []
     seen: set = set()
     for e in events:
-        if e["status"] != "confirmed" or not (e.get("supersedes") or []):
+        if e["status"] != "confirmed" or not _superseded_something(e):
             continue
         for line in e.get("impact") or []:
             key = tuple(line.get("derived_from") or [])

@@ -6610,7 +6610,7 @@ class ColdPathWorker:
             if proposed_at.tzinfo is None:
                 proposed_at = proposed_at.replace(tzinfo=timezone.utc)
             existing_topic_rows = [dict(r) for r in await self.db.fetch(
-                "SELECT topic, supersedes, status FROM alignment_events WHERE user_id = $1 AND project_id = $2",
+                "SELECT topic, supersedes, superseded_patch_ids, status FROM alignment_events WHERE user_id = $1 AND project_id = $2",
                 user_id, project_id,
             )]
             for e in events:
@@ -6644,7 +6644,7 @@ class ColdPathWorker:
                     json.dumps(impact), json.dumps(evidence), bool(e["shippable"]),
                     proposed_at, proposed_at + timedelta(hours=alignment_svc.PROPOSAL_TTL_HOURS), instruction,
                 )
-                existing_topic_rows.append({"topic": e["topic"], "supersedes": e["supersedes_ids"], "status": "proposed"})
+                existing_topic_rows.append({"topic": e["topic"], "supersedes": sup_events, "superseded_patch_ids": sup_patches, "status": "proposed"})
                 stored += 1
             logger.info(
                 "alignment_events_stored", user_id=user_id, origin=origin_id, project_id=project_id,
