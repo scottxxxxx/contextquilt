@@ -70,6 +70,7 @@ from contextquilt.services.recall_formatter import (
 from contextquilt.services.people_signals import (
     compute_person_signals,
     compute_question_totals,
+    last_seen_in,
     presence_anchor,
 )
 from contextquilt.services.person_appearances import (
@@ -5401,6 +5402,11 @@ async def _people_core(
             # Same object shape as an entry in `projects`, so a client
             # decodes one type in both places.
             "top_project": projects[0] if projects else None,
+            # The badge for a disambiguation list: where this person was
+            # last seen, in ANY capacity, capacity stated. top_project is
+            # presence-grade and serves null for a mention-only person,
+            # which is exactly who a "which Sam?" picker needs it for.
+            "last_seen_in": last_seen_in(appearances),
             "open_they_owe": len(they_owe),
             # Per-band counts over the SAME rows `they_owe` carries (shelved
             # already excluded), so the chip and the card read one source and

@@ -2924,11 +2924,38 @@ label untouched for today's matching and logs
 `speaker_identities_applied` logs each label with its replacement count,
 so a key the transcript never used is visible as 0.
 
+Reading the log after a run: `speaker_identities_applied` (`applied`,
+`sent`) is a SUMMARY and cannot tell an unresolvable entry from a lost
+one; the per-label `speaker_identity_unresolved` line is the receipt, so
+keep exactly one per label that did not apply (GP, 2026-08-23).
+
 Not served: a label -> entity_id map for the meeting. The canonical name
 in every stored artefact plus the person's appearance for that
 `origin_id` is the receipt; add a served map only if a client needs it.
 GP must allowlist `metadata.speaker_identities` (rule 3); prove it on
 GP's proxied path, not only CQ's socket.
+
+### 5.18 `last_seen_in` on the People list (2026-08-23)
+
+Scott's live test: labelling "Sam" offered "Sam Altman · 0 meetings" and
+"Sam Wisco · 1 meeting", and what would have settled it is where Sam
+Wisco was last seen. `top_project` cannot: it is presence-grade
+(speaker/ownership) and Sam Wisco was only mentioned, so it is null for
+exactly the person the badge is for. Every list row now carries
+
+```json
+"last_seen_in": {"project_id": "...", "project": "Agent Utilization",
+                 "origin_id": "<meeting>", "last_seen_at": "<ISO>",
+                 "capacities": ["mention"]}   // or null: no appearances
+```
+
+the newest appearance in ANY capacity, capacity stated, because
+"mentioned in X" and "spoke in X" are different claims (5.13).
+`project`/`project_id` null when that meeting had no project; the object
+is still served. Mention-only people who predate migration 31 have no
+appearance rows and get null, which is the same "0 meetings" the list
+already shows. Same row object on list and detail. Intended render: a
+badge under the candidate in the live and post-save pickers.
 
 ### Known client gap as of 2026-08-23
 

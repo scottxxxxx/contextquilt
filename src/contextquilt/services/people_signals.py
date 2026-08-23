@@ -239,3 +239,47 @@ def compute_person_signals(
             "next_open_item": next_item,
         },
     }
+
+
+# ---------------------------------------------------------------
+# last_seen_in: the one meeting worth a badge in a disambiguation list.
+#
+# Scott, 2026-08-23, labelling a live speaker "Sam": the picker offered
+# "Sam Altman · 0 meetings" and "Sam Wisco · 1 meeting", and what would
+# have settled it is WHERE Sam Wisco was last seen. `top_project` cannot
+# do that job: it is presence-grade only (speaker/ownership), and Sam
+# Wisco was merely mentioned, so it serves null for exactly the person
+# who needs the badge. This field is the most recent appearance in ANY
+# capacity, and it says which capacity, because "mentioned in Agent
+# Utilization" and "spoke in Agent Utilization" are different claims
+# and a served name may assert only what was observed (doc 16 5.13).
+# ---------------------------------------------------------------
+
+def last_seen_in(appearances: list) -> "dict | None":
+    """The newest appearance, any capacity, as a badge-sized object.
+
+    {project_id, project, origin_id, last_seen_at, capacities}. `project`
+    and `project_id` are null when that meeting had no project; the
+    object is still served so the date and capacity carry. None when the
+    person has no appearances at all (mention-only people who predate
+    migration 31 have none; that is "0 meetings" and stays honest).
+    Empty capacities are pre-31 rows and are served as-is, never
+    fabricated into "speaker".
+    """
+    best = None
+    best_key = None
+    for a in appearances or []:
+        ts = a.get("last_seen_at")
+        key = ts.isoformat() if hasattr(ts, "isoformat") else (ts or "")
+        if best is None or key > best_key:
+            best, best_key = a, key
+    if best is None:
+        return None
+    ts = best.get("last_seen_at")
+    return {
+        "project_id": best.get("project_id"),
+        "project": best.get("project"),
+        "origin_id": best.get("origin_id"),
+        "last_seen_at": ts.isoformat() if hasattr(ts, "isoformat") else ts,
+        "capacities": sorted(best.get("capacities") or []),
+    }
