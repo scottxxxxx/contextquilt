@@ -2878,6 +2878,58 @@ Known limit, not made worse here: the client veto is per device.
 `separations` array on the list read is the durable fix if that ever
 matters.
 
+### 5.17 Live speaker labels: `metadata.speaker_identities` (2026-08-23)
+
+Scott's first device test of the picker got no prompt, because labelling
+a speaker in the LIVE recording view (the primary path) never calls
+reassign-speaker: the typed name rides inside the capture POST as the
+bracketed `[label]` in the transcript, and ingest then resolved a bare
+"christina" through any recorded alias (LIMIT 1, any source) or the
+unique-candidate heuristic, silently. The 1b contested guard fires only
+when two people could match, and after a silent absorption there is
+never a second. **Scott ruled: the question is asked live, on the
+device.** There is no CQ meeting to ask yet, so the client asks from its
+cached People roster (the one place the client builds the list; its
+predicate mirrors CQ's: single token, every roster person sharing the
+first token, "Someone new" with the last-name field under the NAME_TAKEN
+rule), records the answer per label, and sends it on the capture:
+
+```json
+"metadata": { "speaker_identities": [
+  {"label": "christina", "entity_id": "<uuid>"},
+  {"label": "Speaker 2", "create_new": true, "name": "Christina Lopez"}
+] }
+```
+
+**CQ's half is a REWRITE, not a second resolution path**
+(`services/speaker_identities.py`, worker `_apply_speaker_identities`,
+run after `normalize_owner_in_transcript` and before the LLM call):
+`[label]` / `[label (you)]` becomes `[Canonical Name]` /
+`[Canonical Name (you)]`, case-insensitive on the label. After that the
+canonical name is what the model reads, what `store_entities` hits on its
+exact match (step 1, before any alias or heuristic), what `value.owner`
+carries, what the appearance row is written for and what turn counts key
+on. The server never holds the bare label, so the device's local map and
+CQ agree by construction. `entity_id` follows `merged_into` forward.
+`create_new` follows 5.16's rules: an exact match on the stored name
+resolves (a bare taken name resolves to the exact match and logs
+`speaker_identity_bare_name_taken`, because a map cannot be asked);
+otherwise the person is created (`confirmation_source='speaker_identity'`)
+and Keep separate is stamped against every live person sharing the first
+token (`entity_separations.source='speaker_identity'`). Re-ingest is
+idempotent (19.4): the fuller name exists the second time and resolves.
+A malformed entry, an unknown `entity_id`, or any failure leaves that
+label untouched for today's matching and logs
+`speaker_identity_unresolved`; a bad map never loses a meeting.
+`speaker_identities_applied` logs each label with its replacement count,
+so a key the transcript never used is visible as 0.
+
+Not served: a label -> entity_id map for the meeting. The canonical name
+in every stored artefact plus the person's appearance for that
+`origin_id` is the receipt; add a served map only if a client needs it.
+GP must allowlist `metadata.speaker_identities` (rule 3); prove it on
+GP's proxied path, not only CQ's socket.
+
 ### Known client gap as of 2026-08-23
 
 **SS has no handler.** A 409 falls through `reassignSpeaker`'s switch into
