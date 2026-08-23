@@ -108,9 +108,21 @@ def test_parse_never_raises_on_garbage():
     assert parse_alignment_response({"events": [1, None]}, ["d1"], ["a1"], T) == []
 
 
-def test_evidence_match_folds_case_and_punctuation_but_needs_six_words():
+def test_evidence_match_folds_case_and_punctuation_but_needs_eight_words():
     assert evidence_in_transcript("qa is stuck behind it and srikanthis out monday", T)
-    assert not evidence_in_transcript("QA is stuck", T)
+    assert not evidence_in_transcript("QA is stuck behind it", T)
+
+
+def test_evidence_match_survives_a_speaker_label_between_two_lines():
+    """Measured on a real ABM meeting: honest quotes span two turns of
+    one speaker and a whole-string test rejected them. The receipt is
+    the longest run the transcript actually holds."""
+    from contextquilt.services.alignment import evidence_match
+    t = "[Suresh] Kumar 22nd is his acceptable, the latency of the response.\n[Suresh] Sounds cool. Let's go with that for now."
+    q = "Kumar 22nd is his acceptable, the latency of the response. Sounds cool. Let's go with that for now."
+    m = evidence_match(q, t)
+    assert m is not None and m.startswith("kumar 22nd is his acceptable the latency of the response")
+    assert "sounds cool" in m       # labels stripped, so the run crosses the line
 
 
 # ---------------- impact ----------------

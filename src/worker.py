@@ -13,7 +13,7 @@ import re
 import sys
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import asyncpg
@@ -6604,6 +6604,11 @@ class ColdPathWorker:
                 return 0
 
             stored = 0
+            # Proposal clock: the ingest timestamp, made tz-aware so the
+            # column and the 72h expiry agree on a zone.
+            proposed_at = timestamp if isinstance(timestamp, datetime) else datetime.utcnow()
+            if proposed_at.tzinfo is None:
+                proposed_at = proposed_at.replace(tzinfo=timezone.utc)
             existing_topic_rows = [dict(r) for r in await self.db.fetch(
                 "SELECT topic, supersedes, status FROM alignment_events WHERE user_id = $1 AND project_id = $2",
                 user_id, project_id,
@@ -6617,7 +6622,10 @@ class ColdPathWorker:
                 impact = alignment_svc.derive_impact(referencing, today_iso)
                 change_count = alignment_svc.topic_change_count(existing_topic_rows, e["topic"]) + 1
                 instruction = alignment_svc.private_instruction(e["topic"], change_count)
-                evidence = [{"origin_id": origin_id, "quote": e["evidence_quote"]}] if e["evidence_quote"] else []
+                evidence = (
+                    [{"origin_id": origin_id, "quote": e["evidence_quote"], "matched": e.get("evidence_matched")}]
+                    if e["evidence_quote"] else []
+                )
                 eid = str(uuid.uuid4())
                 await self.db.execute(
                     """
@@ -6628,13 +6636,13 @@ class ColdPathWorker:
                         impact, evidence, shippable, proposed_at, expires_at, private_instruction)
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
                             'proposed', $12, $13::uuid[], $14::uuid[], $15::uuid[],
-                            $16::jsonb, $17::jsonb, $18, $19, $19 + ($20 || ' hours')::interval, $21)
+                            $16::jsonb, $17::jsonb, $18, $19, $20, $21)
                     """,
                     eid, user_id, _uuid_or_none(app_id), project_id, origin_id, origin_type,
                     e["topic"], e["statement"], e["rationale"], e["decision_owner"], e["implementation_owner"],
                     e["confidence"], sup_events, [e["new_decision_id"]], sup_patches,
                     json.dumps(impact), json.dumps(evidence), bool(e["shippable"]),
-                    timestamp, str(alignment_svc.PROPOSAL_TTL_HOURS), instruction,
+                    proposed_at, proposed_at + timedelta(hours=alignment_svc.PROPOSAL_TTL_HOURS), instruction,
                 )
                 existing_topic_rows.append({"topic": e["topic"], "supersedes": e["supersedes_ids"], "status": "proposed"})
                 stored += 1
@@ -6665,6 +6673,7 @@ class ColdPathWorker:
                 UNION SELECT pc2.patch_id FROM patch_cues pc1
                        JOIN patch_cues pc2 ON pc2.cue = pc1.cue AND pc2.patch_id <> pc1.patch_id
                       WHERE pc1.patch_id = ANY($2::uuid[])
+                      GROUP BY pc2.patch_id HAVING count(DISTINCT pc1.cue) >= 2
             )
             SELECT DISTINCT cp.patch_id::text AS patch_id, cp.patch_type, cp.value->>'text' AS text,
                    cp.value->>'owner' AS owner, cp.value->>'deadline_date' AS deadline_date
@@ -6677,7 +6686,7 @@ class ColdPathWorker:
                AND cp.completed_at IS NULL
                AND (cp.project_id = $3 OR cp.project_id IS NULL)
                AND NOT (cp.patch_id = ANY($2::uuid[]))
-             LIMIT 12
+             LIMIT 6
             """,
             subject_key, ids, project_id,
         )

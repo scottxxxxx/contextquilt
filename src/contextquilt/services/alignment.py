@@ -181,14 +181,37 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower().replace("'", "").replace("\u2019", "")).strip()
 
 
-def evidence_in_transcript(quote: Optional[str], transcript: str, min_words: int = 6) -> bool:
-    """True when the quote's words appear contiguously in the transcript
-    after punctuation and case are folded. Short quotes are refused: six
-    words is the floor below which a match proves nothing."""
-    q = _norm(quote or "")
-    if len(q.split()) < min_words:
-        return False
-    return q in _norm(transcript or "")
+_LABEL_RE = re.compile(r"^\s*\[[^\]]{1,60}\]\s*", re.MULTILINE)
+
+
+def evidence_match(quote: Optional[str], transcript: str, min_words: int = 8) -> Optional[str]:
+    """The longest contiguous run of the quote's words that appears in
+    the transcript (speaker labels stripped, case and punctuation
+    folded), or None when no run reaches the floor.
+
+    Measured on a real ABM meeting (2026-08-23): the model copies real
+    words but its quote often spans two transcript lines, with a
+    `[Speaker]` label between them, so a whole-quote substring test
+    failed on honest quotes. Eight contiguous words is the floor below
+    which a match proves nothing; the matched run, not the model's
+    string, is what the receipt should show.
+    """
+    words = _norm(quote or "").split()
+    if len(words) < min_words:
+        return None
+    body = _norm(_LABEL_RE.sub(" ", transcript or ""))
+    # Longest run first, so the receipt is as much of the quote as the
+    # transcript actually holds.
+    for n in range(len(words), min_words - 1, -1):
+        for i in range(0, len(words) - n + 1):
+            frag = " ".join(words[i:i + n])
+            if frag in body:
+                return frag
+    return None
+
+
+def evidence_in_transcript(quote: Optional[str], transcript: str, min_words: int = 8) -> bool:
+    return evidence_match(quote, transcript, min_words) is not None
 
 
 def parse_alignment_response(
@@ -242,7 +265,8 @@ def parse_alignment_response(
         topic = re.sub(r"[^a-z0-9]+", "-", str(e.get("topic") or "").lower()).strip("-") or "untitled"
         confidence = e.get("confidence") if e.get("confidence") in CONFIDENCE_LEVELS else "moderate"
         quote = (e.get("evidence_quote") or "").strip()
-        has_evidence = evidence_in_transcript(quote, transcript)
+        matched = evidence_match(quote, transcript)
+        has_evidence = matched is not None
         guard_hit = guard_shared_text(statement) or guard_shared_text(rationale)
         out.append({
             "new_decision_id": nid,
@@ -253,6 +277,7 @@ def parse_alignment_response(
             "decision_owner": (e.get("decision_owner") or None),
             "implementation_owner": (e.get("implementation_owner") or None),
             "evidence_quote": quote if has_evidence else None,
+            "evidence_matched": matched,
             "confidence": confidence,
             "guard_hit": guard_hit,
             "shippable": bool(has_evidence and not guard_hit),
