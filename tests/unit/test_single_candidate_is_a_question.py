@@ -188,9 +188,10 @@ def exact_decides(typed, roster_names, create_new=False):
     hit = any(n.lower() == typed.lower() for n in roster_names)
     if not hit:
         return "fallthrough"
-    if create_new:
-        return "create"
-    return "ask" if len(tokens(typed)) == 1 else "resolve"
+    if len(tokens(typed)) == 1:
+        # entities is UNIQUE on name; a bare taken name cannot create.
+        return "name_taken" if create_new else "ask"
+    return "resolve"
 
 
 def test_labelling_a_speaker_John_when_a_John_exists_now_ASKS():
@@ -205,8 +206,12 @@ def test_a_full_name_exact_match_is_still_decisive():
     assert exact_decides("John Kirker", ["John Kirker"]) == "resolve"
 
 
-def test_create_new_is_the_escape():
-    assert exact_decides("John", ["John"], create_new=True) == "create"
+def test_create_new_on_a_taken_bare_name_asks_for_more_name():
+    """Scott's ruling B (2026-08-23). entities is UNIQUE on
+    (user_id, name, entity_type) and ingest upserts on it, so a second
+    "John" cannot exist; the first cut of #315 said "create" here and a
+    prod smoke hit the constraint. The escape is a surname."""
+    assert exact_decides("John", ["John"], create_new=True) == "name_taken"
 
 
 def test_no_exact_hit_falls_through_to_the_candidate_logic():
@@ -255,43 +260,43 @@ def _resolver_source():
     return text[start:end]
 
 
-def test_create_new_nulls_the_bare_exact_hit_before_the_ask():
+def test_create_new_on_a_bare_exact_hit_raises_NAME_TAKEN_before_the_ask():
     body = _resolver_source()
-    escape = body.index("if row is not None and create_new")
+    taken = body.index("if row is not None and create_new")
     ask = body.index("if row is not None and not create_new")
     resolve = body.index("if row is not None:\n        resolved = await _load_active_person")
-    assert escape < ask < resolve
-    escape_block = body[escape:ask]
-    assert "len(tokenize_name(name)) == 1" in escape_block
-    assert "row = None" in escape_block
+    assert taken < ask < resolve
+    block = body[taken:ask]
+    assert "len(tokenize_name(name)) == 1" in block
+    assert '"code": "NAME_TAKEN"' in block
+    assert "all_sharing_first_token=True" in block      # same list the ask showed
+    assert "row = None" not in block                     # the first cut, now gone
 
 
-def test_the_escape_is_scoped_to_the_shape_that_asks():
-    """A two-token exact match never 409s, so create_new can never be a
-    considered answer there; a stray flag must not duplicate "John
-    Kirker". The escape and the ask share one predicate."""
+def test_NAME_TAKEN_is_scoped_to_the_shape_that_asks():
+    """A two-token exact match never 409s, so create_new there must not
+    be refused either. Both branches share one predicate."""
     body = _resolver_source()
-    escape = body.index("if row is not None and create_new")
+    taken = body.index("if row is not None and create_new")
     ask = body.index("if row is not None and not create_new")
-    assert body[escape:ask].count("len(tokenize_name(name)) == 1") == 1
+    assert body[taken:ask].count("len(tokenize_name(name)) == 1") == 1
     assert "len(tokenize_name(name)) == 1" in body[ask:ask + 200]
 
 
 def test_someone_new_is_a_keep_separate_against_every_offered_candidate():
-    """The 409 offered every person sharing the first token; "Someone new"
-    answers "none of these". The separation is stamped in the CREATE
-    branch, against the same widened candidate set the ask used, and
-    echoed because SS's veto is local and reads no CQ surface."""
+    """Stamped in the CREATE branch, gated on create_new, against the
+    first-token set (what both 409s carried), and echoed because SS's
+    veto is local and reads no CQ surface. Covers the surname retry
+    after NAME_TAKEN as well as the structural cases."""
     body = _resolver_source()
-    escape = body.index("if row is not None and create_new")
-    ask = body.index("if row is not None and not create_new")
-    block = body[escape:ask]
-    assert "all_sharing_first_token=True" in block
-    assert "separated_from = [" in block
     create = body.index("created = True")
     patch = body.index("# The person patch.")
-    assert "INSERT INTO entity_separations" in body[create:patch]
-    assert "for other in separated_from" in body[create:patch]
+    block = body[create:patch]
+    assert "if create_new:" in block
+    assert "all_sharing_first_token=True" in block
+    assert "separated_from = [" in block
+    assert "INSERT INTO entity_separations" in block
+    assert "for other in separated_from" in block
     assert '"separated_from": separated_from' in body
 
 

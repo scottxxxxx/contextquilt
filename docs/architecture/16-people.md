@@ -2785,34 +2785,60 @@ surname, because refusing to record a real colleague for the sake of a
 tidier graph is the wrong trade and sometimes you genuinely only know
 "Mike".
 
-### What `create_new` does on the bare-first-name case (2026-08-23, PR #315)
+### What `create_new` does on the bare-first-name case (2026-08-23, PR #315 then #316)
 
 Found by checking CQ's half against SS's picker mechanism before the
 first real 409: the flag skipped the ask and then fell into the
 exact-match resolve, so "Someone new" for a second John landed on the
 first John. The unit mirror had asserted "create" the whole time.
 
-Now, when `create_new` is set and the typed name is a single token that
-exactly matches an existing person (the only shape the bare ask fires
-on), CQ:
+The first fix (#315) nulled the exact hit so a second entity named
+"John" would be created. A smoke on the deployed build, in a rolled-back
+transaction, hit `entities_user_id_name_entity_type_key`: **CQ cannot
+hold two people with the same exact name**, and that uniqueness is
+load-bearing (the ingest worker upserts entities on it; rename checks
+collisions on it). Source-reading tests could not see a constraint.
 
-1. creates a NEW entity with that name (two entities literally named
-   "John" is the intended outcome; SS's list keys rows by `entity_id`),
-2. records a Keep separate (`entity_separations`) between the new entity
-   and **every** person the 409 offered, because "Someone new" is the
-   user answering "none of these" and the merge endpoint must refuse to
-   fold them later,
+**Scott's ruling, 2026-08-23: B, ask for more name** rather than drop
+the uniqueness ingest depends on. So `create_new` with a single-token
+name that exactly matches an existing person returns:
+
+```json
+{ "detail": {
+    "code": "NAME_TAKEN",
+    "message": "'John' is already someone's exact name. Add a last name or a nickname to record a different person.",
+    "name": "John",
+    "reason": "bare_first_name",
+    "candidates": [ ...same shape and same first-token set as CONTESTED_NAME... ],
+    "total": <int>, "truncated": <bool>
+} }
+```
+
+Same family as `CONTESTED_NAME`, different code because this one needs
+TEXT from the user, not a pick. SS hides "Someone new" on
+`reason == "bare_first_name"` and (post ruling) puts a text field behind
+it; the retry is `to_name: "John Smith", create_new: true`.
+
+**When a `create_new` request CREATES** (the surname retry, or "Someone
+new" on the two structural cases, where the typed name is nobody's exact
+name), CQ:
+
+1. creates the entity,
+2. records a Keep separate (`entity_separations`) between it and
+   **every person sharing the first token**, which is the list both
+   409s carried, because "Someone new" is the user answering "none of
+   these" and the merge endpoint must refuse to fold them later,
 3. echoes those ids as `separated_from`.
 
 ```json
 // reassign-speaker 200, inside the existing object
 "resolved_person": {
-  "entity_id": "<new uuid>", "name": "John", "patch_id": "...",
+  "entity_id": "<new uuid>", "name": "John Smith", "patch_id": "...",
   "status": "created",
-  "separated_from": ["<uuid>", "..."]     // [] unless create_new escaped a bare exact hit
+  "separated_from": ["<uuid>", "..."]     // [] unless create_new created
 }
 // POST /v1/people 200, top level
-{ "status": "created", "entity_id": "...", "patch_id": "...", "name": "John",
+{ "status": "created", "entity_id": "...", "patch_id": "...", "name": "John Smith",
   "separated_from": ["<uuid>", "..."] }
 ```
 
