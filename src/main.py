@@ -8372,7 +8372,10 @@ async def alignment_correct(
                 user_id, new_id,
             )
     logger.info("alignment_corrected", user_id=user_id, original=event_id, event_id=new_id)
-    return {"status": "corrected", "event": _alignment_row(fresh), "supersedes": event_id}
+    # One carrier for one fact: the superseded id is event.supersedes.
+    # (GP, reading the live bodies: a top-level string copy was a second
+    # shape for the same fact, and two shapes drift.)
+    return {"status": "corrected", "event": _alignment_row(fresh)}
 
 
 # ============================================
