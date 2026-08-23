@@ -7769,32 +7769,34 @@ async def _resolve_or_create_person(
     # a list of one when a second exists.
     if row is not None and create_new \
             and len(tokenize_name(name)) == 1:
-        # THE ESCAPE MUST ESCAPE. SS's picker offers "Someone new" on the
-        # 409 above and retries with `create_new`. Before this line the
-        # flag skipped the ask and then fell straight into the exact hit
-        # below, so "Someone new" for a second John landed on the first
-        # John: the two-Johns bug with a dialog in front of it. The
-        # unit mirror (`exact_decides`) said "create" the whole time,
-        # which is rule 7 in the team protocol: the mirror was true of
-        # the intent and false of the code. Caught by checking CQ's half
-        # against SS's stated mechanism before their first real 409.
-        # Scoped to the same shape the ask fires on, so a decisive
-        # two-token exact match is never duplicated by a stray flag.
+        # "SOMEONE NEW" WITH A NAME THAT IS LITERALLY TAKEN CANNOT CREATE.
         #
-        # "Someone new" is also a Keep separate against every person
-        # the 409 offered, recorded HERE because this is the hop the
-        # user answered on. Server side it makes the merge endpoint
-        # refuse to fold them later; and it is echoed as
-        # `separated_from` because SS's duplicate scan vetoes from a
-        # LOCAL record and never reads entity_separations (a write with
-        # no carrier is invisible to the client, rule 3).
-        separated_from = [
-            str(c["entity_id"]) for c in await _name_candidates(
-                conn, user_id, name, vocab.person_entity_type,
-                all_sharing_first_token=True,
-            )
-        ]
-        row = None
+        # entities is UNIQUE on (user_id, name, entity_type) and the
+        # ingest worker upserts on that key, so two people named
+        # exactly "John" cannot exist. The first cut of #315 nulled the
+        # exact hit here and would have raised on the INSERT; a prod
+        # smoke in a rolled-back transaction found it, the source
+        # reading tests could not. Scott ruled (2026-08-23) B: ask for
+        # more name rather than drop the uniqueness ingest depends on.
+        # Same 409 family, same candidates, a different code so the
+        # client knows this one needs TEXT, not a pick.
+        candidates = await _name_candidates(
+            conn, user_id, name, vocab.person_entity_type,
+            all_sharing_first_token=True,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "NAME_TAKEN",
+                "message": (
+                    f"{name!r} is already someone's exact name. Add a "
+                    "last name or a nickname to record a different person."
+                ),
+                "name": name,
+                "reason": "bare_first_name",
+                **candidate_payload(candidates, scope_project_ids),
+            },
+        )
     if row is not None and not create_new \
             and len(tokenize_name(name)) == 1:
         candidates = await _name_candidates(
@@ -7941,6 +7943,19 @@ async def _resolve_or_create_person(
         )
     else:
         created = True
+        if create_new:
+            # The caller SAW a candidate list and said none of these.
+            # Every person sharing the first token is that list (it is
+            # what both 409s carry), so the new person is kept separate
+            # from each of them, server side here and client side via
+            # the `separated_from` echo. A surname retry after
+            # NAME_TAKEN ("John Smith" after "John") lands here too.
+            separated_from = [
+                str(c["entity_id"]) for c in await _name_candidates(
+                    conn, user_id, name, vocab.person_entity_type,
+                    all_sharing_first_token=True,
+                )
+            ]
         entity_uuid = str(await conn.fetchval(
             """
             INSERT INTO entities
