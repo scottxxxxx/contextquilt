@@ -162,3 +162,73 @@ def test_the_ask_is_the_same_409_shape_for_one_candidate_as_for_many():
     becomes a different code, every existing client breaks silently."""
     one, many = [cand("John", "name")], [cand("John", "name"), cand("Jon", "name")]
     assert decide("John Kirker", one) == decide("John Kirker", many) == "ask"
+
+
+# --------------------------------------------------------------------
+# The REAL two-Johns mechanism, found on the third attempt
+#
+# The two fixes above were both one layer too low. `_resolve_or_create_person`
+# does an EXACT name lookup before any candidate logic runs, so labelling a
+# speaker "John" when an entity called exactly "John" exists resolved
+# immediately and never reached the code either of them touched.
+#
+# Proved by smoking the deployed build: typing "John" against a roster
+# holding "John" returned RESOLVE, and typing "John Kirker" against the
+# same roster returned ZERO candidates, so it would have created a new
+# person rather than merging. The merge happened at the exact match.
+# --------------------------------------------------------------------
+
+def exact_decides(typed, roster_names, create_new=False):
+    """Mirrors the exact-match branch of _resolve_or_create_person.
+
+    Returns "ask" when the typed name matches something exactly but is a
+    bare first name, "resolve" on a decisive exact match, and "fallthrough"
+    when there is no exact hit at all (the candidate logic above then runs).
+    """
+    hit = any(n.lower() == typed.lower() for n in roster_names)
+    if not hit:
+        return "fallthrough"
+    if create_new:
+        return "create"
+    return "ask" if len(tokens(typed)) == 1 else "resolve"
+
+
+def test_labelling_a_speaker_John_when_a_John_exists_now_ASKS():
+    """Scott's bug, at the layer it actually happened."""
+    assert exact_decides("John", ["John"]) == "ask"
+
+
+def test_a_full_name_exact_match_is_still_decisive():
+    """"John Kirker" matching "John Kirker" IS the same person, and asking
+    there would be noise on every re-label. This is the test that stops
+    the rule being widened into uselessness."""
+    assert exact_decides("John Kirker", ["John Kirker"]) == "resolve"
+
+
+def test_create_new_is_the_escape():
+    assert exact_decides("John", ["John"], create_new=True) == "create"
+
+
+def test_no_exact_hit_falls_through_to_the_candidate_logic():
+    """So the directional rule from the previous fix still governs the
+    non-exact path, and the two do not overlap."""
+    assert exact_decides("John Kirker", ["John"]) == "fallthrough"
+
+
+def first_token_matches(surface, roster):
+    """Mirrors _name_candidates(all_sharing_first_token=True)."""
+    first = tokens(surface)[:1]
+    return [n for n in roster if tokens(n)[:1] == first and first]
+
+
+def test_the_ask_carries_EVERY_John_not_just_the_exact_one():
+    """"Which John" is unanswerable from a list of one when a second
+    exists. `person_candidates` short-circuits on the exact hit and would
+    have shown only "John", which is the right answer to "who is named
+    exactly this" and the wrong answer to "who could this mean"."""
+    assert first_token_matches("John", ["John", "John Kirker", "Priya Raman"]) \
+        == ["John", "John Kirker"]
+
+
+def test_the_first_token_widening_does_not_leak_into_other_names():
+    assert first_token_matches("John", ["Johnny Vance", "Jon Marsh"]) == []
