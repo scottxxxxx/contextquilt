@@ -36,9 +36,16 @@ def test_rewrite_reports_zero_for_a_label_the_transcript_does_not_use():
     assert out == T and counts == {"Nobody": 0}
 
 
-def test_rewrite_is_a_no_op_when_label_already_is_the_canonical_name():
-    out, counts = rewrite_speaker_labels("[Christina McAlpin] a", {"Christina McAlpin": "christina mcalpin"})
-    assert out == "[Christina McAlpin] a" and counts["Christina McAlpin"] == 0
+def test_count_means_found_even_when_label_already_is_the_canonical_name():
+    """SS's Someone new renames the live label to the fuller name BEFORE
+    sending, so label == canonical is the normal created case. The count
+    is the one diagnostic for "the key did not match the brackets", so it
+    must say FOUND here, not 0. Text is untouched."""
+    out, counts = rewrite_speaker_labels(
+        "[Christina Lopez] a\n[Christina Lopez (you)] b", {"Christina Lopez": "Christina Lopez"}
+    )
+    assert out == "[Christina Lopez] a\n[Christina Lopez (you)] b"
+    assert counts["Christina Lopez"] == 2
 
 
 def test_parse_keeps_only_well_formed_entries_and_first_answer_per_label():
