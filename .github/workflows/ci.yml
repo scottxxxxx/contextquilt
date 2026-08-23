@@ -46,7 +46,14 @@ jobs:
           pip install pytest pytest-asyncio pytest-cov
 
       - name: Unit suite (no DB — DB-gated tests skip via TEST_DATABASE_URL guard)
-        run: python -m pytest tests/unit/ -q
+        run: python -m pytest tests/unit/ -q --junitxml=unit-results.xml
+
+      # A green suite is not the same claim as a suite that ran. pytest
+      # already fails an empty selection (bad path exits 4, a filter
+      # matching nothing exits 5), but EVERY TEST SKIPPING exits 0, and
+      # this suite skips DB-gated tests by design. See the script header.
+      - name: Assert the unit tests actually ran
+        run: python scripts/assert_tests_ran.py unit-results.xml
 
       - name: Build fresh schema for integration tests
         env:
