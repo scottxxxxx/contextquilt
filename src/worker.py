@@ -137,6 +137,12 @@ from contextquilt.services.people_identity import (
     people_vocabulary,
 )
 from contextquilt.services.person_appearances import observed_capacities
+from contextquilt.services.speaker_identities import (
+    parse_speaker_identities,
+    rewrite_speaker_labels,
+)
+from contextquilt.services.entity_aliasing import tokenize_name
+from contextquilt.services.people_identity import canonical_pair
 from contextquilt.services.ingest_modes import is_interaction_allowed
 from contextquilt.services.decay_model import (
     DEFAULT_TTLS,
@@ -5144,6 +5150,128 @@ class ColdPathWorker:
                     relationships_stored=relationships_stored,
                     longitudinal_types=list(longitudinal_types.keys()))
 
+    async def _apply_speaker_identities(
+        self, user_id: str, transcript: str, metadata: dict, person_entity_type: str,
+    ) -> tuple[str, list[dict]]:
+        """Resolve each answered label to a stored canonical name and
+        rewrite the transcript. Never raises; an entry that cannot be
+        resolved leaves its label untouched for today's matching."""
+        entries = parse_speaker_identities((metadata or {}).get("speaker_identities"))
+        if not entries:
+            return transcript, []
+        mapping: dict[str, str] = {}
+        applied: list[dict] = []
+        for e in entries:
+            try:
+                if e["entity_id"]:
+                    eid = await _resolve_merged_forward(self.db, uuid.UUID(e["entity_id"]))
+                    row = await self.db.fetchrow(
+                        """
+                        SELECT entity_id, name FROM entities
+                        WHERE entity_id = $1 AND user_id = $2
+                          AND entity_type = $3 AND suppressed_at IS NULL
+                        """,
+                        eid, user_id, person_entity_type,
+                    )
+                    if row is None:
+                        logger.warning(
+                            "speaker_identity_unresolved", user_id=user_id,
+                            label=e["label"][:60], entity_id=e["entity_id"][:40],
+                            reason="unknown_entity",
+                        )
+                        continue
+                    canonical, status = row["name"], "linked"
+                else:
+                    canonical, status = await self._create_identified_person(
+                        user_id, e["name"], person_entity_type,
+                    )
+                mapping[e["label"]] = canonical
+                applied.append({"label": e["label"], "name": canonical, "status": status})
+            except Exception as exc:
+                logger.warning(
+                    "speaker_identity_unresolved", user_id=user_id,
+                    label=e["label"][:60], reason=str(exc)[:120],
+                )
+        text, counts = rewrite_speaker_labels(transcript, mapping)
+        for a in applied:
+            a["replacements"] = counts.get(a["label"], 0)
+        logger.info(
+            "speaker_identities_applied", user_id=user_id,
+            applied=applied, sent=len(entries),
+        )
+        return text, applied
+
+    async def _create_identified_person(
+        self, user_id: str, name: str, person_entity_type: str,
+    ) -> tuple[str, str]:
+        """The create_new half, under the same rules as reassign-speaker
+        (doc 16 5.16): an exact match on the stored name resolves (a
+        two-plus-token exact match is decisive by ruling; a bare taken
+        name resolves here rather than failing, because the client was
+        told to ask again and a map cannot be asked); otherwise create
+        the person and stamp Keep separate against every live person
+        sharing the first token, which is the list the device showed.
+        Returns (canonical name, "linked" | "created")."""
+        row = await self.db.fetchrow(
+            """
+            SELECT entity_id, name FROM entities
+            WHERE user_id = $1 AND entity_type = $2 AND LOWER(name) = LOWER($3)
+            LIMIT 1
+            """,
+            user_id, person_entity_type, name,
+        )
+        if row is not None:
+            eid = await _resolve_merged_forward(self.db, row["entity_id"])
+            live = await self.db.fetchrow(
+                "SELECT name FROM entities WHERE entity_id = $1", eid
+            )
+            if len(tokenize_name(name)) == 1:
+                logger.warning(
+                    "speaker_identity_bare_name_taken", user_id=user_id,
+                    name=name[:60],
+                )
+            return (live["name"] if live else row["name"]), "linked"
+
+        first = tokenize_name(name)[:1]
+        roster = await self.db.fetch(
+            """
+            SELECT entity_id, name FROM entities
+            WHERE user_id = $1 AND entity_type = $2
+              AND merged_into IS NULL AND suppressed_at IS NULL
+            """,
+            user_id, person_entity_type,
+        )
+        sharing = [
+            str(r["entity_id"]) for r in roster
+            if first and tokenize_name(r["name"] or "")[:1] == first
+        ]
+        new_id = str(await self.db.fetchval(
+            """
+            INSERT INTO entities
+                (user_id, name, entity_type, description,
+                 confirmed_at, confirmation_source)
+            VALUES ($1, $2, $3, '', NOW(), 'speaker_identity')
+            RETURNING entity_id
+            """,
+            user_id, name, person_entity_type,
+        ))
+        for other in sharing:
+            lo, hi = canonical_pair(new_id, other)
+            await self.db.execute(
+                """
+                INSERT INTO entity_separations
+                    (user_id, entity_id_lo, entity_id_hi, source)
+                VALUES ($1, $2::uuid, $3::uuid, 'speaker_identity')
+                ON CONFLICT (user_id, entity_id_lo, entity_id_hi) DO NOTHING
+                """,
+                user_id, lo, hi,
+            )
+        logger.info(
+            "speaker_identity_person_created", user_id=user_id,
+            name=name[:60], separated_from=len(sharing),
+        )
+        return name, "created"
+
     async def handle_meeting_summary(self, payload: dict[str, Any]):
         """
         Meeting Summary: Extract facts and action items from a meeting summary.
@@ -5308,6 +5436,16 @@ class ColdPathWorker:
             # below and the entity sink both need it, and reading it twice
             # invites the two of them to disagree about what a person is.
             people_vocab = people_vocabulary(await self._app_manifest(app_id))
+
+            # Live speaker labels the user answered on the device
+            # (metadata.speaker_identities): rewrite the bracketed label
+            # to the chosen person's canonical name BEFORE the model
+            # reads it, so every downstream path hits the exact match.
+            # See services/speaker_identities.py for why a rewrite.
+            effective_summary, _identities_applied = await self._apply_speaker_identities(
+                user_id, effective_summary, metadata,
+                people_vocab.person_entity_type,
+            )
 
             response = await llm.extract(
                 system_prompt=resolved_prompt,
