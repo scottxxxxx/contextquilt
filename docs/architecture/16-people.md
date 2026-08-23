@@ -2769,12 +2769,36 @@ and the wrong answer to "who could this mean", so that path uses
 ### What does NOT raise it
 
 - an exact match at two or more tokens ("John Kirker" onto "John Kirker")
-- a single structural candidate where the typed name is SHORTER than the
-  match ("Suresh" onto "Suresh Muchakurti") — a shorthand for somebody
-  the system already knows more about
-- a single candidate matched by a recorded **alias**, which is a question
-  the user already answered
-- anything with `create_new: true`
+- a single structural candidate where the typed name has TWO OR MORE
+  tokens and is SHORTER than the match ("Suresh M" onto "Suresh
+  Muchakurti") — shorthand for somebody the system already knows more
+  about
+- a single candidate matched by a **user-authored alias** (`entity_aliases.source`
+  in `user_edit`, `user_confirmation`), which is a question the user
+  already answered
+- anything with `create_new: true` (except the bare-taken case, which is
+  `NAME_TAKEN` below)
+
+### A bare first name always asks (ruled 2026-08-23)
+
+Scott labelled a speaker "christina"; the roster held one "Christina
+McAlpin" (13 meetings) with a recorded alias "Christina"; it resolved
+with no prompt. Two rules produced that, and both were changed:
+
+1. **The shorthand exemption** (#312: typed shorter than the match
+   resolves) was written when SS had no 409 handler and every ask
+   surfaced as "Memories could not be updated". With the picker live an
+   ask is one tap on "Christina McAlpin · 13 meetings", and a first name
+   alone is never sure which Christina. Now a single-token typed name
+   with a single name-matched candidate ASKS (one candidate in the
+   payload, same shape). Multi-token shorthand keeps the direction rule.
+2. **The alias exemption** assumed an alias is the user's prior answer.
+   On Scott's roster 128 of 145 alias rows were written by
+   `merge_backfill` or `heuristic`. Now `matched_by: "alias"` is emitted
+   only for user-authored rows; a machine alias still FINDS the person
+   (it is a hit) but is reported as `"name"` and so asks.
+
+Cost accepted by Scott: one extra tap per bare-name label.
 
 ### How the caller answers it
 

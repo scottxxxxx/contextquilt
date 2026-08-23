@@ -7613,6 +7613,9 @@ async def unsuppress_person(
     }
 
 
+USER_AUTHORED_ALIAS_SOURCES = frozenset({"user_edit", "user_confirmation"})
+
+
 async def _name_candidates(conn, user_id: str, name: str, person_type: str,
                            all_sharing_first_token: bool = False):
     """Every live person a typed name could denote, with ranking signals.
@@ -7671,7 +7674,7 @@ async def _name_candidates(conn, user_id: str, name: str, person_type: str,
     try:
         alias_rows = await conn.fetch(
             """
-            SELECT e.entity_id FROM entity_aliases a
+            SELECT e.entity_id, a.source FROM entity_aliases a
             JOIN entities e ON e.entity_id = a.entity_id
             WHERE a.user_id = $1 AND LOWER(a.alias) = LOWER($2)
               AND e.entity_type = $3
@@ -7679,8 +7682,20 @@ async def _name_candidates(conn, user_id: str, name: str, person_type: str,
             """,
             user_id, name, person_type,
         )
-        aliased = {str(r["entity_id"]) for r in alias_rows}
-        hits |= aliased
+        # ONLY A USER-AUTHORED ALIAS IS AN ANSWER. The single-candidate
+        # rule below treats `matched_by == "alias"` as "a question the
+        # user already answered", and on Scott's roster (2026-08-23) 128
+        # of 145 alias rows were written by `merge_backfill` or
+        # `heuristic`, not by him. "christina" resolved to Christina
+        # McAlpin without a prompt on a script's say-so. A machine alias
+        # is a guess with the same authority as a name match, so it is
+        # a hit (it still finds the person) but it is reported as one.
+        all_alias_hits = {str(r["entity_id"]) for r in alias_rows}
+        aliased = {
+            str(r["entity_id"]) for r in alias_rows
+            if r["source"] in USER_AUTHORED_ALIAS_SOURCES
+        }
+        hits |= all_alias_hits
     except Exception as exc:
         # entity_aliases can lag on the MCP deployment's separate
         # Postgres. Degrading to structural matching only is safe: it
@@ -7904,7 +7919,19 @@ async def _resolve_or_create_person(
             # would not have matched structurally in the first place.
             typed_tokens = len(tokenize_name(name))
             match_tokens = len(tokenize_name(only.get("name") or ""))
-            if only.get("matched_by") == "name" and typed_tokens > match_tokens:
+            # A BARE FIRST NAME ALWAYS ASKS (Scott, 2026-08-23, after
+            # "christina" landed on Christina McAlpin with no prompt).
+            # The shorthand exemption above was written when SS had no
+            # 409 handler and every ask surfaced as a failure; with the
+            # picker live an ask is one tap on "Christina McAlpin, 13
+            # meetings", and a first name alone is never sure. The one
+            # thing that still resolves a bare name silently is a
+            # USER-authored alias, because that is his prior answer.
+            # Full-name shorthand ("Suresh M" onto "Suresh Muchakurti")
+            # keeps resolving; the direction rule still governs it.
+            bare = typed_tokens == 1
+            if only.get("matched_by") == "name" \
+                    and (bare or typed_tokens > match_tokens):
                 payload = candidate_payload(candidates, scope_project_ids)
                 raise HTTPException(
                     status_code=409,

@@ -95,7 +95,12 @@ def decide(typed, candidates, create_new=False):
         # Direction of information. Typing a shorthand for somebody the
         # system knows more about is normal; typing MORE than it holds is
         # an assertion, and the token they do not share is the question.
-        return "ask" if len(tokens(typed)) > len(tokens(only["name"])) else "resolve"
+        # A bare first name always asks (Scott, 2026-08-23, the
+        # "christina" case); otherwise direction of information.
+        bare = len(tokens(typed)) == 1
+        if bare or len(tokens(typed)) > len(tokens(only["name"])):
+            return "ask"
+        return "resolve"
     return "create"
 
 
@@ -114,16 +119,22 @@ def test_the_two_johns_case_asks():
     assert decide("John Kirker", [cand("John", "name")]) == "ask"
 
 
-def test_the_common_shorthand_case_STILL_RESOLVES():
-    """The regression the first version of this fix caused, live on prod
-    for about an hour, and the reason the rule is directional.
+def test_a_bare_first_name_ASKS_even_as_shorthand():
+    """REVERSED 2026-08-23 on Scott's word. #312 made "Suresh" onto
+    "Suresh Muchakurti" resolve silently, because when #311 asked here
+    SS had no 409 handler and every ask surfaced as "Memories could not
+    be updated". With the picker live, the ask is one tap on "Christina
+    McAlpin, 13 meetings". He labelled "christina", it resolved without
+    a prompt, and a first name alone is never sure which Christina."""
+    assert decide("Suresh", [cand("Suresh Muchakurti", "name")]) == "ask"
+    assert decide("christina", [cand("Christina McAlpin", "name")]) == "ask"
 
-    Labelling a speaker "Suresh" against a roster holding "Suresh
-    Muchakurti" is the normal, correct operation this endpoint exists to
-    perform. A fix that refuses what users do all day is worse than the
-    bug it closes.
-    """
-    assert decide("Suresh", [cand("Suresh Muchakurti", "name")]) == "resolve"
+
+def test_multi_token_shorthand_still_resolves():
+    """The direction rule still governs anything longer than one token:
+    "Suresh M" onto "Suresh Muchakurti" is shorthand for somebody CQ
+    knows more about, and it is not a bare first name."""
+    assert decide("Suresh M", [cand("Suresh Muchakurti", "name")]) == "resolve"
 
 
 def test_an_equal_length_name_resolves():
@@ -136,11 +147,39 @@ def test_an_equal_length_name_resolves():
 def test_a_lone_alias_match_still_resolves():
     """The control, and it is the one that stops this being over-broad.
 
-    A recorded alias is a decision the user already made. Asking again
-    would make every "Mike" a prompt forever and teach people to dismiss
-    the question, which is how a safety prompt becomes a click-through.
+    A USER-AUTHORED alias is a decision the user already made. Asking
+    again would make every "Mike" a prompt forever and teach people to
+    dismiss the question, which is how a safety prompt becomes a
+    click-through. Since 2026-08-23 `matched_by == "alias"` is emitted
+    ONLY for user-authored alias rows (see the source-reading test
+    below); a machine alias is reported as a name match and asks.
     """
     assert decide("Mike", [cand("Mike DiTroia", "alias")]) == "resolve"
+
+
+def test_only_a_user_authored_alias_is_reported_as_an_alias():
+    """On Scott's roster 128 of 145 alias rows were written by
+    merge_backfill or heuristic. "christina" resolved to Christina
+    McAlpin on a script's say-so under the rule above. The candidate
+    builder must gate `aliased` on source, while still counting every
+    alias row as a HIT (it finds the person; it just does not decide)."""
+    import pathlib
+    text = (pathlib.Path(__file__).resolve().parents[2] / "src" / "main.py").read_text()
+    assert 'USER_AUTHORED_ALIAS_SOURCES = frozenset({"user_edit", "user_confirmation"})' in text
+    start = text.index("async def _name_candidates(")
+    end = text.index("\nasync def _resolve_or_create_person(", start)
+    body = text[start:end]
+    assert "SELECT e.entity_id, a.source FROM entity_aliases a" in body
+    assert 'if r["source"] in USER_AUTHORED_ALIAS_SOURCES' in body
+    assert "hits |= all_alias_hits" in body
+
+
+def test_the_live_decision_asks_on_a_bare_name():
+    """The mirror above said "resolve" for a year of Sureshes; read the
+    real branch."""
+    body = _resolver_source()
+    i = body.index("bare = typed_tokens == 1")
+    assert "and (bare or typed_tokens > match_tokens)" in body[i:i + 200]
 
 
 def test_several_candidates_still_ask_regardless_of_how_they_matched():
