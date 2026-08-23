@@ -2710,3 +2710,86 @@ check is blind) plus forbidden do-line preambles on 4 of 21 accepted
 cards. Sonnet: 0 and 0. **The recommendation rests on the invisible-error
 gap, not the accept gap.** Both defect classes are now parse defects, so
 they are caught whichever model runs.
+
+## 5.16 `CONTESTED_NAME` (409): the wire contract (2026-08-23)
+
+Written because ShoulderSurf asked to build against a file rather than a
+message, which is the same reason 5.15 exists.
+
+### Which routes return it
+
+Both callers of `_resolve_or_create_person`:
+
+- `POST /v1/people/{user_id}`
+- **`POST /v1/quilt/{user_id}/reassign-speaker`** — the speaker-labelling
+  path SS uses via `to_name`. This is the one that matters in practice;
+  SS does not call the first at all.
+
+### The body
+
+```json
+{
+  "detail": {
+    "code": "CONTESTED_NAME",
+    "message": "<human sentence, varies by reason>",
+    "name": "<the name the caller typed>",
+    "reason": "bare_first_name",          // ONLY on the bare-first-name case
+    "candidates": [ {
+        "entity_id": "<uuid>",
+        "name": "<stored display name>",
+        "meetings": <int>,
+        "last_met": "<ISO date or null>",
+        "projects": ["<project_id>", ...],
+        "matched_by": "alias" | "name"
+    } ],
+    "total": <int>,       // counted BEFORE the cap
+    "truncated": <bool>
+  }
+}
+```
+
+`total` is counted before the cap so a long tail is visible as a number
+rather than silently dropped, the same reason `/v1/quilt` counts before it
+truncates.
+
+### The three cases that raise it
+
+| when | `reason` | candidates |
+|---|---|---|
+| the typed name matches **several** people | absent | all of them, ranked |
+| the typed name matches **one** person, structurally, and is LONGER than that person's stored name | absent | the one |
+| the typed name **exactly** matches an existing person and is a **single token** | `bare_first_name` | **every** person sharing that first token, not only the exact one |
+
+The third is the two-Johns case. `person_candidates` short-circuits on an
+exact token match and would offer a list of one while a second John sits
+on the roster, which is the right answer to "who is named exactly this"
+and the wrong answer to "who could this mean", so that path uses
+`_name_candidates(all_sharing_first_token=True)` instead.
+
+### What does NOT raise it
+
+- an exact match at two or more tokens ("John Kirker" onto "John Kirker")
+- a single structural candidate where the typed name is SHORTER than the
+  match ("Suresh" onto "Suresh Muchakurti") — a shorthand for somebody
+  the system already knows more about
+- a single candidate matched by a recorded **alias**, which is a question
+  the user already answered
+- anything with `create_new: true`
+
+### How the caller answers it
+
+Retry with either `to_person_id` (or `entity_id`) set to the chosen
+candidate, or `create_new: true` to assert this is somebody new. CQ
+records what the caller says; it never hard-requires a distinguishing
+surname, because refusing to record a real colleague for the sake of a
+tidier graph is the wrong trade and sometimes you genuinely only know
+"Mike".
+
+### Known client gap as of 2026-08-23
+
+**SS has no handler.** A 409 falls through `reassignSpeaker`'s switch into
+`.httpFailure`, the transcript rename stands locally, and the user sees
+"Renamed here. Memories could not be updated." Not destructive, and every
+colliding bare-first-name label is silently unsynced until the picker
+ships. Recorded here rather than only in a thread so the next person
+reading this file knows the contract is served and unanswered.
