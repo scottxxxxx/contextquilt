@@ -85,7 +85,7 @@ from contextquilt.services.people_network import (
 )
 from contextquilt.services import described_as
 from contextquilt.services import who_they_are
-from contextquilt.services.entity_aliasing import person_candidates
+from contextquilt.services.entity_aliasing import person_candidates, tokenize_name
 from contextquilt.services.people_identity import (
     IdentityRequestError,
     candidate_payload,
@@ -7778,7 +7778,33 @@ async def _resolve_or_create_person(
         # payload just carries one candidate instead of several.
         if len(candidates) == 1 and not create_new:
             only = candidates[0]
-            if only.get("matched_by") == "name":
+            # NARROWED, within the hour, because the first version broke
+            # the common case. Asking on every structural single match
+            # means labelling a speaker "Suresh" against a roster holding
+            # "Suresh Muchakurti" now 409s, and that is the normal,
+            # correct operation this endpoint exists to perform. A fix
+            # that refuses the thing users do all day is worse than the
+            # bug it closes.
+            #
+            # The distinguishing signal is DIRECTION OF INFORMATION.
+            #
+            #   typed SHORTER than the match   "Suresh" -> "Suresh Muchakurti"
+            #     The user is using a shorthand for somebody the system
+            #     already knows more about than they typed. Resolve.
+            #
+            #   typed LONGER than the match    "John Kirker" -> "John"
+            #     The user is asserting information CQ does not have. The
+            #     match rests entirely on the token they share, and the
+            #     token they do not share is the whole question. This is
+            #     Scott's two-Johns case exactly: a bare "John" from a CBE
+            #     meeting, and a friend named John Kirker, joined on
+            #     "John" alone. Ask.
+            #
+            # Equal length with different tokens cannot reach here: it
+            # would not have matched structurally in the first place.
+            typed_tokens = len(tokenize_name(name))
+            match_tokens = len(tokenize_name(only.get("name") or ""))
+            if only.get("matched_by") == "name" and typed_tokens > match_tokens:
                 payload = candidate_payload(candidates, scope_project_ids)
                 raise HTTPException(
                     status_code=409,

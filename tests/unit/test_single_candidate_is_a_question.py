@@ -76,29 +76,61 @@ def test_but_a_name_that_is_nobody_s_exact_name_IS_contested():
 # The rule the fix encodes
 # --------------------------------------------------------------------
 
-def decide(candidates, create_new=False):
+def decide(typed, candidates, create_new=False):
     """The endpoint's decision, extracted so it can be tested without a DB.
 
-    Mirrors POST /v1/people: exact name resolves before this is reached;
-    everything here is a candidate match and the question is whether it
-    is safe to resolve without asking.
+    Mirrors POST /v1/people and /reassign-speaker, which share
+    `_resolve_or_create_person`. Exact name resolves before this is
+    reached; everything here is a candidate match and the question is
+    whether it is safe to resolve without asking.
     """
     if create_new:
         return "create"
     if len(candidates) > 1:
         return "ask"
     if len(candidates) == 1:
-        return "resolve" if candidates[0]["matched_by"] == "alias" else "ask"
+        only = candidates[0]
+        if only["matched_by"] == "alias":
+            return "resolve"
+        # Direction of information. Typing a shorthand for somebody the
+        # system knows more about is normal; typing MORE than it holds is
+        # an assertion, and the token they do not share is the question.
+        return "ask" if len(tokens(typed)) > len(tokens(only["name"])) else "resolve"
     return "create"
+
+
+def tokens(n):
+    return [t for t in (n or "").replace(".", " ").split() if t]
 
 
 def cand(name, matched_by):
     return {"entity_id": name.lower(), "name": name, "matched_by": matched_by}
 
 
-def test_a_lone_structural_match_asks():
-    """The two-Johns case. This is the assertion that would have caught it."""
-    assert decide([cand("John", "name")]) == "ask"
+def test_the_two_johns_case_asks():
+    """Typed LONGER than the match: "John Kirker" against a bare "John".
+    The match rests entirely on the shared token and the unshared one is
+    the whole question. This is the assertion that would have caught it."""
+    assert decide("John Kirker", [cand("John", "name")]) == "ask"
+
+
+def test_the_common_shorthand_case_STILL_RESOLVES():
+    """The regression the first version of this fix caused, live on prod
+    for about an hour, and the reason the rule is directional.
+
+    Labelling a speaker "Suresh" against a roster holding "Suresh
+    Muchakurti" is the normal, correct operation this endpoint exists to
+    perform. A fix that refuses what users do all day is worse than the
+    bug it closes.
+    """
+    assert decide("Suresh", [cand("Suresh Muchakurti", "name")]) == "resolve"
+
+
+def test_an_equal_length_name_resolves():
+    """Cannot really occur (equal length with different tokens would not
+    have matched structurally), pinned so the comparison stays > and does
+    not drift to >=, which would start asking on exact re-labels."""
+    assert decide("John Kirker", [cand("John Kirker", "name")]) == "resolve"
 
 
 def test_a_lone_alias_match_still_resolves():
@@ -108,20 +140,20 @@ def test_a_lone_alias_match_still_resolves():
     would make every "Mike" a prompt forever and teach people to dismiss
     the question, which is how a safety prompt becomes a click-through.
     """
-    assert decide([cand("Mike DiTroia", "alias")]) == "resolve"
+    assert decide("Mike", [cand("Mike DiTroia", "alias")]) == "resolve"
 
 
 def test_several_candidates_still_ask_regardless_of_how_they_matched():
-    assert decide([cand("John", "name"), cand("John Kirker", "alias")]) == "ask"
+    assert decide("John", [cand("John", "name"), cand("John Kirker", "alias")]) == "ask"
 
 
 def test_create_new_overrides_the_question():
     """The caller's escape hatch: the user said "this is somebody new"."""
-    assert decide([cand("John", "name")], create_new=True) == "create"
+    assert decide("John Kirker", [cand("John", "name")], create_new=True) == "create"
 
 
 def test_no_candidates_creates_without_asking():
-    assert decide([]) == "create"
+    assert decide("Anybody New", []) == "create"
 
 
 def test_the_ask_is_the_same_409_shape_for_one_candidate_as_for_many():
@@ -129,4 +161,4 @@ def test_the_ask_is_the_same_409_shape_for_one_candidate_as_for_many():
     change; only the length of the candidate list differs. If this ever
     becomes a different code, every existing client breaks silently."""
     one, many = [cand("John", "name")], [cand("John", "name"), cand("Jon", "name")]
-    assert decide(one) == decide(many) == "ask"
+    assert decide("John Kirker", one) == decide("John Kirker", many) == "ask"
