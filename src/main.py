@@ -7608,7 +7608,8 @@ async def unsuppress_person(
     }
 
 
-async def _name_candidates(conn, user_id: str, name: str, person_type: str):
+async def _name_candidates(conn, user_id: str, name: str, person_type: str,
+                           all_sharing_first_token: bool = False):
     """Every live person a typed name could denote, with ranking signals.
 
     Two sources, unioned, because they catch different things:
@@ -7645,7 +7646,20 @@ async def _name_candidates(conn, user_id: str, name: str, person_type: str):
     by_id = {str(r["entity_id"]): r for r in rows}
     roster = [(str(r["entity_id"]), r["name"]) for r in rows]
 
-    structural = {eid for eid, _ in person_candidates(name, roster)}
+    if all_sharing_first_token:
+        # A BARE FIRST NAME HAS NO DECISIVE MATCH, so the exact hit must
+        # not hide the others. `person_candidates` short-circuits on an
+        # exact token match and returns only the entity literally called
+        # "John", which is the correct answer to "who is named exactly
+        # this" and the wrong answer to "who could this mean". When the
+        # caller is about to ASK, they need every John.
+        first = tokenize_name(name)[:1]
+        structural = {
+            eid for eid, n in roster
+            if tokenize_name(n or "")[:1] == first and first
+        }
+    else:
+        structural = {eid for eid, _ in person_candidates(name, roster)}
     aliased: set = set()
     hits = set(structural)
 
@@ -7720,6 +7734,55 @@ async def _resolve_or_create_person(
         """,
         user_id, name, vocab.person_entity_type,
     )
+
+    # AN EXACT MATCH ON A BARE FIRST NAME IS NOT DECISIVE.
+    #
+    # This is the real two-Johns mechanism and it took three attempts to
+    # find, because the two fixes before it were both one layer too low.
+    # A CBE meeting created a person called "John". Scott labelled a
+    # speaker "John" for a DIFFERENT man, the exact-name lookup above hit
+    # immediately, and his friend was attached to the CBE John's eight
+    # meetings before any candidate logic ran at all. He then renamed
+    # that entity to "John Kirker", which carried the CBE history with it.
+    #
+    # An exact match IS decisive at two or more tokens: "John Kirker"
+    # matching "John Kirker" is the same person, and asking there would
+    # be noise. A single token identifies nobody. Half the world's Johns
+    # match "John" exactly, and the whole reason a person has a surname
+    # is that the first name does not do this job.
+    #
+    # The cost is real and Scott accepted it explicitly: labelling any
+    # speaker with a one-word name that already exists now asks, INCLUDING
+    # when it is genuinely the same person. That is the trade he asked
+    # for, in his words: if we are not sure two Johns are the same person,
+    # we must ask when we label them.
+    #
+    # `create_new` is the escape, and the 409 carries every John rather
+    # than only the exact one, because "which John" is unanswerable from
+    # a list of one when a second exists.
+    if row is not None and not create_new \
+            and len(tokenize_name(name)) == 1:
+        candidates = await _name_candidates(
+            conn, user_id, name, vocab.person_entity_type,
+            all_sharing_first_token=True,
+        )
+        if candidates:
+            payload = candidate_payload(candidates, scope_project_ids)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "CONTESTED_NAME",
+                    "message": (
+                        f"{name!r} is a first name, so it does not say which "
+                        "person this is. Pick one, or send create_new to add "
+                        "someone new."
+                    ),
+                    "name": name,
+                    "reason": "bare_first_name",
+                    **payload,
+                },
+            )
+
     if row is None:
         # A CONTESTED TYPED NAME IS A QUESTION, NOT A GUESS.
         #
