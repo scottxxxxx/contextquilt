@@ -159,3 +159,30 @@ The freshness multiplier is the recall-side half of the freshness model document
 | Cache rebuild | PostgreSQL → Redis | <50ms |
 
 Total recall overhead target: **<10ms** on cache hit, **<50ms** on cache miss.
+
+
+## The `excluded` block (2026-08-23)
+
+GhostPour's upgrade nudges need the two real memory moments: a Plus
+user whose question would have drawn on a meeting older than the tier
+window, and a Free user whose people-scoped recall could not use the
+project's memory. Only CQ can count either, so `/v1/recall` carries an
+optional top-level `excluded` object, counted in MEETINGS because the
+copy says meetings:
+
+- `by_window` (present when `metadata.max_age_days` was sent):
+  `{meetings, oldest, max_age_days, definition}`, the AGE predicate
+  inverted over the project scope, universal self-disclosure types
+  excluded because they are never windowed.
+- `by_scope` (present when `metadata.recall_scope == "people"`):
+  `{meetings, definition}`, meetings in the project holding memory.
+  This is scope size, not "matches that scored": the people lane runs no
+  memory leg, so no scored set exists to subtract from. The definition
+  says so on the wire.
+
+Rules: project-scoped requests only (the chat flow is project-scoped);
+one indexed COUNT per condition, measured at ~5 ms warm on the largest
+prod project (1745 rows), 43 ms cold once; never a second recall; absent
+means not computed, zero means nothing excluded; byte-stable within a
+UTC day; written into the render cache with the context so a cache hit
+serves the same block. GP reads it off the raw JSON.
