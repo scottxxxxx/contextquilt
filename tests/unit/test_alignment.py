@@ -148,6 +148,15 @@ def test_private_instruction_counts_in_code_and_never_names_anyone():
     assert "Capture the decision, owner, scope, and confirmation date" in s
 
 
+def test_a_superseded_decision_patch_counts_as_a_change():
+    """The first real events on prod superseded pre-record decision
+    patches, not events; a count on `supersedes` alone read 0."""
+    ev = [{"topic": "t", "supersedes": [], "superseded_patch_ids": ["p1"], "status": "confirmed"}]
+    assert topic_change_count(ev, "t") == 1
+    rec = project_record([dict(_ev("a", "t", "confirmed", "2026-08-21", conf="x"), superseded_patch_ids=["p1"])])
+    assert rec["direction_change_count"] == 1
+
+
 def test_topic_change_count_only_counts_superseding_live_events():
     ev = [
         {"topic": "t", "supersedes": ["x"], "status": "confirmed"},
