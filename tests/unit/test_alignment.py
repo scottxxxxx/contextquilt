@@ -242,6 +242,7 @@ def test_correction_is_guarded_and_conflicts_never_merge():
     assert '"code": "SHARED_TEXT_REJECTED"' in body
     assert '"code": "CORRECTION_CONFLICT"' in body
     assert "'corrected'" in body and "superseded_by = $2::uuid" in body
+    assert '"supersedes": event_id' not in body     # one carrier: event.supersedes
 
 
 def test_confirm_refuses_anything_but_an_open_proposal():
