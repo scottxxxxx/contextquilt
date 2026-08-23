@@ -7645,7 +7645,9 @@ async def _name_candidates(conn, user_id: str, name: str, person_type: str):
     by_id = {str(r["entity_id"]): r for r in rows}
     roster = [(str(r["entity_id"]), r["name"]) for r in rows]
 
-    hits = {eid for eid, _ in person_candidates(name, roster)}
+    structural = {eid for eid, _ in person_candidates(name, roster)}
+    aliased: set = set()
+    hits = set(structural)
 
     try:
         alias_rows = await conn.fetch(
@@ -7658,7 +7660,8 @@ async def _name_candidates(conn, user_id: str, name: str, person_type: str):
             """,
             user_id, name, person_type,
         )
-        hits |= {str(r["entity_id"]) for r in alias_rows}
+        aliased = {str(r["entity_id"]) for r in alias_rows}
+        hits |= aliased
     except Exception as exc:
         # entity_aliases can lag on the MCP deployment's separate
         # Postgres. Degrading to structural matching only is safe: it
@@ -7676,6 +7679,12 @@ async def _name_candidates(conn, user_id: str, name: str, person_type: str):
             "meetings": r["meetings"] or 0,
             "last_met": r["last_met"].isoformat() if r["last_met"] else None,
             "projects": [p for p in (r["projects"] or []) if p],
+            # WHY this person is a candidate, because the caller's
+            # decision depends on it. A recorded alias is a question the
+            # user already answered; a structural first-name match is a
+            # question nobody has been asked. Only the first is safe to
+            # resolve without confirmation.
+            "matched_by": "alias" if eid in aliased else "name",
         })
     return out
 
@@ -7741,8 +7750,50 @@ async def _resolve_or_create_person(
                     **payload,
                 },
             )
+        # ONE CANDIDATE IS STILL A QUESTION WHEN THE MATCH IS STRUCTURAL.
+        #
+        # This used to resolve silently, and that is the whole of the
+        # two-Johns bug (2026-08-23). A CBE meeting created "John". Weeks
+        # later a human typed a name for a DIFFERENT John, exactly one
+        # candidate came back, and his friend was attached to the CBE
+        # John's eight meetings and four projects without anyone being
+        # asked. The card then read "Primary CBE admin for AI for Work"
+        # over a description of somebody else entirely.
+        #
+        # The contested guard above is backwards for the FIRST collision,
+        # and the first collision is the only one that matters: by the
+        # time two Johns exist on the roster the damage is already done,
+        # because the second was silently absorbed into the first and so
+        # there is only ever one. A rule that fires on the second
+        # occurrence can never fire.
+        #
+        # `matched_by` decides it. An ALIAS is a question the user
+        # already answered, so resolving to it is honouring their
+        # decision. A NAME match is `person_candidates` guessing that a
+        # first name means the one person who currently has it, and that
+        # guess is exactly what nobody was asked about. Ask.
+        #
+        # Same 409 shape as the multi-candidate case, so a client that
+        # already handles CONTESTED_NAME handles this with no change; the
+        # payload just carries one candidate instead of several.
         if len(candidates) == 1 and not create_new:
-            row = {"entity_id": candidates[0]["entity_id"]}
+            only = candidates[0]
+            if only.get("matched_by") == "name":
+                payload = candidate_payload(candidates, scope_project_ids)
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "CONTESTED_NAME",
+                        "message": (
+                            f"{name!r} matches {only['name']!r} on the name "
+                            "alone. Confirm it is the same person, or send "
+                            "create_new to add someone new."
+                        ),
+                        "name": name,
+                        **payload,
+                    },
+                )
+            row = {"entity_id": only["entity_id"]}
 
     created = False
     if row is not None:
