@@ -2540,3 +2540,173 @@ inference until a role is stated. Synthesis of a better title across the
 series is a model-bearing step and is deliberately NOT this; the 08-13
 person-analyzer experiment showed cross-meeting synthesis needs Sonnet
 and fails invisibly on Haiku. Decide it against that number.
+
+## 5.15 `trajectory` and `working_with` (2026-08-22) — SPECIFIED, MERGED, NOT SERVED
+
+**Read the status line first: both shapes below are implemented as pure,
+tested services and NOTHING SERVES THEM.** `services/trajectory.py` and
+`services/working_with.py` merged in #307 (107 tests). Neither is
+imported anywhere in `src/`. The measurement SQL that would populate them
+is not written, because it needs prod DB access that is currently
+blocked, and a query nobody can execute against real distributions is
+how a plausible join bug ships.
+
+This section exists because the contract previously lived only in
+cross-session messages and a PR body. When ShoulderSurf's session
+rotated on 2026-08-22 they reconstructed a plausible and wrong version of
+it from notes, which is the failure mode the "record it in the artefact,
+not the thread" rule exists to prevent, arriving on the team that had
+been repeating the rule all day.
+
+### `trajectory` — the hero card, "how they're changing"
+
+The sibling of `what_stands_out`. That lens asks on what measure a person
+is unlike EVERYBODY ELSE; this one asks on what measure they are unlike
+THEMSELVES earlier, which is the question a user genuinely cannot answer
+from inside the meetings. Code computes both windows and picks the
+measure; the model only writes, and may state only numbers it was handed.
+
+Served on `GET /v1/people/{user_id}/{entity_id}`. Object or null; null is
+the common case, not the edge. **Every value is an integer.** There is
+not one float in the payload, for two independent reasons: a served rate
+is a number whose denominator the reader cannot see, and GhostPour's
+proxy walks the body replacing non-finite floats with null and never
+visits ints.
+
+```
+"trajectory": {
+  "lens": "how_theyre_changing", "display_order": 5,
+  "measure_key": "closed_late" | "speaking_turns" | "questions_to_you",
+  "subject": <string>, "unit": <string>, "counted_noun": <string>,
+  "pair_kind": "proportion" | "rate",
+  "valence": "unflattering_up" | "neutral",
+  "movement": "up" | "down",
+  "direction": "worse" | "better" | "up" | "down",
+  "span_meetings": <int>,
+  "earlier": {"numerator","denominator","meetings","origin_ids"[]},
+  "recent":  {"numerator","denominator","meetings","origin_ids"[]},
+  "series":  [{"origin_id","sequence","numerator","denominator"}, ...],
+  "supersedes": [<lens id>, ...],
+  "about_person": <string>,
+  "text": <=180, "narrative": <=320, "do": <=150
+}
+```
+
+Four things the design asked for that this REFUSES to serve, each with
+its reason, so nobody re-adds them from a mock:
+
+- **A pre-divided percentage.** Both windows ship as integer pairs; the
+  client divides if it wants a percent.
+- **A slope.** Two windows support "it was this, it is now that". They
+  do not support a rate of change and nobody measured one.
+- **A duration.** CQ holds no timing at all. ShoulderSurf holds
+  per-segment timing it CANNOT ATTRIBUTE TO A PERSON, because a diarized
+  `speakerLabel` has no join to an `entity_id` unless that voice was
+  enrolled. The honest statement is not "nobody has timing", it is "the
+  side with the timing cannot say whose it is".
+- **A TIME AXIS OF ANY KIND.** This was designed, written and caught in
+  review before it shipped. **CQ NEVER PERSISTS A MEETING DATE**: one
+  arrives at ingest as `payload.timestamp`, is spent resolving relative
+  deadlines, and is dropped. Every surviving timestamp is an INGEST
+  clock. A weekly sparkline keyed on those is a chart of when the
+  importer ran. So windows split by MEETING SEQUENCE and `series` carries
+  `origin_id`; the client holds the only real meeting dates in the system
+  and is the only side that can draw a time axis.
+
+**`pair_kind` is a PROHIBITION, not decoration.** A proportion's
+numerator is a subset of its denominator ("8 of the 11 dated items he
+closed"); a rate's is not ("214 turns across 8 meetings"). A proportion
+MAY be rendered as a percentage. A RATE MAY NOT, EVER. Conflating them
+put "214 out of 8" in a prompt, which both candidate writer models
+correctly refused as impossible, and simultaneously pinned a rate flat
+against the top of a 0..1 axis on the client. It also made the gap gate
+vacuous on rates (2675 "points" against 1200 clears a 20 point floor), so
+rates gate on relative change instead.
+
+**`valence` keeps neutral measures neutral.** `closed_late` has an
+unflattering direction; speaking more, or asking fewer questions, does
+not, and the compass spec is explicit that neither end of those axes is
+good or bad. A neutral measure gets `up`/`down` and must not be tinted as
+a judgement; the parse rejects "declined", "slipped", "disengaged" on
+one, and a test pins that the same word is still allowed on a measure
+entitled to say it.
+
+**`supersedes` is served rather than inferred**, so the hero and a lens
+built on the same arithmetic never render twice on one screen. Empty list
+means nothing is superseded, which is not the same as absent.
+
+### `working_with` — the coaching screen, and it is NARROWER than the design
+
+The design's move cards want a "why it works" backed by observation
+counts, and its own worked example needs proposal AUTHORSHIP, which
+nothing on any hop records: `PersonCommitment` carries an owner, not a
+proposer. The wrong branch is to keep the sentence shape and attach the
+counts we DO have, which produces a non sequitur that reads as evidence
+because there are numbers in it.
+
+So the split, which is the whole design:
+
+- **THE SITUATION IS OBSERVED.** Counts, subject, receipts, this person.
+- **THE TECHNIQUE IS NOT.** General communication practice, offered
+  BECAUSE OF the situation, never claimed to work ON this person.
+
+`basis` carries that seam on the wire in two places, because a client
+cannot infer it and a docstring does not travel. **There is deliberately
+NO field that could hold "why this fits this person"**: nothing observed
+could fill it and a served field invites a value. A test asserts the
+absence.
+
+```
+"working_with": {
+  "person": <string>,
+  "moves": [ {                      # 0 to 3, one per technique
+    "rank": <int>,
+    "context": <=40, "headline": <=90, "say": <=220,
+    "technique": "calibrated_question"|"accusation_audit"|"labelling"|"framing",
+    "technique_label": <string>, "why": <string>,
+    "basis": "general_practice",
+    "situation": { "basis": "observed", "key": <string>,
+                   "numerator","denominator","meetings",
+                   "subject", "patch_ids"[] }
+  } ],
+  "your_half": { "basis": "observed", "stats": [ {
+      "key","label","value","counterpart_label","counterpart_value","meetings"
+  } ] }
+}
+```
+
+The technique is chosen BY CODE from a fixed map, never by the model: a
+model handed five facts and four techniques finds a reason for any
+pairing and is fluent about it. Ranking is on EVIDENCE, not severity,
+because severity puts the flimsiest most alarming thing at the top of a
+screen whose job is to be actionable. One move per technique.
+
+**A `say` may not RESTATE THE MEASUREMENT** (both of the situation's
+numbers), because a script is a sentence said out loud to a colleague and
+"you have gone quiet on 23 of your 46 open items" is accurate, checkable
+and would end a working relationship. It MAY carry other numbers: the
+first version of this rule banned any digit, which also bans the
+reference design's own best script ("One blocker, one decision, 90
+seconds"). A rule that is wrong in the safe direction still degrades,
+because whoever hits it loosens it in whatever direction makes their case
+pass rather than the direction that keeps the real prohibition.
+
+**`your_half` replaces the design's unsourceable stat pair** with turns
+and EXPLICIT question counts. NULL IS UNKNOWN, NEVER ZERO: migration 34
+has no backfill because the transcripts are gone, so a null turn count
+rendered as 0 says somebody sat silent through eight meetings, which is a
+claim about a person built out of a missing column. Explicit and inferred
+question columns are never summed (migration 37), and the labels say "by
+name" because that is what the explicit column counts.
+
+### Model
+
+`CQ_TRAJECTORY_MODEL`. Measured 2026-08-22, 30 calls per model on
+identical computed facts, writer varied: Sonnet 4.6 accepted 25/30 and
+all 25 on the first attempt; Haiku 4.5 accepted 21/30 at 3.7x cheaper AND
+shipped a unit conflation ("11 of the last 11 MEETINGS" on an ITEMS
+denominator, where both 11s are permitted numbers so the invented-number
+check is blind) plus forbidden do-line preambles on 4 of 21 accepted
+cards. Sonnet: 0 and 0. **The recommendation rests on the invisible-error
+gap, not the accept gap.** Both defect classes are now parse defects, so
+they are caught whichever model runs.
