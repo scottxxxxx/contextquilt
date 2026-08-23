@@ -93,10 +93,18 @@ def rewrite_speaker_labels(transcript: str, mapping: dict[str, str]) -> tuple[st
     counts: dict[str, int] = {}
     text = transcript
     for label, canonical in mapping.items():
-        if not label or not canonical or label.lower() == canonical.lower():
+        if not label or not canonical:
             counts[label] = 0
             continue
         pattern = re.compile(r"\[" + re.escape(label) + _YOU_SUFFIX + r"\]", re.IGNORECASE)
+        # The count means "this label was FOUND in the transcript", not
+        # "bytes changed": SS's Someone new renames the live label to the
+        # fuller name before sending, so label == canonical is the normal
+        # created case, and a 0 there would read as the key not matching
+        # the brackets, which is the one diagnostic the count exists for.
+        if label.lower() == canonical.lower():
+            counts[label] = len(pattern.findall(text))
+            continue
         text, n = pattern.subn(lambda m: f"[{canonical}{m.group(1) or ''}]", text)
         counts[label] = n
     return text, counts
