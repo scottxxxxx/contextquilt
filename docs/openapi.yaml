@@ -1163,6 +1163,102 @@ paths:
               schema:
                 $ref: "#/components/schemas/TokenResponse"
 
+  /v1/alignment/{user_id}/meetings/{origin_id}:
+    get:
+      operationId: alignmentForMeeting
+      summary: Alignment events a meeting produced
+      description: >
+        The meeting view's card (Alignment Layer, phase 1). Every shippable
+        alignment event this meeting produced, capture order. An empty
+        `events` array means no card. Events carry the shared record only;
+        the private instruction is never served here.
+      tags: [Alignment]
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+        - { name: origin_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Events for the meeting.
+
+  /v1/alignment/{user_id}/projects/{project_id}:
+    get:
+      operationId: alignmentRecord
+      summary: The project's alignment record
+      description: >
+        Current direction per topic, decision history (the sequence, never
+        annotated), awaiting confirmation, direction_change_count and
+        cumulative derived impact. Shippable events only.
+      tags: [Alignment]
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+        - { name: project_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The record.
+
+  /v1/alignment/{user_id}/events/{event_id}/confirm:
+    post:
+      operationId: alignmentConfirm
+      summary: Confirm a proposed direction
+      description: >
+        Two-step confirmation: nothing is confirmed by inference. Body
+        `confirmed_by` (required, the app vouches) and `on_behalf` (admin
+        override, attributed). 409 NOT_CONFIRMABLE on anything but an open
+        proposal or correction.
+      tags: [Alignment]
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+        - { name: event_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirmed_by]
+              properties:
+                confirmed_by: { type: string }
+                on_behalf: { type: boolean, default: false }
+      responses:
+        "200":
+          description: Confirmed; returns the event.
+        "409":
+          description: NOT_CONFIRMABLE.
+
+  /v1/alignment/{user_id}/events/{event_id}/correct:
+    post:
+      operationId: alignmentCorrect
+      summary: Suggest a correction
+      description: >
+        Corrections are events, not edits. Creates a new `corrected` event
+        superseding the proposal; history is append-only. The statement
+        passes the shared-text guard (422 SHARED_TEXT_REJECTED). A second
+        correction on one proposal is 409 CORRECTION_CONFLICT carrying both;
+        CQ never merges.
+      tags: [Alignment]
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+        - { name: event_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [statement, reason, corrected_by]
+              properties:
+                statement: { type: string }
+                reason: { type: string }
+                corrected_by: { type: string }
+                rationale: { type: string, nullable: true }
+      responses:
+        "200":
+          description: The new corrected event.
+        "409":
+          description: CORRECTION_CONFLICT.
+        "422":
+          description: SHARED_TEXT_REJECTED.
+
   /health:
     get:
       operationId: healthCheck

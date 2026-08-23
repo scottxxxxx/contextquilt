@@ -128,6 +128,7 @@ from contextquilt.services.entity_aliasing import (
     person_candidates,
 )
 from contextquilt.services import behavior_extraction
+from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import described_as
 from contextquilt.services import relationship_lenses
 from contextquilt.services import who_they_are
@@ -2015,6 +2016,19 @@ def _build_default_llm_client(*, alert_db=None):
     return client
 
 
+def resp_content_or(resp):
+    """An LLM response's parsed content, tolerant of a client that hands
+    back the raw object."""
+    return getattr(resp, "content", resp)
+
+
+def _uuid_or_none(v):
+    try:
+        return uuid.UUID(str(v)) if v else None
+    except (ValueError, AttributeError):
+        return None
+
+
 class ColdPathWorker:
     def __init__(self):
         self.redis = None
@@ -2351,6 +2365,26 @@ class ColdPathWorker:
                     logger.debug("deadline_sweep_complete", total_overdue=total)
             except Exception as e:
                 logger.error("deadline_sweep_error", error=str(e))
+            # Alignment proposals lapse (requirements 4: a proposal
+            # expires, a confirmed direction never does). Same cadence,
+            # own try, so a missing table on a lagging DB cannot take the
+            # overdue stamp down with it.
+            try:
+                expired = await self.db.execute(
+                    """
+                    UPDATE alignment_events
+                       SET status = 'expired', updated_at = NOW()
+                     WHERE status IN ('proposed', 'corrected')
+                       AND confirmed_at IS NULL
+                       AND superseded_by IS NULL
+                       AND expires_at IS NOT NULL AND expires_at < NOW()
+                    """
+                )
+                n = int(expired.split()[-1]) if expired else 0
+                if n:
+                    logger.info("alignment_proposals_expired", count=n)
+            except Exception as e:
+                logger.debug("alignment_expiry_skipped", error=str(e)[:120])
             await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
 
     async def decay_loop(self):
@@ -5885,6 +5919,15 @@ class ColdPathWorker:
                 resolved_manifest,
             )
 
+            # Alignment events (design e6ee7ae8, phase 1): its own call,
+            # after everything above is stored, because it needs this
+            # meeting's decision patch ids and the project's active set
+            # as inputs. Inert without a project. Never raises.
+            await self._extract_alignment_events(
+                user_id, effective_summary, app_id, origin_id, origin_type,
+                timestamp, project_id, meeting_date_line,
+            )
+
             await self.hydrate_cache(user_id)
 
         except Exception as e:
@@ -6459,6 +6502,194 @@ class ColdPathWorker:
             logger.warning("behavior_observations_failed", user_id=user_id,
                            origin=origin_id, reason=str(exc)[:200])
             return 0
+
+    ALIGNMENT_ACTIVE_SET_MAX = 40
+
+    async def _extract_alignment_events(
+        self, user_id: str, transcript: str, app_id, origin_id, origin_type,
+        timestamp, project_id, meeting_date_line: str = "",
+    ) -> int:
+        """Phase 1 of the Alignment Layer (services/alignment.py has the
+        rules). Detect supersession by id against the project's active
+        decision set, guard the shared copy in code (one regeneration,
+        then drop), derive the impact receipt from referencing open
+        items, store. Inert without a project or without a decision
+        patch from this meeting. Never raises."""
+        try:
+            if not project_id or not origin_id or not transcript:
+                return 0
+            subject_key = f"user:{user_id}"
+            todays = await self.db.fetch(
+                """
+                SELECT cp.patch_id::text AS id, cp.value->>'text' AS text,
+                       cp.value->>'owner' AS owner
+                  FROM context_patches cp
+                  JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                 WHERE ps.subject_key = $1 AND cp.patch_type = 'decision'
+                   AND cp.origin_id = $2
+                   AND COALESCE(cp.status, 'active') = 'active'
+                 ORDER BY cp.created_at
+                """,
+                subject_key, origin_id,
+            )
+            if not todays:
+                return 0
+            # The active set: live alignment events on this project
+            # (what the record currently believes) plus active decision
+            # patches from OTHER meetings on this project (what the
+            # extraction recorded before any record existed). Deltas,
+            # not history: capped, newest first.
+            prior_events = await self.db.fetch(
+                """
+                SELECT event_id::text AS id, statement AS text,
+                       to_char(proposed_at, 'YYYY-MM-DD') AS date, topic
+                  FROM alignment_events
+                 WHERE user_id = $1 AND project_id = $2
+                   AND status IN ('proposed','confirmed','corrected')
+                   AND superseded_by IS NULL
+                 ORDER BY proposed_at DESC LIMIT $3
+                """,
+                user_id, project_id, self.ALIGNMENT_ACTIVE_SET_MAX,
+            )
+            prior_patches = await self.db.fetch(
+                """
+                SELECT cp.patch_id::text AS id, cp.value->>'text' AS text,
+                       to_char(cp.created_at, 'YYYY-MM-DD') AS date
+                  FROM context_patches cp
+                  JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                 WHERE ps.subject_key = $1 AND cp.patch_type = 'decision'
+                   AND cp.project_id = $2
+                   AND COALESCE(cp.origin_id, '') <> $3
+                   AND COALESCE(cp.status, 'active') = 'active'
+                 ORDER BY cp.created_at DESC LIMIT $4
+                """,
+                subject_key, project_id, origin_id, self.ALIGNMENT_ACTIVE_SET_MAX,
+            )
+            active = [dict(r) for r in prior_events] + [dict(r) for r in prior_patches]
+            if not active:
+                return 0   # nothing to supersede; first decisions are not changes
+            event_ids = {r["id"] for r in prior_events}
+            meeting_date = meeting_date_line.replace("Meeting date:", "").strip() or (
+                timestamp.strftime("%Y-%m-%d") if hasattr(timestamp, "strftime") else str(timestamp)[:10]
+            )
+            today_iso = meeting_date[:10]
+
+            llm = await self._get_llm_for_app(app_id)
+            content = alignment_svc.build_alignment_content(
+                meeting_date, [dict(r) for r in todays], active, transcript,
+            )
+            defects: list = []
+            resp = await llm.extract(system_prompt=alignment_svc.ALIGNMENT_SYSTEM, user_content=content)
+            events = alignment_svc.parse_alignment_response(
+                resp.content, [r["id"] for r in todays], [a["id"] for a in active], transcript, defects,
+            )
+            # THE GUARD REJECTS, THEN REGENERATES ONCE. Never softens.
+            if any(e["guard_hit"] for e in events):
+                hits = [e["guard_hit"] for e in events if e["guard_hit"]]
+                logger.info("alignment_guard_rejected", user_id=user_id, origin=origin_id, terms=hits[:5])
+                retry = await llm.extract(
+                    system_prompt=alignment_svc.ALIGNMENT_SYSTEM,
+                    user_content=content + (
+                        "\n\nYour previous answer was rejected because shared text must not "
+                        f"describe a person. Do not use: {', '.join(hits[:5])}. Rewrite."
+                    ),
+                )
+                events = alignment_svc.parse_alignment_response(
+                    resp_content_or(retry), [r["id"] for r in todays], [a["id"] for a in active], transcript, defects,
+                )
+                events = [e for e in events if not e["guard_hit"]]
+            if not events:
+                logger.info("alignment_events_none", user_id=user_id, origin=origin_id,
+                            defect=defects[0] if defects else "empty")
+                return 0
+
+            stored = 0
+            existing_topic_rows = [dict(r) for r in await self.db.fetch(
+                "SELECT topic, supersedes, status FROM alignment_events WHERE user_id = $1 AND project_id = $2",
+                user_id, project_id,
+            )]
+            for e in events:
+                sup_events = [i for i in e["supersedes_ids"] if i in event_ids]
+                sup_patches = [i for i in e["supersedes_ids"] if i not in event_ids]
+                referencing = await self._alignment_referencing_items(
+                    subject_key, project_id, sup_patches + [e["new_decision_id"]], today_iso,
+                )
+                impact = alignment_svc.derive_impact(referencing, today_iso)
+                change_count = alignment_svc.topic_change_count(existing_topic_rows, e["topic"]) + 1
+                instruction = alignment_svc.private_instruction(e["topic"], change_count)
+                evidence = [{"origin_id": origin_id, "quote": e["evidence_quote"]}] if e["evidence_quote"] else []
+                eid = str(uuid.uuid4())
+                await self.db.execute(
+                    """
+                    INSERT INTO alignment_events (
+                        event_id, user_id, app_id, project_id, origin_id, origin_type,
+                        topic, statement, rationale, decision_owner, implementation_owner,
+                        status, confidence, supersedes, source_patch_ids, superseded_patch_ids,
+                        impact, evidence, shippable, proposed_at, expires_at, private_instruction)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                            'proposed', $12, $13::uuid[], $14::uuid[], $15::uuid[],
+                            $16::jsonb, $17::jsonb, $18, $19, $19 + ($20 || ' hours')::interval, $21)
+                    """,
+                    eid, user_id, _uuid_or_none(app_id), project_id, origin_id, origin_type,
+                    e["topic"], e["statement"], e["rationale"], e["decision_owner"], e["implementation_owner"],
+                    e["confidence"], sup_events, [e["new_decision_id"]], sup_patches,
+                    json.dumps(impact), json.dumps(evidence), bool(e["shippable"]),
+                    timestamp, str(alignment_svc.PROPOSAL_TTL_HOURS), instruction,
+                )
+                existing_topic_rows.append({"topic": e["topic"], "supersedes": e["supersedes_ids"], "status": "proposed"})
+                stored += 1
+            logger.info(
+                "alignment_events_stored", user_id=user_id, origin=origin_id, project_id=project_id,
+                stored=stored, shippable=sum(1 for e in events if e["shippable"]),
+                cost_usd=getattr(resp, "cost_usd", None),
+            )
+            return stored
+        except Exception as exc:
+            logger.warning("alignment_events_failed", user_id=user_id, origin=origin_id, reason=str(exc)[:200])
+            return 0
+
+    async def _alignment_referencing_items(self, subject_key: str, project_id: str, decision_patch_ids: list, today_iso: str) -> list:
+        """Open items that reference the superseded decisions: connected
+        by an edge in either direction, or sharing a cue with one of them.
+        Completables and deliverables only; the receipt is about work."""
+        ids = [i for i in decision_patch_ids if i]
+        if not ids:
+            return []
+        rows = await self.db.fetch(
+            """
+            WITH refs AS (
+                SELECT to_patch_id AS pid FROM patch_connections
+                 WHERE from_patch_id = ANY($2::uuid[]) AND COALESCE(status, 'active') = 'active'
+                UNION SELECT from_patch_id FROM patch_connections
+                 WHERE to_patch_id = ANY($2::uuid[]) AND COALESCE(status, 'active') = 'active'
+                UNION SELECT pc2.patch_id FROM patch_cues pc1
+                       JOIN patch_cues pc2 ON pc2.cue = pc1.cue AND pc2.patch_id <> pc1.patch_id
+                      WHERE pc1.patch_id = ANY($2::uuid[])
+            )
+            SELECT DISTINCT cp.patch_id::text AS patch_id, cp.patch_type, cp.value->>'text' AS text,
+                   cp.value->>'owner' AS owner, cp.value->>'deadline_date' AS deadline_date
+              FROM context_patches cp
+              JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+              JOIN refs ON refs.pid = cp.patch_id
+             WHERE ps.subject_key = $1
+               AND cp.patch_type IN ('commitment','blocker','deliverable')
+               AND COALESCE(cp.status, 'active') = 'active'
+               AND cp.completed_at IS NULL
+               AND (cp.project_id = $3 OR cp.project_id IS NULL)
+               AND NOT (cp.patch_id = ANY($2::uuid[]))
+             LIMIT 12
+            """,
+            subject_key, ids, project_id,
+        )
+        out = []
+        for r in rows:
+            d = r["deadline_date"]
+            out.append({
+                "patch_id": r["patch_id"], "patch_type": r["patch_type"], "text": r["text"],
+                "owner": r["owner"], "deadline_date": d,
+                "overdue": bool(d and re.match(r"^\d{4}-\d{2}-\d{2}$", d) and d < today_iso),
+            })
+        return out
 
     async def _extract_communication_profile(self, user_id: str, transcript: str, app_id: str = None):
         """Extract communication style scores from the (you) speaker's dialogue.

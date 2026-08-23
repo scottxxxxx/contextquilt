@@ -45,6 +45,7 @@ from dashboard.router import router as dashboard_router
 from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
 from contextquilt.services import insight_cards
+from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import facet_runtime
@@ -8134,6 +8135,244 @@ async def create_person(
         "name": name,
         "separated_from": resolved["separated_from"],
     }
+
+
+# ============================================
+# Alignment Layer (design e6ee7ae8, phase 1: the record)
+# ============================================
+#
+# THE PRIVACY BOUNDARY IS IN THE SELECT. Every read below names its
+# columns and none of them is private_instruction; a shared surface can
+# never receive it because no shared query fetches it. Events with
+# shippable = FALSE (no evidence in the transcript, or a guard hit that
+# the regeneration did not clear) stay private candidates and are not
+# served here either (requirements 4: evidence is mandatory).
+
+ALIGNMENT_SHARED_COLUMNS = """
+    event_id::text, project_id, origin_id, origin_type, topic, statement, rationale,
+    decision_owner, implementation_owner, status, confidence,
+    ARRAY(SELECT x::text FROM unnest(supersedes) x) AS supersedes,
+    superseded_by::text AS superseded_by,
+    ARRAY(SELECT x::text FROM unnest(source_patch_ids) x) AS source_patch_ids,
+    ARRAY(SELECT x::text FROM unnest(superseded_patch_ids) x) AS superseded_patch_ids,
+    impact, evidence, proposed_at, expires_at, confirmed_at, confirmed_by,
+    confirmation_on_behalf, correction_reason, corrected_by
+"""
+
+
+def _alignment_row(r) -> dict:
+    d = dict(r)
+    for k in ("impact", "evidence"):
+        v = d.get(k)
+        if isinstance(v, str):
+            try:
+                d[k] = json.loads(v)
+            except Exception:
+                d[k] = []
+    for k in ("proposed_at", "expires_at", "confirmed_at"):
+        if d.get(k) is not None and hasattr(d[k], "isoformat"):
+            d[k] = d[k].isoformat()
+    d["active_until_superseded"] = d["status"] == "confirmed" and not d.get("superseded_by")
+    return d
+
+
+class AlignmentConfirmRequest(BaseModel):
+    # Who confirmed, as the app names them. CQ authenticates apps, not
+    # end users; the app vouches (doc 10). Required so a confirmation is
+    # always attributed; on_behalf marks the admin override.
+    confirmed_by: str
+    on_behalf: bool = False
+
+
+class AlignmentCorrectRequest(BaseModel):
+    statement: str
+    reason: str
+    corrected_by: str
+    rationale: Optional[str] = None
+
+
+@app.get("/v1/alignment/{user_id}/meetings/{origin_id}", tags=["Alignment"])
+async def alignment_for_meeting(
+    user_id: str, origin_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """The meeting view's card: every shippable alignment event this
+    meeting produced, capture order. Empty `events` means no card; the
+    meeting view is byte-identical to today (requirements 6)."""
+    async with db_pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(
+                f"SELECT {ALIGNMENT_SHARED_COLUMNS} FROM alignment_events "
+                "WHERE user_id = $1 AND origin_id = $2 AND shippable "
+                "ORDER BY proposed_at, created_at",
+                user_id, origin_id,
+            )
+        except Exception as exc:
+            logger.warning("alignment_read_unavailable", error=str(exc)[:120])
+            rows = []
+    return {"origin_id": origin_id, "events": [_alignment_row(r) for r in rows]}
+
+
+@app.get("/v1/alignment/{user_id}/projects/{project_id}", tags=["Alignment"])
+async def alignment_record(
+    user_id: str, project_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """The project's alignment record: current direction per topic,
+    decision history (the sequence, never annotated), awaiting
+    confirmation, the direction-change count and cumulative impact."""
+    async with db_pool.acquire() as conn:
+        try:
+            rows = await conn.fetch(
+                f"SELECT {ALIGNMENT_SHARED_COLUMNS} FROM alignment_events "
+                "WHERE user_id = $1 AND project_id = $2 AND shippable "
+                "ORDER BY proposed_at",
+                user_id, project_id,
+            )
+        except Exception as exc:
+            logger.warning("alignment_read_unavailable", error=str(exc)[:120])
+            rows = []
+    events = [_alignment_row(r) for r in rows]
+    rec = alignment_svc.project_record(events)
+    rec.pop("by_id", None)
+    rec["project_id"] = project_id
+    rec["definitions"] = {
+        "direction_change_count": "Confirmed events on this project that superseded a prior item. A count of the record, never of a person.",
+        "cumulative_impact": "Union of the derived impact lines of every confirmed superseding event, deduplicated by the item they derive from.",
+    }
+    return rec
+
+
+@app.post("/v1/alignment/{user_id}/events/{event_id}/confirm", tags=["Alignment"])
+async def alignment_confirm(
+    user_id: str, event_id: str, req: AlignmentConfirmRequest,
+    app_id: str = Depends(verify_application_access),
+):
+    """Two-step confirmation (requirements 4): nothing is confirmed by
+    inference. Confirming makes the statement the active direction and
+    displaces what it superseded. 409 on anything but an open proposal."""
+    who = (req.confirmed_by or "").strip()
+    if not who:
+        raise HTTPException(status_code=422, detail={"code": "CONFIRMED_BY_REQUIRED"})
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT event_id, status, confirmed_at, superseded_by, supersedes, topic, project_id "
+                "FROM alignment_events WHERE user_id = $1 AND event_id = $2::uuid FOR UPDATE",
+                user_id, event_id,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="Alignment event not found")
+            if row["status"] not in ("proposed", "corrected") or row["confirmed_at"] or row["superseded_by"]:
+                raise HTTPException(status_code=409, detail={
+                    "code": "NOT_CONFIRMABLE", "status": row["status"],
+                    "superseded_by": str(row["superseded_by"]) if row["superseded_by"] else None,
+                })
+            await conn.execute(
+                "UPDATE alignment_events SET status = 'confirmed', confirmed_at = NOW(), "
+                "confirmed_by = $3, confirmation_on_behalf = $4, expires_at = NULL, updated_at = NOW() "
+                "WHERE user_id = $1 AND event_id = $2::uuid",
+                user_id, event_id, who, bool(req.on_behalf),
+            )
+            # A confirmed direction displaces what it superseded (and any
+            # other open proposal on the same topic, which the record now
+            # answers). Corrections already displaced their proposal.
+            await conn.execute(
+                "UPDATE alignment_events SET superseded_by = $2::uuid, updated_at = NOW() "
+                "WHERE user_id = $1 AND event_id = ANY($3::uuid[]) AND superseded_by IS NULL",
+                user_id, event_id, list(row["supersedes"] or []),
+            )
+            await conn.execute(
+                "UPDATE alignment_events SET superseded_by = $2::uuid, updated_at = NOW() "
+                "WHERE user_id = $1 AND project_id = $3 AND topic = $4 AND event_id <> $2::uuid "
+                "AND status = 'confirmed' AND superseded_by IS NULL AND confirmed_at < NOW()",
+                user_id, event_id, row["project_id"], row["topic"],
+            )
+            fresh = await conn.fetchrow(
+                f"SELECT {ALIGNMENT_SHARED_COLUMNS} FROM alignment_events WHERE user_id = $1 AND event_id = $2::uuid",
+                user_id, event_id,
+            )
+    logger.info("alignment_confirmed", user_id=user_id, event_id=event_id, on_behalf=bool(req.on_behalf))
+    return {"status": "confirmed", "event": _alignment_row(fresh)}
+
+
+@app.post("/v1/alignment/{user_id}/events/{event_id}/correct", tags=["Alignment"])
+async def alignment_correct(
+    user_id: str, event_id: str, req: AlignmentCorrectRequest,
+    app_id: str = Depends(verify_application_access),
+):
+    """Corrections are events, not edits (requirements 4). A new
+    `corrected` event supersedes the proposal; history is append-only.
+    The corrected text passes the same guard as generated text. Two
+    corrections on one proposal escalate (409 CORRECTION_CONFLICT with
+    both), never auto-merge."""
+    statement = (req.statement or "").strip()
+    who = (req.corrected_by or "").strip()
+    if not statement or not who or not (req.reason or "").strip():
+        raise HTTPException(status_code=422, detail={"code": "STATEMENT_REASON_AND_AUTHOR_REQUIRED"})
+    hit = alignment_svc.guard_shared_text(statement) or alignment_svc.guard_shared_text(req.rationale)
+    if hit:
+        raise HTTPException(status_code=422, detail={
+            "code": "SHARED_TEXT_REJECTED", "term": hit,
+            "message": "Shared text states what the project believes; it never describes a person.",
+        })
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT * FROM alignment_events WHERE user_id = $1 AND event_id = $2::uuid FOR UPDATE",
+                user_id, event_id,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="Alignment event not found")
+            if row["status"] == "expired":
+                raise HTTPException(status_code=409, detail={"code": "NOT_CORRECTABLE", "status": "expired"})
+            prior = await conn.fetch(
+                f"SELECT {ALIGNMENT_SHARED_COLUMNS} FROM alignment_events "
+                "WHERE user_id = $1 AND status = 'corrected' AND $2::uuid = ANY(supersedes) "
+                "AND confirmed_at IS NULL AND superseded_by IS NULL",
+                user_id, event_id,
+            )
+            if prior:
+                raise HTTPException(status_code=409, detail={
+                    "code": "CORRECTION_CONFLICT",
+                    "message": "A correction is already awaiting confirmation on this event. Escalate; CQ never merges two corrections.",
+                    "existing": [_alignment_row(p) for p in prior],
+                    "proposed": {"statement": statement, "reason": req.reason, "corrected_by": who},
+                })
+            new_id = str(uuid.uuid4())
+            await conn.execute(
+                """
+                INSERT INTO alignment_events (
+                    event_id, user_id, app_id, project_id, origin_id, origin_type,
+                    topic, statement, rationale, decision_owner, implementation_owner,
+                    status, confidence, supersedes, source_patch_ids, superseded_patch_ids,
+                    impact, evidence, shippable, proposed_at, expires_at,
+                    correction_reason, corrected_by, private_instruction)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                        'corrected', $12, ARRAY[$13::uuid], $14, $15,
+                        $16, $17, TRUE, NOW(), NOW() + ($18 || ' hours')::interval,
+                        $19, $20, $21)
+                """,
+                new_id, user_id, row["app_id"], row["project_id"], row["origin_id"], row["origin_type"],
+                row["topic"], statement, (req.rationale or None), row["decision_owner"], row["implementation_owner"],
+                row["confidence"], event_id, row["source_patch_ids"], row["superseded_patch_ids"],
+                row["impact"], row["evidence"], str(alignment_svc.PROPOSAL_TTL_HOURS),
+                req.reason.strip(), who, row["private_instruction"],
+            )
+            # The proposal is displaced immediately: the owner now confirms
+            # the corrected wording, not the original (design: "nothing was
+            # overwritten", the original stays in history, superseded).
+            await conn.execute(
+                "UPDATE alignment_events SET superseded_by = $2::uuid, updated_at = NOW() "
+                "WHERE user_id = $1 AND event_id = $3::uuid",
+                user_id, new_id, event_id,
+            )
+            fresh = await conn.fetchrow(
+                f"SELECT {ALIGNMENT_SHARED_COLUMNS} FROM alignment_events WHERE user_id = $1 AND event_id = $2::uuid",
+                user_id, new_id,
+            )
+    logger.info("alignment_corrected", user_id=user_id, original=event_id, event_id=new_id)
+    return {"status": "corrected", "event": _alignment_row(fresh), "supersedes": event_id}
 
 
 # ============================================
