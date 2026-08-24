@@ -4955,6 +4955,18 @@ async def _people_core(
         "WHERE user_id = $1 AND entity_id = ANY($2::uuid[]) ORDER BY alias",
         user_id, ids,
     )
+    # Keep-separate rulings, served per person (lost-phone recovery,
+    # 2026-08-24). SS's merge-proposal veto was a device-only UserDefaults
+    # cache of a decision CQ already holds; serving the pairs makes the
+    # cache derived, so a fresh phone never re-proposes a pair the user
+    # refused. Degrades to empty on a DB without the table.
+    separated_by_id: dict = {}
+    try:
+        for lo, hi in await _read_separations(conn, user_id, [str(i) for i in ids]):
+            separated_by_id.setdefault(lo, set()).add(hi)
+            separated_by_id.setdefault(hi, set()).add(lo)
+    except Exception as exc:
+        logger.debug("separations_unavailable", error=str(exc)[:120])
     appearance_rows = await conn.fetch(
         """
         SELECT pa.entity_id, pa.origin_id, pa.origin_type, pa.project_id,
@@ -5409,6 +5421,9 @@ async def _people_core(
             # presence-grade and serves null for a mention-only person,
             # which is exactly who a "which Sam?" picker needs it for.
             "last_seen_in": last_seen_in(appearances),
+            # Entity ids the user ruled are NOT this person. Sorted, so a
+            # browse surface never reshuffles; [] when nothing was ruled.
+            "separated_from": sorted(separated_by_id.get(eid, ())),
             "open_they_owe": len(they_owe),
             # Per-band counts over the SAME rows `they_owe` carries (shelved
             # already excluded), so the chip and the card read one source and

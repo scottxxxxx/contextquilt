@@ -2975,6 +2975,15 @@ appearance rows and get null, which is the same "0 meetings" the list
 already shows. Same row object on list and detail. Intended render: a
 badge under the candidate in the live and post-save pickers.
 
+### 5.19 `separated_from` on every People row (2026-08-24)
+
+Lost-phone recovery: SS's merge-proposal veto was a device-only
+UserDefaults cache of a ruling CQ already holds in `entity_separations`.
+Every list and detail row now carries `separated_from: [entity_id, ...]`
+(sorted; `[]` when nothing was ruled; both directions of each pair), so
+the client cache is derived and a fresh phone never re-proposes a pair
+the user refused. Degrades to `[]` on a DB without the table.
+
 ### Known client gap as of 2026-08-23
 
 **SS has no handler.** A 409 falls through `reassignSpeaker`'s switch into
