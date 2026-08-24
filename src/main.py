@@ -87,6 +87,7 @@ from contextquilt.services.people_network import (
 )
 from contextquilt.services import described_as
 from contextquilt.services import who_they_are
+from contextquilt.services import trajectory as trajectory_svc
 from contextquilt.services.entity_aliasing import person_candidates, tokenize_name
 from contextquilt.services.people_identity import (
     IdentityRequestError,
@@ -5918,6 +5919,7 @@ async def get_person(
     # along the person is.
     insights: Optional[list] = []
     who_they_are_card: Optional[dict] = None
+    trajectory_card: Optional[dict] = None
     # Per lens: where this person stands and whether waiting helps.
     # Null when the app cannot produce insights at all (capabilities
     # explains that) or when the fetch failed.
@@ -5979,6 +5981,7 @@ async def get_person(
             )
             insights = []
             who_they_are_card = None
+            trajectory_card = None
             # Same runtime and registry TTLs the ledger's decay bands and
             # the worker's decay loop read, so an insight's band and the
             # archival CQ will actually perform come from one authority.
@@ -6006,6 +6009,18 @@ async def get_person(
                         who_they_are_card = who_they_are.served(iv) | {
                             "patch_id": str(ir["patch_id"]),
                         }
+                    continue
+                # The hero lens leaves the capsule stack the same way:
+                # it is a card with its own arithmetic and receipts,
+                # served as `trajectory` (doc 16 5.15). Newest wins if
+                # the worker's replace ever left two.
+                if iv.get("lens") == trajectory_svc.LENS:
+                    if trajectory_card is None:
+                        served_traj = trajectory_svc.served(iv)
+                        if served_traj:
+                            trajectory_card = served_traj | {
+                                "patch_id": str(ir["patch_id"]),
+                            }
                     continue
                 # Evidence is the source patches' meetings: the receipts
                 # the 12a design demands, one row per DISTINCT meeting.
@@ -6232,6 +6247,9 @@ async def get_person(
         # yet (or the insights fetch failed); a client shows the series
         # and the title and waits. Receipts are the cited inputs.
         "who_they_are": who_they_are_card,
+        # The 5.15 hero: how this person is changing against their own
+        # past. Object or null; null is the common case, not the edge.
+        "trajectory": trajectory_card,
         # A list (possibly empty) unless the fetch failed, which is the
         # only cannot-tell. See capabilities.insights for whether this
         # app can ever produce them at all.

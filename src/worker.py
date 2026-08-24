@@ -7,6 +7,7 @@ Default: Mistral Small 3.1 via OpenRouter ($0.03/$0.11 per M tokens).
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -132,6 +133,7 @@ from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import described_as
 from contextquilt.services import relationship_lenses
 from contextquilt.services import who_they_are
+from contextquilt.services import trajectory as trajectory_svc
 from contextquilt.services.people_identity import (
     build_entity_resolver,
     merge_person_clusters,
@@ -2649,6 +2651,13 @@ class ColdPathWorker:
                     subject_key, app_id, rule,
                     MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
                 )
+                # The hero lens (16 5.15): how a person is changing
+                # against their own past. Arithmetic in
+                # services/trajectory.py; the model only writes.
+                created += await self._derive_trajectory(
+                    subject_key, app_id, rule,
+                    MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
+                )
                 continue
             clusters = await self.db.fetch(
                 f"""
@@ -3376,6 +3385,241 @@ class ColdPathWorker:
             logger.info("who_they_are_created", subject=subject_key,
                         person=person["name"], roles=len(roles),
                         perceptions=len(percs), model=model,
+                        replaced=len(existing))
+        return created
+
+    async def _derive_trajectory(
+        self, subject_key: str, app_id: str, rule: dict, budget: int
+    ) -> int:
+        """The 5.15 hero card: on what measure is this person unlike
+        THEMSELVES earlier. Windows split by MEETING SEQUENCE (never by
+        elapsed time; CQ holds no meeting dates), gates and the pick in
+        services/trajectory.py, the model writes and may state only
+        numbers it was handed.
+
+        TWO measures are wired, not three. `questions_to_you` is in the
+        MEASURES map and is deliberately not constructible: migration 37
+        attributes a question the user RECEIVES to the user block in
+        aggregate, never to the asker's row, so "questions they addressed
+        to you" per person does not exist in storage. Building it from
+        `questions_asked` (any addressee) would be a different claim
+        wearing this one's label. Same reason working_with.your_half is
+        not served: the user has no appearance rows, so your-side turns
+        and questions have no source. Both need capture-side columns and
+        can never be backfilled; recorded in 5.15.
+        """
+        if budget <= 0:
+            return 0
+        if os.getenv("CQ_TRAJECTORY_ENABLED", "true").lower() in ("0", "false", "no"):
+            return 0
+        model = os.getenv("CQ_TRAJECTORY_MODEL") or who_they_are.DEFAULT_MODEL
+        vocab = people_vocabulary(await self._app_manifest(app_id))
+        completables = (await get_type_runtime(self.db.fetch)).completable_types
+        user_id = subject_key.split(":", 1)[1] if ":" in subject_key else subject_key
+        resolve_person_entity = await self._person_entity_resolver(user_id)
+        try:
+            people = await self.db.fetch(
+                """
+                SELECT e.entity_id, e.name,
+                       (SELECT count(DISTINCT pa.origin_id) FROM person_appearances pa
+                         WHERE pa.entity_id = e.entity_id) AS meetings
+                FROM entities e
+                WHERE e.user_id = $1 AND e.entity_type = $2
+                  AND e.merged_into IS NULL AND e.suppressed_at IS NULL
+                  AND e.self_at IS NULL
+                ORDER BY e.last_seen_at DESC NULLS LAST
+                LIMIT 200
+                """,
+                user_id, vocab.person_entity_type,
+            )
+        except Exception as exc:
+            logger.debug("trajectory_roster_unavailable", error=str(exc)[:140])
+            return 0
+        created = 0
+        for person in people:
+            if created >= budget:
+                break
+            if int(person["meetings"] or 0) < trajectory_svc.MIN_SPAN_MEETINGS:
+                continue
+            eid = str(person["entity_id"])
+            rows = await self.db.fetch(
+                """
+                SELECT pa.origin_id, pa.turn_count,
+                       max(pa.last_seen_at) AS seen
+                FROM person_appearances pa
+                WHERE pa.user_id = $1 AND pa.entity_id = $2::uuid
+                  AND pa.origin_id IS NOT NULL
+                GROUP BY pa.origin_id, pa.turn_count
+                ORDER BY max(pa.last_seen_at) DESC
+                """,
+                user_id, eid,
+            )
+            # One row per meeting, newest first; a meeting with several
+            # rows keeps the highest turn count (the merge rule the
+            # upsert itself uses).
+            per_meeting: dict = {}
+            newest_first: list = []
+            for r in rows:
+                oid = str(r["origin_id"])
+                if oid not in per_meeting:
+                    per_meeting[oid] = r["turn_count"]
+                    newest_first.append(oid)
+                elif r["turn_count"] is not None:
+                    prev = per_meeting[oid]
+                    per_meeting[oid] = r["turn_count"] if prev is None else max(prev, r["turn_count"])
+            split = trajectory_svc.split_meetings(newest_first)
+            if not split:
+                continue
+            earlier_ids, recent_ids = split
+            span_ids = list(earlier_ids) + list(recent_ids)
+
+            def turn_window(ids):
+                counted = [oid for oid in ids if per_meeting.get(oid) is not None]
+                total = sum(int(per_meeting[oid]) for oid in counted)
+                return trajectory_svc.Window(total, len(counted), ids)
+
+            # closed_late: dated items this person owns from the span's
+            # meetings that CLOSED, late = closed after the date. Owner
+            # resolved through the entity graph, the identity lesson of
+            # the insight rework (owner text alone missed 97 of 110).
+            items = await self.db.fetch(
+                f"""
+                SELECT cp.patch_id, cp.origin_id, cp.value->>'owner' AS owner,
+                       (cp.value->>'deadline_date')::date AS due,
+                       cp.completed_at::date AS closed
+                FROM context_patches cp
+                JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                WHERE ps.subject_key = $1
+                  AND cp.patch_type = ANY($2::text[])
+                  AND cp.origin_id = ANY($3::text[])
+                  AND cp.value->>'deadline_date' ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}$'
+                  AND cp.completed_at IS NOT NULL
+                """,
+                subject_key, list(completables), span_ids,
+            )
+            owned: dict = {}
+            for it in items:
+                who = resolve_person_entity(it["owner"] or "")
+                if who != eid:
+                    continue
+                oid = str(it["origin_id"])
+                den, num, pids = owned.get(oid, (0, 0, []))
+                late = 1 if (it["closed"] and it["due"] and it["closed"] > it["due"]) else 0
+                pids = pids + [str(it["patch_id"])]
+                owned[oid] = (den + 1, num + late, pids)
+
+            def closed_window(ids):
+                den = sum(owned.get(oid, (0, 0, []))[0] for oid in ids)
+                num = sum(owned.get(oid, (0, 0, []))[1] for oid in ids)
+                receipts = [oid for oid in ids if oid in owned]
+                return trajectory_svc.Window(num, den, receipts)
+
+            windows = {
+                "speaking_turns": (turn_window(earlier_ids), turn_window(recent_ids)),
+                "closed_late": (closed_window(earlier_ids), closed_window(recent_ids)),
+            }
+            chosen = trajectory_svc.best_change(windows)
+            if not chosen:
+                continue
+            key = chosen["measure_key"]
+            buckets = []
+            for oid in span_ids:
+                if key == "speaking_turns":
+                    tc = per_meeting.get(oid)
+                    buckets.append({"origin_id": oid,
+                                    "numerator": int(tc or 0),
+                                    "denominator": 1 if tc is not None else 0})
+                else:
+                    den, num, _ = owned.get(oid, (0, 0, []))
+                    buckets.append({"origin_id": oid, "numerator": num, "denominator": den})
+            facts = trajectory_svc.served_trajectory(
+                chosen, person["name"], series=buckets, supersedes=[],
+            )
+            fingerprint = hashlib.sha256(
+                ("|".join(recent_ids) + "::" + json.dumps(
+                    [facts["earlier"], facts["recent"], key], sort_keys=True
+                )).encode()
+            ).hexdigest()[:16]
+            facts["fingerprint"] = fingerprint
+            existing = await self.db.fetch(
+                """
+                SELECT d.patch_id, COALESCE(d.status, 'active') AS status,
+                       d.value->'facts'->>'fingerprint' AS fp
+                FROM context_patches d
+                JOIN patch_subjects dps ON dps.patch_id = d.patch_id
+                WHERE dps.subject_key = $1 AND d.origin_mode = 'derived'
+                  AND d.value->>'lens' = $2 AND d.value->>'source_entity_id' = $3
+                  AND COALESCE(d.value->>'archive_cause', '') <> 'replaced'
+                """,
+                subject_key, trajectory_svc.LENS, eid,
+            )
+            if any(r["status"] != "active" for r in existing):
+                continue  # the durable no, this lens only
+            if any(r["fp"] == fingerprint for r in existing):
+                continue  # inputs unchanged; the person costs nothing
+            content = trajectory_svc.build_trajectory_content(person["name"], facts)
+            permitted = trajectory_svc.allowed_numbers(facts)
+            defects: list = []
+            parsed = None
+            response = None
+            for attempt in range(2):
+                try:
+                    response = await self.llm.extract(
+                        system_prompt=trajectory_svc.TRAJECTORY_SYSTEM,
+                        user_content=content, model=model,
+                    )
+                    parsed = trajectory_svc.parse_trajectory_response(
+                        response.content, permitted=permitted,
+                        person_name=person["name"], defects=defects, facts=facts,
+                    )
+                except Exception as exc:
+                    logger.warning("trajectory_failed", subject=subject_key,
+                                   person=person["name"], reason=str(exc)[:200])
+                    parsed = None
+                    break
+                if parsed or attempt:
+                    break
+                note = trajectory_svc.retry_note(
+                    defects[0] if defects else "",
+                    (response.content or {}).get("text", "") if isinstance(response.content, dict) else "",
+                )
+                if not note:
+                    break
+                content = content + "\n\n" + note
+                defects = []
+            if not parsed:
+                if response is not None:
+                    logger.info("trajectory_rejected", subject=subject_key,
+                                person=person["name"], measure=key,
+                                defect=defects[0] if defects else "declined")
+                continue
+            for r in existing:
+                await self.db.execute(
+                    """
+                    UPDATE context_patches
+                    SET status = 'archived', updated_at = NOW(),
+                        value = jsonb_set(value, '{archive_cause}', '"replaced"'::jsonb)
+                    WHERE patch_id = $1
+                    """,
+                    r["patch_id"],
+                )
+            source_ids = sorted({p for oid in span_ids for p in owned.get(oid, (0, 0, []))[2]})[:20] if key == "closed_late" else []
+            await self._write_person_insight(
+                subject_key, app_id, rule, "", person["name"],
+                source_ids, trajectory_svc.LENS,
+                parsed["text"], parsed["do"],
+                facts=facts, entity_id=eid,
+                extra={
+                    "narrative": parsed.get("narrative") or "",
+                    "display_order": trajectory_svc.DISPLAY_ORDER,
+                    "generated_at": datetime.utcnow().isoformat(),
+                    "model": getattr(response, "model", None) or model,
+                },
+            )
+            created += 1
+            logger.info("trajectory_created", subject=subject_key,
+                        person=person["name"], measure=key,
+                        direction=chosen["direction"], model=model,
                         replaced=len(existing))
         return created
 
