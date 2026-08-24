@@ -2541,15 +2541,33 @@ series is a model-bearing step and is deliberately NOT this; the 08-13
 person-analyzer experiment showed cross-meeting synthesis needs Sonnet
 and fails invisibly on Haiku. Decide it against that number.
 
-## 5.15 `trajectory` and `working_with` (2026-08-22) — SPECIFIED, MERGED, NOT SERVED
+## 5.15 `trajectory` and `working_with` (2026-08-22) — trajectory SERVED (2026-08-24); working_with NOT SERVED, and honestly cannot be yet
 
-**Read the status line first: both shapes below are implemented as pure,
-tested services and NOTHING SERVES THEM.** `services/trajectory.py` and
-`services/working_with.py` merged in #307 (107 tests). Neither is
-imported anywhere in `src/`. The measurement SQL that would populate them
-is not written, because it needs prod DB access that is currently
-blocked, and a query nobody can execute against real distributions is
-how a plausible join bug ships.
+**Status: `trajectory` is live.** The worker's consolidation person
+branch runs `_derive_trajectory` (after who_they_are, same budget), and
+person detail serves the card as `trajectory` next to `who_they_are`,
+filtered out of the `insights` stack. Kill switch
+`CQ_TRAJECTORY_ENABLED`; model `CQ_TRAJECTORY_MODEL` (Sonnet default,
+per the eval below). TWO of the three measures are wired:
+
+- `closed_late`: dated completables owned by the person (owner resolved
+  through the entity graph, never text), closed after their date, per
+  span meeting.
+- `speaking_turns`: `person_appearances.turn_count` per meeting; a
+  meeting with a null count is an honest zero-denominator bucket.
+
+**`questions_to_you` is in MEASURES and is deliberately NOT built**,
+because the data does not exist: migration 37 attributes a question the
+user RECEIVES to the aggregate user block, never to the asker's row, so
+"questions they addressed to you" has no per-person source. Building it
+from `questions_asked` (any addressee) would be a different claim
+wearing this one's label. **`working_with.your_half` is unservable for
+the same class of reason**: the user has no `person_appearances` rows,
+so your-side turns and your-side received questions have no storage.
+Both need CAPTURE-side changes (a per-asker to-user column; user-side
+turn counts) and can never be backfilled; until then `working_with`
+stays unserved (its moves writer prompt was also never authored). The
+sections below remain the contract for when that lands.
 
 This section exists because the contract previously lived only in
 cross-session messages and a PR body. When ShoulderSurf's session

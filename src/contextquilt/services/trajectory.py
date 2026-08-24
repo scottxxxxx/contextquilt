@@ -953,3 +953,26 @@ def retry_note(defect: str, attempt_text: str = "") -> Optional[str]:
             "counts as they were handed to you."
         )
     return None
+
+
+def served(value: dict) -> Optional[dict]:
+    """The 5.15 wire object from a stored card's value, or None.
+
+    The card is stored by `_write_person_insight` with the arithmetic in
+    `value.facts` (the `served_trajectory` dict plus a fingerprint) and
+    the prose at the top level. This reassembles exactly the doc 16 5.15
+    shape and nothing else; the fingerprint is regeneration bookkeeping
+    and stays out of the wire object.
+    """
+    facts = dict((value or {}).get("facts") or {})
+    if not facts.get("measure_key"):
+        return None
+    facts.pop("fingerprint", None)
+    return {
+        "lens": LENS,
+        "display_order": DISPLAY_ORDER,
+        **facts,
+        "text": (value or {}).get("text") or "",
+        "narrative": (value or {}).get("narrative") or "",
+        "do": (value or {}).get("do") or "",
+    }
