@@ -182,7 +182,6 @@ copy says meetings:
 
 Rules: project-scoped requests only (the chat flow is project-scoped);
 one indexed COUNT per condition, measured at ~5 ms warm on the largest
-prod project (1745 rows), 43 ms cold once; never a second recall; absent
-means not computed, zero means nothing excluded; byte-stable within a
+prod project (1745 rows), 43 ms cold once; never a second recall; `excluded` is `null` when not computed (the response model always carries the key), an object with zeros when a condition applied and nothing was kept out; byte-stable within a
 UTC day; written into the render cache with the context so a cache hit
 serves the same block. GP reads it off the raw JSON.
