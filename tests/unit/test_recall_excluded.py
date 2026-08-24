@@ -48,3 +48,21 @@ def test_definitions_ride_on_the_wire_and_absent_means_not_computed():
     assert b.count('"definition": (') == 2
     assert "if not excluded:\n                excluded = None" in b
     assert "A count of the scope, not of matches" in b
+
+
+def test_by_scope_sql_is_not_an_fstring_and_swaps_both_placeholders():
+    """An f-string interpolated {AGE} before the placeholder swap and sent
+    literal '{d}::int' to Postgres (prod, 2026-08-24, caught by GP's
+    proxied proof). Plain string, two replaces."""
+    b = _block()
+    i = b.index('recall_scope") == "people"')
+    q = b[i:b.index('excluded["by_scope"]', i)]
+    assert 'f"""' not in q
+    assert '.replace("{SCOPE_COL}", scope_col).replace("{AGE}", AGE.format(d="$4", u="$3"))' in q
+
+
+def test_people_lane_unpacks_all_four_read_context_values():
+    """Pre-existing 500 on every Free people-scoped recall: the helper grew
+    a fourth value and this lane kept unpacking three."""
+    assert "p_vocab, p_owed, _, _ = await _people_read_context(db_pool, app_id)" in MAIN
+    assert "p_vocab, p_owed, _ = await _people_read_context" not in MAIN

@@ -1351,16 +1351,20 @@ async def recall_context(
                     ),
                 }
             if (request.metadata or {}).get("recall_scope") == "people":
+                # Plain string + replace for BOTH placeholders: an f-string
+                # here interpolated {AGE} before the placeholder swap and
+                # shipped literal "{d}::int" to Postgres (syntax error,
+                # degraded to no block; GP's proof caught it).
                 n = await db_pool.fetchval(
-                    f"""
+                    """
                     SELECT count(DISTINCT cp.origin_id)
                     FROM context_patches cp
                     JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
-                    WHERE ps.subject_key = $1 AND cp.{scope_col} = $2
+                    WHERE ps.subject_key = $1 AND cp.{SCOPE_COL} = $2
                       AND COALESCE(cp.status, 'active') = 'active'
                       AND cp.origin_id IS NOT NULL
                       {AGE}
-                    """.replace("{AGE}", AGE.format(d="$4", u="$3")),
+                    """.replace("{SCOPE_COL}", scope_col).replace("{AGE}", AGE.format(d="$4", u="$3")),
                     subject_key, scope_val, universal_types, max_age_days,
                 )
                 excluded["by_scope"] = {
@@ -1436,7 +1440,11 @@ async def recall_context(
     # share a body. Unknown scope values fall through to the full lane
     # (open vocabulary, additive rule).
     if (request.metadata or {}).get("recall_scope") == "people":
-        p_vocab, p_owed, _ = await _people_read_context(db_pool, app_id)
+        # Four values since person_rule joined the tuple; this lane was
+        # left unpacking three and 500'd on every Free people-scoped
+        # recall, which GP degraded silently (found by GP proving #325
+        # through the proxied path, 2026-08-24).
+        p_vocab, p_owed, _, _ = await _people_read_context(db_pool, app_id)
         person_ids = [
             str(r["entity_id"]) for r in entity_rows
             if r["entity_type"] == p_vocab.person_entity_type
