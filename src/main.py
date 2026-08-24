@@ -276,6 +276,12 @@ class RecallResponse(BaseModel):
     patch_count: int
     communication_style: Optional[str] = None
     timing_ms: Optional[Dict[str, float]] = None
+    # What this recall could not use, as MEETINGS (GP, 2026-08-23: the
+    # two real memory moments an upgrade can name). Absent when CQ did
+    # not compute it (no project scope, or the condition does not
+    # apply); present with zeros when it applies and nothing was kept
+    # out. Definitions ride on the wire.
+    excluded: Optional[Dict[str, Any]] = None
 
 # ============================================
 # Recall constants
@@ -791,6 +797,7 @@ async def recall_context(
                 matched_cues=cached.get("matched_cues", []),
                 patch_count=cached["patch_count"],
                 communication_style=cached.get("communication_style"),
+                excluded=cached.get("excluded"),
                 timing_ms=timings,
             )
         except (json.JSONDecodeError, KeyError):
@@ -1297,6 +1304,79 @@ async def recall_context(
         except Exception:
             scoped_total = 0
 
+    # The `excluded` block (GP #773, the memory upgrade moments). Two
+    # indexed COUNTs at most, only on project-scoped requests, never a
+    # second recall. Counted in MEETINGS because the copy says meetings.
+    #   by_window: active meeting-bound rows in this project OUTSIDE the
+    #     tier window (the AGE predicate inverted), as distinct origins,
+    #     plus the oldest observation so "the one from May" is sayable.
+    #     Present only when a window was sent.
+    #   by_scope: on a people-scoped (Free) request, the meetings in this
+    #     project holding memory the People render cannot use. This is
+    #     scope size, not "matches that scored", because the people lane
+    #     skips every memory leg and the scored set does not exist; the
+    #     definition says so on the wire rather than in a docstring.
+    # Day-bucketed like everything else here: byte-stable within a UTC
+    # day, and it rides in the render cache with the context.
+    excluded: Optional[dict] = None
+    if has_project_scope:
+        try:
+            scope_col = "project_id" if recall_project_id else "project"
+            scope_val = recall_project_id or recall_project
+            excluded = {}
+            if max_age_days is not None:
+                row = await db_pool.fetchrow(
+                    f"""
+                    SELECT count(DISTINCT cp.origin_id) AS meetings,
+                           min(COALESCE(cp.last_observed_at, cp.created_at)) AS oldest
+                    FROM context_patches cp
+                    JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                    WHERE ps.subject_key = $1 AND cp.{scope_col} = $2
+                      AND COALESCE(cp.status, 'active') = 'active'
+                      AND cp.origin_id IS NOT NULL
+                      AND NOT (cp.patch_type = ANY($3::text[]))
+                      AND COALESCE(cp.last_observed_at, cp.created_at)::date
+                          < ((NOW() AT TIME ZONE 'utc')::date - $4::int)
+                    """,
+                    subject_key, scope_val, universal_types, max_age_days,
+                )
+                excluded["by_window"] = {
+                    "meetings": int(row["meetings"] or 0),
+                    "oldest": row["oldest"].isoformat() if row and row["oldest"] else None,
+                    "max_age_days": max_age_days,
+                    "definition": (
+                        "Meetings in this project whose memory is older than max_age_days "
+                        "and was therefore not available to this recall. Universal "
+                        "self-disclosure types are never windowed and are not counted."
+                    ),
+                }
+            if (request.metadata or {}).get("recall_scope") == "people":
+                n = await db_pool.fetchval(
+                    f"""
+                    SELECT count(DISTINCT cp.origin_id)
+                    FROM context_patches cp
+                    JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                    WHERE ps.subject_key = $1 AND cp.{scope_col} = $2
+                      AND COALESCE(cp.status, 'active') = 'active'
+                      AND cp.origin_id IS NOT NULL
+                      {AGE}
+                    """.replace("{AGE}", AGE.format(d="$4", u="$3")),
+                    subject_key, scope_val, universal_types, max_age_days,
+                )
+                excluded["by_scope"] = {
+                    "meetings": int(n or 0),
+                    "definition": (
+                        "Meetings in this project that hold memory a people-scoped recall "
+                        "cannot use. A count of the scope, not of matches: the people lane "
+                        "runs no memory leg, so no scored set exists to subtract from."
+                    ),
+                }
+            if not excluded:
+                excluded = None
+        except Exception as exc:
+            logger.debug("recall_excluded_unavailable", error=str(exc)[:120])
+            excluded = None
+
     # Cap for flat output — avoids runaway context blocks for users
     # with large quilts.
     flat_cap = request.max_patches or 15
@@ -1385,6 +1465,7 @@ async def recall_context(
                         "matched_cues": [],
                         "patch_count": ledger_total,
                         "communication_style": None,
+                        "excluded": excluded,
                     }),
                     ex=RECALL_RENDER_CACHE_TTL,
                 )
@@ -1400,6 +1481,7 @@ async def recall_context(
             context=context,
             matched_entities=matched_names,
             matched_patch_ids=ledger_ids,
+            excluded=excluded,
             matched_cues=[],
             patch_count=ledger_total,
             communication_style=None,
@@ -1504,6 +1586,7 @@ async def recall_context(
                     "matched_cues": matched_cues,
                     "patch_count": patch_count,
                     "communication_style": comm_style,
+                    "excluded": excluded,
                 }),
                 ex=RECALL_RENDER_CACHE_TTL,
             )
@@ -1537,6 +1620,7 @@ async def recall_context(
         matched_cues=matched_cues,
         patch_count=patch_count,
         communication_style=comm_style,
+        excluded=excluded,
         timing_ms=timings,
     )
 

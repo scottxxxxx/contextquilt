@@ -82,6 +82,21 @@ components:
             type: string
         patch_count:
           type: integer
+        excluded:
+          type: object
+          nullable: true
+          description: >
+            What this recall could not use, counted in MEETINGS, from one
+            indexed COUNT per condition on project-scoped requests only
+            (never a second recall). Absent when not computed; present with
+            zeros when the condition applied and nothing was kept out.
+            by_window {meetings, oldest, max_age_days, definition} is present
+            when metadata.max_age_days was sent: meetings in the project whose
+            memory is older than the window. by_scope {meetings, definition}
+            is present when metadata.recall_scope is "people": meetings in the
+            project holding memory the people render cannot use (a count of
+            the scope, not of matches; the people lane runs no memory leg).
+            Day-bucketed, byte-stable within a UTC day, cached with the render.
 
     MemoryRequest:
       type: object
