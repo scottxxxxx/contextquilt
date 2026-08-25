@@ -492,7 +492,9 @@ def test_a_rate_is_not_phrased_as_a_proportion():
     chosen = change_for_measure("speaking_turns", window(214, 8, "a"),
                                 window(96, 8, "b"))
     content = build_trajectory_content("Suresh", served_trajectory(chosen, "Suresh"))
-    assert "214 speaking turns across 8 meetings" in content
+    # Both numbers, labelled: the stretch size and the counted meetings
+    # (2026-08-24, the "first 7 meetings" conflation on a live card).
+    assert "EARLIER stretch of 8 meetings: 214 speaking turns in total, counted in 8 of those meetings" in content
     # Scoped to the DATA lines. The prompt's own prohibition names the
     # forbidden phrasing ("must never be written as N out of M"), so a
     # whole-content assertion trips on the guardrail it is checking for.
