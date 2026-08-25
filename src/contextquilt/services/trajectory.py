@@ -617,20 +617,34 @@ def build_trajectory_content(
             f"{recent.get('numerator')} out of {recent.get('denominator')}"
         )
     else:
+        # The denominator of a rate is the meetings WHERE THE THING WAS
+        # COUNTED, which can be fewer than the stretch holds (a null
+        # turn_count is an uncounted meeting, never a zero). Handing the
+        # writer "188 across 7 meetings" for an 8-meeting stretch produced
+        # "your first 7 meetings together" on Sukumar's live card
+        # (2026-08-24): the honest number wearing the wrong label. State
+        # both numbers and say which is which.
         lines.append(
-            f"- EARLIER stretch: {earlier.get('numerator')} "
-            f"{measure.counted_noun} across "
-            f"{earlier.get('denominator')} meetings"
+            f"- EARLIER stretch of {earlier.get('meetings')} meetings: "
+            f"{earlier.get('numerator')} {measure.counted_noun} in total, "
+            f"counted in {earlier.get('denominator')} of those meetings"
         )
         lines.append(
-            f"- RECENT stretch: {recent.get('numerator')} "
-            f"{measure.counted_noun} across "
-            f"{recent.get('denominator')} meetings"
+            f"- RECENT stretch of {recent.get('meetings')} meetings: "
+            f"{recent.get('numerator')} {measure.counted_noun} in total, "
+            f"counted in {recent.get('denominator')} of those meetings"
         )
         lines.append(
             "- THESE ARE TOTALS ACROSS MEETINGS, NOT PROPORTIONS. The "
             "first number is not a share of the second and must never be "
             "written as a percentage or as \"N out of M\"."
+        )
+        lines.append(
+            "- The stretch is the number of meetings; \"counted in N\" is "
+            "how many of them the measure was recorded for. Never call the "
+            "counted number \"the first N meetings\", \"the last N "
+            "meetings\" or \"the N meetings that followed\"; that phrase "
+            "belongs to the stretch size only."
         )
     lines.append(
         f"- the two stretches together span {facts.get('span_meetings')} "
@@ -737,6 +751,40 @@ def conflates_the_denominator(text: str, pair_kind: str) -> bool:
     if pair_kind != "proportion":
         return False
     return bool(_UNIT_CONFLATION.search(text or ""))
+
+
+WINDOW_SIZE_CONFLATED = "counted_meetings_called_the_stretch"
+
+
+def conflates_counted_with_stretch(text: str, facts: dict) -> bool:
+    """True when a RATE's counted-meetings denominator is written as the
+    stretch size ("your first 7 meetings", "the 5 meetings that
+    followed") while the stretch actually holds a different number.
+
+    Sukumar's live card, 2026-08-24: 188 turns counted in 7 of 8 earlier
+    meetings became "across your first 7 meetings together". Every
+    number was permitted, so the invented-number gate was blind; the
+    label was the lie. Only fires when the two numbers differ, so an
+    8-of-8 stretch keeps its natural sentence.
+    """
+    if (facts or {}).get("pair_kind") != "rate":
+        return False
+    for win in ((facts or {}).get("earlier") or {}, (facts or {}).get("recent") or {}):
+        try:
+            den, meetings = int(win.get("denominator")), int(win.get("meetings"))
+        except (TypeError, ValueError):
+            continue
+        if den == meetings:
+            continue
+        pattern = re.compile(
+            rf"\b(?:first|last|next|previous|earlier|later|following|"
+            rf"initial|opening|most recent)\s+{den}\s+meetings\b|"
+            rf"\b{den}\s+meetings\s+(?:that|which)\s+(?:followed|came|preceded)\b",
+            re.IGNORECASE,
+        )
+        if pattern.search(text or ""):
+            return True
+    return False
 
 
 def opens_with_a_preamble(do: str) -> bool:
@@ -861,6 +909,10 @@ def parse_trajectory_response(
             if defects is not None:
                 defects.append(UNIT_CONFLATED)
             return None
+        if conflates_counted_with_stretch(whole, facts):
+            if defects is not None:
+                defects.append(WINDOW_SIZE_CONFLATED)
+            return None
         if (facts.get("valence") or "neutral") == "neutral" \
                 and grades_a_neutral_measure(whole):
             if defects is not None:
@@ -925,6 +977,13 @@ def retry_note(defect: str, attempt_text: str = "") -> Optional[str]:
             "direction. What was observed is that a count moved. Describe "
             "the movement without words like declined, improved, slipped "
             "or disengaged."
+        )
+    if defect == WINDOW_SIZE_CONFLATED:
+        return (
+            "Your last answer called the counted-meetings number the size "
+            "of the stretch (\"the first N meetings\"). The stretch size "
+            "and the counted number are different numbers; say \"counted "
+            "in N of those meetings\" or leave the count out of the claim."
         )
     if defect == UNIT_CONFLATED:
         return (

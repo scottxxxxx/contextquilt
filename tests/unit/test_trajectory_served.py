@@ -86,3 +86,55 @@ def test_detail_serves_it_next_to_who_they_are_and_out_of_the_stack():
 def test_the_pass_runs_in_the_person_branch_of_consolidation():
     i = WORKER.index("created += await self._derive_who_they_are")
     assert "self._derive_trajectory" in WORKER[i:i + 700]
+
+
+# ------------------------------------------------------------------
+# The counted-meetings denominator is not the stretch size (2026-08-24,
+# Sukumar's live card: "across your first 7 meetings" for 7-of-8).
+# ------------------------------------------------------------------
+
+def _rate_facts(e_den=7, e_meet=8, r_den=5, r_meet=8):
+    return {"pair_kind": "rate", "measure_key": "speaking_turns", "valence": "neutral",
+            "movement": "down", "span_meetings": 16,
+            "earlier": {"numerator": 188, "denominator": e_den, "meetings": e_meet},
+            "recent": {"numerator": 35, "denominator": r_den, "meetings": r_meet}}
+
+
+def test_counted_number_called_the_stretch_is_rejected_on_a_rate():
+    from contextquilt.services.trajectory import conflates_counted_with_stretch
+    f = _rate_facts()
+    assert conflates_counted_with_stretch("His turns totaled 188 across your first 7 meetings together", f)
+    assert conflates_counted_with_stretch("against 35 across the 5 meetings that followed", f)
+    assert not conflates_counted_with_stretch("188 turns, counted in 7 of the 8 earlier meetings", f)
+
+
+def test_a_fully_counted_stretch_keeps_its_natural_sentence():
+    from contextquilt.services.trajectory import conflates_counted_with_stretch
+    assert not conflates_counted_with_stretch("across your first 8 meetings", _rate_facts(e_den=8))
+
+
+def test_proportions_are_never_checked_by_this_gate():
+    from contextquilt.services.trajectory import conflates_counted_with_stretch
+    f = dict(_rate_facts(), pair_kind="proportion")
+    assert not conflates_counted_with_stretch("your first 7 meetings", f)
+
+
+def test_the_prompt_states_both_numbers_for_a_rate():
+    from contextquilt.services.trajectory import build_trajectory_content
+    c = build_trajectory_content("Sukumar", _rate_facts())
+    assert "EARLIER stretch of 8 meetings: 188 speaking turns in total, counted in 7 of those meetings" in c
+    assert "Never call the counted number" in c
+
+
+def test_parse_rejects_it_and_the_retry_note_names_it():
+    from contextquilt.services.trajectory import parse_trajectory_response, retry_note, WINDOW_SIZE_CONFLATED, allowed_numbers
+    f = _rate_facts()
+    d = []
+    out = parse_trajectory_response(
+        {"skip": False, "text": "His turns totaled 188 across your first 7 meetings together, against 35 across the 5 meetings that followed.",
+         "narrative": "The shift is only visible in aggregate across the 16 meetings; no single meeting shows it, and the totals say what moved.",
+         "do": "Check the agenda length against the ground you need to cover."},
+        permitted=allowed_numbers(f), person_name="Sukumar", defects=d, facts=f,
+    )
+    assert out is None and WINDOW_SIZE_CONFLATED in d
+    assert "counted in N of those meetings" in retry_note(WINDOW_SIZE_CONFLATED)
