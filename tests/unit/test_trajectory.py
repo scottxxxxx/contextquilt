@@ -100,6 +100,85 @@ def test_a_gap_just_over_the_floor_qualifies():
     assert abs(found["gap_points"]) >= MIN_GAP_POINTS
 
 
+# --------------------------------------------------------------------
+# Hysteresis (Scott's ruling 2026-08-26): a live card holds at lower
+# floors than a new card needs to appear. Suresh's card vanished at 39
+# percent against the 40 floor the day one meeting slid the windows.
+# --------------------------------------------------------------------
+
+def test_a_rate_change_under_the_entry_floor_holds_a_live_card():
+    from contextquilt.services.trajectory import (
+        HOLD_RATE_RELATIVE_CHANGE, MIN_RATE_RELATIVE_CHANGE,
+    )
+    key = "speaking_turns"
+    earlier = window(100, 8, "a")        # 12.5 a meeting
+    recent = window(139, 8, "b")         # 17.4, +39 percent: Suresh's number
+    rel = (recent.rate_points - earlier.rate_points) / earlier.rate_points
+    assert HOLD_RATE_RELATIVE_CHANGE <= abs(rel) < MIN_RATE_RELATIVE_CHANGE
+    assert change_for_measure(key, earlier, recent) is None
+    assert change_for_measure(key, earlier, recent, held=True) is not None
+
+
+def test_a_thin_window_under_the_entry_denominator_holds_a_live_card():
+    from contextquilt.services.trajectory import HOLD_WINDOW_DENOMINATOR
+    key = "speaking_turns"
+    earlier = window(200, 8, "a")
+    recent = Window(40, 4, mtgs("b", 8))       # Pallavi's: 4 counted of 8
+    assert HOLD_WINDOW_DENOMINATOR <= recent.denominator < MIN_WINDOW_DENOMINATOR
+    assert change_for_measure(key, earlier, recent) is None
+    assert change_for_measure(key, earlier, recent, held=True) is not None
+
+
+def test_a_proportion_gap_under_the_entry_floor_holds_a_live_card():
+    from contextquilt.services.trajectory import HOLD_GAP_POINTS
+    key = "closed_late"
+    earlier = window(3, 10, "a")   # 30 points
+    recent = window(4, 10, "b")    # 40 points, gap 10: under both floors
+    assert change_for_measure(key, earlier, recent, held=True) is None
+    recent = Window(45, 100, mtgs("b", 8))   # 45 points, gap 15
+    assert HOLD_GAP_POINTS <= 15 < MIN_GAP_POINTS
+    assert change_for_measure(key, earlier, recent) is None
+    assert change_for_measure(key, earlier, recent, held=True) is not None
+
+
+def test_the_hold_floor_is_still_a_floor():
+    """Below it a live card comes down; hysteresis is not immortality."""
+    key = "speaking_turns"
+    earlier = window(100, 8, "a")
+    recent = window(110, 8, "b")         # +10 percent
+    assert change_for_measure(key, earlier, recent, held=True) is None
+
+
+def test_structural_gates_do_not_soften_for_a_live_card():
+    """Span, meetings per window and the instances floor are about
+    whether a comparison EXISTS. A live card gets no discount there."""
+    key = "closed_late"
+    earlier = window(0, 12, "a")
+    recent = Window(1, 5, mtgs("b", 4))       # one instance, unflattering
+    assert change_for_measure(key, earlier, recent, held=True) is None
+    key2, e2, r2 = qualifying()
+    short = Window(r2.numerator, r2.denominator, mtgs("b", 2))   # 2 meetings
+    assert change_for_measure(key2, e2, short, held=True) is None
+
+
+def test_best_change_softens_only_the_held_measure():
+    earlier_t = window(100, 8, "a")
+    recent_t = window(139, 8, "b")                   # +39 percent, hold only
+    key_c, e_c, r_c = qualifying("closed_late")      # clears entry
+    windows = {"speaking_turns": (earlier_t, recent_t), "closed_late": (e_c, r_c)}
+    # nothing held: only closed_late qualifies
+    assert best_change(windows)["measure_key"] == "closed_late"
+    # speaking_turns held: it qualifies, and ranking still decides
+    both = best_change(windows, held_key="speaking_turns")
+    assert both is not None
+    # held alone: the held measure survives where it would not appear
+    alone = best_change({"speaking_turns": (earlier_t, recent_t)}, held_key="speaking_turns")
+    assert alone and alone["measure_key"] == "speaking_turns"
+    assert best_change({"speaking_turns": (earlier_t, recent_t)}) is None
+    # a held key that is not in the windows changes nothing
+    assert best_change(windows, held_key="nothing") ["measure_key"] == "closed_late"
+
+
 def test_one_instance_cannot_carry_an_unflattering_claim():
     """A pattern needs instances, not merely a rate.
 

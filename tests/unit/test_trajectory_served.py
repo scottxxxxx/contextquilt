@@ -53,7 +53,7 @@ def test_the_pass_wires_only_the_constructible_measures():
 def test_the_pass_splits_on_sequence_and_uses_the_service_gates():
     body = _pass()
     assert "trajectory_svc.split_meetings(newest_first)" in body
-    assert "trajectory_svc.best_change(windows)" in body
+    assert "trajectory_svc.best_change(windows, held_key=held_key)" in body
     assert "trajectory_svc.allowed_numbers(facts)" in body
     assert "ORDER BY max(pa.last_seen_at) DESC" in body       # sequence proxy, never served
     assert "served_trajectory" in body
@@ -73,6 +73,33 @@ def test_durable_no_and_fingerprint_gate_before_any_model_call():
     call = body.index("self.llm.extract")
     assert gate < call
     assert 'if any(r["fp"] == fingerprint for r in existing)' in body
+
+
+# ------------------------------------------------------------------
+# Hysteresis (Scott's ruling 2026-08-26): a live card is judged at the
+# hold floors, and comes down as `lapsed` when even those fail, rather
+# than standing on numbers that are no longer true or flickering.
+# ------------------------------------------------------------------
+
+def test_the_live_card_is_read_before_the_gates_and_names_its_measure():
+    body = _pass()
+    fetch = body.index("d.value->'facts'->>'measure_key' AS measure_key")
+    pick = body.index("trajectory_svc.best_change(windows, held_key=held_key)")
+    assert fetch < pick
+    assert 'held_key = live[0]["measure_key"] if live else None' in body
+    assert body.count("FROM context_patches d") == 1        # one fetch, reused below
+
+
+def test_a_live_card_that_fails_the_hold_floor_is_archived_as_lapsed():
+    body = _pass()
+    i = body.index("if not chosen:")
+    block = body[i:i + 900]
+    assert "'\"lapsed\"'::jsonb" in block
+    assert "for r in live:" in block
+    assert "trajectory_lapsed" in block
+    # lapsed is not a durable no: the existing fetch skips lapsed rows the
+    # same way it skips replaced ones, so the person can earn a new card
+    assert "NOT IN ('replaced', 'lapsed')" in body
 
 
 def test_detail_serves_it_next_to_who_they_are_and_out_of_the_stack():

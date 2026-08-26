@@ -745,7 +745,9 @@ proposed but not built.
 
 **`value.archive_cause`** ships with this work: every archive site now
 stamps why (`decay`, `replaced`, `corrected`, `merge`,
-`project_archived`, `cleanup`, `dedup`), and completions already carry
+`project_archived`, `cleanup`, `dedup`, and since 2026-08-26 `lapsed`: a
+derived trajectory card whose arithmetic fell under the hold floor with
+nothing to succeed it, see 5.15), and completions already carry
 `completion_source`. Before this, 864 archived-without-completion rows
 on prod could not say whether a client deleted them or time did. Old
 rows stay null = unknown; a new archive site that stamps nothing fails
@@ -2652,6 +2654,27 @@ entitled to say it.
 **`supersedes` is served rather than inferred**, so the hero and a lens
 built on the same arithmetic never render twice on one screen. Empty list
 means nothing is superseded, which is not the same as absent.
+
+**Hysteresis (ruled 2026-08-26).** The entry floors (40 percent relative
+change on a rate, 20 points on a proportion, 5 counted meetings per
+window) are what a card needs to APPEAR. A card that is live is judged
+at lower HOLD floors (25 percent, 12 points, 4 counted) and only comes
+down when even those fail. Why: on 2026-08-25 one new meeting slid every
+window by one, Suresh's change landed at 39 percent and Pallavi's recent
+window at 4 counted, and both cards vanished the day after they were
+made, which reads as the system changing its mind rather than as the
+sample moving. Structural gates (span, meetings per window, instances
+behind an unflattering claim) never soften: they decide whether a
+comparison exists, not how large it is. The sentence is regenerated from
+the NEW numbers whenever the inputs move, so a held card never states
+arithmetic the current windows do not support. A live card that fails
+the hold floor is archived with `archive_cause = "lapsed"` (nothing
+succeeds it, so not `replaced`), and lapsed is NOT a durable no: the
+worker skips lapsed rows the way it skips replaced ones, and the person
+earns a new card at the entry floor. Ranking is unchanged, so a held
+card still yields to a different measure whose change is larger; it only
+stops yielding to nothing. Constants: `HOLD_RATE_RELATIVE_CHANGE`,
+`HOLD_GAP_POINTS`, `HOLD_WINDOW_DENOMINATOR` in `services/trajectory.py`.
 
 ### `working_with` — the coaching screen, and it is NARROWER than the design
 

@@ -3518,8 +3518,46 @@ class ColdPathWorker:
                 "speaking_turns": (turn_window(earlier_ids), turn_window(recent_ids)),
                 "closed_late": (closed_window(earlier_ids), closed_window(recent_ids)),
             }
-            chosen = trajectory_svc.best_change(windows)
+            # The live card, if any, BEFORE the gates run: its measure is
+            # judged against the hold floors (hysteresis, Scott's ruling
+            # 2026-08-26), and if nothing qualifies any more it is
+            # archived rather than left standing on numbers that are no
+            # longer true. Same rows feed the durable-no and fingerprint
+            # checks below.
+            existing = await self.db.fetch(
+                """
+                SELECT d.patch_id, COALESCE(d.status, 'active') AS status,
+                       d.value->'facts'->>'fingerprint' AS fp,
+                       d.value->'facts'->>'measure_key' AS measure_key
+                FROM context_patches d
+                JOIN patch_subjects dps ON dps.patch_id = d.patch_id
+                WHERE dps.subject_key = $1 AND d.origin_mode = 'derived'
+                  AND d.value->>'lens' = $2 AND d.value->>'source_entity_id' = $3
+                  AND COALESCE(d.value->>'archive_cause', '') NOT IN ('replaced', 'lapsed')
+                """,
+                subject_key, trajectory_svc.LENS, eid,
+            )
+            live = [r for r in existing if r["status"] == "active"]
+            held_key = live[0]["measure_key"] if live else None
+            chosen = trajectory_svc.best_change(windows, held_key=held_key)
             if not chosen:
+                for r in live:
+                    # LAPSED, not replaced: nothing succeeds it. The card
+                    # said something the arithmetic no longer supports
+                    # even at the hold floor, so it comes down. A lapsed
+                    # card is not a durable no; the person can earn a
+                    # new one at the entry floor.
+                    await self.db.execute(
+                        """
+                        UPDATE context_patches
+                        SET status = 'archived', updated_at = NOW(),
+                            value = jsonb_set(value, '{archive_cause}', '"lapsed"'::jsonb)
+                        WHERE patch_id = $1
+                        """,
+                        r["patch_id"],
+                    )
+                    logger.info("trajectory_lapsed", subject=subject_key,
+                                person=person["name"], measure=r["measure_key"])
                 continue
             key = chosen["measure_key"]
             buckets = []
@@ -3541,18 +3579,6 @@ class ColdPathWorker:
                 )).encode()
             ).hexdigest()[:16]
             facts["fingerprint"] = fingerprint
-            existing = await self.db.fetch(
-                """
-                SELECT d.patch_id, COALESCE(d.status, 'active') AS status,
-                       d.value->'facts'->>'fingerprint' AS fp
-                FROM context_patches d
-                JOIN patch_subjects dps ON dps.patch_id = d.patch_id
-                WHERE dps.subject_key = $1 AND d.origin_mode = 'derived'
-                  AND d.value->>'lens' = $2 AND d.value->>'source_entity_id' = $3
-                  AND COALESCE(d.value->>'archive_cause', '') <> 'replaced'
-                """,
-                subject_key, trajectory_svc.LENS, eid,
-            )
             if any(r["status"] != "active" for r in existing):
                 continue  # the durable no, this lens only
             if any(r["fp"] == fingerprint for r in existing):
