@@ -689,10 +689,22 @@ MAX_NAME_CANDIDATES = 6
 
 
 def rank_person_candidates(candidates, scope_project_ids=()):
-    """Most likely answer first, by three observed signals in order.
+    """Most likely answer first, by four observed signals in order.
 
-    Same project as the meeting being labelled, then most recently met,
-    then most meetings, then name for a stable tie break.
+    Present before mention-only, then same project as the meeting being
+    labelled, then most recently met, then most meetings, then name for
+    a stable tie break.
+
+    PRESENT FIRST is Scott's ruling of 2026-08-26, after his live "Sam"
+    run offered Sam Altman (an April article, never in a meeting) beside
+    Sam Wisco (one meeting). Mention-only people STAY in the list, since
+    a person you have talked about is a person you may now be meeting,
+    but a speaker label is a claim that somebody was in the room, and
+    the people who have been in a room before are the likelier answer.
+    `present` is served on each candidate (any appearance in a
+    presence-grade capacity: speaker, ownership, or the pre-31 unknown)
+    so the client can show WHY the order is what it is; a candidate
+    without the key sorts as not present.
 
     Note what is NOT in here: any claim about who the speaker probably
     is. Ordering a picker is a convenience, and being wrong costs a
@@ -713,6 +725,7 @@ def rank_person_candidates(candidates, scope_project_ids=()):
     out.sort(key=lambda c: (c.get("last_met") or ""), reverse=True)
     if scope:
         out.sort(key=lambda c: not (scope & set(c.get("projects") or ())))
+    out.sort(key=lambda c: not bool(c.get("present")))
     return out
 
 

@@ -2758,6 +2758,7 @@ Both callers of `_resolve_or_create_person`:
         "meetings": <int>,
         "last_met": "<ISO date or null>",
         "projects": ["<project_id>", ...],
+        "present": <bool>,   // any presence-grade appearance (speaker, ownership, pre-31 unknown)
         "matched_by": "alias" | "name"
     } ],
     "total": <int>,       // counted BEFORE the cap
@@ -2769,6 +2770,18 @@ Both callers of `_resolve_or_create_person`:
 `total` is counted before the cap so a long tail is visible as a number
 rather than silently dropped, the same reason `/v1/quilt` counts before it
 truncates.
+
+**Ranking is CQ's, and the client renders served order** (SS confirmed
+2026-08-26 that `ContestedName.swift` neither sorts nor re-sorts). The
+order, most significant first: `present` before mention-only (ruled
+2026-08-26 after the live "Sam" run offered Sam Altman, an April article
+with no meetings, beside Sam Wisco with one), then a project the meeting
+being labelled belongs to, then most recently met, then most meetings,
+then name. Mention-only people STAY in the list; present-first is an
+ordering, never an exclusion. `present` uses the SAME predicate as
+`people_signals.is_presence_grade` (in SQL, inside `_name_candidates`) so
+the picker never calls someone "been here" whom the cadence never
+counted.
 
 ### The three cases that raise it
 
