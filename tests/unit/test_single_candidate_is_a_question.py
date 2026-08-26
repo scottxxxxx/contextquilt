@@ -299,14 +299,16 @@ def _resolver_source():
     return text[start:end]
 
 
+TAKEN_PREDICATE = "if create_new and len(tokenize_name(name)) == 1:"
+
+
 def test_create_new_on_a_bare_exact_hit_raises_NAME_TAKEN_before_the_ask():
     body = _resolver_source()
-    taken = body.index("if row is not None and create_new")
+    taken = body.index(TAKEN_PREDICATE)
     ask = body.index("if row is not None and not create_new")
     resolve = body.index("if row is not None:\n        resolved = await _load_active_person")
     assert taken < ask < resolve
     block = body[taken:ask]
-    assert "len(tokenize_name(name)) == 1" in block
     assert '"code": "NAME_TAKEN"' in block
     assert "all_sharing_first_token=True" in block      # same list the ask showed
     assert "row = None" not in block                     # the first cut, now gone
@@ -316,10 +318,33 @@ def test_NAME_TAKEN_is_scoped_to_the_shape_that_asks():
     """A two-token exact match never 409s, so create_new there must not
     be refused either. Both branches share one predicate."""
     body = _resolver_source()
-    taken = body.index("if row is not None and create_new")
+    taken = body.index(TAKEN_PREDICATE)
     ask = body.index("if row is not None and not create_new")
     assert body[taken:ask].count("len(tokenize_name(name)) == 1") == 1
     assert "len(tokenize_name(name)) == 1" in body[ask:ask + 200]
+
+
+def test_create_new_on_a_bare_name_that_SHARES_a_first_name_is_also_refused():
+    """Scott's ruling 2026-08-26, strict everywhere: the live prompt on
+    the device already refused a bare "Christina" while "Christina Lee"
+    was on the roster; this server let Review > Rename create her. The
+    predicate no longer requires a literal whole-name hit: the 409 fires
+    on `row is not None OR candidates`, where candidates is the
+    first-token set (mention-only people included, it is the roster).
+    An uncollided bare name still creates: both conditions false falls
+    through to the create branch."""
+    body = _resolver_source()
+    taken = body.index(TAKEN_PREDICATE)
+    ask = body.index("if row is not None and not create_new")
+    block = body[taken:ask]
+    assert "if row is not None or candidates:" in block
+    assert block.index("all_sharing_first_token=True") < block.index("if row is not None or candidates:")
+    assert "Others are also called" in block                 # the collision message
+    assert "already someone's exact name" in block           # the literal one
+    # and the same fact as a machine field the client branches on
+    assert '"collision": "exact_name" if row is not None else "first_name"' in block
+    # the refusal is the ONLY thing inside that gate; no create happens there
+    assert "INSERT INTO entities" not in block
 
 
 def test_someone_new_is_a_keep_separate_against_every_offered_candidate():

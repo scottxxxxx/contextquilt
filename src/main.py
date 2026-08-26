@@ -7914,9 +7914,19 @@ async def _resolve_or_create_person(
     # `create_new` is the escape, and the 409 carries every John rather
     # than only the exact one, because "which John" is unanswerable from
     # a list of one when a second exists.
-    if row is not None and create_new \
-            and len(tokenize_name(name)) == 1:
-        # "SOMEONE NEW" WITH A NAME THAT IS LITERALLY TAKEN CANNOT CREATE.
+    if create_new and len(tokenize_name(name)) == 1:
+        # "SOMEONE NEW" WITH A NAME THAT IS LITERALLY TAKEN CANNOT CREATE,
+        # AND NEITHER CAN ONE THAT SHARES A FIRST NAME WITH ANYONE.
+        #
+        # The second half is Scott's ruling of 2026-08-26 ("strict
+        # everywhere"): the live labelling prompt on the device already
+        # refused a bare "Christina" while a "Christina Lee" was on the
+        # roster, and Review > Rename, which obeys this server, let it
+        # through. Two doors, two answers. A bare first name that
+        # collides with any live person (mention-only included, the
+        # roster is the roster) needs a surname or a nickname first,
+        # because a bare-named person is a permanent question in every
+        # picker after this one (#317: a bare first name always asks).
         #
         # entities is UNIQUE on (user_id, name, entity_type) and the
         # ingest worker upserts on that key, so two people named
@@ -7931,19 +7941,38 @@ async def _resolve_or_create_person(
             conn, user_id, name, vocab.person_entity_type,
             all_sharing_first_token=True,
         )
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "code": "NAME_TAKEN",
-                "message": (
+        if row is not None or candidates:
+            # Two messages, one code: the client already distinguishes
+            # "already someone's exact name" from "others are also
+            # called X" in its own live alert, so the server says the
+            # same thing on the same input.
+            if row is not None:
+                message = (
                     f"{name!r} is already someone's exact name. Add a "
                     "last name or a nickname to record a different person."
-                ),
-                "name": name,
-                "reason": "bare_first_name",
-                **candidate_payload(candidates, scope_project_ids),
-            },
-        )
+                )
+            else:
+                message = (
+                    f"Others are also called {name!r}. Add a last name "
+                    "or a nickname so this person can be told apart."
+                )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "NAME_TAKEN",
+                    "message": message,
+                    "name": name,
+                    "reason": "bare_first_name",
+                    # WHICH collision, as a machine field, because the
+                    # client's rename alert branches on it and does not
+                    # parse `message` (SS, 2026-08-26). The candidates
+                    # list carries the same fact (an exact hit is a
+                    # candidate whose name equals the typed one), so a
+                    # client on an older server can derive it.
+                    "collision": "exact_name" if row is not None else "first_name",
+                    **candidate_payload(candidates, scope_project_ids),
+                },
+            )
     if row is not None and not create_new \
             and len(tokenize_name(name)) == 1:
         candidates = await _name_candidates(
