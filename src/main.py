@@ -342,6 +342,56 @@ RECALL_RENDER_CACHE_TTL = 30  # seconds
 # budget, so degradation is visible before it costs anything.
 RECALL_SLOW_RENDER_MS = int(os.getenv("CQ_RECALL_SLOW_MS", "150"))
 
+# ---------------------------------------------------------------
+# Recall timings: every step key is a DELTA for the step it names, and
+# the parts are made to add up out loud.
+#
+# What this is for, 2026-08-27. A recall took 740ms and its line read
+# `redis_entity_lookup: 247.04`. That key was measured from the START OF
+# THE REQUEST while every neighbour was a delta, so it silently included
+# a vocabulary lookup that can touch Postgres and the render-cache read,
+# and the vocabulary lookup had no key of its own at all. I read the
+# label, believed Redis was slow, told another team a mechanism built on
+# it, and had to retract. The number was real; the NAME was wrong, and
+# nothing in the line could have revealed that.
+#
+# So: one key per step, each measuring only itself, each ending in `_ms`
+# so the rule is checkable rather than remembered; and `unaccounted_ms`,
+# which is the wall clock minus the parts. A gap now has somewhere to
+# appear instead of hiding inside whichever key happens to start at t0.
+# An instrument that cannot show its own blind spot is how a wrong
+# attribution survives.
+RECALL_STEP_TIMINGS = (
+    "vocab_lookup_ms",
+    "render_cache_lookup_ms",
+    "entity_index_ms",
+    "cue_index_ms",
+    "postgres_entities_and_graph_ms",
+    "postgres_patches_ms",
+    "score_and_format_ms",
+    "working_memory_ms",
+    "render_cache_write_ms",
+)
+
+# Measured INSIDE one of the steps above. Summing these would double
+# count, so they are reported and never added.
+RECALL_NESTED_TIMINGS = ("entity_index_rehydrated_ms",)
+
+
+def _stamp_recall_total(timings: dict, t0: float) -> dict:
+    """Stamp `total` and the time the step keys do not account for.
+
+    Called at every site that ends a recall, including the early
+    returns, because a blind spot that only appears on the slow path is
+    the one you will be reading when it matters.
+    """
+    timings["total"] = round((time.monotonic() - t0) * 1000, 2)
+    parts = sum(
+        float(timings.get(k) or 0) for k in RECALL_STEP_TIMINGS
+    )
+    timings["unaccounted_ms"] = round(timings["total"] - parts, 2)
+    return timings
+
 # ============================================
 # i18n — Recall section labels by locale
 # ============================================
@@ -756,7 +806,9 @@ async def recall_context(
     # upstream prompt caches (Anthropic cache_control) see a byte-stable
     # prefix. timing_ms is rebuilt fresh on every call so the cache is
     # observable in dashboards.
+    vocab_t = time.monotonic()
     recall_vocab = await _people_vocab_cached(app_id)
+    timings["vocab_lookup_ms"] = round((time.monotonic() - vocab_t) * 1000, 2)
     cache_key_payload = {
         "text": request.text,
         "metadata": request.metadata or {},
@@ -783,7 +835,7 @@ async def recall_context(
     if cached_blob:
         try:
             cached = json.loads(cached_blob)
-            timings["total"] = round((time.monotonic() - t0) * 1000, 2)
+            _stamp_recall_total(timings, t0)
             timings["render_cache_hit"] = 1
             # A cache hit is still a recall — the patches were served to
             # the caller, so they count as accessed.
@@ -809,6 +861,7 @@ async def recall_context(
 
     # Step 1: Find matching entities from Redis index (fast)
     entity_index_key = f"entity_index:{user_id}"
+    entity_t = time.monotonic()
     known_entities = await redis_client.smembers(entity_index_key)
 
     # Cache-miss self-heal. Without this, recall silently degrades to empty
@@ -828,7 +881,9 @@ async def recall_context(
         # Sliding TTL — keep an actively used cache from expiring under a long meeting.
         await redis_client.expire(entity_index_key, ENTITY_INDEX_TTL)
 
-    timings["redis_entity_lookup"] = round((time.monotonic() - t0) * 1000, 2)
+    # Renamed from `redis_entity_lookup`: it never bounded only Redis, and
+    # it was the label that produced a wrong attribution on 2026-08-27.
+    timings["entity_index_ms"] = round((time.monotonic() - entity_t) * 1000, 2)
 
     matched_names = []
     if known_entities:
@@ -856,6 +911,7 @@ async def recall_context(
     # rehydrate + sliding TTL as the entity index; sorted iteration for
     # byte-stable output (same gotcha as matched_names above).
     cue_index_key = f"cue_index:{user_id}"
+    cue_t = time.monotonic()
     known_cues = await redis_client.smembers(cue_index_key)
     if not known_cues:
         try:
@@ -873,6 +929,10 @@ async def recall_context(
             known_cues = set(cue_values)
     else:
         await redis_client.expire(cue_index_key, ENTITY_INDEX_TTL)
+    # Untimed until 2026-08-27, so its cost landed in no key at all and
+    # `unaccounted_ms` would have carried it. Same self-heal shape as the
+    # entity index, so the same right to a number of its own.
+    timings["cue_index_ms"] = round((time.monotonic() - cue_t) * 1000, 2)
 
     matched_cues = []
     if known_cues:
@@ -907,7 +967,7 @@ async def recall_context(
                 extract_unmatched_mentions(request.text, known_index_terms),
                 nothing_matched=True,
             )
-            timings["total"] = round((time.monotonic() - t0) * 1000, 2)
+            _stamp_recall_total(timings, t0)
             return RecallResponse(
                 context="\n".join(signal_lines),
                 matched_entities=[],
@@ -1011,7 +1071,7 @@ async def recall_context(
                 """,
                 user_id, entity_ids, max_hops
             )
-        timings["postgres_entities_and_graph"] = round((time.monotonic() - t1) * 1000, 2)
+        timings["postgres_entities_and_graph_ms"] = round((time.monotonic() - t1) * 1000, 2)
 
     # Step 4: Get patches for this user
     t2 = time.monotonic()
@@ -1221,7 +1281,7 @@ async def recall_context(
             all_patches.append(row)
             seen_texts.add(key)
 
-    timings["postgres_patches"] = round((time.monotonic() - t2) * 1000, 2)
+    timings["postgres_patches_ms"] = round((time.monotonic() - t2) * 1000, 2)
     t3 = time.monotonic()
 
     # Step 5: Score and format the context block.
@@ -1480,7 +1540,7 @@ async def recall_context(
             except Exception:
                 pass
         timings["render_cache_write_ms"] = round((time.monotonic() - t5) * 1000, 2)
-        timings["total"] = round((time.monotonic() - t0) * 1000, 2)
+        _stamp_recall_total(timings, t0)
         timings["render_cache_hit"] = 0
         # Served ledger items count as recall access (decay exemption),
         # same as the full lane.
@@ -1602,7 +1662,7 @@ async def recall_context(
             pass
 
     timings["render_cache_write_ms"] = round((time.monotonic() - t5) * 1000, 2)
-    timings["total"] = round((time.monotonic() - t0) * 1000, 2)
+    _stamp_recall_total(timings, t0)
     timings["render_cache_hit"] = 0
 
     # Tail visibility: the 2026-07-18 timeout was only discovered
