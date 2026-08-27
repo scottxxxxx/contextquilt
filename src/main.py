@@ -974,6 +974,12 @@ async def recall_context(
                 patch_count=0,
                 timing_ms=timings,
             )
+        # This exit never stamped a total, before or after #334, so it
+        # returned step timings with no clock to check them against and
+        # no `unaccounted_ms` at all. Found by running a real recall on
+        # prod rather than by reading the tests, which is the whole
+        # argument for going and looking at the artifact.
+        _stamp_recall_total(timings, t0)
         return RecallResponse(context="", matched_entities=[], patch_count=0, timing_ms=timings)
 
     # Step 2 & 3: entity rows + graph traversal — only meaningful when we

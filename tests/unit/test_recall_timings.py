@@ -129,8 +129,33 @@ def test_the_gap_between_the_parts_and_the_clock_is_published():
 
 def test_every_exit_from_recall_stamps_the_total_the_same_way():
     """Including the early returns. A blind spot that only appears on
-    the slow path is the one you are reading when it matters."""
+    one path is the one you are reading when it matters.
+
+    THIS TEST WAS TOO WEAK ON ITS FIRST DAY and the weakness is the
+    lesson. It asserted that no exit HAND-ROLLS a total, which was true,
+    and counted the stamps, which was >= 2. Both passed while one exit
+    returned `timing_ms` with no total and no `unaccounted_ms` at all.
+    A real recall on prod found it in one call. So the assertion is now
+    the property itself: every return that carries timings is preceded
+    by the stamp."""
     body = _recall_body()
-    assert body.count("_stamp_recall_total(timings, t0)") >= 2, "early returns too"
-    # no exit inside recall may hand-roll the total and skip the accounting
-    assert 'timings["total"] = round(' not in body
+    assert 'timings["total"] = round(' not in body, "no exit may hand-roll the total"
+    returns = [m.start() for m in re.finditer(r"return RecallResponse\(", body)]
+    assert returns, "the recall body must return somewhere"
+    stamps = [m.start() for m in re.finditer(r"_stamp_recall_total\(timings, t0\)", body)]
+    prev = 0
+    for at in returns:
+        tail = body[at:at + 900]
+        if "timing_ms=timings" not in tail:
+            prev = at
+            continue
+        # EXACT, not a proximity window: between the previous exit and
+        # this one there must be a stamp. A fixed character window was
+        # this test's second mistake in a day, passing on the two real
+        # exits whose RecallResponse simply has many fields.
+        assert any(prev <= sp < at for sp in stamps), (
+            f"the return at offset {at} carries timing_ms with no "
+            "_stamp_recall_total since the previous exit, so that path "
+            "reports step timings with no clock and no gap"
+        )
+        prev = at
