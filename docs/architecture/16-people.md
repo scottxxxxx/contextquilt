@@ -2663,6 +2663,25 @@ against the top of a 0..1 axis on the client. It also made the gap gate
 vacuous on rates (2675 "points" against 1200 clears a 20 point floor), so
 rates gate on relative change instead.
 
+**`measure_label` says what was measured, and the SECTION stays general**
+(ruled 2026-08-27). Scott: "if all we're ever doing is measuring their
+interactions then why not be more specific?" The observation was right in
+practice, since every card produced up to that day was `speaking_turns`,
+and wrong as a rename: this lens also carries `closed_late`, which is
+about delivering by a date and has nothing to do with how much somebody
+talks, and there was data for one on prod that same day (128 closed dated
+items). A section titled for engagement would be false the first time a
+`closed_late` card shipped. So the lens keeps its general title and the
+card names its own axis: `measure_label` is short, names WHAT was counted
+and never the direction ("Speaking turns", "Closing late"), because
+direction already rides `direction` and a grading label would put a
+verdict on a neutral measure. It is ENGLISH and it is a FALLBACK: the
+client localizes off `measure_key`, which is stable and present on cards
+derived before this field existed, and renders `measure_label` only for a
+key it does not recognise yet, so a new measure is never invisible on an
+older client. Serving the words alone would put English on a Spanish
+card.
+
 **`valence` keeps neutral measures neutral.** `closed_late` has an
 unflattering direction; speaking more, or asking fewer questions, does
 not, and the compass spec is explicit that neither end of those axes is

@@ -101,6 +101,57 @@ def test_a_gap_just_over_the_floor_qualifies():
 
 
 # --------------------------------------------------------------------
+# The per-measure label (Scott, 2026-08-27). The lens title cannot be
+# specific and stay true, because `closed_late` is about delivering by a
+# date and has nothing to do with engagement, so the SECTION stays
+# general and the CARD says what was measured.
+# --------------------------------------------------------------------
+
+def test_every_measure_carries_a_label():
+    for key, m in MEASURES.items():
+        assert m.label, f"{key} has no label"
+        assert m.label[0].isupper(), f"{key} label should read as a title: {m.label!r}"
+        assert len(m.label) <= 24, f"{key} label is too long for the header: {m.label!r}"
+
+
+def test_a_label_names_the_axis_and_never_the_direction():
+    """Direction is carried by `direction` and the badge. A label that
+    graded would put a verdict on a neutral measure, which is what
+    `valence` exists to prevent."""
+    banned = ("more", "less", "fewer", "better", "worse", "up", "down",
+              "declin", "improv", "drop", "rising", "falling")
+    for key, m in MEASURES.items():
+        low = m.label.lower()
+        for word in banned:
+            assert word not in low, f"{key} label states a direction: {m.label!r}"
+
+
+def test_the_label_is_served_next_to_the_key_that_localizes_it():
+    """The client localizes off `measure_key` and falls back to
+    `measure_label` for a key it does not know, so both must ride
+    together or the fallback has nothing to fall back from."""
+    key, earlier, recent = qualifying()
+    chosen = change_for_measure(key, earlier, recent)
+    facts = served_trajectory(chosen, "Ada")
+    assert facts["measure_label"] == MEASURES[key].label
+    assert facts["measure_key"] == key
+
+
+def test_the_label_survives_the_stored_round_trip():
+    """`served()` reassembles a stored card from `value.facts`. A card
+    derived BEFORE this field existed simply lacks it, which is why the
+    client must key off `measure_key` rather than require the label."""
+    from contextquilt.services.trajectory import served
+    key, earlier, recent = qualifying()
+    facts = served_trajectory(change_for_measure(key, earlier, recent), "Ada")
+    card = served({"facts": dict(facts), "text": "t", "narrative": "n", "do": "d"})
+    assert card["measure_label"] == MEASURES[key].label
+    old = {k: v for k, v in facts.items() if k != "measure_label"}
+    older = served({"facts": old, "text": "t", "narrative": "n", "do": "d"})
+    assert "measure_label" not in older and older["measure_key"] == key
+
+
+# --------------------------------------------------------------------
 # Hysteresis (Scott's ruling 2026-08-26): a live card holds at lower
 # floors than a new card needs to appear. Suresh's card vanished at 39
 # percent against the 40 floor the day one meeting slid the windows.
