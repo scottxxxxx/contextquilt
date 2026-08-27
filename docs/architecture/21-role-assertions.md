@@ -95,9 +95,24 @@ the precedent and the argument: the same type competing with fourteen
 others in one prompt produced 4 observations where a dedicated call
 produced 48.
 
-## 5. Decisions only Scott can make
+## 5. Decisions, RULED 2026-08-27
 
-**A. Meeting dates.** The spec is built on a time axis: calendar-month
+Scott ruled all three the day this was written. The reasoning that was
+put to him is kept below, because a ruling without its argument gets
+relitigated by whoever inherits it.
+
+- **A. Meeting dates: PERSIST THEM AT INGEST.** Stage 0 below is
+  therefore live work, not a proposal.
+- **B. Confidence: INTERNAL ONLY, never served.** It weights band widths
+  and suppresses low-confidence assertions from the evidence list, and it
+  never reaches the wire or the screen. Doc 16's rule stands unchanged.
+- **C. Facet vocabulary: PER PERSON.** Four to seven facets derived from
+  that person's own history. Cross-person comparison is deliberately
+  impossible here; that is what `relationship_lenses` is for.
+
+### The arguments as put
+
+**A. Meeting dates** (ruled: persist). The spec is built on a time axis: calendar-month
 buckets, quarters below eight meetings a month, a dated inflection point.
 CQ persists no meeting date, on purpose, and the trajectory lens went out
 of its way to split by MEETING SEQUENCE instead, because every timestamp
@@ -121,14 +136,14 @@ is additive, and it keeps the arithmetic where every other lens computes
 it. Note it does NOT weaken the recall byte-stability rule, which is
 about output, not storage.
 
-**B. Confidence.** The spec puts a 0..1 float on every assertion. Doc 16
+**B. Confidence** (ruled: internal only). The spec puts a 0..1 float on every assertion. Doc 16
 forbids serving a synthesized confidence float, for reasons that were
 paid for. These are reconcilable: keep confidence INTERNAL, as a
 weighting term for band widths, and never serve it. The spec itself only
 requires it for weighting and for suppressing low-confidence assertions
 from the evidence list, so nothing is lost.
 
-**C. Facet vocabulary, per-person or global.** The spec's own open
+**C. Facet vocabulary** (ruled: per person). The spec's own open
 question 4, and it leans per-person ("makes cross-person comparison
 impossible, probably correctly"). Per-person matches CQ's grain and
 avoids a global taxonomy nobody can maintain; it also means no roster
@@ -146,7 +161,7 @@ does for receipts.
 
 Each stage is useful on its own and none removes a surface.
 
-0. **Meeting dates** (CQ, small). Pending decision A. Unblocks every
+0. **Meeting dates** (CQ, small). RULED and in progress. Unblocks every
    later stage that has a time axis.
 1. **The assertion record** (CQ). Append-only, alongside `stated_roles`
    and `entity_descriptions` rather than replacing them: `source`,
