@@ -106,6 +106,25 @@ MIN_RATE_RELATIVE_CHANGE = 0.40
 # pattern nobody observed.
 MIN_INSTANCES_FOR_WORSE = 2
 
+# HYSTERESIS (Scott's ruling, 2026-08-26). The floors above are what a
+# card needs to APPEAR. A card that is already live needs less to STAY,
+# because a one-meeting wobble at the boundary otherwise flickers it off
+# and on, and a system that changes its mind every meeting reads as one
+# that never made it up. Suresh's card vanished the day one new meeting
+# slid the windows and his change landed at 39 percent against the 40
+# floor; nothing about him had changed, the sample had. So a live card
+# holds until the change drops below these lower floors, or a window
+# thins below the hold denominator. The sentence is regenerated from the
+# NEW numbers each time the inputs move, so nothing served is ever a
+# claim the current arithmetic does not support; only the threshold for
+# saying it at all is lower once it has been said. Structural gates
+# (span, meetings per window, instances for an unflattering claim) do
+# not soften: they are about whether a comparison exists, not how big it
+# is.
+HOLD_GAP_POINTS = 12
+HOLD_RATE_RELATIVE_CHANGE = 0.25
+HOLD_WINDOW_DENOMINATOR = 4
+
 # A trajectory is a claim about a stretch of a relationship, and the unit
 # is MEETINGS, never elapsed time. CQ cannot honestly say how long ago
 # anything happened (see the docstring: no meeting date is ever
@@ -305,18 +324,27 @@ def _span_meetings(earlier: Window, recent: Window) -> int:
     return len(set(earlier.origin_ids) | set(recent.origin_ids))
 
 
-def change_for_measure(key: str, earlier: Window, recent: Window) -> Optional[dict]:
+def change_for_measure(key: str, earlier: Window, recent: Window,
+                       held: bool = False) -> Optional[dict]:
     """The change on ONE measure, or None when it does not qualify.
 
     Every gate lives here rather than at the call site, so a new caller
     cannot forget one and a rule change lands in a single place.
+
+    `held` means a card on this measure is live for this person right
+    now, so the HOLD floors apply instead of the entry floors (see
+    HOLD_GAP_POINTS). Only the size floors soften; every structural gate
+    is the same either way.
     """
     measure = MEASURES.get(key)
     if measure is None:
         return None
-    if earlier.denominator < MIN_WINDOW_DENOMINATOR:
+    min_denominator = HOLD_WINDOW_DENOMINATOR if held else MIN_WINDOW_DENOMINATOR
+    min_gap = HOLD_GAP_POINTS if held else MIN_GAP_POINTS
+    min_relative = HOLD_RATE_RELATIVE_CHANGE if held else MIN_RATE_RELATIVE_CHANGE
+    if earlier.denominator < min_denominator:
         return None
-    if recent.denominator < MIN_WINDOW_DENOMINATOR:
+    if recent.denominator < min_denominator:
         return None
     if earlier.meetings < MIN_WINDOW_MEETINGS:
         return None
@@ -329,7 +357,7 @@ def change_for_measure(key: str, earlier: Window, recent: Window) -> Optional[di
     # conflating them is how the gate stops biting. See MIN_GAP_POINTS.
     if measure.pair_kind == "proportion":
         gap = recent.rate_points - earlier.rate_points
-        if abs(gap) < MIN_GAP_POINTS:
+        if abs(gap) < min_gap:
             return None
         relative = None
     else:
@@ -339,7 +367,7 @@ def change_for_measure(key: str, earlier: Window, recent: Window) -> Optional[di
             return None
         gap = recent.rate_points - earlier.rate_points
         relative = gap / earlier.rate_points
-        if abs(relative) < MIN_RATE_RELATIVE_CHANGE:
+        if abs(relative) < min_relative:
             return None
     if gap == 0:
         return None
@@ -365,13 +393,19 @@ def change_for_measure(key: str, earlier: Window, recent: Window) -> Optional[di
     }
 
 
-def best_change(windows: Dict[str, tuple]) -> Optional[dict]:
+def best_change(windows: Dict[str, tuple], held_key: Optional[str] = None) -> Optional[dict]:
     """The one change worth a card for this person, or None.
 
     `windows` maps a measure key to (earlier, recent). One card, not a
     stack: the same discipline the roster lens states, that a system
     emitting more than about one finding per person per period is
     producing horoscopes.
+
+    `held_key` is the measure of the card that is live for this person
+    right now, if any: that measure is judged against the HOLD floors,
+    every other measure against the entry floors. Ranking is unchanged,
+    so a live card still yields to a different measure whose change is
+    genuinely larger; it only stops yielding to nothing.
 
     Ties break on the measure key so two identical runs pick the same
     card. A card that changes identity between cycles reads to the user
@@ -383,7 +417,7 @@ def best_change(windows: Dict[str, tuple]) -> Optional[dict]:
             earlier, recent = pair
         except (TypeError, ValueError):
             continue
-        found = change_for_measure(key, earlier, recent)
+        found = change_for_measure(key, earlier, recent, held=(key == held_key))
         if found:
             candidates.append(found)
     if not candidates:
