@@ -54,6 +54,35 @@ MIN_CLUSTER_SIZE_FLOOR = 2
 DEFAULT_MIN_PATCHES = 3
 MAX_CLUSTERS_PER_USER_PER_CYCLE = 3
 MAX_USERS_PER_APP_PER_CYCLE = 20
+
+# The hero lens gets its OWN budget rather than the remainder of the one
+# above, ruled 2026-08-27 after it went dark for three days without a
+# word in the log.
+#
+# What happened: MAX_CLUSTERS_PER_USER_PER_CYCLE was one pool shared by
+# every rule for a user AND by the five person passes, and the hero pass
+# ran last on `MAX - created`. Two doors starved it, and both had to be
+# opened. A cue rule could spend the pool before the person rule was
+# reached at all, so the branch never ran; and inside the branch the four
+# earlier passes could spend what was left, so the hero pass was handed a
+# budget of zero and returned on its first person. Neither path logged
+# anything, so the symptom was simply that no card was ever made:
+# 2026-08-25 to 08-27, Suresh cleared the entry floor at +40.7 percent,
+# was the only person on the roster who did, and got nothing.
+#
+# A shared pool is right for passes that answer the same question and can
+# stand in for each other. The hero is not one of those: it is the only
+# lens that measures a person against THEMSELVES, so a cycle that spends
+# its slots on cue clusters has not covered the same ground. Separate
+# budgets also mean the fix cannot rot back into place by re-ordering.
+#
+# The ceiling per user per cycle is therefore this many ON TOP of the
+# shared pool, which is the cost of the ruling and is stated here rather
+# than discovered later. It is cheap in practice: the fingerprint gate
+# skips a person whose inputs have not moved before any model call, and
+# `created` counts WRITES, so a roster of unchanged people costs nothing
+# and does not consume a slot.
+MAX_TRAJECTORY_PER_USER_PER_CYCLE = 3
 CLUSTER_WINDOW_DAYS = 180
 MAX_SOURCE_TEXTS = 10  # prompt size cap per CUE synthesis call
 

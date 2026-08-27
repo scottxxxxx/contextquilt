@@ -83,6 +83,75 @@ def test_detail_serves_it_next_to_who_they_are_and_out_of_the_stack():
     assert '"who_they_are": who_they_are_card,' in MAIN[j - 300:j]
 
 
+# ------------------------------------------------------------------
+# The hero pass has its OWN budget, and says so when it cannot run
+# (ruled 2026-08-27). It was last in a fixed order on a shared pool of 3
+# and went dark 08-25 to 08-27 while Suresh cleared the entry floor at
+# +40.7 percent, logging nothing, because "no budget" and "nobody
+# qualified" produced the identical silence.
+# ------------------------------------------------------------------
+
+def _consolidate_user_body():
+    i = WORKER.index("async def _consolidate_user(")
+    return WORKER[i:WORKER.index("async def people_network_loop", i)]
+
+
+def test_the_hero_pass_gets_its_own_budget_not_the_remainder():
+    body = _consolidate_user_body()
+    call = body.index("self._derive_trajectory(")
+    args = body[call:call + 220]
+    assert "MAX_TRAJECTORY_PER_USER_PER_CYCLE" in args
+    # the remainder of the shared pool must not appear in ITS arguments
+    assert "MAX_CLUSTERS_PER_USER_PER_CYCLE - created" not in args
+    # and it is imported rather than re-declared in the worker
+    assert "MAX_TRAJECTORY_PER_USER_PER_CYCLE," in WORKER.split("async def")[0]
+
+
+def test_hero_cards_are_reported_but_never_charged_to_the_shared_pool():
+    """Folding them into `created` would make the separate budget
+    cosmetic: the hero cards would push the shared passes out instead."""
+    body = _consolidate_user_body()
+    assert body.count("hero_created += await self._derive_trajectory(") == 1
+    # the ONLY `... += await self._derive_trajectory(` is the hero one, so
+    # nothing adds it to the shared counter. Counted rather than asserted
+    # absent, because "hero_created" ends in "created" and the naive
+    # `not in` check passes on the very line it is meant to forbid.
+    assert body.count("created += await self._derive_trajectory(") == 1
+    assert "return created + hero_created" in body
+
+
+def test_the_person_branch_is_reachable_when_the_shared_pool_is_spent():
+    """The second door. A cue rule spending the pool used to break the
+    rule loop before the person rule was reached, so the hero lens never
+    ran at all and its own budget would have been unreachable."""
+    body = _consolidate_user_body()
+    assert "if created >= MAX_CLUSTERS_PER_USER_PER_CYCLE and not is_person_rule:" in body
+    guard = body.index("if created >= MAX_CLUSTERS_PER_USER_PER_CYCLE and not is_person_rule:")
+    branch = body.index("if is_person_rule:")
+    assert guard < branch
+
+
+def test_the_shared_passes_are_never_handed_a_negative_budget():
+    """The branch is now reachable with the pool already spent, so the
+    remainder can go negative without the clamp."""
+    body = _consolidate_user_body()
+    for pass_name in ("_consolidate_user_people", "_derive_follow_through",
+                      "_derive_stands_out", "_derive_who_they_are"):
+        i = body.index(f"self.{pass_name}(")
+        assert "max(0, MAX_CLUSTERS_PER_USER_PER_CYCLE - created)" in body[i:i + 200], pass_name
+
+
+def test_starvation_is_logged_at_info_rather_than_being_silent():
+    body = _pass()
+    assert body.count("trajectory_budget_exhausted") == 2
+    assert 'logger.info("trajectory_budget_exhausted"' in body
+    assert 'reason="no_budget_on_entry"' in body      # handed nothing
+    assert 'reason="budget_reached"' in body          # ran out part way
+    # the count is what was observed, so it comes from the loop position
+    assert "people_unexamined=len(people) - index" in body
+    assert "for index, person in enumerate(people):" in body
+
+
 def test_the_pass_runs_in_the_person_branch_of_consolidation():
     i = WORKER.index("created += await self._derive_who_they_are")
     assert "self._derive_trajectory" in WORKER[i:i + 700]

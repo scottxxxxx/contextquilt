@@ -2631,6 +2631,26 @@ its reason, so nobody re-adds them from a mock:
   `origin_id`; the client holds the only real meeting dates in the system
   and is the only side that can draw a time axis.
 
+**The pass has its OWN budget, and says so when it cannot run** (ruled
+2026-08-27). It used to run last of the five person passes on the
+remainder of `MAX_CLUSTERS_PER_USER_PER_CYCLE`, a pool also shared with
+every cue rule for that user, and it logged nothing when the remainder
+was zero. Two doors starved it: a cue rule could spend the pool before
+the person rule was reached, so the branch never ran; and inside the
+branch the four earlier passes could spend what was left. Between
+2026-08-25 and 08-27 no hero card was created for anyone while Suresh
+cleared the entry floor at +40.7 percent and was the only person on the
+roster who did, and nothing in the log said so, because "no budget" and
+"nobody qualified" produce identical silence. Now:
+`MAX_TRAJECTORY_PER_USER_PER_CYCLE` is its own bound, hero cards are
+reported in the cycle total but never charged to the shared pool, the
+rule loop's break does not apply to a rule with its own budget, and both
+starvation paths log `trajectory_budget_exhausted` at INFO with the
+number of people left unexamined. That number is what was OBSERVED and
+must never be read as a backlog that would have produced cards: most of
+a roster never qualifies. The per-user ceiling is therefore this budget
+ON TOP of the shared pool, which is the stated cost of the ruling.
+
 **`pair_kind` is a PROHIBITION, not decoration.** A proportion's
 numerator is a subset of its denominator ("8 of the 11 dated items he
 closed"); a rate's is not ("214 turns across 8 meetings"). A proportion

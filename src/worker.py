@@ -90,6 +90,7 @@ from contextquilt.services.consolidation import (
     QUIET_MEETING_WINDOW,
     MAX_CLUSTERS_PER_USER_PER_CYCLE,
     MAX_SOURCE_TEXTS,
+    MAX_TRAJECTORY_PER_USER_PER_CYCLE,
     MAX_USERS_PER_APP_PER_CYCLE,
     MODEL_CHOSEN_LENSES,
     RETIRED_LENSES,
@@ -2615,26 +2616,48 @@ class ColdPathWorker:
         self, subject_key: str, app_id: str, rules: list
     ) -> int:
         """Run every rule's cluster detection for one user; synthesize and
-        store up to MAX_CLUSTERS_PER_USER_PER_CYCLE new derived patches."""
+        store up to MAX_CLUSTERS_PER_USER_PER_CYCLE new derived patches,
+        PLUS up to MAX_TRAJECTORY_PER_USER_PER_CYCLE hero cards on their
+        own budget (see that constant for why the hero lens is not in the
+        shared pool, and what it cost to learn).
+
+        `hero_created` is deliberately not folded into `created`: it is
+        counted in the returned total, because a hero card is a patch
+        this cycle wrote and the cycle log must not under-report, but it
+        must never subtract from the shared pool or the separation is
+        cosmetic.
+        """
         created = 0
+        hero_created = 0
         for rule in rules:
-            if created >= MAX_CLUSTERS_PER_USER_PER_CYCLE:
+            is_person_rule = rule.get("cluster") == "person"
+            # A rule with its OWN budget is not stopped by the shared one.
+            # Before 2026-08-27 this break came first for every rule, so a
+            # cue rule that spent the pool meant the person branch was
+            # never entered and the hero lens never ran at all. The four
+            # shared passes inside the branch still respect the pool (they
+            # are handed 0 below and return immediately), which is the
+            # behaviour that was always intended for them.
+            if created >= MAX_CLUSTERS_PER_USER_PER_CYCLE and not is_person_rule:
                 break
-            if rule.get("cluster") == "person":
-                # Two passes over the same rule, sharing one budget. The
+            if is_person_rule:
+                # Four passes over the same rule, sharing one budget. The
                 # model-chosen lenses go first because they are the older
-                # contract; the computed lens takes whatever slots are
+                # contract; the computed lenses take whatever slots are
                 # left, so a cycle spends at most
-                # MAX_CLUSTERS_PER_USER_PER_CYCLE calls per user either
-                # way and neither pass can starve the other of more than
-                # one cycle's worth.
+                # MAX_CLUSTERS_PER_USER_PER_CYCLE calls per user across
+                # these four and none can starve another by more than one
+                # cycle's worth. Each remainder is clamped at zero because
+                # the branch is now reachable with the pool already spent,
+                # and a negative budget is a number no pass should have to
+                # reason about.
                 created += await self._consolidate_user_people(
                     subject_key, app_id, rule,
-                    MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
+                    max(0, MAX_CLUSTERS_PER_USER_PER_CYCLE - created),
                 )
                 created += await self._derive_follow_through(
                     subject_key, app_id, rule,
-                    MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
+                    max(0, MAX_CLUSTERS_PER_USER_PER_CYCLE - created),
                 )
                 # The contrastive pass runs LAST, and that ordering is
                 # deliberate rather than incidental: it is the only pass
@@ -2642,21 +2665,24 @@ class ColdPathWorker:
                 # say anything about one of them.
                 created += await self._derive_stands_out(
                     subject_key, app_id, rule,
-                    MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
+                    max(0, MAX_CLUSTERS_PER_USER_PER_CYCLE - created),
                 )
                 # The synthesis lens runs on its own model and its own
                 # fingerprint gate, so it spends nothing on a person
                 # whose inputs have not moved.
                 created += await self._derive_who_they_are(
                     subject_key, app_id, rule,
-                    MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
+                    max(0, MAX_CLUSTERS_PER_USER_PER_CYCLE - created),
                 )
                 # The hero lens (16 5.15): how a person is changing
                 # against their own past. Arithmetic in
-                # services/trajectory.py; the model only writes.
-                created += await self._derive_trajectory(
+                # services/trajectory.py; the model only writes. It runs
+                # on its OWN budget, never the remainder: it was last in
+                # a fixed order on a shared pool and went dark for three
+                # days without logging a word.
+                hero_created += await self._derive_trajectory(
                     subject_key, app_id, rule,
-                    MAX_CLUSTERS_PER_USER_PER_CYCLE - created,
+                    MAX_TRAJECTORY_PER_USER_PER_CYCLE,
                 )
                 continue
             clusters = await self.db.fetch(
@@ -2699,7 +2725,8 @@ class ColdPathWorker:
                 )
                 if made:
                     created += 1
-        return created
+        # Hero cards are reported but were never charged to the pool.
+        return created + hero_created
 
     async def people_network_loop(self):
         """The 13b orbit graph precompute (daily): one snapshot per user
@@ -3435,9 +3462,32 @@ class ColdPathWorker:
         except Exception as exc:
             logger.debug("trajectory_roster_unavailable", error=str(exc)[:140])
             return 0
+        # STARVATION IS SAID OUT LOUD, ruled 2026-08-27. This pass used to
+        # be handed the remainder of a shared budget and could be given
+        # zero, in which case it returned on its first person having
+        # logged nothing at all. Three days of no cards looked exactly
+        # like three days of nobody qualifying, and the only reason the
+        # difference was ever found was somebody asking where one card
+        # had gone. An absence is evidence only if the contradicting
+        # result had a channel to arrive through (doc 19.10), so this is
+        # that channel. It logs at INFO, not debug: a pass that cannot
+        # run is not a detail.
+        if budget <= 0:
+            logger.info("trajectory_budget_exhausted", subject=subject_key,
+                        budget=budget, created=0, people_unexamined=len(people),
+                        reason="no_budget_on_entry")
+            return 0
         created = 0
-        for person in people:
+        for index, person in enumerate(people):
             if created >= budget:
+                # The count is what was OBSERVED, never a claim that the
+                # remainder would have produced cards: most of a roster
+                # never qualifies, and this line must not read as a
+                # backlog it has not measured.
+                logger.info("trajectory_budget_exhausted", subject=subject_key,
+                            budget=budget, created=created,
+                            people_unexamined=len(people) - index,
+                            reason="budget_reached")
                 break
             if int(person["meetings"] or 0) < trajectory_svc.MIN_SPAN_MEETINGS:
                 continue
