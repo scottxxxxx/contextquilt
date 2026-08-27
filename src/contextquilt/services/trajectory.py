@@ -206,13 +206,38 @@ class Measure:
     sentence. Deriving it from `unit` by string surgery produced "214
     meetings across 8 meetings", which is what a field that does not
     exist looks like when it is faked from one that does.
+
+    `label` is the short name of WHAT WAS MEASURED, for the card to show
+    beside the lens title (Scott, 2026-08-27: "if all we're ever doing is
+    measuring their interactions then why not be more specific?"). It
+    exists because the lens title cannot be specific and stay true. The
+    lens is not an engagement lens: `closed_late` is about delivering by
+    a date and has nothing to do with how much somebody talks, so
+    renaming the section to engagement would be false the first time a
+    `closed_late` card ships, and there is data for one (128 closed dated
+    items on prod the day this was written). The section stays general
+    and the CARD gets specific.
+
+    A label names the axis and NEVER the direction: "Speaking turns", not
+    "Speaks less". Direction is already carried by `direction` and by the
+    badge the client draws from it, and a label that graded would put a
+    verdict on a neutral measure, which is the thing `valence` exists to
+    prevent.
+
+    It is ENGLISH and it is a FALLBACK. The client localizes off
+    `measure_key`, which is stable, already served, and present on cards
+    derived before this field existed; `measure_label` is what it renders
+    for a key it does not recognise yet, so a measure added here is never
+    invisible on an older client. Serving the words instead would put
+    English on a Spanish card, which is the bug three teams spent
+    2026-08-27 removing from the share page and the hero chip.
     """
 
     __slots__ = ("key", "subject", "phrase", "unit", "valence",
-                 "pair_kind", "counted_noun")
+                 "pair_kind", "counted_noun", "label")
 
     def __init__(self, key, subject, phrase, unit, valence, pair_kind,
-                 counted_noun=""):
+                 counted_noun="", label=""):
         self.key = key
         self.subject = subject
         self.phrase = phrase
@@ -220,6 +245,7 @@ class Measure:
         self.valence = valence
         self.pair_kind = pair_kind
         self.counted_noun = counted_noun
+        self.label = label
 
 
 # The precise `subject` labels the counts ON THE CARD, where there is
@@ -235,6 +261,10 @@ MEASURES = {
         "unflattering_up",
         "proportion",
         "items",
+        # Names the axis, never the direction: this card can say the
+        # person is closing late LESS often, and "Closing late" is still
+        # what was counted.
+        "Closing late",
     ),
     "speaking_turns": Measure(
         "speaking_turns",
@@ -244,6 +274,7 @@ MEASURES = {
         "neutral",
         "rate",
         "speaking turns",
+        "Speaking turns",
     ),
     "questions_to_you": Measure(
         "questions_to_you",
@@ -253,6 +284,7 @@ MEASURES = {
         "neutral",
         "rate",
         "questions to you",
+        "Questions to you",
     ),
 }
 
@@ -507,6 +539,13 @@ def served_trajectory(
         # ever, because its numerator is not a subset of its denominator.
         "pair_kind": measure.pair_kind,
         "counted_noun": measure.counted_noun,
+        # WHAT was measured, short, for the card to show beside the lens
+        # title. English and a FALLBACK: the client localizes off
+        # `measure_key`, which is stable and is present on cards derived
+        # before this field existed, and renders this only for a key it
+        # does not recognise. Serving the words alone would put English
+        # on a Spanish card.
+        "measure_label": measure.label,
         "direction": chosen["direction"],
         "movement": chosen["movement"],
         "span_meetings": chosen["span_meetings"],
