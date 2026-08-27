@@ -7776,7 +7776,18 @@ async def _name_candidates(conn, user_id: str, name: str, person_type: str,
                  WHERE pa.entity_id = e.entity_id) AS last_met,
                (SELECT array_agg(DISTINCT pa.project_id) FROM person_appearances pa
                  WHERE pa.entity_id = e.entity_id
-                   AND pa.project_id IS NOT NULL) AS projects
+                   AND pa.project_id IS NOT NULL) AS projects,
+               -- The SAME presence predicate as people_signals.is_presence_grade,
+               -- in SQL: speaker or ownership capacity, or the pre-31 empty
+               -- array (unknown must not become "did not attend"). A mention
+               -- is not a meeting. Two definitions of presence would let the
+               -- picker rank someone as "been here" whom the cadence never
+               -- counted.
+               EXISTS (SELECT 1 FROM person_appearances pa
+                        WHERE pa.entity_id = e.entity_id
+                          AND (cardinality(pa.capacities) = 0
+                               OR pa.capacities && ARRAY['speaker','ownership']::text[])
+                      ) AS present
         FROM entities e
         WHERE e.user_id = $1 AND e.entity_type = $2
           AND e.merged_into IS NULL AND e.suppressed_at IS NULL
@@ -7845,6 +7856,11 @@ async def _name_candidates(conn, user_id: str, name: str, person_type: str,
             "meetings": r["meetings"] or 0,
             "last_met": r["last_met"].isoformat() if r["last_met"] else None,
             "projects": [p for p in (r["projects"] or []) if p],
+            # Has this person ever been IN a meeting (presence-grade
+            # appearance), or only been talked about? Ranks present
+            # people first (Scott, 2026-08-26) and is served so the
+            # picker can say why.
+            "present": bool(r["present"]),
             # WHY this person is a candidate, because the caller's
             # decision depends on it. A recorded alias is a question the
             # user already answered; a structural first-name match is a

@@ -60,6 +60,58 @@ def test_missing_signals_never_raise():
     assert "Mike Nobody" in names(got)
 
 
+MENTION_ONLY_IN_SCOPE = {"entity_id": "m", "name": "Mike Mentioned",
+                         "meetings": 3, "last_met": "2026-08-25",
+                         "projects": ["emids"], "present": False}
+PRESENT_ELSEWHERE = {"entity_id": "q", "name": "Mike Quiet", "meetings": 1,
+                     "last_met": "2026-05-01", "projects": ["other"],
+                     "present": True}
+
+
+def test_present_beats_every_other_signal():
+    """Scott's ruling (2026-08-26): a person who has BEEN in a meeting
+    ranks above a mention-only person even when the mention-only one is
+    in this project, was mentioned yesterday, and more often."""
+    got = rank_person_candidates([MENTION_ONLY_IN_SCOPE, PRESENT_ELSEWHERE],
+                                 ["emids"])
+    assert names(got) == ["Mike Quiet", "Mike Mentioned"]
+
+
+def test_mention_only_stays_in_the_list():
+    """Present-first is an ordering, not an exclusion."""
+    got = rank_person_candidates([MENTION_ONLY_IN_SCOPE, PRESENT_ELSEWHERE])
+    assert "Mike Mentioned" in names(got) and len(got) == 2
+
+
+def test_present_ties_fall_through_to_the_older_signals():
+    """Among present people the 2026-08-23 order still holds: scope,
+    then recency, then volume."""
+    a = dict(DITROIA, present=True)
+    b = dict(PETERSON, present=True)
+    assert names(rank_person_candidates([a, b], ["emids"]))[0] == "Mike Peterson"
+    assert names(rank_person_candidates([a, b]))[0] == "Mike DiTroia"
+
+
+def test_missing_present_key_sorts_as_not_present():
+    """A caller that never computed presence must not accidentally
+    outrank one that did."""
+    unknown = dict(DITROIA)
+    unknown.pop("present", None)
+    got = rank_person_candidates([unknown, PRESENT_ELSEWHERE])
+    assert names(got)[0] == "Mike Quiet"
+
+
+def test_endpoint_serves_present_on_each_candidate():
+    """The wire carries WHY the order is what it is (rule: publish the
+    definition on the wire). `_name_candidates` must compute it from
+    presence-grade capacities and put it on every candidate dict."""
+    start = MAIN.index("async def _name_candidates(")
+    body = MAIN[start:start + 6000]
+    assert "AS present" in body
+    assert '"present":' in body
+    assert "'speaker'" in body and "'ownership'" in body
+
+
 def test_payload_counts_before_it_caps():
     """A long tail must be visible as a number, never silently dropped,
     the same rule /v1/quilt follows when it truncates."""
