@@ -2855,8 +2855,17 @@ load-bearing (the ingest worker upserts entities on it; rename checks
 collisions on it). Source-reading tests could not see a constraint.
 
 **Scott's ruling, 2026-08-23: B, ask for more name** rather than drop
-the uniqueness ingest depends on. So `create_new` with a single-token
-name that exactly matches an existing person returns:
+the uniqueness ingest depends on. **Extended 2026-08-26, "strict
+everywhere":** the live labelling prompt on the device already refused a
+bare first name whenever ANY roster person shared its first token
+(`LiveLabelResolver.isDistinctEnough`), while this server, and so Review
+> Rename, only refused a literal whole-name hit; two doors gave two
+answers on a bare "Christina" beside a "Christina Lee". Now `create_new`
+with a single-token name returns `NAME_TAKEN` when the name is literally
+taken OR when any live person (mention-only included) shares its first
+token; an uncollided bare name still creates. The message says which
+("already someone's exact name" vs "Others are also called 'Christina'"),
+the code and the payload are the same:
 
 ```json
 { "detail": {
@@ -2864,6 +2873,7 @@ name that exactly matches an existing person returns:
     "message": "'John' is already someone's exact name. Add a last name or a nickname to record a different person.",
     "name": "John",
     "reason": "bare_first_name",
+    "collision": "exact_name" | "first_name",   // which refusal; the client's alert branches on it
     "candidates": [ ...same shape and same first-token set as CONTESTED_NAME... ],
     "total": <int>, "truncated": <bool>
 } }
