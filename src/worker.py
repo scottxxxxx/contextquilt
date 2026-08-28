@@ -6059,6 +6059,49 @@ class ColdPathWorker:
             origin_id = metadata.get("origin_id") if metadata else None
             origin_type = metadata.get("origin_type") if metadata else None
 
+            # THE DAY THE MEETING HAPPENED, recorded rather than spent.
+            #
+            # Until 2026-08-27 this timestamp built the `Meeting date:`
+            # prompt line and was dropped, so every date CQ held was an
+            # ingest clock and no surface could honestly bucket by month
+            # (doc 21, ruled by Scott). It is written here and read by
+            # nothing yet; the point is that history starts accruing now,
+            # because a meeting's date is like the transcript, available
+            # exactly once.
+            #
+            # Failure is swallowed on purpose. This is bookkeeping beside
+            # the ingest, never a reason to lose an extraction, and the
+            # table may not exist on the MCP deployment's lagging
+            # Postgres, which is the same degradation entity_aliases and
+            # patch_cues already take.
+            # Gated on the PARSED date (computed above for the prompt's
+            # `Meeting date:` line), never on the raw string: that parse
+            # already handles the Z suffix and yields None on anything it
+            # cannot read, and slicing the string instead would write a
+            # confident wrong day for any format it does not expect.
+            if origin_id and meeting_date:
+                try:
+                    await self.db.execute(
+                        """
+                        INSERT INTO meeting_origins
+                            (user_id, origin_id, origin_type, meeting_date)
+                        VALUES ($1, $2, $3, $4::date)
+                        ON CONFLICT (user_id, origin_id) DO UPDATE
+                           SET meeting_date = EXCLUDED.meeting_date,
+                               origin_type  = COALESCE(EXCLUDED.origin_type,
+                                                       meeting_origins.origin_type),
+                               updated_at   = NOW()
+                         WHERE meeting_origins.meeting_date
+                               IS DISTINCT FROM EXCLUDED.meeting_date
+                        """,
+                        user_id, str(origin_id),
+                        str(origin_type) if origin_type else None,
+                        meeting_date,
+                    )
+                except Exception as exc:
+                    logger.debug("meeting_origin_not_recorded",
+                                 origin_id=str(origin_id), error=str(exc)[:140])
+
             # Auto-register project if project_id provided
             if project_id and project:
                 try:
