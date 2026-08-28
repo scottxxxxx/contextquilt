@@ -90,6 +90,8 @@ from contextquilt.services.consolidation import (
     CLUSTER_WINDOW_DAYS,
     QUIET_MEETING_WINDOW,
     MAX_CLUSTERS_PER_USER_PER_CYCLE,
+    LENS_ATTEMPT_LIMIT,
+    LENS_ATTEMPT_PASS_SLOT,
     MAX_PERSON_LENSES_PER_USER_PER_CYCLE,
     MAX_SOURCE_TEXTS,
     MAX_TRAJECTORY_PER_USER_PER_CYCLE,
@@ -3917,6 +3919,23 @@ class ColdPathWorker:
             )
             if not remaining_lenses(taken):
                 continue
+            # SKIP A PERSON THIS PASS HAS ALREADY FAILED ON, on evidence
+            # no bigger than today's. The check is here rather than
+            # inside the call because here is where it saves the call,
+            # which is the entire point: the same two people were being
+            # paid for on every cycle for days and still had no card.
+            user_id_for_attempts = (
+                subject_key.split(":", 1)[1] if ":" in subject_key else subject_key
+            )
+            evidence = len({str(p) for p in (cluster["patch_ids"] or ())})
+            if await self._lens_in_cooldown(
+                user_id_for_attempts, cluster["entity_id"],
+                LENS_ATTEMPT_PASS_SLOT, evidence,
+            ):
+                logger.debug("profile_cooldown_skipped",
+                             subject=subject_key, person=cluster["person_name"],
+                             evidence=evidence)
+                continue
             made = await self._synthesize_person_cluster(
                 subject_key, app_id, rule,
                 cluster["person_patch_id"], cluster["person_name"],
@@ -3926,6 +3945,12 @@ class ColdPathWorker:
             )
             if made:
                 created += 1
+                # A success closes the whole person: the pass got
+                # something out of this corpus, so nothing it tried
+                # before is evidence about what it can do next.
+                await self._clear_lens_failures(
+                    user_id_for_attempts, cluster["entity_id"]
+                )
         return created
 
     async def _taken_lenses(
@@ -3977,6 +4002,95 @@ class ColdPathWorker:
             subject_key, produce_type, ids,
         )
         return {r["lens"] for r in rows if r["lens"]}
+
+    async def _record_lens_failure(self, user_id: str, entity_id: "str | None",
+                                   lens: str, outcome: str,
+                                   defect: "str | None", evidence: int) -> None:
+        """A failed attempt is a fact, and until 2026-08-28 it was the
+        only outcome this pass did not write down.
+
+        A decline logged at debug and returned; a rejected card wrote
+        nothing either. The idempotency gate counts lens STAMPS, so it
+        never saw either one, and the same people were retried every
+        cycle forever at a model call each while the readiness surface
+        told the user their card was still coming.
+        """
+        if not entity_id:
+            return
+        try:
+            await self.db.execute(
+                """
+                INSERT INTO person_lens_attempts
+                    (user_id, entity_id, lens, attempts, evidence_at_attempt,
+                     last_outcome, last_defect, last_attempt_at)
+                VALUES ($1, $2::uuid, $3, 1, $4, $5, $6, NOW())
+                ON CONFLICT (user_id, entity_id, lens) DO UPDATE
+                   SET attempts = CASE
+                           -- Evidence grew, so this is a fresh question
+                           -- rather than the same one again: start over
+                           -- instead of holding an old failure against a
+                           -- corpus that no longer exists.
+                           WHEN EXCLUDED.evidence_at_attempt
+                                > COALESCE(person_lens_attempts.evidence_at_attempt, -1)
+                           THEN 1
+                           ELSE person_lens_attempts.attempts + 1
+                       END,
+                       evidence_at_attempt = EXCLUDED.evidence_at_attempt,
+                       last_outcome = EXCLUDED.last_outcome,
+                       last_defect  = EXCLUDED.last_defect,
+                       last_attempt_at = NOW()
+                """,
+                user_id, str(entity_id), lens, int(evidence or 0),
+                outcome, (defect or None),
+            )
+        except Exception as exc:
+            # Bookkeeping beside the pass, never a reason to lose it.
+            logger.debug("lens_attempt_not_recorded", lens=lens,
+                         error=str(exc)[:140])
+
+    async def _lens_in_cooldown(self, user_id: str, entity_id: "str | None",
+                                lens: str, evidence: int) -> bool:
+        """True when this slot has already failed LENS_ATTEMPT_LIMIT
+        times on evidence no larger than today's.
+
+        The gate is EVIDENCE, not a clock. A person who failed on a given
+        corpus will fail on that same corpus tomorrow, so a timer would
+        only decide how often we pay for it. Growth is the thing that
+        makes the question new.
+        """
+        if not entity_id:
+            return False
+        try:
+            row = await self.db.fetchrow(
+                """
+                SELECT attempts, evidence_at_attempt
+                  FROM person_lens_attempts
+                 WHERE user_id = $1 AND entity_id = $2::uuid AND lens = $3
+                """,
+                user_id, str(entity_id), lens,
+            )
+        except Exception:
+            return False        # table may lag on the MCP deployment
+        if row is None:
+            return False
+        if int(row["attempts"] or 0) < LENS_ATTEMPT_LIMIT:
+            return False
+        return int(evidence or 0) <= int(row["evidence_at_attempt"] or 0)
+
+    async def _clear_lens_failures(self, user_id: str,
+                                   entity_id: "str | None") -> None:
+        """A success closes the whole person: the pass got something out
+        of this corpus, so nothing it tried before is evidence about what
+        it can do next."""
+        if not entity_id:
+            return
+        try:
+            await self.db.execute(
+                "DELETE FROM person_lens_attempts WHERE user_id = $1 AND entity_id = $2::uuid",
+                user_id, str(entity_id),
+            )
+        except Exception:
+            pass
 
     async def _synthesize_person_cluster(
         self, subject_key: str, app_id: str, rule: dict,
@@ -4084,12 +4198,28 @@ class ColdPathWorker:
             # answering in a shape the card cannot hold, and a run of
             # them would silently stop the pass. Different level, so the
             # difference is visible without reading every debug line.
+            # WRITE THE FAILURE DOWN. A rejection knows its lens because
+            # the model chose one and the parse then refused the card; a
+            # decline does not, because the model produced nothing at
+            # all, so it lands against the pass sentinel and stalls every
+            # lens still pending for this person, which is what a decline
+            # means.
+            failed_lens = (
+                (profile or {}).get("lens") if defects else None
+            ) or LENS_ATTEMPT_PASS_SLOT
             if defects:
                 logger.info("profile_card_rejected", subject=subject_key,
                             person=person_name, defect=defects[0])
             else:
                 logger.debug("profile_declined", subject=subject_key,
                              person=person_name)
+            await self._record_lens_failure(
+                subject_key.split(":", 1)[1] if ":" in subject_key else subject_key,
+                entity_id, failed_lens,
+                "rejected" if defects else "declined",
+                defects[0] if defects else None,
+                len({str(p) for p in (source_patch_ids or ())}),
+            )
             return False
 
         # The post-check. Re-read rather than trusting the pre-call set:

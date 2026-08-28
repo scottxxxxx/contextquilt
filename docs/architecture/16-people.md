@@ -1048,8 +1048,36 @@ So the detail route serves, per lens in the whole vocabulary:
 | `available` | the card is in `insights` | no, it is already there |
 | `pending_evidence` | below the gate, and the numbers say by how much | yes |
 | `pending_pattern` | gate met, no claim found yet, re-checked each cycle | yes |
+| `stalled` | gate met, the pass HAS TRIED on this evidence and it did not yield | yes, but only new evidence |
 | `suppressed` | the user rejected this card | NO, never invite waiting |
 | `retired` | the system archived it | NO, never invite waiting |
+
+**`stalled` (ruled 2026-08-28) is NOT closed**, and the distinction is the
+whole reason it exists. It was added after ShoulderSurf asked whether a
+decline is visible to a client. It is: a person whose card fails the same
+parse gate on every cycle was served `pending_pattern`, which the client
+renders as "Nothing stands out yet. This fills in as more comes in about
+{name}", inviting an action that cannot work, forever. Measured: Ragu on
+`stated_role_dropped` and Pallavi Kandanu on `opens_with_name`,
+identically, across three days.
+
+`more_meetings_help` stays TRUE on it, and that is precise rather than
+sloppy. The retry rule is EVIDENCE GROWTH, not a timer (a person who
+fails on a corpus fails on that same corpus tomorrow, so a clock would
+only decide how often we pay for it), so a new meeting genuinely does
+cause another attempt. What the state stops claiming is that the CURRENT
+evidence is still going to produce something. A client may therefore say
+"we looked and found nothing yet, we will look again after your next
+meeting", which is the first time saying "we looked" has been true:
+`pending_pattern` cannot distinguish a pass that declined from one that
+never ran, so no client was entitled to claim it.
+
+THE ATTEMPT COUNT IS NOT SERVED, deliberately. SS argued it and the
+argument is right: "we have looked 6 times" turns candour into a report
+of repeated failure and reads as the app being broken. It lives in
+`person_lens_attempts` for diagnosis and is absent from the wire rather
+than merely unused on it, because a value that can be rendered will be
+rendered by whoever is in a hurry.
 
 `suppressed` and `retired` both mean the pass will not produce this card
 again, because the durable no ignores status: any stamp closes the lens

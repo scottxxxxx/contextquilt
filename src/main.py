@@ -4969,6 +4969,7 @@ async def _person_insight_readiness(
     person_patch_ids: Optional[Any],
     ownership_label: str,
     rule: dict,
+    entity_id: Optional[str] = None,
 ) -> dict:
     """Per lens: where this person stands, and whether waiting helps.
 
@@ -5035,12 +5036,33 @@ async def _person_insight_readiness(
             """,
             f"user:{user_id}", patch_ids,
         )
+    # What the pass has already TRIED and failed on. Without this a
+    # person whose card fails the same parse gate every cycle is served
+    # `pending_pattern`, which the client renders as "this fills in as
+    # more comes in", inviting an action that cannot work.
+    attempt_rows: list = []
+    try:
+        attempt_rows = [dict(r) for r in await db_pool.fetch(
+            """
+            SELECT lens, attempts, evidence_at_attempt
+              FROM person_lens_attempts
+             WHERE user_id = $1 AND entity_id = $2::uuid
+            """,
+            user_id, entity_id,
+        )] if entity_id else []
+    except Exception:
+        # Table may lag on the MCP deployment's own Postgres. Degrading
+        # to today's behaviour is safe: every lens simply reads as
+        # pending rather than stalled.
+        attempt_rows = []
+
     return build_insight_readiness(
         [dict(r) for r in source_rows],
         [dict(r) for r in stamp_rows],
         today=datetime.utcnow().date(),
         min_patches=rule["min_patches"],
         min_meetings=rule["min_meetings"],
+        attempt_rows=attempt_rows,
     )
 
 
@@ -6104,6 +6126,7 @@ async def get_person(
                 row.get("_patch_ids") or row.get("patch_id"),
                 vocab.ownership_label,
                 person_rule,
+                entity_id=eid,
             )
         except Exception:
             readiness = None
