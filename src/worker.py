@@ -3668,8 +3668,26 @@ class ColdPathWorker:
                 else:
                     den, num, _ = owned.get(oid, (0, 0, []))
                     buckets.append({"origin_id": oid, "numerator": num, "denominator": den})
+            # WHAT THIS CARD REPLACES ON THIS PERSON. `supersedes` has
+            # been served as an empty list since the hero shipped, and
+            # that was harmless only because the follow-through lens was
+            # starved and had produced zero cards. Giving the person
+            # lenses their own budget is what makes it matter: a
+            # `closed_late` hero and a `how_they_follow_through` card are
+            # THE SAME ARITHMETIC (which dated items came due, which
+            # closed late), so once both can exist they would render
+            # twice on one screen, which is the exact duplicate this
+            # field was added to prevent.
+            #
+            # Only closed_late supersedes it. `speaking_turns` is a
+            # different measurement entirely and must not silently
+            # remove a card about reliability.
+            supersedes = (
+                [FOLLOW_THROUGH_LENS]
+                if key == "closed_late" else []
+            )
             facts = trajectory_svc.served_trajectory(
-                chosen, person["name"], series=buckets, supersedes=[],
+                chosen, person["name"], series=buckets, supersedes=supersedes,
             )
             fingerprint = hashlib.sha256(
                 ("|".join(recent_ids) + "::" + json.dumps(

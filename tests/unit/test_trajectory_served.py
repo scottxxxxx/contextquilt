@@ -246,6 +246,31 @@ def test_the_three_budgets_are_three_separate_constants():
     assert MAX_TRAJECTORY_PER_USER_PER_CYCLE >= 1
 
 
+def test_a_closed_late_hero_supersedes_the_follow_through_lens():
+    """`supersedes` was served as an empty list from the day the hero
+    shipped, and that was harmless ONLY because the follow-through lens
+    was starved to zero cards. Giving the person lenses their own budget
+    is what makes it matter: a closed_late hero and a
+    how_they_follow_through card are the SAME ARITHMETIC (which dated
+    items came due, which closed late), so once both can exist they
+    would render twice on one screen."""
+    body = _pass()
+    assert "supersedes=supersedes" in body
+    assert 'if key == "closed_late" else []' in body
+    assert "[FOLLOW_THROUGH_LENS]" in body
+    assert "supersedes=[]" not in body, "the hardcoded empty list is the bug"
+
+
+def test_speaking_turns_supersedes_nothing():
+    """A different measurement entirely. It must not silently remove a
+    card about reliability."""
+    body = _pass()
+    i = body.index("supersedes = (")
+    block = body[i:i + 220]
+    assert '"closed_late"' in block
+    assert "speaking_turns" not in block
+
+
 def test_the_pass_runs_in_the_person_branch_of_consolidation():
     """Ordering by index rather than a character window: a window is a
     guess about how much code sits between two calls, and it broke the
