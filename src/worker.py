@@ -6091,6 +6091,37 @@ class ColdPathWorker:
             origin_id = metadata.get("origin_id") if metadata else None
             origin_type = metadata.get("origin_type") if metadata else None
 
+            # HONOUR A PROJECT DECISION MADE WHILE THIS INGEST WAS STILL
+            # RUNNING. An ingest is multi-phase and takes about twenty
+            # seconds; assigning a project the moment a meeting ends
+            # lands inside that window, and on 2026-08-28 it did: the
+            # rescope moved the 3 patches that existed and the 12 written
+            # eight seconds later stayed unscoped forever.
+            #
+            # Only when this payload carries NO project of its own. A
+            # payload that names one is the newer statement and wins. A
+            # row whose project_id is NULL is an EXPLICIT unassignment
+            # and must leave this ingest unscoped rather than fall
+            # through to "never stated" (migration 43).
+            if origin_id and not project_id:
+                try:
+                    decided = await self.db.fetchrow(
+                        """
+                        SELECT project_id, project FROM origin_project_assignments
+                         WHERE user_id = $1 AND origin_id = $2
+                           AND origin_type = $3
+                        """,
+                        user_id, str(origin_id),
+                        str(origin_type) if origin_type else "meeting",
+                    )
+                except Exception:
+                    decided = None      # table may lag on the MCP deployment
+                if decided is not None:
+                    project_id = decided["project_id"]
+                    project = decided["project"] or project
+                    logger.info("origin_project_adopted", origin_id=str(origin_id),
+                                project_id=project_id, user_id=user_id)
+
             # THE DAY THE MEETING HAPPENED, recorded rather than spent.
             #
             # Until 2026-08-27 this timestamp built the `Meeting date:`

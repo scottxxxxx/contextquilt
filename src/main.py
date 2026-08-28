@@ -8770,6 +8770,30 @@ async def assign_origin_to_project(
         project_id, user_id, project_name
     )
 
+    # RECORD THE DECISION ITSELF, before moving anything, so an ingest
+    # phase that finishes AFTER this call can still honour it. The
+    # rescope below can only move rows that already exist; this row is
+    # what makes the answer to "did it all follow" a yes rather than a
+    # matter of timing. See migration 43.
+    try:
+        await db_pool.execute(
+            """
+            INSERT INTO origin_project_assignments
+                (user_id, origin_id, origin_type, project_id, project)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id, origin_id, origin_type) DO UPDATE
+               SET project_id = EXCLUDED.project_id,
+                   project    = EXCLUDED.project,
+                   assigned_at = NOW()
+            """,
+            user_id, origin_id, origin_type, project_id, project_name,
+        )
+    except Exception as exc:
+        # Never fail the user's assignment because the durable note could
+        # not be written; the rescope below is still the visible effect.
+        logger.warning("origin_project_intent_not_recorded",
+                       origin_id=origin_id, error=str(exc)[:140])
+
     # Find all patches for this origin that are currently unscoped
     subject_key = f"user:{user_id}"
     updated = await db_pool.execute(
@@ -8793,6 +8817,27 @@ async def assign_origin_to_project(
     # Extract count from "UPDATE N"
     patches_updated = int(updated.split()[-1]) if updated else 0
 
+    # THE PEOPLE MOVE WITH THE MEETING (Scott, 2026-08-28: "make sure
+    # that people and meetings are associated with that project after it
+    # changed").
+    #
+    # Until now this route rescoped `context_patches` and nothing else,
+    # so a meeting assigned after the fact kept presence rows that still
+    # said "no project". Found on his own data: all three of Steven
+    # Williams's meetings had every patch correctly scoped and every
+    # appearance unscoped. A person is IN a project because they were in
+    # its meetings, so a rescope that moves the facts and leaves the
+    # attendance behind has only done half the job.
+    appearances = await db_pool.execute(
+        """
+        UPDATE person_appearances SET project_id = $1
+        WHERE user_id = $2 AND origin_id = $3 AND origin_type = $4
+          AND project_id IS DISTINCT FROM $1
+        """,
+        project_id, user_id, origin_id, origin_type,
+    )
+    appearances_updated = int(appearances.split()[-1]) if appearances else 0
+
     # Trigger cache refresh
     stream_key = "memory_updates"
     payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
@@ -8804,6 +8849,9 @@ async def assign_origin_to_project(
         "origin_id": origin_id,
         "project_id": project_id,
         "patches_updated": patches_updated,
+        # Served so the caller can SEE both halves happened rather than
+        # infer it from a 200 (rule 4: check the echo, not the status).
+        "appearances_updated": appearances_updated,
     }
 
 
@@ -8833,6 +8881,25 @@ async def unassign_origin_from_project(
     to that project (recommended); an empty body clears unconditionally.
     """
     subject_key = f"user:{user_id}"
+    # An explicit unassignment is a DECISION, not the absence of one: it
+    # must stop a later ingest phase adopting the project still sitting
+    # on this origin's earlier patches. project_id NULL in the row means
+    # exactly that (migration 43).
+    try:
+        await db_pool.execute(
+            """
+            INSERT INTO origin_project_assignments
+                (user_id, origin_id, origin_type, project_id, project)
+            VALUES ($1, $2, $3, NULL, NULL)
+            ON CONFLICT (user_id, origin_id, origin_type) DO UPDATE
+               SET project_id = NULL, project = NULL, assigned_at = NOW()
+            """,
+            user_id, origin_id, origin_type,
+        )
+    except Exception as exc:
+        logger.warning("origin_project_intent_not_recorded",
+                       origin_id=origin_id, error=str(exc)[:140])
+
     guard_sql = ""
     params = [subject_key, origin_type, origin_id]
     if unassignment.project_id:
@@ -8858,6 +8925,25 @@ async def unassign_origin_from_project(
     )
     patches_updated = int(updated.split()[-1]) if updated else 0
 
+    # The mirror of the rescope: presence leaves with the facts, under
+    # the SAME guard. Without the guard here a stale "remove it from the
+    # old project" would strip a meeting that has since been reassigned,
+    # which is the exact case the guard exists for on the patches half.
+    appearance_guard = "AND project_id = $4" if unassignment.project_id else ""
+    appearance_params = [user_id, origin_id, origin_type]
+    if unassignment.project_id:
+        appearance_params.append(unassignment.project_id)
+    appearances = await db_pool.execute(
+        f"""
+        UPDATE person_appearances SET project_id = NULL
+        WHERE user_id = $1 AND origin_id = $2 AND origin_type = $3
+          AND project_id IS NOT NULL
+          {appearance_guard}
+        """,
+        *appearance_params,
+    )
+    appearances_updated = int(appearances.split()[-1]) if appearances else 0
+
     stream_key = "memory_updates"
     payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
     await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
@@ -8868,6 +8954,7 @@ async def unassign_origin_from_project(
         "origin_id": origin_id,
         "project_id_guard": unassignment.project_id,
         "patches_updated": patches_updated,
+        "appearances_updated": appearances_updated,
     }
 
 
