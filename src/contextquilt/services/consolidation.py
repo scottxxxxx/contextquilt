@@ -83,6 +83,33 @@ MAX_USERS_PER_APP_PER_CYCLE = 20
 # `created` counts WRITES, so a roster of unchanged people costs nothing
 # and does not consume a slot.
 MAX_TRAJECTORY_PER_USER_PER_CYCLE = 3
+
+# The four PERSON LENS passes (`_consolidate_user_people`,
+# `_derive_follow_through`, `_derive_stands_out`, `_derive_who_they_are`)
+# get their own budget too, ruled by Scott 2026-08-28: "fix the budget so
+# the other lenses catch up".
+#
+# The measurement that produced this number. On 2026-08-28 the receipts
+# gate was working exactly as intended, 317 of 377 people had fewer than
+# three distinct meetings and correctly had nothing. But of the SIXTY
+# people who did qualify, only 26 had any card at all: 34 eligible people
+# had none, weeks after the lenses shipped. They were sharing the
+# cue-cluster pool of three per user per cycle, so the whole roster
+# competed for three slots a day and most of it never arrived. That is
+# the same starvation #333 found on the hero lens, in the four passes
+# that were left behind when it was fixed.
+#
+# WHY A LARGE NUMBER IS NOT RECKLESS HERE, which is the part worth
+# checking rather than trusting. The work is BOUNDED, not open ended:
+# a card is only written for a person past the receipts gate, on a lens
+# they do not already have, and the durable-no plus idempotency checks
+# mean an existing card is never rewritten. So the entire backlog is
+# (eligible people x lens vocabulary), about 240 calls once, and a
+# generous budget does not spend more in total, it only finishes sooner.
+# At this number the measured 34-person backlog clears in roughly six
+# daily cycles instead of forty-five, and steady state falls back to
+# almost nothing because the gates stop paying for anyone already done.
+MAX_PERSON_LENSES_PER_USER_PER_CYCLE = 25
 CLUSTER_WINDOW_DAYS = 180
 MAX_SOURCE_TEXTS = 10  # prompt size cap per CUE synthesis call
 

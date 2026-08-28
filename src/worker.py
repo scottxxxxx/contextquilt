@@ -90,6 +90,7 @@ from contextquilt.services.consolidation import (
     CLUSTER_WINDOW_DAYS,
     QUIET_MEETING_WINDOW,
     MAX_CLUSTERS_PER_USER_PER_CYCLE,
+    MAX_PERSON_LENSES_PER_USER_PER_CYCLE,
     MAX_SOURCE_TEXTS,
     MAX_TRAJECTORY_PER_USER_PER_CYCLE,
     MAX_USERS_PER_APP_PER_CYCLE,
@@ -2648,18 +2649,23 @@ class ColdPathWorker:
         self, subject_key: str, app_id: str, rules: list
     ) -> int:
         """Run every rule's cluster detection for one user; synthesize and
-        store up to MAX_CLUSTERS_PER_USER_PER_CYCLE new derived patches,
-        PLUS up to MAX_TRAJECTORY_PER_USER_PER_CYCLE hero cards on their
-        own budget (see that constant for why the hero lens is not in the
-        shared pool, and what it cost to learn).
+        store up to MAX_CLUSTERS_PER_USER_PER_CYCLE new derived patches
+        from CUE clusters, plus up to
+        MAX_PERSON_LENSES_PER_USER_PER_CYCLE person lens cards and
+        MAX_TRAJECTORY_PER_USER_PER_CYCLE hero cards, each on a budget of
+        its own.
 
-        `hero_created` is deliberately not folded into `created`: it is
-        counted in the returned total, because a hero card is a patch
-        this cycle wrote and the cycle log must not under-report, but it
-        must never subtract from the shared pool or the separation is
-        cosmetic.
+        THREE COUNTERS, and the separation is the whole point. Sharing one
+        pool between passes that answer different questions is what
+        starved the hero lens for three days (#333) and 34 of the 60
+        eligible people out of every lens for weeks (this change). Cards
+        from the two person budgets are counted in the RETURNED total,
+        because the cycle log must not under-report what was written, but
+        they never subtract from the cue-cluster pool or the separation
+        would be cosmetic.
         """
         created = 0
+        person_created = 0
         hero_created = 0
         for rule in rules:
             is_person_rule = rule.get("cluster") == "person"
@@ -2683,29 +2689,38 @@ class ColdPathWorker:
                 # the branch is now reachable with the pool already spent,
                 # and a negative budget is a number no pass should have to
                 # reason about.
-                created += await self._consolidate_user_people(
+                person_created += await self._consolidate_user_people(
                     subject_key, app_id, rule,
-                    max(0, MAX_CLUSTERS_PER_USER_PER_CYCLE - created),
+                    max(0, MAX_PERSON_LENSES_PER_USER_PER_CYCLE - person_created),
                 )
-                created += await self._derive_follow_through(
+                person_created += await self._derive_follow_through(
                     subject_key, app_id, rule,
-                    max(0, MAX_CLUSTERS_PER_USER_PER_CYCLE - created),
+                    max(0, MAX_PERSON_LENSES_PER_USER_PER_CYCLE - person_created),
                 )
                 # The contrastive pass runs LAST, and that ordering is
                 # deliberate rather than incidental: it is the only pass
                 # that needs every OTHER person measured before it can
                 # say anything about one of them.
-                created += await self._derive_stands_out(
+                person_created += await self._derive_stands_out(
                     subject_key, app_id, rule,
-                    max(0, MAX_CLUSTERS_PER_USER_PER_CYCLE - created),
+                    max(0, MAX_PERSON_LENSES_PER_USER_PER_CYCLE - person_created),
                 )
                 # The synthesis lens runs on its own model and its own
                 # fingerprint gate, so it spends nothing on a person
                 # whose inputs have not moved.
-                created += await self._derive_who_they_are(
+                person_created += await self._derive_who_they_are(
                     subject_key, app_id, rule,
-                    max(0, MAX_CLUSTERS_PER_USER_PER_CYCLE - created),
+                    max(0, MAX_PERSON_LENSES_PER_USER_PER_CYCLE - person_created),
                 )
+                if person_created >= MAX_PERSON_LENSES_PER_USER_PER_CYCLE:
+                    # Said out loud for the same reason the hero pass says
+                    # it: "budget spent" and "nobody qualified" produce
+                    # identical silence, and last time that cost three
+                    # days of nobody noticing (doc 19.10).
+                    logger.info("person_lens_budget_exhausted",
+                                subject=subject_key,
+                                budget=MAX_PERSON_LENSES_PER_USER_PER_CYCLE,
+                                created=person_created)
                 # The hero lens (16 5.15): how a person is changing
                 # against their own past. Arithmetic in
                 # services/trajectory.py; the model only writes. It runs
@@ -2757,8 +2772,9 @@ class ColdPathWorker:
                 )
                 if made:
                     created += 1
-        # Hero cards are reported but were never charged to the pool.
-        return created + hero_created
+        # Person lens cards and hero cards are both REPORTED in the cycle
+        # total and neither was ever charged to the cue-cluster pool.
+        return created + person_created + hero_created
 
     async def people_network_loop(self):
         """The 13b orbit graph precompute (daily): one snapshot per user
