@@ -43,6 +43,7 @@ from contextquilt.services.extraction_schema import (
     PATCH_TYPES,
     speaker_turn_counts,
     question_attribution,
+    meeting_role_signals,
     extraction_patch_backstop,
     cap_entities,
     inject_ownership_entities,
@@ -1292,6 +1293,7 @@ async def store_entities(
     speaker_turns: dict | None = None,
     self_label: str | None = None,
     speaker_questions: dict | None = None,
+    speaker_role_signals: dict | None = None,
 ):
     """
     Store extracted entities to Postgres, resolving alternate surface
@@ -1417,6 +1419,15 @@ async def store_entities(
             # identified as the user.
             q = (speaker_questions or {}).get("by_label", {}).get(name_key) or {}
             q_user = (speaker_questions or {}).get("user") or {}
+            # Opened / closed / answered, from the same one pass. NULL
+            # when no transcript was parsed for this appearance; FALSE is
+            # an observation (parsed, and they did not), the same
+            # distinction turn_count makes and the same one
+            # `capacities = {}` makes about presence.
+            r = (speaker_role_signals or {}).get("by_label", {}).get(name_key) or {}
+            opened_meeting = r.get("opened")
+            closed_meeting = r.get("closed")
+            answers_given = r.get("answers_given")
             questions_by_user = q_user.get("asked") if q_user else None
             try:
                 # A suppressed entity ("not a person") accumulates no
@@ -1438,8 +1449,10 @@ async def store_entities(
                          questions_asked, questions_received_explicit, questions_received_inferred,
                          questions_from_user_explicit, questions_from_user_inferred,
                          meeting_questions_by_user,
+                         opened_meeting, closed_meeting, answers_given,
                          first_seen_at, last_seen_at)
                     VALUES ($1, $2, $3, $4, $5, $6::text[], $7, $8, $9, $10, $11, $12, $13,
+                        $14, $15, $16,
                         -- THE MEETING'S CLOCK, NEVER THE INGEST'S. Doc 16
                         -- 6.2a states this rule and only the relabel routes
                         -- in main.py implemented it; the ingest path took the
@@ -1525,6 +1538,24 @@ async def store_entities(
                                 THEN person_appearances.meeting_questions_by_user
                             ELSE GREATEST(COALESCE(person_appearances.meeting_questions_by_user, 0),
                                           EXCLUDED.meeting_questions_by_user)
+                        END,
+                        -- The booleans take OR rather than GREATEST, and
+                        -- NULL still never clobbers: a re-ingest that
+                        -- parsed no transcript must not turn an observed
+                        -- TRUE back into an unknown, and one that did
+                        -- parse must not turn it into FALSE. Two ingests
+                        -- of one meeting are one meeting (doc 19.4).
+                        opened_meeting = CASE
+                            WHEN EXCLUDED.opened_meeting IS NULL THEN person_appearances.opened_meeting
+                            ELSE COALESCE(person_appearances.opened_meeting, FALSE) OR EXCLUDED.opened_meeting
+                        END,
+                        closed_meeting = CASE
+                            WHEN EXCLUDED.closed_meeting IS NULL THEN person_appearances.closed_meeting
+                            ELSE COALESCE(person_appearances.closed_meeting, FALSE) OR EXCLUDED.closed_meeting
+                        END,
+                        answers_given = CASE
+                            WHEN EXCLUDED.answers_given IS NULL THEN person_appearances.answers_given
+                            ELSE GREATEST(COALESCE(person_appearances.answers_given, 0), EXCLUDED.answers_given)
                         END
                     """,
                     user_id, entity_id, str(origin_id),
@@ -1538,6 +1569,7 @@ async def store_entities(
                     q.get("from_user_explicit"),
                     q.get("from_user_inferred"),
                     questions_by_user,
+                    opened_meeting, closed_meeting, answers_given,
                 )
             except Exception as e:
                 logger.debug("person_appearance_skipped", error=str(e)[:120])
@@ -6190,6 +6222,12 @@ class ColdPathWorker:
                 # transcript is gone after this; there is no second
                 # chance at this signal for this meeting, ever.
                 speaker_questions=question_attribution(
+                    effective_summary, owner_speaker_label
+                ),
+                # Who opened the room, who closed it, who answered its
+                # questions. Same transcript, same one pass, same
+                # never-backfillable constraint (doc 21 stage 2).
+                speaker_role_signals=meeting_role_signals(
                     effective_summary, owner_speaker_label
                 ),
                 # Which entity type IS a person comes from the app's people

@@ -2397,3 +2397,113 @@ def extraction_patch_backstop(
     """
     scaled = 36 + max(0, int(transcript_chars)) // 1000
     return max(floor, min(ceiling, scaled))
+
+
+def meeting_role_signals(text: object, user_label: "str | None" = None) -> dict:
+    """Who opened the room, who closed it, and who answered its questions.
+
+    The third sibling of `speaker_turn_counts` and `question_attribution`,
+    under the identical constraint and for the identical reason: the
+    transcript is in hand exactly once, at ingest, and NOTHING here can
+    ever be backfilled. Every meeting that landed before this shipped is
+    permanently unmeasurable on these three, which is why they are worth
+    capturing before a surface reads them.
+
+    From the Memory Layer Spec's observed-behaviour set (doc 21 4), these
+    are the three that are EXACT FROM THE TRANSCRIPT. Nothing here asks a
+    model anything, so nothing here can hallucinate. The spec's other
+    three (who assigned a follow-up and whether it was accepted, who set
+    or moved an agenda item, who deferred pending upstream input) need
+    semantics and belong in a model call that identifies while code
+    counts (doc 19.1); they are deliberately absent rather than faked
+    with a keyword heuristic, because a wrong signal accrues into the
+    corpus exactly as permanently as a right one.
+
+    WHAT EACH ONE MEANS, precisely, because the names are shorter than
+    the facts:
+
+    - `opened` / `closed`: this speaker took the transcript's first or
+      last turn. Awarded ONLY when that turn belongs to a named speaker.
+      If a diarization placeholder opened the room then NOBODY opened it
+      as far as this record is concerned, because handing it to the first
+      named speaker instead would be a guess wearing an exact number's
+      clothes. Same rule as "only the IMMEDIATE next turn can be an
+      answer" in `question_attribution`.
+    - `answers_given`: turns this speaker took directly after ANOTHER
+      speaker's turn that ended on a question. It is the same adjacency
+      `question_attribution` already grades as `inferred`, read from the
+      answerer's side instead of the asker's, so the two columns cannot
+      disagree about what an answer is.
+
+    NOT the spec's "terminal answerer of a question raised by someone
+    outside their team". Two qualifiers are dropped and the name says so:
+    CQ has no team model at all, so "outside their team" is unservable
+    rather than hard; and "terminal" would require knowing when a topic
+    closed, which this parse cannot see. What is counted is answers
+    given, which is a smaller claim and a true one.
+
+    Returns {} when there is nothing to parse, so a caller writes NULL
+    rather than a confident zero. When a parse DOES happen, `opened` and
+    `closed` are False for everyone who did not do it: that is a real
+    observation, not an absence.
+    """
+    empty: dict = {}
+    if not isinstance(text, str) or not text:
+        return empty
+
+    turns: list = []
+    self_key: "str | None" = None
+    for m in _TURN.finditer(text):
+        raw, body = m.group(1), m.group(2)
+        marked = "(you)" in raw.lower()
+        name = re.sub(r"\(you\)", "", raw, flags=re.IGNORECASE).strip()
+        if not name or is_placeholder_or_self_person(name):
+            turns.append((None, body))
+            continue
+        key = name.lower()
+        if marked or is_placeholder_or_self_person(name, user_label):
+            self_key = self_key or key
+        turns.append((key, body))
+    if not turns:
+        return empty
+
+    labels = {k for k, _ in turns if k}
+    if not labels:
+        return empty
+
+    def _blank() -> dict:
+        return {"opened": False, "closed": False, "answers_given": 0}
+
+    by_label = {k: _blank() for k in sorted(labels - ({self_key} if self_key else set()))}
+    user_block = _blank() if self_key else None
+
+    def _slot(key: "str | None") -> "dict | None":
+        if key is None:
+            return None
+        if self_key and key == self_key:
+            return user_block
+        return by_label.get(key)
+
+    # The room's first and last turn, awarded only to a named speaker.
+    first_slot = _slot(turns[0][0])
+    if first_slot is not None:
+        first_slot["opened"] = True
+    last_slot = _slot(turns[-1][0])
+    if last_slot is not None:
+        last_slot["closed"] = True
+
+    # An answer is a turn taken directly after somebody else's trailing
+    # question. Same adjacency rule as the `inferred` grade next door.
+    for idx in range(1, len(turns)):
+        speaker, _ = turns[idx]
+        prev_speaker, prev_body = turns[idx - 1]
+        if not speaker or not prev_speaker or speaker == prev_speaker:
+            continue
+        sentences = [s.strip() for s in _SENTENCE.findall(prev_body) if s.strip()]
+        if not sentences or not sentences[-1].endswith("?"):
+            continue
+        slot = _slot(speaker)
+        if slot is not None:
+            slot["answers_given"] += 1
+
+    return {"by_label": by_label, "user": user_block}
