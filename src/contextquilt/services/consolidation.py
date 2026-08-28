@@ -491,7 +491,50 @@ READINESS_SUPPRESSED = "suppressed"
 READINESS_RETIRED = "retired"
 READINESS_PENDING_EVIDENCE = "pending_evidence"
 READINESS_PENDING_PATTERN = "pending_pattern"
-READINESS_WAITING_STATES = {READINESS_PENDING_EVIDENCE, READINESS_PENDING_PATTERN}
+
+# "We tried on the evidence we have and it did not yield." Ruled by Scott
+# 2026-08-28 after ShoulderSurf asked whether a decline is visible to
+# them. It is: such a person was served `pending_pattern`, which the
+# table below calls "re-checked each cycle" with waiting-helps true, and
+# the client renders "Nothing stands out yet. This fills in as more comes
+# in about {name}." For a person whose card fails the same parse gate on
+# every cycle that invites an action which cannot work, forever.
+#
+# IT IS NOT CLOSED. `suppressed` and `retired` mean the pass will never
+# produce this card again; this one explicitly WILL try again. Folding it
+# into the closed set would suppress a card that should still be
+# inviting something, which is the opposite error to the one it fixes.
+#
+# So it stays a WAITING state and `more_meetings_help` stays true, and
+# that is precise rather than sloppy: the retry rule is evidence growth,
+# not a timer, so a new meeting genuinely does cause another attempt.
+# What it stops claiming is that the CURRENT evidence is still going to
+# produce something.
+#
+# The ATTEMPT COUNT IS DELIBERATELY NOT SERVED. ShoulderSurf argued it
+# and the argument is right: "we have looked 6 times" turns candour into
+# a report of repeated failure and reads as the app being broken. Kept
+# internal in `person_lens_attempts` for diagnosis. Not merely unused on
+# the wire, ABSENT from it, because a value that can be rendered will be
+# rendered by whoever is in a hurry.
+READINESS_STALLED = "stalled"
+READINESS_WAITING_STATES = {
+    READINESS_PENDING_EVIDENCE,
+    READINESS_PENDING_PATTERN,
+    READINESS_STALLED,
+}
+
+# The pass sentinel. A REJECTION knows its lens: the model chose one and
+# the parse then refused the card. A DECLINE does not, because the model
+# produced nothing at all, so it is recorded against the pass and read as
+# "every lens still pending for this person is stalled", which is what a
+# decline actually means.
+LENS_ATTEMPT_PASS_SLOT = "__profile_call__"
+
+# How many failures on the SAME evidence before the pass stops paying for
+# it. Three, because the in-cycle retry already runs once, so this is a
+# third and fourth chance rather than a first.
+LENS_ATTEMPT_LIMIT = 3
 
 # The archive cause DELETE /v1/patches stamps. Any other cause on an
 # archived insight means the system retired the card, not the user.
@@ -499,7 +542,7 @@ USER_SUPPRESSION_CAUSE = "user_delete"
 
 
 def _lens_state(stamps: List[Mapping[str, Any]], gate_met: bool,
-                lens: Optional[str] = None) -> str:
+                lens: Optional[str] = None, stalled: bool = False) -> str:
     for stamp in stamps:
         if (stamp.get("status") or "active") == "active":
             return READINESS_AVAILABLE
@@ -519,7 +562,12 @@ def _lens_state(stamps: List[Mapping[str, Any]], gate_met: bool,
         return READINESS_RETIRED
     if stamps:
         return READINESS_RETIRED
-    return READINESS_PENDING_PATTERN if gate_met else READINESS_PENDING_EVIDENCE
+    if not gate_met:
+        # Below the gate the honest answer is the counts, whatever the
+        # pass has tried: a person can be stalled AND short of evidence,
+        # and "you need two more meetings" is the more useful of the two.
+        return READINESS_PENDING_EVIDENCE
+    return READINESS_STALLED if stalled else READINESS_PENDING_PATTERN
 
 
 def build_insight_readiness(
@@ -528,6 +576,7 @@ def build_insight_readiness(
     today: date,
     min_patches: int,
     min_meetings: int,
+    attempt_rows: Optional[Iterable[Mapping[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Per lens: where this person stands, and whether waiting helps.
 
@@ -563,6 +612,21 @@ def build_insight_readiness(
     # The computed-lens gate, from the same arithmetic the pass runs on.
     computed = judge_items(rows, today)["facts"]
 
+    # Which lenses the pass has already tried and failed on, past the
+    # limit. A row against the pass sentinel stalls EVERY pending lens
+    # for this person, because a decline means the model looked at them
+    # and produced nothing at all rather than nothing for one lens.
+    stalled_lenses = set()
+    pass_stalled = False
+    for row in (attempt_rows or ()):
+        if int(row.get("attempts") or 0) < LENS_ATTEMPT_LIMIT:
+            continue
+        slot = row.get("lens")
+        if slot == LENS_ATTEMPT_PASS_SLOT:
+            pass_stalled = True
+        elif slot:
+            stalled_lenses.add(slot)
+
     lenses = []
     for lens in sorted(PROFILE_LENSES):
         if lens in COMPUTED_LENSES:
@@ -572,7 +636,10 @@ def build_insight_readiness(
             items, meetings = model_items, model_meetings
             need_items = min_patches
         gate_met = items >= need_items and meetings >= min_meetings
-        state = _lens_state(by_lens.get(lens, []), gate_met, lens)
+        state = _lens_state(
+            by_lens.get(lens, []), gate_met, lens,
+            stalled=(pass_stalled or lens in stalled_lenses),
+        )
         lenses.append({
             "lens": lens,
             "state": state,
