@@ -144,7 +144,11 @@ def test_hero_cards_are_reported_but_never_charged_to_the_shared_pool():
     # absent, because "hero_created" ends in "created" and the naive
     # `not in` check passes on the very line it is meant to forbid.
     assert body.count("created += await self._derive_trajectory(") == 1
-    assert "return created + hero_created" in body
+    # The hero counter is returned and never added to the cue-cluster
+    # counter. Updated 2026-08-28 when the person lenses got a third
+    # counter of their own: the PROPERTY is that every budget is
+    # reported and none is charged to another, not the old literal.
+    assert "return created + person_created + hero_created" in body
 
 
 def test_the_person_branch_is_reachable_when_the_shared_pool_is_spent():
@@ -158,14 +162,18 @@ def test_the_person_branch_is_reachable_when_the_shared_pool_is_spent():
     assert guard < branch
 
 
-def test_the_shared_passes_are_never_handed_a_negative_budget():
-    """The branch is now reachable with the pool already spent, so the
-    remainder can go negative without the clamp."""
+def test_no_pass_is_ever_handed_a_negative_budget():
+    """The branch is reachable with a pool already spent, so a bare
+    remainder can go negative. Written against the cue-cluster budget in
+    #333 and rewritten on 2026-08-28 when these four moved to their own:
+    the rule is the clamp, whichever budget it is clamping."""
     body = _consolidate_user_body()
     for pass_name in ("_consolidate_user_people", "_derive_follow_through",
                       "_derive_stands_out", "_derive_who_they_are"):
         i = body.index(f"self.{pass_name}(")
-        assert "max(0, MAX_CLUSTERS_PER_USER_PER_CYCLE - created)" in body[i:i + 200], pass_name
+        args = body[i:i + 220]
+        assert "max(0, " in args, pass_name
+        assert " - person_created)" in args, pass_name
 
 
 def test_starvation_is_logged_at_info_rather_than_being_silent():
@@ -179,9 +187,98 @@ def test_starvation_is_logged_at_info_rather_than_being_silent():
     assert "for index, person in enumerate(people):" in body
 
 
+# ------------------------------------------------------------------
+# The four PERSON LENS passes have their own budget too (ruled
+# 2026-08-28). Measured that day: the receipts gate was working, 317 of
+# 377 people had under three meetings and correctly had nothing, but of
+# the SIXTY who qualified only 26 had any card. 34 eligible people had
+# none, because all four passes were still sharing the cue-cluster pool
+# of three per user per cycle. Same starvation #333 found on the hero,
+# in the passes that were left behind when it was fixed.
+# ------------------------------------------------------------------
+
+def test_the_person_lens_passes_do_not_share_the_cue_cluster_pool():
+    body = _consolidate_user_body()
+    for pass_name in ("_consolidate_user_people", "_derive_follow_through",
+                      "_derive_stands_out", "_derive_who_they_are"):
+        i = body.index(f"self.{pass_name}(")
+        args = body[i:i + 220]
+        assert "MAX_PERSON_LENSES_PER_USER_PER_CYCLE" in args, pass_name
+        assert "MAX_CLUSTERS_PER_USER_PER_CYCLE" not in args, pass_name
+
+
+def test_the_four_still_share_ONE_budget_with_each_other():
+    """Sharing between these four is right: they answer the same kind of
+    question about one person and can stand in for each other. Sharing
+    with the cue rules was not."""
+    body = _consolidate_user_body()
+    assert body.count("person_created += await self.") == 4
+    assert "max(0, MAX_PERSON_LENSES_PER_USER_PER_CYCLE - person_created)" in body
+
+
+def test_person_lens_cards_are_reported_but_never_charged_to_the_pool():
+    body = _consolidate_user_body()
+    assert "return created + person_created + hero_created" in body
+    # the cue-cluster counter must not be advanced by a person pass
+    assert "created += await self._consolidate_user_people" not in body.replace(
+        "person_created += await self._consolidate_user_people", "")
+
+
+def test_person_lens_starvation_is_logged_rather_than_silent():
+    """Budget spent and nobody qualified produce identical silence, and
+    last time that cost three days of nobody noticing."""
+    body = _consolidate_user_body()
+    assert "person_lens_budget_exhausted" in body
+    assert 'logger.info("person_lens_budget_exhausted"' in body
+
+
+def test_the_three_budgets_are_three_separate_constants():
+    from contextquilt.services.consolidation import (
+        MAX_CLUSTERS_PER_USER_PER_CYCLE,
+        MAX_PERSON_LENSES_PER_USER_PER_CYCLE,
+        MAX_TRAJECTORY_PER_USER_PER_CYCLE,
+    )
+    assert len({id(MAX_CLUSTERS_PER_USER_PER_CYCLE),
+                id(MAX_PERSON_LENSES_PER_USER_PER_CYCLE)}) >= 1
+    # the person lens budget must be big enough to actually catch up: the
+    # measured backlog was ~34 people across a four-lens vocabulary
+    assert MAX_PERSON_LENSES_PER_USER_PER_CYCLE > MAX_CLUSTERS_PER_USER_PER_CYCLE
+    assert MAX_TRAJECTORY_PER_USER_PER_CYCLE >= 1
+
+
+def test_a_closed_late_hero_supersedes_the_follow_through_lens():
+    """`supersedes` was served as an empty list from the day the hero
+    shipped, and that was harmless ONLY because the follow-through lens
+    was starved to zero cards. Giving the person lenses their own budget
+    is what makes it matter: a closed_late hero and a
+    how_they_follow_through card are the SAME ARITHMETIC (which dated
+    items came due, which closed late), so once both can exist they
+    would render twice on one screen."""
+    body = _pass()
+    assert "supersedes=supersedes" in body
+    assert 'if key == "closed_late" else []' in body
+    assert "[FOLLOW_THROUGH_LENS]" in body
+    assert "supersedes=[]" not in body, "the hardcoded empty list is the bug"
+
+
+def test_speaking_turns_supersedes_nothing():
+    """A different measurement entirely. It must not silently remove a
+    card about reliability."""
+    body = _pass()
+    i = body.index("supersedes = (")
+    block = body[i:i + 220]
+    assert '"closed_late"' in block
+    assert "speaking_turns" not in block
+
+
 def test_the_pass_runs_in_the_person_branch_of_consolidation():
-    i = WORKER.index("created += await self._derive_who_they_are")
-    assert "self._derive_trajectory" in WORKER[i:i + 700]
+    """Ordering by index rather than a character window: a window is a
+    guess about how much code sits between two calls, and it broke the
+    first time a log line was added between them."""
+    body = _consolidate_user_body()
+    assert body.index("await self._derive_who_they_are") < \
+        body.index("await self._derive_trajectory")
+    assert "if is_person_rule:" in body
 
 
 # ------------------------------------------------------------------
