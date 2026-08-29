@@ -82,12 +82,34 @@ and a count. Against CQ:
 
 | Signal | CQ today |
 |---|---|
-| Opened or closed a meeting | missing |
-| Assigned a follow-up to another attendee, and whether accepted | partial: commitments carry `value.owner` and the item ledger has a `reassigned` mode, but nothing records WHO assigned it |
-| Terminal answerer of a question raised from outside their team | missing. Migration 37 counts questions asked and received, never answered, and CQ has no team model |
-| Set or moved an agenda item | missing |
-| Deferred a commitment pending upstream input | partial: blockers exist, that specific shape does not |
-| Share of speaking turns that were directive versus responsive | missing: `turn_count` is a count with no split |
+| Opened or closed a meeting | `opened_meeting` / `closed_meeting` (migration 42, exact from the transcript) |
+| Assigned a follow-up to another attendee, and whether accepted | `follow_ups_assigned` / `follow_ups_accepted` (migration 43, semantic call) |
+| Terminal answerer of a question raised from outside their team | `answers_given` (migration 42) is the SMALLER claim the parse can support: not terminal, not team scoped, because CQ has no team model and this parse cannot see when a topic closed |
+| Set or moved an agenda item | `agenda_moves` (migration 43) |
+| Deferred a commitment pending upstream input | `upstream_deferrals` (migration 43) |
+| Share of speaking turns that were directive versus responsive | `directive_turns` / `responsive_turns` (migration 43). The two do NOT sum to `turn_count`: a turn the model could not clearly grade is left unclassified, because guessing at an ambiguous turn is how a share becomes fiction |
+
+**The division of labour in the semantic half is doc 19.1 and it is what
+makes those counts storable.** The model returns POINTERS, never names
+and never numbers: a turn index, plus for a follow up the name of the
+person the work was handed to. WHO did it is read off that turn's own
+speaker label in the shared `transcript_turns` parse, so a model that
+mis-attributes a line cannot move a signal onto the wrong person, and a
+citation to a turn nobody took is dropped rather than counted. The
+assignee name is read from the model and used ONLY to refuse two cases
+that would otherwise inflate the count: an assignment to nobody, and an
+assignment to yourself, which is a commitment and belongs to the main
+extraction.
+
+**A ZERO IN MIGRATION 43 IS WEAKER THAN A FALSE IN MIGRATION 42, and
+nothing may read them alike.** 42's FALSE is an exact parse saying this
+person did not take the first turn. 43's zero says the model identified
+none of this for them, which is a judgment and can be a miss. NULL
+throughout still means the pass did not run. Two more pairs that must
+never be collapsed: `follow_ups_accepted` is a subset of
+`follow_ups_assigned` and THE GAP BETWEEN THEM IS NOT REFUSALS, because
+silence and "I will look at it" land outside `accepted` alongside a flat
+no; and `directive + responsive` is not `turn_count`, as above.
 
 Every one of these is capture-side, and the transcript is available
 exactly once (doc 19.5, doc 16 6.6). `services/behavior_extraction.py` is
@@ -167,11 +189,18 @@ Each stage is useful on its own and none removes a surface.
    and `entity_descriptions` rather than replacing them: `source`,
    `speaker_id`, verbatim `text`, `origin_id`, `scope`. Backfillable from
    existing rows for `source` and `text`, never for `speaker_id`.
-2. **Observed-behaviour capture** (CQ, own extraction call). The six
-   signals, counts and rates per meeting, on the `behavior_extraction`
-   pattern. Not backfillable: the transcript is gone. This is the doc
-   19.3 rule, an unstated field is an unemitted field, so the earlier
-   this lands the more history it accumulates.
+2. **Observed-behaviour capture** (CQ, own extraction call). SHIPPED in
+   two cuts, both live and reading nothing yet. First cut (migration 42)
+   took only what is exact from the transcript, so nothing in it asks a
+   model anything and nothing in it can hallucinate. Second cut
+   (migration 43, `services/role_semantics.py`) took the three that need
+   semantics plus the sixth signal the first cut's own docstring dropped
+   while accounting for six, on the `behavior_extraction` pattern and
+   under doc 19.1. Counts per meeting; RATES ARE NOT STORED, because a
+   rate is a read-time derivation and stage 4 owns it. Not backfillable:
+   the transcript is gone. This is the doc 19.3 rule, an unstated field
+   is an unemitted field, so the earlier this lands the more history it
+   accumulates.
 3. **Facets** (CQ). Per-person vocabulary derived from that person's own
    history, 4 to 7 live facets, ordered least to most directive, stable
    once assigned. A vocabulary that changes shape mid-history makes the
