@@ -1471,6 +1471,53 @@ def speaker_turn_counts(text: object, user_label: "str | None" = None) -> dict:
 _TURN = re.compile(r"^\s*\[([^\]]{1,60})\]([^\[]*)", re.MULTILINE)
 # Sentences, keeping the terminator so a question can be recognized by it.
 _SENTENCE = re.compile(r"[^.!?\n]+[.!?]+|[^.!?\n]+")
+
+
+def transcript_turns(text: object, user_label: "str | None" = None) -> tuple:
+    """One transcript, split into ordered turns, plus the user's own key.
+
+    THE single definition of what a turn is, shared by everything that
+    reads a transcript turn by turn. `meeting_role_signals` had this loop
+    inline; `role_semantics` needs the identical split, and two private
+    copies of it would eventually disagree about where one turn ends,
+    which is the same failure `answers_given` avoids by reading the very
+    adjacency `question_attribution` grades.
+
+    Returns `(turns, self_key)`. Each turn is
+    `(speaker_key, body, display_label)`:
+
+    - `speaker_key` is the lowercased name, or None when the label is a
+      diarization placeholder ("Speaker 2", "Unknown"). None means "a
+      turn was taken and we do not know by whom", which is not the same
+      as no turn, so the turn stays in the list and keeps its position.
+      Anything counting per person must skip it; anything counting
+      adjacency must not.
+    - `display_label` is the label EXACTLY as the transcript wrote it,
+      `(you)` marker and all, so a caller re-rendering the transcript for
+      a model reproduces it rather than paraphrasing it.
+
+    `self_key` is the key of the speaker who is the app user, from the
+    `(you)` marker or from `user_label`, or None when neither identified
+    one.
+    """
+    turns: list = []
+    self_key: "str | None" = None
+    if not isinstance(text, str) or not text:
+        return turns, self_key
+    for m in _TURN.finditer(text):
+        raw, body = m.group(1), m.group(2)
+        marked = "(you)" in raw.lower()
+        name = re.sub(r"\(you\)", "", raw, flags=re.IGNORECASE).strip()
+        if not name or is_placeholder_or_self_person(name):
+            turns.append((None, body, raw))
+            continue
+        key = name.lower()
+        if marked or is_placeholder_or_self_person(name, user_label):
+            self_key = self_key or key
+        turns.append((key, body, raw))
+    return turns, self_key
+
+
 # Openers that sit in front of a vocative and are not part of the name.
 _VOCATIVE_FILLER = frozenset({
     "hey", "hi", "hello", "ok", "okay", "so", "and", "but", "well",
@@ -1601,23 +1648,11 @@ def question_attribution(text: object, user_label: "str | None" = None) -> dict:
 
     # Pass 1: the turns, with the self label resolved from either signal
     # (the inline marker or the passed display name).
-    turns: list = []
-    self_key: "str | None" = None
-    for m in _TURN.finditer(text):
-        raw, body = m.group(1), m.group(2)
-        marked = "(you)" in raw.lower()
-        name = re.sub(r"\(you\)", "", raw, flags=re.IGNORECASE).strip()
-        if not name or is_placeholder_or_self_person(name):
-            turns.append((None, body))
-            continue
-        key = name.lower()
-        if marked or is_placeholder_or_self_person(name, user_label):
-            self_key = self_key or key
-        turns.append((key, body))
+    turns, self_key = transcript_turns(text, user_label)
     if not turns:
         return empty
 
-    labels = {k for k, _ in turns if k}
+    labels = {t[0] for t in turns if t[0]}
     vocab = _addressee_vocabulary(labels)
     others = sorted(labels - ({self_key} if self_key else set()))
 
@@ -1637,7 +1672,7 @@ def question_attribution(text: object, user_label: "str | None" = None) -> dict:
     unattributed = 0
     total = 0
 
-    for idx, (speaker, body) in enumerate(turns):
+    for idx, (speaker, body, _display) in enumerate(turns):
         if not speaker or not body.strip():
             continue
         sentences = [s.strip() for s in _SENTENCE.findall(body) if s.strip()]
@@ -2451,23 +2486,11 @@ def meeting_role_signals(text: object, user_label: "str | None" = None) -> dict:
     if not isinstance(text, str) or not text:
         return empty
 
-    turns: list = []
-    self_key: "str | None" = None
-    for m in _TURN.finditer(text):
-        raw, body = m.group(1), m.group(2)
-        marked = "(you)" in raw.lower()
-        name = re.sub(r"\(you\)", "", raw, flags=re.IGNORECASE).strip()
-        if not name or is_placeholder_or_self_person(name):
-            turns.append((None, body))
-            continue
-        key = name.lower()
-        if marked or is_placeholder_or_self_person(name, user_label):
-            self_key = self_key or key
-        turns.append((key, body))
+    turns, self_key = transcript_turns(text, user_label)
     if not turns:
         return empty
 
-    labels = {k for k, _ in turns if k}
+    labels = {t[0] for t in turns if t[0]}
     if not labels:
         return empty
 
@@ -2495,8 +2518,8 @@ def meeting_role_signals(text: object, user_label: "str | None" = None) -> dict:
     # An answer is a turn taken directly after somebody else's trailing
     # question. Same adjacency rule as the `inferred` grade next door.
     for idx in range(1, len(turns)):
-        speaker, _ = turns[idx]
-        prev_speaker, prev_body = turns[idx - 1]
+        speaker = turns[idx][0]
+        prev_speaker, prev_body = turns[idx - 1][0], turns[idx - 1][1]
         if not speaker or not prev_speaker or speaker == prev_speaker:
             continue
         sentences = [s.strip() for s in _SENTENCE.findall(prev_body) if s.strip()]

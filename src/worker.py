@@ -44,6 +44,7 @@ from contextquilt.services.extraction_schema import (
     speaker_turn_counts,
     question_attribution,
     meeting_role_signals,
+    transcript_turns,
     extraction_patch_backstop,
     cap_entities,
     inject_ownership_entities,
@@ -135,6 +136,7 @@ from contextquilt.services.entity_aliasing import (
     person_candidates,
 )
 from contextquilt.services import behavior_extraction
+from contextquilt.services import role_semantics
 from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import described_as
 from contextquilt.services import relationship_lenses
@@ -1298,6 +1300,7 @@ async def store_entities(
     self_label: str | None = None,
     speaker_questions: dict | None = None,
     speaker_role_signals: dict | None = None,
+    speaker_semantic_signals: dict | None = None,
 ):
     """
     Store extracted entities to Postgres, resolving alternate surface
@@ -1432,6 +1435,22 @@ async def store_entities(
             opened_meeting = r.get("opened")
             closed_meeting = r.get("closed")
             answers_given = r.get("answers_given")
+            # The four signals that needed a model to identify them
+            # (doc 21 stage 2 second cut). They arrive through THIS
+            # writer rather than a later UPDATE for the same reason the
+            # behavior call writes through `store_connected_patches`: a
+            # second writer for the same columns would be a second set
+            # of re-ingest rules about the same meeting. NULL when the
+            # semantic pass did not run; a zero is the model finding
+            # none, which is weaker than the FALSE next door and the
+            # column comments say so.
+            sem = (speaker_semantic_signals or {}).get("by_label", {}).get(name_key) or {}
+            follow_ups_assigned = sem.get("follow_ups_assigned")
+            follow_ups_accepted = sem.get("follow_ups_accepted")
+            agenda_moves = sem.get("agenda_moves")
+            upstream_deferrals = sem.get("upstream_deferrals")
+            directive_turns = sem.get("directive_turns")
+            responsive_turns = sem.get("responsive_turns")
             questions_by_user = q_user.get("asked") if q_user else None
             try:
                 # A suppressed entity ("not a person") accumulates no
@@ -1454,9 +1473,11 @@ async def store_entities(
                          questions_from_user_explicit, questions_from_user_inferred,
                          meeting_questions_by_user,
                          opened_meeting, closed_meeting, answers_given,
+                         follow_ups_assigned, follow_ups_accepted, agenda_moves,
+                         upstream_deferrals, directive_turns, responsive_turns,
                          first_seen_at, last_seen_at)
                     VALUES ($1, $2, $3, $4, $5, $6::text[], $7, $8, $9, $10, $11, $12, $13,
-                        $14, $15, $16,
+                        $14, $15, $16, $17, $18, $19, $20, $21, $22,
                         -- THE MEETING'S CLOCK, NEVER THE INGEST'S. Doc 16
                         -- 6.2a states this rule and only the relabel routes
                         -- in main.py implemented it; the ingest path took the
@@ -1560,6 +1581,40 @@ async def store_entities(
                         answers_given = CASE
                             WHEN EXCLUDED.answers_given IS NULL THEN person_appearances.answers_given
                             ELSE GREATEST(COALESCE(person_appearances.answers_given, 0), EXCLUDED.answers_given)
+                        END,
+                        -- The semantic counts take turn_count's rule for
+                        -- turn_count's reason: one meeting read twice is
+                        -- still one meeting, so a re-ingest keeps the
+                        -- larger reading and never sums. NULL never
+                        -- clobbers, so a lane that runs no semantic pass
+                        -- cannot erase one that did.
+                        follow_ups_assigned = CASE
+                            WHEN EXCLUDED.follow_ups_assigned IS NULL THEN person_appearances.follow_ups_assigned
+                            ELSE GREATEST(COALESCE(person_appearances.follow_ups_assigned, 0),
+                                          EXCLUDED.follow_ups_assigned)
+                        END,
+                        follow_ups_accepted = CASE
+                            WHEN EXCLUDED.follow_ups_accepted IS NULL THEN person_appearances.follow_ups_accepted
+                            ELSE GREATEST(COALESCE(person_appearances.follow_ups_accepted, 0),
+                                          EXCLUDED.follow_ups_accepted)
+                        END,
+                        agenda_moves = CASE
+                            WHEN EXCLUDED.agenda_moves IS NULL THEN person_appearances.agenda_moves
+                            ELSE GREATEST(COALESCE(person_appearances.agenda_moves, 0), EXCLUDED.agenda_moves)
+                        END,
+                        upstream_deferrals = CASE
+                            WHEN EXCLUDED.upstream_deferrals IS NULL THEN person_appearances.upstream_deferrals
+                            ELSE GREATEST(COALESCE(person_appearances.upstream_deferrals, 0),
+                                          EXCLUDED.upstream_deferrals)
+                        END,
+                        directive_turns = CASE
+                            WHEN EXCLUDED.directive_turns IS NULL THEN person_appearances.directive_turns
+                            ELSE GREATEST(COALESCE(person_appearances.directive_turns, 0), EXCLUDED.directive_turns)
+                        END,
+                        responsive_turns = CASE
+                            WHEN EXCLUDED.responsive_turns IS NULL THEN person_appearances.responsive_turns
+                            ELSE GREATEST(COALESCE(person_appearances.responsive_turns, 0),
+                                          EXCLUDED.responsive_turns)
                         END
                     """,
                     user_id, entity_id, str(origin_id),
@@ -1574,6 +1629,8 @@ async def store_entities(
                     q.get("from_user_inferred"),
                     questions_by_user,
                     opened_meeting, closed_meeting, answers_given,
+                    follow_ups_assigned, follow_ups_accepted, agenda_moves,
+                    upstream_deferrals, directive_turns, responsive_turns,
                 )
             except Exception as e:
                 logger.debug("person_appearance_skipped", error=str(e)[:120])
@@ -6421,6 +6478,15 @@ class ColdPathWorker:
                 logger.warning("extraction_capped", type="relationships", original=len(relationships), capped=MAX_RELATIONSHIPS_PER_MEETING)
                 relationships = relationships[:MAX_RELATIONSHIPS_PER_MEETING]
 
+            # The four signals that need a reader (doc 21 stage 2, second
+            # cut). Awaited HERE so they reach the appearance row through
+            # the same writer the exact signals use; an empty result is a
+            # NULL column, never a zero.
+            semantic_role_signals = await self._extract_semantic_role_signals(
+                user_id, effective_summary, app_id, origin_id,
+                owner_speaker_label,
+            )
+
             entities_stored = await store_entities(
                 self.db, self.redis, user_id, entities, metadata,
                 # Who actually spoke, so the appearance carries the capacity
@@ -6441,6 +6507,13 @@ class ColdPathWorker:
                 speaker_role_signals=meeting_role_signals(
                     effective_summary, owner_speaker_label
                 ),
+                # Who assigned work to whom and whether it was taken, who
+                # steered the agenda, who was waiting on somebody
+                # upstream, and the directive versus responsive split of
+                # the room's turns. A model identified each one by
+                # pointing at a turn; the counting and the attribution
+                # happened here, off the same parse.
+                speaker_semantic_signals=semantic_role_signals,
                 # Which entity type IS a person comes from the app's people
                 # vocabulary (doc 16 5.9); the SS floor when undeclared.
                 # This closes slice 2's recorded limit: a custom-named
@@ -7114,6 +7187,72 @@ class ColdPathWorker:
             logger.warning("behavior_observations_failed", user_id=user_id,
                            origin=origin_id, reason=str(exc)[:200])
             return 0
+
+    async def _extract_semantic_role_signals(
+        self, user_id: str, transcript: str, app_id, origin_id, user_label,
+    ) -> dict:
+        """The four role signals a model has to read for (doc 21 stage 2).
+
+        Its own call, for the reason doc 19.5 records and
+        `behavior_extraction` measured: a signal competing with fourteen
+        other types for one prompt's attention loses. Its own module,
+        `services/role_semantics.py`, holds the prompt and the counting.
+
+        THIS ONE RUNS BEFORE `store_entities` RATHER THAN AFTER, which is
+        the opposite of the behavior call, and the difference is the
+        point. Behavior observations are patches and go through the patch
+        sink. These are COLUMNS ON THE APPEARANCE ROW, and that row is
+        written in exactly one place, with one set of re-ingest rules
+        (NULL never clobbers, a second reading keeps the larger). Writing
+        them here means they pass through that writer instead of a
+        second one with rules of its own.
+
+        The cost of that ordering is honest and small: a failed or slow
+        call delays the appearance write by one call on the async path.
+        It never blocks it, because this never raises and an empty
+        result means the columns go in NULL, which is exactly what they
+        mean.
+
+        Behind `CQ_ROLE_SEMANTICS_ENABLED` (on by default), and gated
+        before the model on transcript length plus at least one named
+        speaker who is not the user.
+        """
+        try:
+            if os.getenv("CQ_ROLE_SEMANTICS_ENABLED", "true").lower() in (
+                "0", "false", "no"
+            ):
+                return {}
+            turns, self_key = transcript_turns(transcript, user_label)
+            if not role_semantics.worth_a_call(transcript, turns, self_key):
+                return {}
+            llm = await self._get_llm_for_app(app_id)
+            defects: list = []
+            response = await llm.extract(
+                system_prompt=role_semantics.ROLE_SEMANTICS_SYSTEM,
+                user_content=role_semantics.build_role_semantics_content(turns),
+            )
+            signals = role_semantics.parse_role_semantics_response(
+                response.content, turns, self_key, defects=defects,
+            )
+            if not signals:
+                logger.info("role_semantics_none", user_id=user_id,
+                            origin=origin_id,
+                            defect=defects[0] if defects else "empty")
+                return {}
+            totals: dict = {}
+            for block in (signals.get("by_label") or {}).values():
+                for k, v in block.items():
+                    totals[k] = totals.get(k, 0) + v
+            logger.info(
+                "role_semantics_extracted", user_id=user_id, origin=origin_id,
+                people=len(signals.get("by_label") or {}), turns=len(turns),
+                cost_usd=getattr(response, "cost_usd", None), **totals,
+            )
+            return signals
+        except Exception as exc:
+            logger.warning("role_semantics_failed", user_id=user_id,
+                           origin=origin_id, reason=str(exc)[:200])
+            return {}
 
     ALIGNMENT_ACTIVE_SET_MAX = 40
 
