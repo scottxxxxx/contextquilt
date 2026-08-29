@@ -400,6 +400,44 @@ def build_profile_content(
     return "\n".join(lines)
 
 
+def _as_json_object(content: Any) -> Optional[Dict[str, Any]]:
+    """The model's answer as a dict, or None.
+
+    One place that knows how to get an object out of an LLM answer, so
+    the parse and the failure logger cannot disagree about what the
+    model said. They already have to agree: the lens read on the failure
+    path is only trustworthy because the parse validated the same key
+    off the same bytes.
+    """
+    obj = content
+    if isinstance(obj, str):
+        m = re.search(r"\{.*\}", obj, re.DOTALL)
+        if not m:
+            return None
+        try:
+            obj = json.loads(m.group())
+        except json.JSONDecodeError:
+            return None
+    return obj if isinstance(obj, dict) else None
+
+
+def chosen_lens(content: Any) -> Optional[str]:
+    """The lens the model picked, or None if it did not pick a valid one.
+
+    Exists because the failure path needs to know WHICH lens was
+    rejected, and the parse returns None on a rejection, which throws
+    that away. `parse_profile_response` validates this exact key against
+    `MODEL_CHOSEN_LENSES` BEFORE it appends any defect, so a non-empty
+    defect list implies this returns a real lens. Read here rather than
+    reimplemented at the call site, so the two readings cannot drift.
+    """
+    obj = _as_json_object(content)
+    if obj is None:
+        return None
+    lens = obj.get("lens")
+    return lens if lens in MODEL_CHOSEN_LENSES else None
+
+
 def parse_profile_response(
     content: Any,
     person_name: Optional[str] = None,
@@ -418,16 +456,8 @@ def parse_profile_response(
     `defects` to collect the reason: a rejected FORMAT is a different
     event from a model choosing to skip, and only one of them is worth
     waking up for."""
-    obj = content
-    if isinstance(obj, str):
-        m = re.search(r"\{.*\}", obj, re.DOTALL)
-        if not m:
-            return None
-        try:
-            obj = json.loads(m.group())
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(obj, dict):
+    obj = _as_json_object(content)
+    if obj is None:
         return None
     if obj.get("skip") is not False and obj.get("skip") is not None:
         return None

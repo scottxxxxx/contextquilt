@@ -97,6 +97,7 @@ from contextquilt.services.consolidation import (
     MAX_TRAJECTORY_PER_USER_PER_CYCLE,
     MAX_USERS_PER_APP_PER_CYCLE,
     MODEL_CHOSEN_LENSES,
+    chosen_lens,
     RETIRED_LENSES,
     PROFILE_SYSTEM,
     build_profile_content,
@@ -4204,8 +4205,23 @@ class ColdPathWorker:
             # all, so it lands against the pass sentinel and stalls every
             # lens still pending for this person, which is what a decline
             # means.
+            #
+            # READ THE LENS OFF THE ANSWER, NOT OFF `profile`. This line
+            # used to say `(profile or {}).get("lens")`, inside a branch
+            # `profile` can only reach when it is falsy, so both arms
+            # evaluated to None and the sentinel was the answer for every
+            # reachable input. The comment above described behaviour the
+            # code could not do (rule 7), and the cost was the inversion
+            # of the ruling it was written to implement: one rejected
+            # `how_they_decide` marked `what_moves_them` stalled too,
+            # and `_readiness`'s per-lens branch was unreachable from its
+            # only writer. `chosen_lens` validates the same key against
+            # MODEL_CHOSEN_LENSES that `parse_profile_response` validates
+            # before it appends any defect, so a non-empty `defects`
+            # implies a real lens here. The sentinel stays as the
+            # fallback, which is what a decline still means.
             failed_lens = (
-                (profile or {}).get("lens") if defects else None
+                chosen_lens(response.content) if defects else None
             ) or LENS_ATTEMPT_PASS_SLOT
             if defects:
                 logger.info("profile_card_rejected", subject=subject_key,
