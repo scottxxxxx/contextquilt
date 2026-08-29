@@ -36,6 +36,8 @@ from contextquilt.services.consolidation import (  # noqa: E402
     READINESS_SUPPRESSED,
     READINESS_WAITING_STATES,
     _lens_state,
+    chosen_lens,
+    parse_profile_response,
 )
 
 
@@ -107,6 +109,64 @@ def test_the_parse_defect_is_never_served():
     readiness = MAIN[MAIN.index("async def _person_insight_readiness"):]
     readiness = readiness[:readiness.index("\nasync def ", 10)]
     assert "last_defect" not in readiness  # never selected
+
+
+def test_a_rejection_is_recorded_against_the_lens_the_model_actually_picked():
+    """THE #342 DEFECT, AND IT WAS DEAD CODE. The writer read the lens off
+    `profile` inside a branch `profile` can only reach when it is falsy,
+    so both arms of the conditional were None and the sentinel was the
+    answer for every reachable input. One rejected `how_they_decide`
+    therefore marked `what_moves_them` stalled as well, which inverts the
+    ruling the line was written to implement, and `_readiness`'s per-lens
+    branch was unreachable from its only writer.
+
+    The lens is read off the model's own answer now. That is safe for
+    exactly one reason and it is worth stating: `parse_profile_response`
+    validates this same key against MODEL_CHOSEN_LENSES BEFORE it appends
+    any defect, so a non-empty defect list implies a real lens is in
+    there."""
+    answer = {"skip": False, "lens": "how_they_decide",
+              "text": "x" * 400, "do": "Ask for the numbers first."}
+    defects: list = []
+    assert parse_profile_response(answer, defects=defects) is None, "card is rejected"
+    assert defects, "and the rejection is a defect, not a decline"
+    assert chosen_lens(answer) == "how_they_decide"
+
+
+def test_a_decline_still_lands_on_the_pass_sentinel():
+    """A model that produced nothing at all said nothing about any one
+    lens, so it stalls every pending lens. That half was always right and
+    the fix must not trade one wrong answer for the other."""
+    assert chosen_lens({"skip": True}) is None
+    assert chosen_lens("I would rather not draw a conclusion here.") is None
+    assert chosen_lens({"skip": False, "lens": "how_they_hire"}) is None, (
+        "an invented lens is not a lens"
+    )
+
+
+def test_the_writer_reads_the_response_and_not_the_parse_result():
+    """Pinned at the source, because the bug was invisible in behaviour:
+    the sentinel is a legitimate value, so every row the broken line
+    wrote looked exactly like a correct decline."""
+    i = WORKER.index("failed_lens = (")
+    expr = WORKER[i:WORKER.index("LENS_ATTEMPT_PASS_SLOT", i) + len("LENS_ATTEMPT_PASS_SLOT")]
+    assert "chosen_lens(response.content)" in expr
+    assert "profile" not in expr, "profile is falsy in this branch, by construction"
+
+
+def test_the_expression_is_not_constant_over_its_reachable_inputs():
+    """The diagnosis was made by EXECUTING the old expression over all
+    six reachable input combinations and finding one answer every time.
+    A constant conditional is the shape to test for, so the replacement
+    is executed the same way rather than read."""
+    seen = set()
+    for content in ({"skip": False, "lens": "how_they_decide", "text": "t", "do": "d"},
+                    {"skip": False, "lens": "what_moves_them", "text": "t", "do": "d"},
+                    {"skip": True},
+                    "no json at all"):
+        for defects in ([], ["claim_too_long"]):
+            seen.add((chosen_lens(content) if defects else None) or LENS_ATTEMPT_PASS_SLOT)
+    assert seen == {"how_they_decide", "what_moves_them", LENS_ATTEMPT_PASS_SLOT}
 
 
 def test_a_pass_level_decline_stalls_every_pending_lens():
