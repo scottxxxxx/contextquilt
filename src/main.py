@@ -2074,6 +2074,45 @@ class PatchUpdate(BaseModel):
     project_id: Optional[str] = None
     permanence_override: Optional[str] = None           # one of: permanent | decade | year | quarter | month | week | day | null
     permanence_override_source: Optional[str] = None    # 'user' or 'app'; defaults to 'user' when the API is called without explicit source
+    # THE DUE DATE, EDITABLE. Until now nothing could change it after the
+    # fact, so an item created with the wrong date, or with none, was
+    # stuck that way forever, by anyone, on any surface.
+    #
+    # "" CLEARS it back to undated, matching permanence_override's
+    # convention on this same route rather than inventing a second one.
+    # None means "not supplied" and leaves the stored value alone.
+    #
+    # WHAT THIS MUST NEVER TOUCH IS `value.deadline_history`. That array
+    # is written by the WORKER on the re-observation path and it means
+    # THE PERSON MOVED THEIR OWN DEADLINE, observed in a room; the item
+    # ledger derives its `re_dated` mode by counting it. If a user edit
+    # appended to it, a colleague's card would report that they pushed a
+    # deadline when in fact the app's user moved it in the UI, which is a
+    # served claim about something nobody observed (doc 16 5.13).
+    #
+    # The precedent is already one function away: `_stated_days` in
+    # item_ledger refuses to anchor on `updated_at` because "an admin
+    # edit, a vouch or a shelve moves that, and none of them is anybody
+    # saying the item out loud." An edit changes what is TRUE. It does
+    # not create evidence about anybody's conduct.
+    deadline_date: Optional[str] = None                 # YYYY-MM-DD to set, "" to clear, omit to leave unchanged
+    # THE SAME FIELD AS `category`, UNDER THE NAME THE CLIENT ACTUALLY
+    # SENDS. GP's proxy audit (2026-08-30) found their model named
+    # `category` while SS's updatePatch sends `patch_type`, so the key
+    # was dropped on their hop and every patch-type edit was a silent
+    # no-op: 200 back, nothing changed.
+    #
+    # THEIR FIX ALONE DOES NOT CLOSE IT. Once they stop dropping the key
+    # it arrives here, and this model would have ignored it for the same
+    # reason under a different roof, so the edit would still no-op and
+    # the second fix would look like the first one failing. Three
+    # components, two names, and the mismatch survives any one of them
+    # being corrected alone.
+    #
+    # Both names are accepted rather than renaming either: `category` is
+    # the shipped name on this route and something may send it, and a
+    # rename to fix a compatibility bug is how you get a third name.
+    patch_type: Optional[str] = None
 
 class PatchCompletionRequest(BaseModel):
     evidence: Optional[str] = None  # short free-text note on what completed it (e.g. "user tapped done")
@@ -2752,7 +2791,40 @@ async def update_patch(
     if update.owner is not None:
         value["owner"] = update.owner if update.owner else None
 
-    new_type = update.category if update.category else row["patch_type"]
+    # The due date. Sets, or clears on "".
+    #
+    # Unlike the create route this REFUSES a malformed value instead of
+    # dropping it, and the difference is deliberate. On create, refusing
+    # would lose the task the user just typed, and the date was minted by
+    # the client. Here the item already exists and is safe, the user is
+    # deliberately editing one field, and silently keeping the old date
+    # while answering 200 would tell them the edit worked when it did
+    # not. A no-op reported as success is the worse failure on this
+    # route.
+    #
+    # `deadline_history` is NOT touched, on purpose. See PatchUpdate.
+    if update.deadline_date is not None:
+        if update.deadline_date == "":
+            value.pop("deadline_date", None)
+        elif _valid_calendar_day(update.deadline_date):
+            value["deadline_date"] = update.deadline_date
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "INVALID_DEADLINE_DATE",
+                    "message": (
+                        f"deadline_date {update.deadline_date!r} is not a valid "
+                        "YYYY-MM-DD calendar day. Send \"\" to clear the date, "
+                        "or omit the field to leave it unchanged."
+                    ),
+                },
+            )
+
+    # Either spelling, then the stored type. `category` first only
+    # because it is the older of the two; they are the same field and a
+    # caller sending both contradictory values has a bug either way.
+    new_type = update.category or update.patch_type or row["patch_type"]
 
     await db_pool.execute(
         """
@@ -2812,7 +2884,13 @@ async def update_patch(
     payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
     await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
 
-    return {"status": "updated", "patch_id": patch_id}
+    return {
+        "status": "updated",
+        "patch_id": patch_id,
+        # Echoed so the caller compares rather than assumes, and so a
+        # cleared date is distinguishable from an untouched one.
+        "deadline_date": value.get("deadline_date"),
+    }
 
 
 @app.post("/v1/quilt/{user_id}/patches/{patch_id}/complete", tags=["Quilt"])
