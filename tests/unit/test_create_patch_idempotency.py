@@ -208,3 +208,120 @@ def test_echo_searches_every_array_a_created_patch_could_land_in():
     assert reached == declared, (
         f"echo searches {reached}, QuiltResponse declares {declared}"
     )
+
+
+# --- the optional due date --------------------------------------------
+#
+# Scott ruled the date optional (relayed by SS, 2026-08-30). An item
+# WITHOUT one stays legitimate; the field exists because an item without
+# one can never be overdue, never reaches the recall guarantee's
+# five-overdue slot, and anchors decay on updated_at. Tracked but never
+# chased.
+
+def _validator():
+    """Lift _ISO_DAY and _valid_calendar_day out of main.py and RUN them.
+
+    Executed rather than read, because the first cut of this helper used
+    `date.fromisoformat` while main.py imported only `datetime`,
+    `timedelta` and `timezone`. That parses clean and is a NameError on
+    the first real call, which is the receipt already in CQ's rule 7.
+    """
+    import re as _re
+    from datetime import date as _date
+    tree = ast.parse(MAIN)
+    ns = {"re": _re, "date": _date}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "_ISO_DAY":
+            exec(ast.get_source_segment(MAIN, node), ns)
+        if isinstance(node, ast.FunctionDef) and node.name == "_valid_calendar_day":
+            exec(ast.get_source_segment(MAIN, node), ns)
+    assert "_valid_calendar_day" in ns, "_valid_calendar_day not found in main.py"
+    return ns["_valid_calendar_day"]
+
+
+def test_date_import_exists_so_the_validator_can_actually_run():
+    """A NameError here would pass every syntax check and every source
+    assertion, and fail on the first request."""
+    assert re.search(r"^from datetime import .*\bdate\b", MAIN, re.MULTILINE)
+
+
+def test_validator_accepts_a_real_day():
+    assert _validator()("2026-08-30") is True
+
+
+def test_validator_rejects_a_regex_valid_day_that_does_not_exist():
+    """THE REASON THE PARSE IS THERE AS WELL AS THE REGEX. 2026-02-31
+    matches ^\\d{4}-\\d{2}-\\d{2}$, so it passes the guard every consumer
+    uses, reaches the ::date cast, and RAISES there rather than being
+    skipped. The regex alone would have let it through."""
+    f = _validator()
+    assert f("2026-02-31") is False
+    assert f("2026-13-01") is False
+
+
+def test_validator_rejects_shapes_the_downstream_guard_would_skip():
+    """An unpadded or datetime-shaped value is not a slightly wrong date.
+    It is invisible to all eight ::date call sites, silently, while
+    sitting in the row looking like a deadline."""
+    f = _validator()
+    for bad in ("2026-8-30", "2026-08-30T00:00:00Z", "30/08/2026", "", None, 20260830):
+        assert f(bad) is False, bad
+
+
+def test_a_bad_date_drops_the_date_and_keeps_the_item():
+    """Refusing the write would lose the task the user typed, because the
+    CLIENT mints the date, so a bad one is its bug and not the user's to
+    retype."""
+    src = _func_source("create_patch")
+    window = src.split("deadline_warning = None", 1)[1].split("# Resolve project scope", 1)[0]
+    assert "raise HTTPException" not in window
+    assert "deadline_warning = (" in window
+
+
+def test_a_dropped_date_is_reported_not_left_to_inference():
+    src = _func_source("create_patch")
+    assert "warnings=[deadline_warning] if deadline_warning else None" in src
+    body = _func_source("_created_patch_response")
+    assert '"warnings": list(warnings or [])' in body
+
+
+def test_deadline_date_is_optional():
+    """An item without a date is legitimate, not degraded."""
+    model = MAIN.split("class PatchCreate(BaseModel):", 1)[1].split("\n\n\n", 1)[0]
+    assert re.search(r"deadline_date:\s*Optional\[str\]\s*=\s*Field\(\s*\n?\s*default=None", model)
+
+
+def test_stored_verbatim_so_the_echo_matches_what_was_sent():
+    """SS compares the echoed date to what they sent. Normalising it (to a
+    datetime at noon UTC, say) would make a strict equality check on their
+    side report every stored date as dropped.
+
+    CHECKED ON THE AST, NOT AS A SUBSTRING, and that is not fussiness.
+    The first version of this test asserted the assignment text appeared
+    in the source, and a sabotage that appended "T12:00:00Z" to the value
+    left that text intact and the test GREEN. It was decoration. This
+    asserts the assigned expression IS the bare attribute, so any
+    reformatting of it fails.
+    """
+    src = _func_source("create_patch")
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(node, ast.Assign):
+            continue
+        tgt = node.targets[0]
+        if (isinstance(tgt, ast.Subscript)
+                and getattr(tgt.value, "id", "") == "value"
+                and getattr(tgt.slice, "value", "") == "deadline_date"):
+            assert isinstance(node.value, ast.Attribute), (
+                f"deadline_date is assigned {ast.unparse(node.value)!r}, "
+                "which is not the bare value the client sent"
+            )
+            assert ast.unparse(node.value) == "patch.deadline_date"
+            return
+    raise AssertionError("no assignment to value['deadline_date'] found")
+
+
+def test_no_companion_deadline_free_text_is_invented():
+    """`value.deadline` means "as spoken in the room". Nobody spoke this
+    one, and synthesising it would put words in a meeting's mouth."""
+    src = _func_source("create_patch")
+    assert 'value["deadline"]' not in src
