@@ -273,6 +273,46 @@ def test_a_room_with_only_the_user_in_it_has_nothing_to_write():
     assert rs.worth_a_call(text2, turns2, self_key2) is True
 
 
+def test_the_gate_says_which_of_its_two_conditions_declined():
+    """The reason is the point, not the no.
+
+    A silent decline collapses kill-switch-off, gate-declined and
+    never-called into one observable, and then nothing can say whether
+    the lane is dead or correctly quiet. Each condition has to be
+    separable from the other, or the log answers a different question
+    than the one being asked.
+    """
+    short = "[Ana] all good, nothing to report.\n"
+    turns, self_key = turns_of(short)
+    assert rs.why_not_worth_a_call(short, turns, self_key) == "transcript_too_short"
+
+    only_user = "[Ana (you)] " + ("thinking out loud about the plan. " * 20) + "\n"
+    turns, self_key = turns_of(only_user)
+    assert rs.why_not_worth_a_call(only_user, turns, self_key) == "no_other_named_speaker"
+
+    fine = only_user + "[Bob] sounds right to me.\n"
+    turns, self_key = turns_of(fine)
+    assert rs.why_not_worth_a_call(fine, turns, self_key) is None
+
+
+def test_the_boolean_gate_and_the_reason_cannot_disagree():
+    """`worth_a_call` is the boolean spelling of `why_not_worth_a_call`,
+    so a future edit to one that does not reach the other is a defect.
+    Asserted over both conditions and the pass, by EXECUTION, because a
+    second copy of the conditions is exactly what this replaced."""
+    cases = [
+        "[Ana] short.\n",
+        "[Ana (you)] " + ("one voice in an empty room. " * 20) + "\n",
+        "[Ana (you)] " + ("one voice. " * 20) + "\n[Bob] and another.\n",
+        "",
+    ]
+    for text in cases:
+        turns, self_key = turns_of(text)
+        assert rs.worth_a_call(text, turns, self_key) is (
+            rs.why_not_worth_a_call(text, turns, self_key) is None
+        ), text[:40]
+
+
 # ------------------------------------------------------------------
 # Wiring, the migration, and the promises the prompt makes.
 # ------------------------------------------------------------------

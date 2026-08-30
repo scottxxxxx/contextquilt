@@ -124,21 +124,43 @@ def build_role_semantics_content(turns: List[tuple]) -> str:
     return "\n".join(lines)
 
 
-def worth_a_call(text: Optional[str], turns: List[tuple], self_key: Optional[str]) -> bool:
-    """Whether this transcript can produce a row worth paying for.
+def why_not_worth_a_call(
+    text: Optional[str], turns: List[tuple], self_key: Optional[str],
+) -> Optional[str]:
+    """Why this transcript cannot produce a row worth paying for, or None.
 
     Two conditions, both cheap and both checked before the model. The
     transcript has to be long enough to have conduct in it, and it has
     to contain at least one named speaker who is not the user, because
     the user's own block is computed and deliberately not stored, so a
     room with nobody else in it has nothing to write.
+
+    This returns the REASON rather than a bare no, because the caller
+    logs it. A gate that declines silently makes "off", "declined" and
+    "never reached" one single observable, and then the question of
+    whether the lane is filling has no answer either way (doc 19.10:
+    an absence is evidence only if the contradicting result had a
+    channel to arrive through). Measured on prod 2026-08-30: the lane
+    had produced nothing since it shipped, and no log line anywhere
+    could say whether that was correct behaviour or a dead feature.
     """
     if not text or len(text) < MIN_TRANSCRIPT_CHARS:
-        return False
+        return "transcript_too_short"
     named = {k for k, _b, _d in turns if k}
     if self_key:
         named.discard(self_key)
-    return bool(named)
+    if not named:
+        return "no_other_named_speaker"
+    return None
+
+
+def worth_a_call(text: Optional[str], turns: List[tuple], self_key: Optional[str]) -> bool:
+    """Whether this transcript can produce a row worth paying for.
+
+    The conditions live in `why_not_worth_a_call`, which is the single
+    source of truth; this is the boolean spelling of the same answer.
+    """
+    return why_not_worth_a_call(text, turns, self_key) is None
 
 
 def _blank() -> Dict[str, int]:
