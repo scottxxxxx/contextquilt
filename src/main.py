@@ -3626,6 +3626,115 @@ class PatchCreate(BaseModel):
     owner: Optional[str] = Field(default=None, description="Owner name (for commitment, blocker, decision)")
     project_id: Optional[str] = Field(default=None, description="Project UUID to scope this patch to")
     connections: Optional[List[PatchConnectionInput]] = Field(default=None, description="Optional connections to existing patches")
+    # IDEMPOTENCY KEY, minted by the client and stable across its retries.
+    #
+    # The write this route serves is a human tapping Add. SS's account of
+    # the failure is the specification: the user taps, the network stalls,
+    # they see nothing, they tap again. Without a key the second tap is a
+    # second row in somebody's ledger, and the client's only safe response
+    # to an ambiguous write is to STOP RETRYING and park the item for a
+    # human — which is honest and a worse product than it needs to be.
+    #
+    # With a key, a repeat POST returns the row the first one created,
+    # with 200 and `created: false`, so an ambiguous write becomes an
+    # ordinary retry.
+    #
+    # Optional: the extractor and every existing caller write without one
+    # and are unaffected.
+    client_id: Optional[str] = Field(
+        default=None,
+        description="Client-minted idempotency key (e.g. a UUID). A repeat POST with the same value returns the existing patch with created=false instead of creating a second one.",
+    )
+
+
+async def _existing_client_id_patch(client_id: str, subject_key: str):
+    """The active patch already holding this idempotency key, for THIS
+    subject, or None.
+
+    The subject check is not decoration. The unique index is global,
+    because the key is a client-minted UUID and `patch_subjects` is a
+    separate table an index cannot reach into. So a key colliding across
+    users is possible in principle, and returning the row without
+    checking would hand one user another user's patch in an echo. A
+    mismatch is refused by the caller instead.
+    """
+    return await db_pool.fetchrow(
+        """
+        SELECT cp.patch_id
+        FROM context_patches cp
+        JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+        WHERE cp.client_id = $1 AND ps.subject_key = $2
+          AND COALESCE(cp.status, 'active') = 'active'
+        LIMIT 1
+        """,
+        client_id, subject_key,
+    )
+
+
+async def _created_patch_response(
+    user_id: str, app_id: str, patch_id: str, patch_type: str,
+    *, created: bool, connections: list,
+):
+    """The create echo, rendered by the READ route rather than beside it.
+
+    SS asked for the created item back "exactly as /v1/quilt would later
+    render it, so the client compares rather than assumes". The tempting
+    way to do that is to build a QuiltPatchResponse here. That would be a
+    SECOND renderer for one wire shape, and the two would drift the first
+    time a field is added to one and not the other, silently, with the
+    create path telling the client something the read path does not.
+
+    So this asks the actual read route. `get_user_quilt` is a plain async
+    function and `since` already exists, so a one-second delta returns a
+    handful of rows and the item is picked out of them. The echo is then
+    identical to /v1/quilt BY CONSTRUCTION rather than by a test that
+    could go stale.
+
+    THE ECHO MUST NEVER FAIL THE WRITE. The patch is committed by the
+    time this runs; a slow or failed render is a thinner response, never
+    a 500 for a create that succeeded and never a signal to the client to
+    retry. On any failure the item is simply absent and `item_rendered`
+    says so, which is the honest shape: the client refetches rather than
+    believing a fabricated echo.
+    """
+    body = {
+        "status": "created" if created else "exists",
+        "created": created,
+        "patch_id": patch_id,
+        "type": patch_type,
+        "connections": connections,
+        "item": None,
+        "item_rendered": False,
+    }
+    try:
+        since = (datetime.utcnow() - timedelta(seconds=5)).isoformat()
+        # EVERY parameter is passed explicitly, and that is load bearing.
+        # These are FastAPI route parameters whose defaults are `Query(None)`
+        # OBJECTS, not None. FastAPI substitutes the real value per request,
+        # but a DIRECT call does not: an omitted `category` would arrive as a
+        # truthy Query instance and silently filter the echo to nothing.
+        # Verified by running it, not by reading the signature.
+        quilt = await get_user_quilt(
+            user_id=user_id,
+            category=None,
+            since=since,
+            origin_id=None,
+            group_by=None,
+            project_id=None,
+            limit=None,
+            order=None,
+            max_age_days=None,
+            app_id=app_id,
+        )
+        for candidate in (quilt.patches or []):
+            if str(candidate.patch_id) == str(patch_id):
+                body["item"] = candidate
+                body["item_rendered"] = True
+                break
+    except Exception as exc:
+        logger.warning("create_patch_echo_failed",
+                       patch_id=patch_id, error=str(exc)[:200])
+    return body
 
 
 @app.post("/v1/quilt/{user_id}/patches", tags=["Quilt"])
@@ -3649,6 +3758,18 @@ async def create_patch(
     now = datetime.utcnow()
     persistence = PATCH_PERSISTENCE.get(patch.type, "decaying")
 
+    # Idempotency fast path. The unique index below is what makes a
+    # concurrent double-tap impossible; this lookup is what makes a
+    # SEQUENTIAL retry cheap, which is the common case (the user taps,
+    # gives up, and taps again seconds later).
+    if patch.client_id:
+        prior = await _existing_client_id_patch(patch.client_id, subject_key)
+        if prior is not None:
+            return await _created_patch_response(
+                user_id, app_id, str(prior["patch_id"]), patch.type,
+                created=False, connections=[],
+            )
+
     # Build value JSON
     value = {"text": patch.text}
     if patch.owner:
@@ -3668,18 +3789,46 @@ async def create_patch(
     patch_project = project_name if patch.type in PROJECT_SCOPED_TYPES else None
     patch_project_id = project_id if patch.type in PROJECT_SCOPED_TYPES else None
 
-    await db_pool.execute(
+    # ON CONFLICT closes the window the fast path above cannot. Two taps
+    # in flight together both miss the SELECT; only one survives the
+    # unique index, and the loser is told which row won rather than
+    # getting an error for a write that did what the user meant.
+    inserted = await db_pool.fetchval(
         """
         INSERT INTO context_patches (
             patch_id, patch_name, patch_type, value,
             origin_mode, source_prompt, confidence, persistence,
-            project, project_id, status, created_at, updated_at, last_observed_at
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            project, project_id, status, created_at, updated_at, last_observed_at,
+            client_id
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+        ON CONFLICT (client_id) WHERE client_id IS NOT NULL DO NOTHING
+        RETURNING patch_id
         """,
         patch_id, f"declared_{patch_id[:8]}", patch.type, json.dumps(value),
         "declared", "manual", 1.0, persistence,
-        patch_project, patch_project_id, "active", now, now, now
+        patch_project, patch_project_id, "active", now, now, now,
+        patch.client_id,
     )
+    if inserted is None:
+        # The concurrent tap won. Serve ITS row, so both requests agree
+        # on which patch exists rather than one of them 500ing on a write
+        # that succeeded.
+        prior = await _existing_client_id_patch(patch.client_id, subject_key)
+        if prior is None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "CLIENT_ID_TAKEN",
+                    "message": (
+                        "This client_id already belongs to a patch on another "
+                        "subject. Idempotency keys must be unique per client."
+                    ),
+                },
+            )
+        return await _created_patch_response(
+            user_id, app_id, str(prior["patch_id"]), patch.type,
+            created=False, connections=[],
+        )
 
     await db_pool.execute(
         "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
@@ -3742,12 +3891,10 @@ async def create_patch(
     payload = {"type": "hydrate", "user_id": user_id, "timestamp": now.isoformat()}
     await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
 
-    return {
-        "status": "created",
-        "patch_id": patch_id,
-        "type": patch.type,
-        "connections": created_connections,
-    }
+    return await _created_patch_response(
+        user_id, app_id, patch_id, patch.type,
+        created=True, connections=created_connections,
+    )
 
 
 # ============================================
