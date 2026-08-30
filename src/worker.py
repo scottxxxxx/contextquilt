@@ -7221,9 +7221,28 @@ class ColdPathWorker:
             if os.getenv("CQ_ROLE_SEMANTICS_ENABLED", "true").lower() in (
                 "0", "false", "no"
             ):
+                logger.info("role_semantics_skipped", user_id=user_id,
+                            origin=origin_id, reason="kill_switch")
                 return {}
             turns, self_key = transcript_turns(transcript, user_label)
-            if not role_semantics.worth_a_call(transcript, turns, self_key):
+            declined = role_semantics.why_not_worth_a_call(
+                transcript, turns, self_key,
+            )
+            if declined:
+                # The counts go in the line because they are what anyone
+                # asking "is this lane dead or just quiet" needs next,
+                # and reading them off the store resolves through entity
+                # resolution while the gate reads RAW labels, so the log
+                # is the only place the two agree.
+                named = {k for k, _b, _d in turns if k}
+                if self_key:
+                    named.discard(self_key)
+                logger.info(
+                    "role_semantics_skipped", user_id=user_id,
+                    origin=origin_id, reason=declined,
+                    chars=len(transcript or ""), turns=len(turns),
+                    named_others=len(named),
+                )
                 return {}
             llm = await self._get_llm_for_app(app_id)
             defects: list = []
