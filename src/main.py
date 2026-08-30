@@ -3726,10 +3726,18 @@ async def _created_patch_response(
             max_age_days=None,
             app_id=app_id,
         )
-        for candidate in (quilt.patches or []):
-            if str(candidate.patch_id) == str(patch_id):
-                body["item"] = candidate
-                body["item_rendered"] = True
+        # QuiltResponse splits its rows across TWO arrays, `facts` and
+        # `action_items` (completables land in the second). There is no
+        # `patches` field. Both are searched because the create route
+        # accepts every VALID_PATCH_TYPES value, not only completables,
+        # so which array a new patch lands in depends on its type.
+        for bucket in (quilt.action_items or []), (quilt.facts or []):
+            for candidate in bucket:
+                if str(candidate.patch_id) == str(patch_id):
+                    body["item"] = candidate
+                    body["item_rendered"] = True
+                    break
+            if body["item_rendered"]:
                 break
     except Exception as exc:
         logger.warning("create_patch_echo_failed",
