@@ -369,3 +369,106 @@ def test_the_migration_says_a_zero_here_is_weaker_than_the_false_next_door():
     assert "weaker" in low
     assert "not a refusal" in low or "not a refusal count" in low
     assert "is not turn_count" in low
+
+
+# --- The wire verifier's fixture, pinned to the parse ------------------
+#
+# `scripts/verify_role_semantics_wire.py` grades a live model answer
+# against a DESIGNED one. That grading is only worth anything if the
+# designed answer is reachable through the real parse: if EXPECTED and
+# the parse disagree, the verifier goes red on a correct model and the
+# operator learns the opposite of the truth. These tests are the
+# verifier's own rule-2 check, kept here so a change to the parse breaks
+# them instead of surfacing as a mystery red on prod.
+
+def _load_verifier():
+    import importlib.util
+    path = ROOT / "scripts" / "verify_role_semantics_wire.py"
+    spec = importlib.util.spec_from_file_location("_verify_wire", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# The answer a model that read the fixture correctly would give.
+_DESIGNED_POINTERS = {
+    "follow_ups": [
+        {"turn": 4, "assignee": "Marcus Hill", "accepted": True},
+        {"turn": 6, "assignee": "Scott", "accepted": True},
+    ],
+    "agenda_moves": [{"turn": 2}, {"turn": 8}, {"turn": 13}],
+    "upstream_deferrals": [{"turn": 10}],
+    "turn_roles": [],
+}
+
+
+def _grade(pointers):
+    """The verifier's grade, as a list of red cells. Empty means green."""
+    verifier = _load_verifier()
+    turns, self_key = transcript_turns(verifier.TRANSCRIPT, None)
+    signals = rs.parse_role_semantics_response(
+        json.dumps(pointers), turns, self_key, defects=[],
+    )
+    red = []
+    for key, want in verifier.EXPECTED.items():
+        got = (signals.get("by_label") or {}).get(key)
+        if got is None:
+            red.append(f"{key}:absent")
+            continue
+        for column, want_value in want.items():
+            if got[column] != want_value:
+                red.append(f"{key}.{column}")
+    return red
+
+
+def test_verifier_expected_is_reachable_through_the_real_parse():
+    """The designed answer grades GREEN. Without this the whole script
+    could be asserting something the parse can never produce."""
+    assert _grade(_DESIGNED_POINTERS) == []
+
+
+def test_verifier_catches_an_assignment_pointer_off_by_one():
+    """The failure the whole design exists to catch: the assignment
+    cited at the REPLIER's turn instead of the asker's. Nothing but
+    attribution grading can see this, because the counts stay plausible.
+
+    Note WHERE it goes red. The misplaced pointer names Marcus as
+    assignee on Marcus's own turn, so the parse refuses it as an
+    assignment to yourself and it vanishes rather than landing on him.
+    The evidence is therefore the assigner's missing count, not a
+    surplus on the replier.
+    """
+    bad = json.loads(json.dumps(_DESIGNED_POINTERS))
+    bad["follow_ups"][0]["turn"] = 5
+    assert sorted(_grade(bad)) == [
+        "dana reyes.follow_ups_accepted", "dana reyes.follow_ups_assigned",
+    ]
+
+
+def test_verifier_catches_a_self_commitment_read_as_an_assignment():
+    """Planted negative: turn 14 is Marcus taking something on himself.
+    A model that pattern-matches "I'll do X" fails here and nowhere
+    else, which is why the fixture carries it."""
+    bad = json.loads(json.dumps(_DESIGNED_POINTERS))
+    bad["follow_ups"].append(
+        {"turn": 14, "assignee": "Dana Reyes", "accepted": None}
+    )
+    assert _grade(bad) == ["marcus hill.follow_ups_assigned"]
+
+
+def test_verifier_catches_a_plain_delay_read_as_an_upstream_deferral():
+    """Planted negative: turn 15 is a delay with no upstream in it. The
+    prompt draws that distinction explicitly, so it is worth grading."""
+    bad = json.loads(json.dumps(_DESIGNED_POINTERS))
+    bad["upstream_deferrals"].append({"turn": 15})
+    assert _grade(bad) == ["dana reyes.upstream_deferrals"]
+
+
+def test_verifier_fixture_speakers_match_what_it_grades():
+    """Every named non-user speaker in the fixture has a designed answer.
+    A speaker the fixture forgot would be graded as an 'unexpected
+    speaker' miss on every run, forever."""
+    verifier = _load_verifier()
+    turns, self_key = transcript_turns(verifier.TRANSCRIPT, None)
+    named = {k for k, _b, _d in turns if k} - {self_key}
+    assert named == set(verifier.EXPECTED)
