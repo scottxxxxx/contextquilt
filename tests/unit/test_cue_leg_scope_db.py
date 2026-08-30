@@ -69,14 +69,15 @@ async def _ensure_schema() -> None:
 async def _patch(conn, subject_key, text, patch_type, cue, project_id=None):
     """One active patch, subject-linked and cue-indexed. Returns its id."""
     patch_id = uuid.uuid4()
+    # No subject_key column here: migration 26 dropped it and patch_subjects
+    # carries the link. The worker's own insert is the shape to copy.
     await conn.execute(
         """
         INSERT INTO context_patches
-            (patch_id, subject_key, patch_name, patch_type, value, project_id, status)
-        VALUES ($1, $2, $3, $4, $5::jsonb, $6, 'active')
+            (patch_id, patch_name, patch_type, value, project_id, status)
+        VALUES ($1, $2, $3, $4::jsonb, $5, 'active')
         """,
-        patch_id, subject_key, text[:40], patch_type,
-        f'{{"text": "{text}"}}', project_id,
+        patch_id, text[:40], patch_type, f'{{"text": "{text}"}}', project_id,
     )
     await conn.execute(
         "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
