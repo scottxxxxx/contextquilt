@@ -16,7 +16,7 @@ import redis.asyncio as redis
 import json
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import sys
 
 import structlog
@@ -3645,6 +3645,50 @@ class PatchCreate(BaseModel):
         default=None,
         description="Client-minted idempotency key (e.g. a UUID). A repeat POST with the same value returns the existing patch with created=false instead of creating a second one.",
     )
+    # THE DAY THIS IS DUE, as a plain YYYY-MM-DD.
+    #
+    # Scott ruled the date optional (relayed by SS 2026-08-30). Optional
+    # is the operative word: an item WITHOUT one is a legitimate item,
+    # not a degraded one, so this never becomes required.
+    #
+    # It matters more than a display string. A completable with no
+    # deadline_date can never be overdue, never reaches the project
+    # recall guarantee's five-overdue slot, and anchors decay on
+    # updated_at instead of GREATEST(updated_at, deadline_date). So an
+    # item without one is TRACKED BUT NEVER CHASED, and that is the whole
+    # reason this field exists.
+    #
+    # Day granularity, deliberately, and it matches what every consumer
+    # already reads: eight separate call sites cast
+    # value->>'deadline_date' to ::date behind a
+    # `^\d{4}-\d{2}-\d{2}$` regex guard. A value that misses that
+    # shape is not a slightly-wrong date, it is invisible to every one of
+    # them, silently. Hence validation here rather than storage here.
+    #
+    # No companion `deadline` free-text is accepted: that field means
+    # "as spoken in the room", and nobody spoke this one.
+    deadline_date: Optional[str] = Field(
+        default=None,
+        description="Optional due date as a plain calendar day, YYYY-MM-DD, in the user's own timezone. No time component and no zone suffix. Stored and echoed back verbatim, never normalised.",
+    )
+
+
+# The exact shape every downstream ::date cast guards on. Written as a
+# regex AND a real calendar parse, because the regex alone accepts
+# 2026-02-31 and 2026-13-01, which pass the guard, reach the cast, and
+# raise there instead of being skipped.
+_ISO_DAY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _valid_calendar_day(raw: object) -> bool:
+    """True only for a string that is BOTH the guarded shape and a real day."""
+    if not isinstance(raw, str) or not _ISO_DAY.match(raw):
+        return False
+    try:
+        date.fromisoformat(raw)
+    except ValueError:
+        return False
+    return True
 
 
 async def _existing_client_id_patch(client_id: str, subject_key: str):
@@ -3673,7 +3717,7 @@ async def _existing_client_id_patch(client_id: str, subject_key: str):
 
 async def _created_patch_response(
     user_id: str, app_id: str, patch_id: str, patch_type: str,
-    *, created: bool, connections: list,
+    *, created: bool, connections: list, warnings: list | None = None,
 ):
     """The create echo, rendered by the READ route rather than beside it.
 
@@ -3705,6 +3749,9 @@ async def _created_patch_response(
         "connections": connections,
         "item": None,
         "item_rendered": False,
+        # Present and empty when nothing was dropped, so a caller can
+        # test the key rather than its absence.
+        "warnings": list(warnings or []),
     }
     try:
         since = (datetime.utcnow() - timedelta(seconds=5)).isoformat()
@@ -3782,6 +3829,32 @@ async def create_patch(
     value = {"text": patch.text}
     if patch.owner:
         value["owner"] = patch.owner
+
+    # A malformed date is DROPPED, not stored, and never fails the write.
+    #
+    # Storing it would be worse than dropping it: every consumer guards
+    # its ::date cast with the same regex, so a bad value is silently
+    # skipped by all of them while sitting in the row looking like a
+    # deadline. The item would read as dated and behave as undated.
+    #
+    # Refusing the whole write would be worse still. The user typed a
+    # task; losing the task because the date was malformed is a bad
+    # trade, and the client mints the date itself so a bad one is its bug
+    # to fix, not the user's to retype. So: keep the item, drop the date,
+    # and SAY SO in the response rather than leave the caller to infer it
+    # from an absence.
+    deadline_warning = None
+    if patch.deadline_date is not None:
+        if _valid_calendar_day(patch.deadline_date):
+            value["deadline_date"] = patch.deadline_date
+        else:
+            deadline_warning = (
+                f"deadline_date {patch.deadline_date!r} is not a valid "
+                "YYYY-MM-DD calendar day and was not stored. The item was "
+                "created without a date."
+            )
+            logger.warning("create_patch_deadline_rejected",
+                           value=str(patch.deadline_date)[:40])
 
     # Resolve project scope
     project_name = None
@@ -3902,6 +3975,7 @@ async def create_patch(
     return await _created_patch_response(
         user_id, app_id, patch_id, patch.type,
         created=True, connections=created_connections,
+        warnings=[deadline_warning] if deadline_warning else None,
     )
 
 
