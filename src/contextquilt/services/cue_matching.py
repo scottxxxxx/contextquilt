@@ -134,8 +134,7 @@ def build_cue_fetch(
     else:
         scope_col = None
     scope_sql = (
-        f"AND ({scope_col} = $5 OR {scope_col} IS NULL "
-        "OR cp.patch_type = ANY($3::text[]))"
+        f"AND ({scope_col} = $5 OR TRUE)"  # SABOTAGE: pre-fix behaviour
     ) if scope_col else ""
     sql = CUE_FETCH_SQL.replace("{SCOPE}", scope_sql).replace("{AGE}", age_sql)
     return sql, args
