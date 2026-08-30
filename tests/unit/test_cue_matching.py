@@ -83,6 +83,37 @@ def test_digits_and_underscores_count_as_word_characters():
     assert cue_matches("q3 roadmap", "the q3 roadmap slipped")
 
 
+# GhostPour's ask (cloudzap-35, 2026-08-30): the real index holds cues
+# like `a2a` and `abm`, and a boundary rule that behaves for pure-alpha
+# cues can behave differently around digits and punctuation. Transcript
+# text really does write "a2a-gateway" and "abm/hq", so those cases are
+# tested rather than assumed.
+
+@pytest.mark.parametrize("text,expected", [
+    ("the a2a roster is stale", True),
+    ("a2a-gateway went down", True),          # hyphen does not continue the word
+    ("(a2a)", True),
+    ("a2a", True),
+    ("za2a is a different token", False),     # word continues to the left
+    ("a2ab is a different token", False),     # word continues to the right
+    ("a2a2a", False),
+    ("the a2a_bridge config", False),         # underscore joins
+])
+def test_a_cue_with_digits_matches_on_boundaries_too(text, expected):
+    assert cue_matches("a2a", text) is expected
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("abm renewed", True),
+    ("routed through abm/hq", True),
+    ("abm's roadmap", True),
+    ("labmate is not abm", True),             # a real mention follows a false one
+    ("labmate work", False),
+])
+def test_abm_is_not_matched_inside_another_word(text, expected):
+    assert cue_matches("abm", text) is expected
+
+
 def test_empty_cue_never_matches():
     assert cue_matches("", "anything at all") is False
 
