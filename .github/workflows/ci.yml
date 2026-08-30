@@ -60,7 +60,7 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cq_test
         run: python scripts/run_migrations.py
 
-      - name: DB integration tests (structured ingest + patch cues)
+      - name: DB integration tests (structured ingest + patch cues + cue-leg scope)
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cq_test
-        run: python -m pytest tests/unit/test_structured_ingest_db.py tests/unit/test_patch_cues_db.py -v
+        run: python -m pytest tests/unit/test_structured_ingest_db.py tests/unit/test_patch_cues_db.py tests/unit/test_cue_leg_scope_db.py -v
