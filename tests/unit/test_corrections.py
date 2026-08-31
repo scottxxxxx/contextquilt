@@ -2,7 +2,10 @@
 
 from datetime import date
 
+import pytest
+
 from src.contextquilt.services.corrections import (
+    CORRECTION_SYSTEM,
     FALLBACK_PATCH_TYPE,
     MAX_CANDIDATES,
     build_correction_content,
@@ -54,7 +57,7 @@ def test_valid_match_with_resolved_deadline():
               deadline_date="2026-08-15", owner="Robin"),
         IDS, meeting_date=TODAY,
     )
-    assert matched == "aaaa"
+    assert matched == ["aaaa"]
     assert value["text"] == "Ship the release by August 15"
     assert value["deadline_date"] == "2026-08-15"
     assert value["owner"] == "Robin"
@@ -63,14 +66,14 @@ def test_valid_match_with_resolved_deadline():
 
 def test_hallucinated_patch_id_downgrades_to_unmatched():
     matched, value = parse_correction_response(_resp("zzzz", "Robin owns the rollout now"), IDS)
-    assert matched is None
+    assert matched == []
     assert value["text"] == "Robin owns the rollout now"
 
 
 def test_null_match_uses_declared_type_when_valid():
     matched, value = parse_correction_response(
         _resp(None, "Robin owns the rollout now", patch_type="commitment"), IDS)
-    assert matched is None
+    assert matched == []
     assert value["_new_type"] == "commitment"
     matched, value = parse_correction_response(
         _resp(None, "Robin owns the rollout now", patch_type="not_a_type"), IDS)
@@ -80,7 +83,7 @@ def test_null_match_uses_declared_type_when_valid():
 def test_embedded_json_and_garbage():
     raw = 'Sure: {"corrected_patch_id": "bbbb", "corrected_fact": {"text": "Deadline is now end of August"}, "reason": "r"}'
     matched, value = parse_correction_response(raw, IDS)
-    assert matched == "bbbb"
+    assert matched == ["bbbb"]
     assert parse_correction_response("no json", IDS) is None
     assert parse_correction_response(None, IDS) is None
     assert parse_correction_response({"corrected_fact": {"text": "hi"}}, IDS) is None  # too short
@@ -92,7 +95,7 @@ def test_bad_deadline_date_dropped_not_fatal():
               deadline_date="sometime soon"),
         IDS, meeting_date=TODAY,
     )
-    assert matched == "aaaa"
+    assert matched == ["aaaa"]
     assert "deadline_date" not in value
     assert value["deadline"] == "by the offsite"
 
@@ -137,3 +140,101 @@ def test_completion_parse_drops_null_hallucinated_and_garbage():
 def test_completion_parse_embedded_json():
     raw = 'ok {"completed_patch_id": "aaaa", "evidence": "user said done", "reason": "r"}'
     assert parse_completion_response(raw, IDS) == ("aaaa", "user said done")
+
+
+# --------------------------------------------------------------------
+# A false belief is recorded more than once
+# --------------------------------------------------------------------
+
+def test_every_contradicted_patch_is_returned_not_just_the_closest():
+    """Steven Williams, 2026-08-31, and the case that forced this.
+
+    The user wrote one sentence: he is not an attorney and neither is
+    his mother. It contradicted five ACTIVE patches across four types,
+    a person description, his mother's own person patch, a goal, a
+    commitment, and the derived summary. The single-id contract could
+    supersede at most one of them, so the correction landed, the user
+    was told it had been applied, and the app went on asserting the
+    same thing from the other four the next time he looked.
+    """
+    matched, value = parse_correction_response(
+        {"corrected_patch_ids": ["aaaa", "bbbb", "cccc"],
+         "corrected_fact": {"text": "Steven is not an attorney and neither is his mother"}},
+        {"aaaa", "bbbb", "cccc", "dddd"},
+    )
+    assert matched == ["aaaa", "bbbb", "cccc"]
+
+
+def test_one_hallucinated_id_does_not_discard_the_real_ones():
+    # Dropping the whole list because one entry was invented would turn
+    # a partly-good answer into an unmatched correction, which is the
+    # failure this change exists to remove.
+    matched, _ = parse_correction_response(
+        {"corrected_patch_ids": ["aaaa", "ghost", "bbbb"],
+         "corrected_fact": {"text": "He is not an attorney"}},
+        {"aaaa", "bbbb"},
+    )
+    assert matched == ["aaaa", "bbbb"]
+
+
+def test_order_is_preserved_because_the_first_match_decides_type_and_scope():
+    # Keeping the single-match case byte-identical to the old behaviour
+    # depends on this, so it is asserted rather than assumed.
+    matched, _ = parse_correction_response(
+        {"corrected_patch_ids": ["cccc", "aaaa"],
+         "corrected_fact": {"text": "He is not an attorney"}},
+        {"aaaa", "cccc"},
+    )
+    assert matched == ["cccc", "aaaa"]
+
+
+def test_a_repeated_id_is_counted_once():
+    # Archiving the same patch twice would stamp it twice and write two
+    # identical `replaces` edges.
+    matched, _ = parse_correction_response(
+        {"corrected_patch_ids": ["aaaa", "aaaa"],
+         "corrected_fact": {"text": "He is not an attorney"}},
+        {"aaaa"},
+    )
+    assert matched == ["aaaa"]
+
+
+def test_the_old_single_id_spelling_still_parses():
+    """A model shown a cached prompt in the old shape must not break.
+
+    The instruction asks for the plural now, but an in-flight or cached
+    prompt carrying the singular is a real possibility and the cost of
+    accepting both is two lines.
+    """
+    matched, _ = parse_correction_response(
+        {"corrected_patch_id": "aaaa",
+         "corrected_fact": {"text": "He is not an attorney"}},
+        {"aaaa"},
+    )
+    assert matched == ["aaaa"]
+
+
+@pytest.mark.parametrize("raw", [None, [], "", 42, {"a": 1}, [None, 7]])
+def test_an_unusable_id_field_is_an_unmatched_correction_not_a_crash(raw):
+    # Unmatched corrections still land, so the only wrong outcome here
+    # is an exception that loses a user-stated fact entirely.
+    matched, value = parse_correction_response(
+        {"corrected_patch_ids": raw,
+         "corrected_fact": {"text": "He is not an attorney"}},
+        {"aaaa"},
+    )
+    assert matched == []
+    assert value["text"] == "He is not an attorney"
+
+
+def test_the_instruction_asks_for_every_one_rather_than_the_best():
+    """The prompt has to say it, or the model returns its single best.
+
+    Doc 19.3: an unstated field is an unemitted field. A list-shaped
+    schema with a "which patch does this contradict" instruction gets a
+    list of length one.
+    """
+    lowered = CORRECTION_SYSTEM.lower()
+    assert "every one of them" in lowered
+    assert "not just the closest" in lowered
+    assert "corrected_patch_ids" in CORRECTION_SYSTEM

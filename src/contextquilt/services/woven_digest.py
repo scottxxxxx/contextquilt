@@ -679,11 +679,22 @@ def build_digest(
         "row_pairs": row_pairs(len(chosen)),
         "dropped": dropped,
         # Paging, so a client never has to infer whether there is more.
-        # `total_available` counts what EARNED a tile, after pruning, so
-        # it is the honest denominator for "showing N of M" rather than
-        # a raw candidate count that includes rows the quilt can never
-        # show.
-        "total_available": total,
+        #
+        # `tiles_available`, NOT `total_available`, and the name was
+        # changed before ShoulderSurf wrote the decoder rather than
+        # after. GhostPour caught the collision because they are the
+        # only hop holding both routes: `/v1/quilt/{user_id}` already
+        # serves `total_available` counted BEFORE its cap, the real
+        # denominator, 2136 for Scott, and renders it into user-visible
+        # copy as a floor. This one counts AFTER pruning, tiles that
+        # earned a headline, 265 for the same user on the same day.
+        #
+        # Two sibling routes under one prefix, one field name, opposite
+        # semantics and an 8x gap. Both counting rules are right for
+        # their own route: "showing 6 of 265" has to be honest or the
+        # scroll promises tiles that do not exist. The name was the
+        # defect, and a name nobody opens misleads its own author first.
+        "tiles_available": total,
         "offset": start,
         "has_more": start + len(chosen) < total,
     }

@@ -42,11 +42,11 @@ FALLBACK_PATCH_TYPE = "takeaway"
 
 CORRECTION_SYSTEM = """You are the correction stage of ContextQuilt, a persistent memory system. A user has just told their assistant that something in memory is wrong. You are shown the user's correction and a numbered list of stored memory patches, each with its patch_id. Your job:
 
-1. Decide which stored patch (if any) the correction contradicts. Only pick a patch the correction actually contradicts or updates — topical similarity is not contradiction. If none qualifies, use null.
+1. Decide which stored patches the correction contradicts. List EVERY ONE of them, not just the closest. A single false belief is usually recorded in several patches of different types: the person's description, a goal that assumes it, a commitment phrased around it. Correcting one and leaving the others means the user is told the same wrong thing again tomorrow. Only pick patches the correction actually contradicts or updates: topical similarity is not contradiction. If none qualifies, use an empty list.
 2. Write the corrected fact as it should now be remembered: one concise statement incorporating the user's correction. Keep the same language the user wrote in. If the correction carries a deadline, resolve it to a calendar date using the current date provided.
 
 Respond with EXACTLY this raw JSON shape and nothing else:
-{"corrected_patch_id": "<patch_id copied verbatim from the list, or null>", "corrected_fact": {"text": "<the corrected statement>", "owner": "<responsible person, or null>", "deadline": "<deadline as the user said it, or null>", "deadline_date": "<YYYY-MM-DD or null>", "patch_type": "<only when corrected_patch_id is null: one of the allowed types, else null>"}, "reason": "<one short sentence>"}"""
+{"corrected_patch_ids": ["<patch_id copied verbatim from the list>", "..."], "corrected_fact": {"text": "<the corrected statement>", "owner": "<responsible person, or null>", "deadline": "<deadline as the user said it, or null>", "deadline_date": "<YYYY-MM-DD or null>", "patch_type": "<only when corrected_patch_ids is empty: one of the allowed types, else null>"}, "reason": "<one short sentence>"}"""
 
 
 def build_correction_content(
@@ -80,10 +80,15 @@ def parse_correction_response(
     allowed_types: Optional[set] = None,
     fallback_type: str = FALLBACK_PATCH_TYPE,
 ) -> Optional[Tuple[Optional[str], Dict[str, Any]]]:
-    """Returns (matched_patch_id_or_None, corrected_fact_value) or None
-    when the response is unusable. A hallucinated patch_id (not in the
-    candidate set) downgrades to unmatched rather than corrupting an
-    unrelated patch."""
+    """Returns (matched_patch_ids, corrected_fact_value) or None when the
+    response is unusable.
+
+    The id list is EVERY patch the correction contradicts, in the order
+    the model gave them, deduplicated, with hallucinated ids dropped
+    individually rather than discarding the whole list. An empty list is
+    an unmatched correction, which still lands: never lose a
+    user-stated fact.
+    """
     obj = content
     if isinstance(obj, str):
         import json as _json
@@ -108,9 +113,35 @@ def parse_correction_response(
     if not (5 <= len(text) <= 600):
         return None
 
-    matched = obj.get("corrected_patch_id")
-    if not isinstance(matched, str) or matched not in valid_patch_ids:
-        matched = None
+    # EVERY contradicted patch, not the closest one. Steven Williams,
+    # 2026-08-31: the user wrote one sentence saying he is not an
+    # attorney and neither is his mother. It contradicted five ACTIVE
+    # patches across four types (a person description, his mother's own
+    # person patch, a goal, a commitment and the derived summary). The
+    # single-id contract could supersede at most one, so the correction
+    # landed, the user was told it had been applied, and the app went on
+    # asserting the same thing from the other four.
+    #
+    # Both spellings are accepted: a model shown the old single-id shape
+    # in any cached prompt still parses, and the plural is what the
+    # instruction now asks for. Order is preserved so the FIRST match
+    # decides the new patch's type and scope, which keeps the
+    # single-match behaviour byte-identical to before.
+    raw = obj.get("corrected_patch_ids")
+    if raw is None:
+        raw = obj.get("corrected_patch_id")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        raw = []
+    matched: List[str] = []
+    for candidate in raw:
+        # A hallucinated id downgrades to unmatched rather than
+        # corrupting an unrelated patch, and dropping ONE bad id must
+        # not discard the good ones alongside it.
+        if isinstance(candidate, str) and candidate in valid_patch_ids \
+                and candidate not in matched:
+            matched.append(candidate)
 
     value: Dict[str, Any] = {"text": text}
     owner = fact.get("owner")
