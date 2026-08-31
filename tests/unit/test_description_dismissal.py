@@ -165,3 +165,141 @@ def test_the_summary_is_not_rewritten_inline():
     body = body[:body.index("async def undismiss_descriptions")]
     assert '"who_they_are": "regenerating"' in body
     assert "CQ_WHO_THEY_ARE_MODEL" not in body
+
+
+# --------------------------------------------------------------------
+# The syntheses built from rejected readings go too, immediately
+# --------------------------------------------------------------------
+
+def _dismiss_body() -> str:
+    body = MAIN[MAIN.index("async def dismiss_descriptions"):]
+    return body[:body.index("async def undismiss_descriptions")]
+
+
+def test_a_dismissal_archives_the_summaries_built_from_those_readings():
+    """Steven Williams, 2026-08-31, and the reason this is not optional.
+
+    The user marked the "who they are" paragraph inaccurate. All four
+    readings were stamped, the route answered that the summary was
+    regenerating, and the paragraph was STILL ACTIVE in the database and
+    still being served when he looked again. `who_they_are` regenerates
+    only when its input fingerprint changes, on a periodic worker pass,
+    so "it will be here next time you look" was a promise this endpoint
+    could not keep.
+    """
+    body = _dismiss_body()
+    assert "status = 'archived'" in body
+    assert '"who_they_are", "trajectory"' in body
+
+
+def test_the_trajectory_card_goes_with_it():
+    """It is the OTHER synthesis of the same series.
+
+    It kept narrating the rejected arc, "first seen as a
+    practitioner-buyer, then reidentified as an advisor", directly under
+    a paragraph the user had just struck through.
+    """
+    assert '"trajectory"' in _dismiss_body()
+
+
+def test_only_the_syntheses_are_archived_never_the_whole_card_stack():
+    # The insight lenses are separate claims with their own evidence. A
+    # user rejecting a characterisation is not rejecting every
+    # observation ever made about the person, and the durable-no rule is
+    # PER LENS for the same reason.
+    body = _dismiss_body()
+    lens_filter = body[body.index("value->>'lens' = ANY"):][:120]
+    assert "$1::text[]" in lens_filter
+
+
+def test_archiving_stamps_a_cause_rather_than_vanishing():
+    # Every archive site stamps `value.archive_cause` (doc 16 5.7), so a
+    # year out "the user rejected this" is still distinguishable from
+    # decay, replacement or cleanup.
+    assert """'{archive_cause}', '"corrected"'""" in _dismiss_body()
+
+
+def test_a_failed_archive_cannot_fail_the_dismissal():
+    # The dismissal is what the user actually asked for and it has
+    # already taken effect. Losing a card must not cost them that.
+    body = _dismiss_body()
+    block = body[body.index("syntheses_archived = 0"):body.index("if payload.note:")]
+    assert "try:" in block and "except Exception" in block
+
+
+def test_the_response_reports_what_was_archived_rather_than_assuming_it():
+    # The count is the difference between a summary that was withdrawn
+    # and one still sitting on somebody's screen, and the previous
+    # response could not tell the caller which.
+    assert '"syntheses_archived": syntheses_archived,' in _dismiss_body()
+
+
+def test_the_dismissal_speaks_the_apps_person_type_not_the_literal():
+    """The People surface was born speaking ShoulderSurf's dialect.
+
+    A literal here is the overfit the vocabulary exists to prevent, and
+    it is guarded by test_people_vocabulary as a family. This one caught
+    the first version of this code.
+    """
+    body = _dismiss_body()
+    assert "_people_vocab_cached" in body
+    assert "patch_type = 'person'" not in body
+    # AND THAT THE RESULT IS ACTUALLY USED. Sabotage put the literal
+    # back in the PARAMETER position, leaving the vocabulary lookup
+    # sitting above it unused, and this test passed: it had checked that
+    # the call existed rather than that its answer reached the query.
+    # A resolved value nobody passes is the same as never resolving it.
+    lookup = body[body.index("person_patch_ids = await db_pool.fetch"):]
+    lookup = lookup[:lookup.index(")")]
+    assert "dismiss_vocab.person_type" in lookup, (
+        "the resolved person type never reaches the query"
+    )
+    assert '"person"' not in lookup
+
+
+# --------------------------------------------------------------------
+# Saying so out loud while it settles
+# --------------------------------------------------------------------
+
+def test_the_person_detail_says_when_a_correction_is_still_settling():
+    """Scott's ask on 2026-08-31, in his words: a way for the app to show
+    that we are reconciling and that there may be an inaccuracy until it
+    does.
+
+    Three things happen at three speeds when a characterisation is
+    rejected: readings stamped now, syntheses archived now, replacement
+    summary written by the worker whenever it next runs. In between,
+    `who_they_are` is legitimately absent, and without this field that
+    gap is indistinguishable from "this person never had a summary".
+    """
+    assert '"reconciling": reconciling,' in MAIN
+    block = MAIN[MAIN.index("reconciling = None"):MAIN.index('"described_as": described_as_series')]
+    for key in ('"since"', '"dismissed_readings"', '"correction_recorded"'):
+        assert key in block, key
+
+
+def test_a_summary_written_BEFORE_the_rejection_does_not_clear_it():
+    """Otherwise a stale card marks the person settled.
+
+    A summary derived before the user objected was built from the very
+    material they rejected, so its existence is not evidence that the
+    replacement has been written.
+    """
+    block = MAIN[MAIN.index("reconciling = None"):MAIN.index('"described_as": described_as_series')]
+    assert "newest_card is None or" in block
+    assert "newest_card < rec[\"latest\"]" in block
+
+
+def test_reconciling_is_derived_rather_than_stored():
+    # A stored flag needs clearing, and the thing that would clear it is
+    # a worker pass with no reason to know the field exists.
+    block = MAIN[MAIN.index("reconciling = None"):MAIN.index('"described_as": described_as_series')]
+    assert "UPDATE" not in block and "INSERT" not in block
+
+
+def test_a_failed_reconciling_check_serves_null_rather_than_settled():
+    # Null means CQ cannot tell, which is honest. Claiming a person is
+    # settled because a query failed is not.
+    block = MAIN[MAIN.index("reconciling = None"):MAIN.index('"described_as": described_as_series')]
+    assert "except Exception" in block
+    assert 'logger.warning("reconciling_state_unavailable"' in block

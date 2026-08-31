@@ -135,7 +135,7 @@ def test_paging_is_a_partition_with_no_repeats_and_no_gaps():
     assert len(seen) == len(set(seen)) == 66
 
 
-def test_total_available_counts_what_earned_a_tile_not_what_was_fetched():
+def test_tiles_available_counts_what_earned_a_tile_not_what_was_fetched():
     """The honest denominator for "showing 6 of 322".
 
     Counting raw candidates would include rows the quilt can never show
@@ -144,7 +144,7 @@ def test_total_available_counts_what_earned_a_tile_not_what_was_fetched():
     cands = mixed({"commitment": 10})
     cands += [patch("person1", "person"), patch("orphan", "event", origin=None)]
     out = build_digest(cands, limit=6)
-    assert out["total_available"] == 10
+    assert out["tiles_available"] == 10
     assert out["dropped"]
 
 

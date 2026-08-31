@@ -5348,8 +5348,12 @@ class ColdPathWorker:
 
         Candidate set = patches whose text appears in the passed
         context_block first (what the user was looking at), then scoped
-        recent patches. One LLM call picks the contradicted patch by id
-        (resolved_commitments pattern) and writes the corrected fact.
+        recent patches. One LLM call picks EVERY contradicted patch by
+        id (resolved_commitments pattern) and writes the corrected fact.
+        Every one of them is archived and connected, because a false
+        belief is usually recorded several times in different shapes and
+        superseding the closest one tells the user it is fixed while the
+        app keeps asserting it from the rest.
         Supersede uses only existing vocabulary: new patch is
         origin_mode='declared', stale patch is archived (delta sync
         converges devices), connected with role 'replaces'. Unmatched
@@ -5421,10 +5425,17 @@ class ColdPathWorker:
             logger.warning("correction_unparseable", user_id=user_id,
                            correction=correction_text[:100])
             return
-        matched_id, value = parsed
+        matched_ids, value = parsed
         new_type = value.pop("_new_type", fallback_type)
 
-        old = by_id.get(matched_id) if matched_id else None
+        # EVERY contradicted patch is superseded, not the closest one.
+        # A false belief is usually recorded several times in different
+        # shapes, and correcting one of them tells the user it is fixed
+        # while the app keeps asserting it from the others.
+        olds = [by_id[pid] for pid in matched_ids if pid in by_id]
+        # The FIRST match decides type and scope, which keeps the
+        # single-match case byte-identical to the previous behaviour.
+        old = olds[0] if olds else None
         if old is not None:
             new_type = old["patch_type"]
 
@@ -5471,7 +5482,7 @@ class ColdPathWorker:
                         )
                     except Exception:
                         pass
-                if old is not None:
+                for old in olds:
                     await conn.execute(
                         """
                         UPDATE context_patches SET
@@ -5514,10 +5525,16 @@ class ColdPathWorker:
                         """,
                         new_patch_id, old["patch_id"],
                     )
-        if old is not None:
+        if olds:
+            # The COUNT is the number that matters here: a correction
+            # that superseded one of five is the failure this loop
+            # exists to fix, and it is indistinguishable from a clean
+            # one unless the log says how many it touched.
             logger.info("correction_applied", user_id=user_id,
-                        superseded=str(old["patch_id"]), new_patch=new_patch_id,
-                        patch_type=new_type, in_block=old in in_block)
+                        superseded=[str(o["patch_id"]) for o in olds],
+                        superseded_count=len(olds), new_patch=new_patch_id,
+                        patch_type=new_type,
+                        in_block=sum(1 for o in olds if o in in_block))
         else:
             logger.info("correction_unmatched_stored", user_id=user_id,
                         new_patch=new_patch_id, patch_type=new_type,

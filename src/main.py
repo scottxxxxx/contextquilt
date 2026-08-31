@@ -6693,6 +6693,74 @@ async def get_person(
     except Exception as exc:
         logger.warning("described_as_series_unavailable", error=str(exc)[:140])
 
+    # IS THIS PERSON MID-RECONCILIATION, and say so rather than let the
+    # client infer it from an absence.
+    #
+    # When the user marks a characterisation wrong, three things happen
+    # at three different speeds: the readings are stamped immediately,
+    # the syntheses built from them are archived immediately, and a new
+    # summary is written by the worker's profile pass whenever it next
+    # runs. In between, `who_they_are` is legitimately absent.
+    #
+    # Without this field that gap is indistinguishable from "this person
+    # never had a summary", so a client either says nothing or says
+    # something reassuring it cannot support. Scott asked for exactly
+    # this on 2026-08-31: a way for the app to show that a correction is
+    # settling and that there may be an inaccuracy until it does.
+    #
+    # Derived, never stored: a stored flag would need clearing, and the
+    # thing that clears it is a worker pass that has no reason to know
+    # this field exists.
+    reconciling = None
+    try:
+        rec = await db_pool.fetchrow(
+            """
+            SELECT count(*) AS n,
+                   max(dismissed_at) AS latest,
+                   bool_or(dismissed_note IS NOT NULL) AS had_note
+              FROM entity_descriptions
+             WHERE user_id = $1 AND entity_id = $2::uuid
+               AND dismissed_at IS NOT NULL
+            """,
+            user_id, entity_id,
+        )
+        if rec and rec["n"]:
+            newest_card = await db_pool.fetchval(
+                """
+                SELECT max(cp.created_at)
+                  FROM context_patches cp
+                  JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                 WHERE ps.subject_key = $1
+                   AND cp.patch_type = 'insight'
+                   AND cp.value->>'lens' = 'who_they_are'
+                   AND COALESCE(cp.status, 'active') = 'active'
+                   AND (cp.value->>'source_entity_id' = $2
+                        OR cp.value->>'source_person' IN (
+                            SELECT cp2.patch_id::text FROM context_patches cp2
+                              JOIN patch_subjects ps2 ON ps2.patch_id = cp2.patch_id
+                             WHERE ps2.subject_key = $1 AND cp2.patch_type = $3))
+                """,
+                # The app's OWN person type, never the literal. The
+                # People surface was born speaking ShoulderSurf's
+                # dialect and a test guards against it drifting back.
+                f"user:{user_id}", entity_id, vocab.person_type,
+            )
+            # A summary written BEFORE the rejection is a summary built
+            # from rejected material, so it does not clear the state.
+            if newest_card is None or (rec["latest"] and newest_card < rec["latest"]):
+                reconciling = {
+                    "since": rec["latest"].isoformat() if rec["latest"] else None,
+                    "dismissed_readings": int(rec["n"]),
+                    # Whether the user gave their own version, which is
+                    # the difference between "we removed this" and "we
+                    # are folding in what you told us".
+                    "correction_recorded": bool(rec["had_note"]),
+                }
+    except Exception as exc:
+        # Null means CQ cannot tell, which is honest. Claiming a person
+        # is settled because a query failed is not.
+        logger.warning("reconciling_state_unavailable", error=str(exc)[:140])
+
     # What this person has STATED they are, as opposed to what a meeting
     # showed them doing. A stated role ("Suresh is scrum master on ABM
     # project") is a `role` patch linked to its project, not to the
@@ -6754,6 +6822,10 @@ async def get_person(
         # perception changed and open the history. Null = cannot tell
         # (fetch failed); iterations 0 = we have never described them.
         "described_as": described_as_series,
+        # Null when nothing is pending. An object means a
+        # characterisation was rejected and the replacement has not been
+        # written yet, so the client can say so out loud.
+        "reconciling": reconciling,
         # PRECEDENCE RULE, on the wire: a role the person STATED beats a
         # description a meeting INFERRED. `title` is the newest stated
         # role with the person's own name and copula stripped; a client
@@ -7086,6 +7158,66 @@ async def dismiss_descriptions(
                 count=len(rows), source=(payload.source or "user_card"),
                 had_note=bool(payload.note))
 
+    # ARCHIVE THE SYNTHESES BUILT FROM THOSE ROWS, NOW, not on the next
+    # worker pass.
+    #
+    # Steven Williams, 2026-08-31: the user marked the "who they are"
+    # paragraph inaccurate, all four readings were stamped, the route
+    # answered that the summary was regenerating, and the paragraph was
+    # STILL ACTIVE in the database and still being served when he looked
+    # again. `who_they_are` regenerates only when its input fingerprint
+    # changes, on a periodic pass, so "it will be here next time you
+    # look" was a promise this endpoint could not keep.
+    #
+    # `trajectory` goes with it for the same reason: it is the other
+    # synthesis OF the description series, and it kept narrating the
+    # rejected arc ("first seen as a practitioner-buyer, then
+    # reidentified as an advisor") under a paragraph the user had just
+    # struck through.
+    #
+    # Archived rather than deleted, cause `corrected`, so the worker's
+    # own replace machinery still sees a coherent history and an undo
+    # has something to reason about. Guarded: losing a card must never
+    # fail the dismissal the user actually asked for.
+    syntheses_archived = 0
+    try:
+        # The app's OWN person type, resolved from its manifest, never
+        # the literal: this surface was born speaking ShoulderSurf's
+        # dialect and a test guards against it drifting back.
+        dismiss_vocab = await _people_vocab_cached(app_id)
+        person_patch_ids = await db_pool.fetch(
+            """
+            SELECT cp.patch_id::text AS patch_id
+              FROM context_patches cp
+              JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+             WHERE ps.subject_key = $1 AND cp.patch_type = $2
+            """,
+            f"user:{user_id}", dismiss_vocab.person_type,
+        )
+        archived = await db_pool.fetch(
+            """
+            UPDATE context_patches SET
+                status = 'archived',
+                updated_at = NOW(),
+                value = jsonb_set(value, '{archive_cause}', '"corrected"')
+             WHERE patch_type = 'insight'
+               AND COALESCE(status, 'active') = 'active'
+               AND value->>'lens' = ANY($1::text[])
+               AND (value->>'source_entity_id' = $2
+                    OR value->>'source_person' = ANY($3::text[]))
+            RETURNING patch_id
+            """,
+            ["who_they_are", "trajectory"], entity_id,
+            [r["patch_id"] for r in person_patch_ids],
+        )
+        syntheses_archived = len(archived)
+        if syntheses_archived:
+            logger.info("dismissal_archived_syntheses", user_id=user_id,
+                        entity_id=entity_id, count=syntheses_archived)
+    except Exception as exc:
+        logger.warning("dismissal_synthesis_archive_failed", user_id=user_id,
+                       entity_id=entity_id, error=str(exc)[:200])
+
     # "Correct this" rather than "this is inaccurate": the note is a
     # fact the user STATED, so it goes down the existing correction lane
     # rather than a parallel path of its own. handle_correction already
@@ -7124,6 +7256,11 @@ async def dismiss_descriptions(
         "dismissed": len(rows),
         "correction_enqueued": bool(payload.note),
         "who_they_are": "regenerating",
+        # What actually happened, not what was intended. The count is
+        # the difference between a summary that was withdrawn and one
+        # that is still sitting on somebody's screen, and the previous
+        # version of this response could not tell the caller which.
+        "syntheses_archived": syntheses_archived,
     }
 
 
@@ -7332,11 +7469,14 @@ async def woven_digest(
         # real cost is payload, about 713 bytes a tile, which is an
         # argument for paging rather than for a cap.
         #
-        # `total_available` counts what EARNED a tile, after pruning, so
-        # "showing 6 of 322" is honest. A raw candidate count would
+        # `tiles_available` counts what EARNED a tile, after pruning, so
+        # "showing 6 of 265" is honest. A raw candidate count would
         # include rows the quilt can never show and would promise a
-        # scroll that ends early.
-        "total_available": digest["total_available"],
+        # scroll that ends early. Deliberately NOT named
+        # `total_available`: the sibling /v1/quilt/{user_id} route
+        # already uses that name for a count taken BEFORE its cap, and
+        # GhostPour caught the collision from the middle hop.
+        "tiles_available": digest["tiles_available"],
         "offset": digest["offset"],
         "has_more": digest["has_more"],
     }
