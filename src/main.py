@@ -7222,7 +7222,8 @@ async def woven_digest(
     user_id: str,
     window: Optional[str] = Query("7d", description="7d, 30d, or a day count"),
     limit: int = Query(6, ge=1, le=6),
-    project_id: Optional[str] = Query(None),
+    project_id: Optional[str] = Query(None, description="Scope by project id"),
+    project: Optional[str] = Query(None, description="Scope by project NAME"),
     app_id: str = Depends(verify_application_access),
 ):
     """The week's quilt: the few patches worth a tile, already ranked.
@@ -7245,8 +7246,49 @@ async def woven_digest(
     """
     subject_key = f"user:{user_id}"
     days = _woven_window_days(window)
-    project_clause = "AND cp.project_id = $3" if project_id else ""
-    args = [subject_key, days] + ([project_id] if project_id else [])
+
+    # BOTH SPELLINGS, and the reason is a failure mode rather than
+    # politeness. The handoff's section 5 spells the param `project`
+    # while this route grew up with `project_id`, and a project NAME
+    # arriving in the id slot matches no row, so the tab renders empty
+    # with a 200 and nothing anywhere errors. Recall already takes both
+    # for the same reason, so this is the house pattern rather than a
+    # new one.
+    project_clause = ""
+    args: list = [subject_key, days]
+    if project_id:
+        project_clause = "AND cp.project_id = $3"
+        args.append(project_id)
+    elif project:
+        project_clause = "AND cp.project = $3"
+        args.append(project)
+
+    # AND THE REAL FIX IS NOT THE SPELLING. "no such project" and "this
+    # project had a quiet week" are the same observable when a filter
+    # returns nothing, and only one of them is a bug. So a supplied
+    # filter that matches NO patch at all in this user's whole quilt is
+    # reported as unknown rather than served as an empty week. Scoped to
+    # the user, and deliberately checked against the WHOLE quilt rather
+    # than the window: a real project with a quiet week must still read
+    # as quiet.
+    project_known = None
+    if project_id or project:
+        col = "project_id" if project_id else "project"
+        try:
+            project_known = bool(await db_pool.fetchval(
+                f"""
+                SELECT 1 FROM context_patches cp
+                  JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                 WHERE ps.subject_key = $1 AND cp.{col} = $2
+                 LIMIT 1
+                """,
+                subject_key, project_id or project,
+            ))
+        except Exception as exc:
+            # Unknown rather than false: a failed check must not accuse
+            # a real project of not existing.
+            logger.warning("woven_project_check_failed", error=str(exc)[:200])
+            project_known = None
 
     try:
         rows = await db_pool.fetch(
@@ -7275,6 +7317,11 @@ async def woven_digest(
         # Why a thin week is thin, so a client can say so rather than
         # rendering an unexplained empty state.
         "dropped": digest["dropped"],
+        # null when no filter was passed, true for a project this user
+        # actually has, false when the filter matched nothing anywhere.
+        # False plus an empty `patches` means "wrong project", not
+        # "quiet week", and the client should say so.
+        "project_known": project_known,
     }
 
 

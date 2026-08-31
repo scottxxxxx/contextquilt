@@ -1420,7 +1420,22 @@ paths:
             to 7 rather than 4xx: a typo in a query param must not cost
             the user their memory tab.
         - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 6, default: 6 } }
-        - { name: project_id, in: query, required: false, schema: { type: string } }
+        - name: project_id
+          in: query
+          required: false
+          schema: { type: string }
+          description: Scope by project id.
+        - name: project
+          in: query
+          required: false
+          schema: { type: string }
+          description: >
+            Scope by project NAME. Both spellings are accepted because
+            the handoff's section 5 spells the param `project` while
+            this route grew up with `project_id`, and a NAME arriving in
+            the id slot matches no row, so the tab would render empty
+            with a 200 and nothing would error. `project_id` wins if
+            both are sent.
       responses:
         "200":
           description: Lifetime totals plus the windowed tiles.
@@ -1433,6 +1448,19 @@ paths:
                   meetings_count: { type: integer, nullable: true }
                   since: { type: string, nullable: true }
                   window_days: { type: integer }
+                  project_known:
+                    type: boolean
+                    nullable: true
+                    description: >
+                      null when no project filter was passed, true for a
+                      project this user actually has, false when the
+                      filter matched nothing anywhere in their quilt.
+                      FALSE PLUS AN EMPTY `patches` MEANS "WRONG
+                      PROJECT", NOT "QUIET WEEK", and the client should
+                      say so rather than rendering an empty grid.
+                      Checked against the whole quilt rather than the
+                      window, so a real project with a quiet week still
+                      reads as quiet.
                   rows:
                     type: array
                     items: { type: array, items: { type: integer } }
