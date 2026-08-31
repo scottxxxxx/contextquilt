@@ -207,3 +207,57 @@ def parse(content: Any, patches: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         accepted[pid] = headline
 
     return {"headlines": accepted, "refused": refused}
+
+
+# --------------------------------------------------------------------
+# Which patches still need a line
+# --------------------------------------------------------------------
+#
+# THE QUERY LIVES HERE SO A TEST CAN EXECUTE IT. The first version of
+# this was written inline in the worker and filtered on `cp.user_id`, a
+# column context_patches does not have: migration 26 dropped it and
+# `patch_subjects` carries the link. Every test covering the lane read
+# SOURCE, because worker.py cannot be imported without asyncpg, so all
+# of them passed. The lane never raises by design, so in production the
+# error would have been swallowed and it would have written zero
+# headlines forever while logging a warning nobody reads.
+#
+# That is the `Body` import shape a second time: a check that is
+# satisfied by the text being present and cannot see whether the text
+# means anything. A string cannot be wrong out loud; only an execution
+# can. So the SQL is built here, both callers use it, and the DB test
+# runs it against a real Postgres.
+
+PENDING_SELECT = """
+    SELECT cp.patch_id, cp.patch_type, cp.value, cp.origin_id,
+           cp.completed_at, cp.sensitivity
+      FROM context_patches cp
+      JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+     WHERE cp.status = 'active'
+       AND cp.value->>'headline' IS NULL
+"""
+
+
+def build_pending_fetch(subject_key: Optional[str] = None,
+                        origin_id: Optional[str] = None):
+    """SQL and args for patches that have no headline yet.
+
+    Idempotent by QUERY rather than by bookkeeping: it asks for rows
+    without a headline, so a re-ingest, a retry and the backfill can all
+    cross the same meeting without paying twice or overwriting a line
+    that is already there.
+
+    Eligibility beyond this is NOT decided here. `why_not_a_tile` is the
+    single source of truth for what can earn a tile, and restating any
+    part of it in SQL would be a second source that drifts toward paying
+    a model to headline patches the quilt can never show.
+    """
+    sql, args = PENDING_SELECT, []
+    if subject_key is not None:
+        args.append(subject_key)
+        sql += f"       AND ps.subject_key = ${len(args)}\n"
+    if origin_id is not None:
+        args.append(origin_id)
+        sql += f"       AND cp.origin_id = ${len(args)}\n"
+    sql += "     ORDER BY cp.created_at DESC\n"
+    return sql, args

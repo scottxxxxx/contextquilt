@@ -61,12 +61,46 @@ def test_eligibility_comes_from_the_live_predicate_not_a_second_list():
     assert "woven_digest.why_not_a_tile" in BACKFILL
 
 
-def test_the_lane_only_selects_patches_that_have_no_headline_yet():
-    # Idempotent by query rather than by bookkeeping: a re-ingest, a
-    # retry and the backfill can all cross the same meeting without
-    # paying twice or overwriting a line already written.
-    assert "value->>'headline' IS NULL" in _lane()
-    assert "value->>'headline' IS NULL" in BACKFILL
+def test_the_lane_and_the_backfill_share_one_query_builder():
+    """Both callers ask the SERVICE, and the service is executed by a test.
+
+    Written inline in the worker, the first version of this query
+    filtered on `cp.user_id`, a column context_patches has not had since
+    migration 26 dropped it. Every test here reads SOURCE, because
+    worker.py cannot be imported without asyncpg, so the wrong column
+    name was present in the text and every test passed. The lane never
+    raises by design, so production would have swallowed the error and
+    written zero headlines forever behind a warning nobody reads.
+
+    A string cannot be wrong out loud; only an execution can. See
+    test_headline_query_db.py, which runs it against a real Postgres.
+    """
+    assert "headlines.build_pending_fetch" in _lane()
+    assert "headlines.build_pending_fetch" in BACKFILL
+    for name, body in (("worker lane", _lane()), ("backfill", BACKFILL)):
+        assert "SELECT" not in body, (
+            f"{name} builds its own SQL again; the shared builder is the "
+            "only copy a DB test executes"
+        )
+
+
+def test_the_builder_is_idempotent_by_query():
+    # Idempotent by asking rather than by bookkeeping: a re-ingest, a
+    # retry and the backfill can all cross one meeting without paying
+    # twice or overwriting a line already written.
+    from contextquilt.services.headlines import PENDING_SELECT
+    assert "value->>'headline' IS NULL" in PENDING_SELECT
+    assert "status = 'active'" in PENDING_SELECT
+
+
+def test_the_builder_scopes_through_patch_subjects_not_a_user_column():
+    """The exact defect, named.
+
+    context_patches carries no user_id. patch_subjects carries the link.
+    """
+    from contextquilt.services.headlines import PENDING_SELECT
+    assert "JOIN patch_subjects" in PENDING_SELECT
+    assert "cp.user_id" not in PENDING_SELECT
 
 
 def test_the_call_is_batched_and_capped():

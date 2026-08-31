@@ -83,19 +83,9 @@ async def main() -> int:
 
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL"],
                                      min_size=1, max_size=3)
-    where = ["cp.status = 'active'", "cp.value->>'headline' IS NULL"]
-    params: list = []
-    if args.user:
-        params.append(args.user)
-        where.append(f"cp.user_id = ${len(params)}")
-
-    rows = await pool.fetch(f"""
-        SELECT cp.patch_id, cp.user_id, cp.patch_type, cp.value,
-               cp.origin_id, cp.completed_at, cp.sensitivity
-          FROM context_patches cp
-         WHERE {' AND '.join(where)}
-         ORDER BY cp.created_at DESC
-    """, *params)
+    sql, params = headlines.build_pending_fetch(
+        subject_key=f"user:{args.user}" if args.user else None)
+    rows = await pool.fetch(sql, *params)
 
     # The live predicate decides, not this script.
     skipped: Counter = Counter()

@@ -7304,17 +7304,13 @@ class ColdPathWorker:
         Never raises. This runs after everything real is already stored.
         """
         try:
-            rows = await self.db.fetch(
-                """
-                SELECT cp.patch_id, cp.patch_type, cp.value, cp.origin_id,
-                       cp.completed_at, cp.sensitivity
-                  FROM context_patches cp
-                 WHERE cp.user_id = $1 AND cp.origin_id = $2
-                   AND cp.status = 'active'
-                   AND cp.value->>'headline' IS NULL
-                """,
-                user_id, origin_id,
-            )
+            # Built in the service so a DB test can EXECUTE it. The
+            # first version filtered on `cp.user_id`, a column this
+            # table does not have since migration 26, and every test
+            # covering this lane reads source, so all of them passed.
+            sql, params = headlines.build_pending_fetch(
+                subject_key=f"user:{user_id}", origin_id=origin_id)
+            rows = await self.db.fetch(sql, *params)
             candidates = [
                 dict(r) for r in rows
                 if woven_digest.why_not_a_tile(dict(r)) is None
