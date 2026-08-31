@@ -19,6 +19,7 @@ from itertools import permutations
 import pytest
 
 from contextquilt.services.woven_digest import (
+    DROP_NO_HEADLINE,
     COLUMNS,
     DROP_EXHAUST,
     DROP_ORPHAN,
@@ -44,6 +45,9 @@ TODAY = date(2026, 8, 31)
 
 
 def patch(pid="p1", ptype="takeaway", text="Ship the gateway", origin="m1", **value):
+    # A tile without a headline is not a tile, so the helper supplies
+    # one. A test about its ABSENCE passes headline=None explicitly.
+    value.setdefault("headline", text[:40])
     return {"patch_id": pid, "patch_type": ptype, "origin_id": origin,
             "value": dict({"text": text}, **value)}
 
@@ -325,7 +329,8 @@ def test_a_json_string_value_is_parsed_not_dropped():
     """
     import json as _json
     raw = {"patch_id": "a", "patch_type": "takeaway", "origin_id": "m1",
-           "value": _json.dumps({"text": "Zero data retention"})}
+           "value": _json.dumps({"text": "Zero data retention",
+                                 "headline": "Zero retention"})}
     assert why_not_a_tile(raw) is None
     out = build_digest([raw], limit=6)
     assert len(out["patches"]) == 1
@@ -436,22 +441,42 @@ def test_the_quilt_still_fills_when_the_variety_runs_out():
     assert types.count("commitment") == 5 and types.count("decision") == 1
 
 
-def test_the_headline_is_served_and_null_is_a_real_state():
-    """Section 6.3 is enforced by refusal rather than repair.
+def test_a_patch_with_no_headline_never_becomes_a_tile():
+    """The ruling that settled a real disagreement with ShoulderSurf.
 
-    Every repair available is a truncation, which is the exact thing 6.3
-    forbids, so a line that broke a rule leaves the patch with NO
-    headline. That is the same served state as a patch stored before the
-    lane existed. The key must always be present, or the client cannot
-    tell a null from a field a middlebox dropped.
+    Section 6.3 refuses an invalid headline rather than repairing it,
+    because every repair is a truncation. That rule was about the
+    WRITER, and it left the reader's case unstated, so CQ and SS filled
+    the gap in opposite directions: CQ said render `fact`, SS's
+    renderer skipped the patch. At six tiles that was a one-tile
+    disagreement. At sixty with one in five null it is twelve.
+
+    SS's objection decides it: `fact` is unbounded and a tile is
+    stamp-sized, so rendering it makes the RENDERER cut the sentence,
+    which is the forbidden truncation through a different door. And
+    skipping client-side is wrong too, because `total_available` would
+    promise tiles that never appear.
+
+    So the selection refuses instead, the contract is one sentence long
+    (every tile served has a headline), and the loss is COUNTED in
+    `dropped` where it creates pressure to improve the writer rather
+    than silently thinning somebody's quilt.
     """
     out = build_digest([
         patch("a", text="Target market is small firms", headline="Small firms win"),
-        patch("b", text="Privacy will be the differentiator"),
+        patch("b", text="Privacy will be the differentiator", headline=None),
     ], limit=6)
-    by_id = {p["patch_id"]: p for p in out["patches"]}
-    assert by_id["a"]["headline"] == "Small firms win"
-    assert "headline" in by_id["b"] and by_id["b"]["headline"] is None
+    assert [p["patch_id"] for p in out["patches"]] == ["a"]
+    assert out["patches"][0]["headline"] == "Small firms win"
+    assert out["dropped"] == {DROP_NO_HEADLINE: 1}
+
+
+def test_every_served_tile_carries_a_headline():
+    # The contract, asserted as a sweep rather than case by case.
+    out = build_digest(
+        [patch(f"p{i}", text=f"Thing number {i}") for i in range(6)]
+        + [patch("bare", text="No line for this one", headline=None)], limit=6)
+    assert all(p["headline"] for p in out["patches"])
 
 
 def test_a_headline_arriving_as_a_json_string_value_still_serves():

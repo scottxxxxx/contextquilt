@@ -90,6 +90,7 @@ DROP_NO_TEXT = "no_text"
 DROP_PERSON = "person_type_not_rendered"
 DROP_ORPHAN = "episode_without_origin"
 DROP_EXHAUST = "meeting_exhaust"
+DROP_NO_HEADLINE = "no_headline_written"
 DROP_RESOLVED = "already_acted_on"
 DROP_CONTESTED = "contested_identity"
 DROP_SENSITIVE = "sensitive_content"
@@ -173,6 +174,36 @@ def why_not_a_tile(patch: Dict[str, Any]) -> Optional[str]:
 
     if EXHAUST.search(text):
         return DROP_EXHAUST
+
+    # A TILE WITHOUT A HEADLINE IS NOT A TILE, and this rule settles a
+    # disagreement rather than expressing a preference.
+    #
+    # Section 6.3 refuses an invalid headline rather than repairing it,
+    # because every repair available is a truncation. That rule was
+    # about the WRITER. It left the reader's case unstated, and CQ and
+    # ShoulderSurf then filled the gap in opposite directions: CQ said
+    # render `fact`, SS's renderer skipped the patch. Both readings were
+    # defensible and only one could be right.
+    #
+    # SS's objection is the one that decides it. `fact` is unbounded and
+    # a tile is stamp-sized, so rendering it makes the RENDERER cut the
+    # sentence: the same forbidden truncation, arriving through a
+    # different door. But skipping client-side is wrong too, because
+    # then `total_available` promises tiles that never appear and the
+    # holes are invisible from here.
+    #
+    # So neither side decides it at render time. A patch that cannot be
+    # shown as a tile is not SELECTED as one, which makes the contract a
+    # sentence long: every tile the home digest serves has a headline.
+    # It also puts the loss in `dropped`, where the count is visible and
+    # creates pressure to improve the writer, instead of silently
+    # thinning somebody's quilt.
+    #
+    # The seam route is deliberately NOT gated: it is one meeting in
+    # capture order with no tiling and no size constraint, so a fact
+    # there is the record rather than a broken tile.
+    if not _value(patch).get("headline"):
+        return DROP_NO_HEADLINE
     return None
 
 
