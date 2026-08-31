@@ -34,7 +34,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from contextquilt.services.extraction_schema import PATCH_TYPES, validate_deadline_date
 
-MAX_CANDIDATES = 20
+# Raised from 20 with the relevance legs: the set is now mostly
+# material the correction is actually about, so a bigger set is more
+# signal rather than more noise. Steven Williams needed five slots for
+# one sentence.
+MAX_CANDIDATES = 30
+
+# Trigram floor for "this patch reads like the correction". Deliberately
+# well below the dedup path's 0.35 gray zone: a correction is phrased as
+# a denial ("Steven is not an attorney") and the patch it contradicts is
+# phrased as an assertion, so they share fewer trigrams than two
+# statements of the same fact do.
+CORRECTION_SIMILARITY_FLOOR = 0.08
 MAX_CORRECTION_CHARS = 2000
 # Type for an unmatched correction when the model doesn't name a better
 # one — a plain remembered fact.
