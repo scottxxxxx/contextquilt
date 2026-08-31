@@ -136,6 +136,7 @@ from contextquilt.services.entity_aliasing import (
     person_candidates,
 )
 from contextquilt.services import behavior_extraction
+from contextquilt.services import extraction_gate
 from contextquilt.services import role_semantics
 from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import described_as
@@ -6069,6 +6070,47 @@ class ColdPathWorker:
                 user_id, effective_summary, metadata,
                 people_vocab.person_entity_type,
             )
+
+            # Length gate (ruled 2026-08-31). A transcript below the
+            # floor almost never yields a patch: measured over 30 days,
+            # 85 of the 89 calls under 1200 chars produced nothing. The
+            # decline carries its REASON and the length, because a gate
+            # that declines silently makes "gated", "model returned
+            # nothing" and "never ran" one observable, which is the
+            # defect #350 fixed in the role-semantics lane. See
+            # services/extraction_gate.py for the price of this trade
+            # and for why the floor differs from the gateway's.
+            gate_reason = extraction_gate.why_not_worth_extracting(effective_summary)
+            if gate_reason:
+                logger.info(
+                    "extraction_skipped",
+                    reason=gate_reason,
+                    user_id=user_id,
+                    origin=origin_id,
+                    chars=len(effective_summary or ""),
+                    floor=extraction_gate.min_transcript_chars(),
+                )
+                # THE BEHAVIOR LANE STILL RUNS, and this is load bearing
+                # rather than tidiness. It is a SEPARATE call with its
+                # own 400-char floor (doc 19.5), and it earns its keep
+                # in exactly the band this gate covers: measured over 30
+                # days, meetings between 400 and 1200 chars produced 18
+                # behavior patches across 8 meetings. Returning here
+                # without it would delete those, which is 4.6x the cost
+                # this gate was priced and ruled on, paid silently, by a
+                # gate nobody asked to do that.
+                #
+                # The other lanes are correctly skipped. Role semantics
+                # produced 0 rows in this band. The communication
+                # profile gates on a marker read off the extraction that
+                # did not happen. Alignment needs this meeting's own
+                # decision patch ids, which do not exist.
+                await self._extract_behavior_observations(
+                    user_id, summary, app_id, origin_id, origin_type,
+                    timestamp, project, project_id, user_label,
+                    resolved_manifest,
+                )
+                return
 
             response = await llm.extract(
                 system_prompt=resolved_prompt,
