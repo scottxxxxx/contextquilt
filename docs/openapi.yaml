@@ -1372,3 +1372,134 @@ paths:
                 properties:
                   restored: { type: integer }
                   who_they_are: { type: string, example: regenerating }
+
+  /v1/quilt/{user_id}/woven:
+    get:
+      operationId: wovenDigest
+      summary: The week's quilt, already pruned and ranked
+      description: >
+        The few patches worth a tile, for the Woven memory screen. The
+        app makes no ranking decisions, so everything here is pruned and
+        ordered before it leaves; selection and layout live in
+        services/woven_digest.
+
+
+        TWO TIME BASES IN ONE RESPONSE, deliberately. `total_memories`,
+        `meetings_count` and `since` are LIFETIME, because the screen
+        opens with "2,770 things you'd have forgotten" and "SINCE
+        MARCH". `patches` is the WINDOW, because the grid beneath says
+        "THIS WEEK'S PATCHES". Making them consistent is the obvious fix
+        and it guts the opening claim.
+
+
+        `span` and `height` come from the design prototype rather than
+        being derived: height is a property of the ROW, not of the
+        weight, so every tile in a row shares one. `rows` groups tile
+        indexes into rendered rows, each filling the 6-column grid
+        exactly. Tile size is decorative and does NOT encode importance.
+
+
+        No meeting titles, durations or minute marks: doc 15 item 5, CQ
+        wins on state and the app wins on content, so the client joins
+        `source_meeting_id` to its own records.
+
+
+        `dropped` reports why a thin week is thin, keyed by prune rule,
+        so a client can explain an empty state rather than rendering an
+        unexplained one. An empty `patches` array is a real state and is
+        never padded.
+      tags: [Quilt]
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+        - name: window
+          in: query
+          required: false
+          schema: { type: string, default: "7d" }
+          description: >
+            7d, 30d, or a bare day count. A malformed value falls back
+            to 7 rather than 4xx: a typo in a query param must not cost
+            the user their memory tab.
+        - { name: limit, in: query, required: false, schema: { type: integer, minimum: 1, maximum: 6, default: 6 } }
+        - { name: project_id, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: Lifetime totals plus the windowed tiles.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_memories: { type: integer, nullable: true }
+                  meetings_count: { type: integer, nullable: true }
+                  since: { type: string, nullable: true }
+                  window_days: { type: integer }
+                  rows:
+                    type: array
+                    items: { type: array, items: { type: integer } }
+                  dropped:
+                    type: object
+                    additionalProperties: { type: integer }
+                  patches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        patch_id: { type: string }
+                        patch_type: { type: string }
+                        fact: { type: string }
+                        weight: { type: integer }
+                        span: { type: integer }
+                        height: { type: integer }
+                        source_meeting_id: { type: string, nullable: true }
+                        occurred_at: { type: string, nullable: true }
+                        stitched_to:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              patch_id: { type: string }
+                              label: { type: string }
+
+  /v1/quilt/{user_id}/meetings/{origin_id}/woven:
+    get:
+      operationId: wovenMeetingSeam
+      summary: One meeting's patches, in capture order
+      description: >
+        The seam screen. NOT ranked: the seam is a record of a
+        conversation and reordering it would break the one thing that
+        screen is for, which is reading the meeting back in the order it
+        happened. Same pruning as the home quilt, so a rejected or
+        sensitive patch cannot appear here either.
+      tags: [Quilt]
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+        - { name: origin_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: The meeting's patches in capture order.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  meeting_id: { type: string }
+                  dropped:
+                    type: object
+                    additionalProperties: { type: integer }
+                  patches:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        patch_id: { type: string }
+                        patch_type: { type: string }
+                        fact: { type: string }
+                        source_meeting_id: { type: string, nullable: true }
+                        occurred_at: { type: string, nullable: true }
+                        stitched_to:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              patch_id: { type: string }
+                              label: { type: string }

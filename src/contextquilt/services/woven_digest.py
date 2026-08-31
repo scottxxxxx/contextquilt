@@ -355,3 +355,69 @@ def build_digest(
         "row_pairs": row_pairs(len(chosen)),
         "dropped": dropped,
     }
+
+# Section 6.4: a stitch label is at most 24 characters and "reads as a
+# thing, not a sentence" -- "$3M ARR goal", "Zero retention constraint".
+STITCH_LABEL_MAX = 24
+
+# Words a label must not end on. Cutting mid-phrase is unavoidable
+# without a model; ending on a conjunction is not, and it is the
+# difference between a short label and a broken one.
+_DANGLING = frozenset({
+    "and", "or", "of", "the", "a", "an", "to", "for", "with", "in", "on",
+    "at", "by", "from", "as", "that", "which", "is", "are", "was", "were",
+})
+
+# Where a fact stops being a thing and starts being a sentence about it.
+# A colon, a dash or a comma almost always marks that boundary in the
+# extraction's own phrasing: "Camino Caseworks business plan documenting
+# market opportunity..." wants to stop at "documenting".
+# A BARE HYPHEN IS NOT A BOUNDARY. An early version included one and
+# turned "60-67% small firms" into "Target market of 60", destroying the
+# figure that both 6.3 and 6.4 say to keep. Only an em dash or a SPACED
+# hyphen separates clauses; an unspaced one is inside a number or a
+# compound word.
+_LABEL_BREAK = re.compile(
+    r"\s*[:;,()\u2014]\s*"
+    r"|\s+-\s+"
+    r"|\s+(?:that|which|documenting|covering|including|with|for|to)\s+",
+    re.I,
+)
+
+
+def stitch_label(text: Optional[str]) -> str:
+    """A short label for a linked patch, derived FROM that patch.
+
+    Never invented, per section 6.4: the label has to be derived from
+    the thing it points at, and every link must resolve to a patch the
+    user can open, so this is a display string beside an id rather than
+    a replacement for one.
+
+    HONEST LIMIT. Section 6.3 says of headlines "no trailing ellipsis,
+    rewrite rather than truncate", and the same instinct applies here.
+    A rule cannot rewrite. So this CUTS AT A CLAUSE BOUNDARY rather than
+    at a character count wherever it can, which yields a phrase instead
+    of a fragment, and falls back to whole words with no ellipsis when
+    it cannot. A model would do better and this is the deterministic
+    floor, the same division as headlines.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    head = _LABEL_BREAK.split(raw, maxsplit=1)[0].strip(" .")
+    if head and len(head) <= STITCH_LABEL_MAX:
+        return head
+    # No usable boundary: keep whole words, and no ellipsis, because a
+    # trailing "..." in a pill reads as a broken string rather than as a
+    # deliberately short label.
+    out: List[str] = []
+    for word in raw.split():
+        if len(" ".join(out + [word])) > STITCH_LABEL_MAX:
+            break
+        out.append(word)
+    # A label ending on "and" or "of" reads as a broken string rather
+    # than a short one, which is the same objection as the ellipsis.
+    while out and out[-1].lower().strip(",;:") in _DANGLING:
+        out.pop()
+    return " ".join(out).strip(" .,;:") or raw[:STITCH_LABEL_MAX].strip()
+

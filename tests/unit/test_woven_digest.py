@@ -35,6 +35,8 @@ from contextquilt.services.woven_digest import (
     row_is_exact,
     row_pairs,
     salience,
+    stitch_label,
+    STITCH_LABEL_MAX,
     why_not_a_tile,
 )
 
@@ -239,3 +241,56 @@ def test_salience_is_computed_but_kept_off_the_public_shape():
     out = build_digest([patch("a")], limit=6)
     assert "_salience" in out["patches"][0]
     assert "salience" not in out["patches"][0]
+
+
+# --------------------------------------------------------------------
+# Stitch labels (section 6.4)
+# --------------------------------------------------------------------
+
+def test_a_label_keeps_the_concrete_number():
+    """The bug this test exists for: a bare hyphen is not a boundary.
+
+    An early version broke on any "-" and turned "60-67% small firms"
+    into "Target market of 60", destroying the figure that both 6.3 and
+    6.4 say to keep. Only an em dash or a SPACED hyphen separates
+    clauses; an unspaced one is inside a number or a compound word.
+    """
+    assert stitch_label("Target market of 60-67% small firms is ideal") \
+        == "Target market of 60-67%"
+
+
+def test_a_label_stops_at_a_clause_boundary_rather_than_a_character_count():
+    assert stitch_label("Data security and privacy: zero data retention") \
+        == "Data security"
+    assert stitch_label("Zero data retention - no exceptions") \
+        == "Zero data retention"
+
+
+def test_a_label_never_ends_on_a_dangling_word():
+    """Cutting mid-phrase is unavoidable without a model. Ending on a
+    conjunction is not, and it is the difference between a short label
+    and a broken one, which is the same objection as a trailing
+    ellipsis."""
+    for text in ("Competitors are shipping insecure implementations of it",
+                 "Data security and privacy concerns raised by the client",
+                 "A plan for the migration and the rollout and the rest"):
+        label = stitch_label(text)
+        assert label.split()[-1].lower() not in {
+            "and", "or", "of", "the", "a", "an", "to", "for", "with"}, label
+
+
+def test_a_label_never_carries_an_ellipsis():
+    long_text = "Achieve three million in annual recurring revenue by scaling"
+    assert "..." not in stitch_label(long_text)
+    assert "…" not in stitch_label(long_text)
+
+
+def test_labels_respect_the_length_cap():
+    for text in ("x" * 200, "Camino Caseworks business plan documenting scope",
+                 "Short one"):
+        assert len(stitch_label(text)) <= STITCH_LABEL_MAX
+
+
+def test_an_empty_patch_yields_an_empty_label_rather_than_raising():
+    assert stitch_label("") == ""
+    assert stitch_label(None) == ""
