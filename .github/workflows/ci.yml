@@ -60,7 +60,26 @@ jobs:
           DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cq_test
         run: python scripts/run_migrations.py
 
-      - name: DB integration tests (structured ingest + patch cues + cue-leg scope)
+      # GLOBBED, NOT ENUMERATED, and that change was paid for. This step
+      # named three files explicitly, so a fourth DB test added on
+      # 2026-08-31 skipped in the no-DB suite and was not selected here:
+      # it would never have executed anywhere, which is the only outcome
+      # worse than a failing test. The bug it was written for had
+      # already happened, and a sabotage run is what exposed that the
+      # test could not have caught it.
+      #
+      # An enumerated list is a list somebody must remember to update,
+      # and the entry that gets forgotten is precisely the one whose
+      # absence is silent. Every DB-gated file is named `*_db.py`, so
+      # the glob is the rule rather than a convenience.
+      - name: DB integration tests (every tests/unit/test_*_db.py)
         env:
           TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/cq_test
-        run: python -m pytest tests/unit/test_structured_ingest_db.py tests/unit/test_patch_cues_db.py tests/unit/test_cue_leg_scope_db.py -v
+        run: python -m pytest tests/unit/test_*_db.py -v --junitxml=db-results.xml
+
+      # And the same count check the unit suite gets, for the same
+      # reason: these tests SKIP without TEST_DATABASE_URL, so a typo in
+      # the env var name above would turn this step green with nothing
+      # exercised, which is exactly the state it was added to detect.
+      - name: Assert the DB tests actually ran
+        run: python scripts/assert_tests_ran.py db-results.xml
