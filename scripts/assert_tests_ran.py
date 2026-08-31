@@ -44,8 +44,18 @@ import xml.etree.ElementTree as ET
 # the removal that made it necessary, so the drop is reviewable.
 MIN_EXECUTED = 1750
 
+# THE FLOOR IS PER SUITE, and it took a red CI step to notice. This
+# script was written for the whole unit run and its floor is that run's
+# size. Pointed at the DB-gated suite, sixteen tests, it failed for the
+# only reason a count check can fail wrongly: the number belonged to a
+# different population. The check was correct and the question was not
+# the one being asked, which is the shape doc 19 keeps recording.
+#
+# So the floor is an argument. It still defaults to the unit-suite
+# number, so no existing caller changes behaviour.
 
-def main(path: str) -> int:
+
+def main(path: str, minimum: int = MIN_EXECUTED) -> int:
     try:
         root = ET.parse(path).getroot()
     except (OSError, ET.ParseError) as exc:
@@ -67,12 +77,12 @@ def main(path: str) -> int:
     executed = collected - skipped
     print(
         f"assert_tests_ran: collected={collected} skipped={skipped} "
-        f"executed={executed} floor={MIN_EXECUTED}"
+        f"executed={executed} floor={minimum}"
     )
-    if executed < MIN_EXECUTED:
+    if executed < minimum:
         print(
             f"assert_tests_ran: FAIL. {executed} tests actually ran, which is "
-            f"below the floor of {MIN_EXECUTED}. Either something stopped the "
+            f"below the floor of {minimum}. Either something stopped the "
             "suite from running (a renamed path, a broadened skip guard, a "
             "fixture raising SkipTest) or tests were removed. If the removal "
             "was deliberate, lower MIN_EXECUTED in this file in the same "
@@ -83,4 +93,7 @@ def main(path: str) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1] if len(sys.argv) > 1 else "unit-results.xml"))
+    args = sys.argv[1:]
+    path = args[0] if args else "unit-results.xml"
+    floor = int(args[1]) if len(args) > 1 else MIN_EXECUTED
+    sys.exit(main(path, floor))

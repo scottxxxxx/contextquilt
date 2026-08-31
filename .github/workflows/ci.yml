@@ -82,4 +82,4 @@ jobs:
       # the env var name above would turn this step green with nothing
       # exercised, which is exactly the state it was added to detect.
       - name: Assert the DB tests actually ran
-        run: python scripts/assert_tests_ran.py db-results.xml
+        run: python scripts/assert_tests_ran.py db-results.xml 14
