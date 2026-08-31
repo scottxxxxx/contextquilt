@@ -167,7 +167,13 @@ def one_card_per_lens(cards):
     collapsed into one bucket: an unknown shape is not evidence of
     duplication, and the client renders unknown lenses neutrally.
 
-    EVIDENCE BEATS RECENCY when both cards carry counts. Measured on
+    EVIDENCE BEATS RECENCY, and "evidence" means the denominator where
+    there is one and the COUNT OF EVIDENCE ROWS where there is not. The
+    second half was missing until 2026-08-31 and the clause that used to
+    stand here, "when both cards carry counts", was the trap: the model
+    lenses never carry counts, so for them this collapse was pure
+    recency and could keep a card computed from 2 meetings over one
+    computed from 32. Measured on
     production 2026-08-16: this user's items are split across two app
     ids by the August flip, 916 rows under the old gateway identity and
     279 under the new one, and the consolidation pass is ACL-scoped, so
@@ -180,11 +186,41 @@ def one_card_per_lens(cards):
     outcome stops depending on scheduling.
     """
     def _evidence(card):
+        """How much of the record this card was computed from.
+
+        A PAIR, and the second half is the fix for a real starvation.
+        The denominator is a COMPUTED lens's own arithmetic base and is
+        null for a lens a model reasoned its way to: it counted nothing,
+        so it has no counts. `how_they_decide` and `what_moves_them` are
+        exactly that family.
+
+        So for them the first element was 0 on every card, the
+        comparison below never fired, and the collapse fell back to
+        newest-first with nothing in the function saying so. Measured on
+        production 2026-08-31: Suresh holds three `how_they_decide`
+        cards derived from 32, 21 and 2 meetings, and the collapse kept
+        the 2. ShoulderSurf's client requires three evidence rows before
+        it will render a lens, so both of his model lenses dropped and
+        the person we hold 140 meetings on rendered a single card while
+        Pallavi, with one card per lens, rendered all of them.
+
+        Neither side could see it. CQ served three cards, the client
+        rendered one, and the number that decided it lived inside a card
+        neither was inspecting.
+
+        The evidence rows are the honest fallback: the route has already
+        computed them, one per distinct meeting with a LIVE source
+        patch, which is the same question the denominator answers for
+        the lenses that have one. Compared as a tuple so a real
+        denominator still wins outright where one exists.
+        """
         facts = (card or {}).get("facts") or {}
         try:
-            return int(facts.get("denominator") or 0)
+            denominator = int(facts.get("denominator") or 0)
         except (TypeError, ValueError):
-            return 0
+            denominator = 0
+        rows = (card or {}).get("evidence")
+        return (denominator, len(rows) if isinstance(rows, (list, tuple)) else 0)
 
     best: dict = {}
     order: list = []
