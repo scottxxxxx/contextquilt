@@ -443,8 +443,16 @@ def build_digest(
                 "height": height,
                 "source_meeting_id": patch.get("origin_id"),
                 "occurred_at": patch.get("created_at"),
-                "_salience": score,
             }
+            # `score` is deliberately NOT in the dict above. It shipped
+            # as `_salience` for one evening because an internal ranking
+            # number was convenient to eyeball, and GP caught that two
+            # teams had agreed it would stay internal while it was on the
+            # wire. An underscore is a convention, not a boundary: once a
+            # field travels, somebody eventually builds on it, and the
+            # ranking is the part of this service most likely to change.
+            # The `dropped` map and the worker logs answer the questions
+            # it was there for.
             for (score, patch), weight, span, height in zip(
                 chosen, weights, plan["spans"], plan["heights"])
         ],
