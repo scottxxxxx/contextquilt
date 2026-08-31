@@ -7332,8 +7332,46 @@ class ColdPathWorker:
                     user_content=headlines.build_user_content(batch),
                 )
                 out = headlines.parse(response.content, batch)
-                for reason, n in out["refused"].items():
-                    refused[reason] = refused.get(reason, 0) + n
+
+                # ONE SECOND PASS over the lines that broke a rule,
+                # shown their own attempt and its actual length.
+                # Measured on the hard residue: 16% accepted on a
+                # single pass, 52% after this. It is a REWRITE, not a
+                # repair: nothing here shortens a string, which is the
+                # distinction 6.3 turns on. Never more than one retry,
+                # so a stubborn fact costs two calls and not a loop.
+                if out["retryable"]:
+                    try:
+                        retry = await llm.extract(
+                            system_prompt=headlines.RETRY_SYSTEM,
+                            user_content=headlines.build_retry_content(
+                                out["retryable"], batch),
+                        )
+                        merged = headlines.apply_retry(
+                            out, headlines.parse(retry.content, batch))
+                        recovered = merged["recovered"]
+                        out["headlines"] = merged["headlines"]
+                        # The refusals that SURVIVED the retry are the
+                        # honest count; the first pass's are noise once
+                        # the line was rewritten.
+                        for reason, n in merged["refused"].items():
+                            refused[reason] = refused.get(reason, 0) + n
+                        if recovered:
+                            logger.info("headlines_recovered_on_retry",
+                                        user_id=user_id, origin=origin_id,
+                                        recovered=recovered,
+                                        attempted=len(out["retryable"]))
+                    except Exception as exc:
+                        # The first pass's headlines are already good;
+                        # a failed retry must not cost them.
+                        logger.warning("headline_retry_failed",
+                                       origin=origin_id, reason=str(exc)[:140])
+                        for reason, n in out["refused"].items():
+                            refused[reason] = refused.get(reason, 0) + n
+                else:
+                    for reason, n in out["refused"].items():
+                        refused[reason] = refused.get(reason, 0) + n
+
                 for pid, line in out["headlines"].items():
                     # `updated_at` untouched on purpose; see the docstring.
                     await self.db.execute(

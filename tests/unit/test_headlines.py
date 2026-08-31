@@ -30,6 +30,9 @@ from contextquilt.services.headlines import (
     MAX_HEADLINE_CHARS,
     TERMINAL_PERIOD,
     TOO_LONG,
+    RETRY_SYSTEM,
+    apply_retry,
+    build_retry_content,
     build_user_content,
     parse,
     why_invalid,
@@ -241,3 +244,110 @@ def test_a_healthy_batch_reports_no_batch_level_reason():
     assert out["headlines"]
     for reason in (NO_JSON, NOTHING_RETURNED, NOTHING_ASKED):
         assert reason not in out["refused"]
+
+
+# --------------------------------------------------------------------
+# The second pass: a rewrite, never a repair
+# --------------------------------------------------------------------
+
+def test_a_refused_line_comes_back_with_its_attempt_and_reason():
+    """Enough to quote the failure back, which is why the retry works.
+
+    Measured on the hard residue, patches already refused once: 16%
+    accepted on a single pass, 52% after a retry naming the failure.
+    Models count characters badly and REVISE well. A stricter first
+    instruction was tried instead and did WORSE, 6% against 8%, because
+    "at most six words" pushed numbers into words and made the lines
+    longer.
+    """
+    out = parse({"headlines": [{"id": "p1", "headline": "x" * 60}]}, [patch("p1")])
+    assert out["retryable"] == [
+        {"id": "p1", "attempt": "x" * 60, "reason": TOO_LONG}]
+
+
+def test_an_empty_attempt_is_not_retryable():
+    # Nothing to quote back and nothing was learned, so a retry would
+    # be a second identical request at twice the price.
+    out = parse({"headlines": [{"id": "p1", "headline": "   "}]}, [patch("p1")])
+    assert out["retryable"] == []
+    assert out["refused"] == {EMPTY: 1}
+
+
+def test_a_hallucinated_id_is_not_retryable():
+    # There is no fact to rewrite against.
+    out = parse({"headlines": [{"id": "nope", "headline": "x" * 60}]}, [patch("p1")])
+    assert out["retryable"] == []
+
+
+def test_the_retry_prompt_states_the_actual_length():
+    """The one thing the model could not check for itself.
+
+    Telling it the limit again is not information. Telling it that its
+    line was 60 characters is.
+    """
+    body = build_retry_content(
+        [{"id": "p1", "attempt": "x" * 60, "reason": TOO_LONG}], [patch("p1")])
+    assert "(60 characters)" in body
+    assert "fact: " in body and TOO_LONG in body
+
+
+def test_the_retry_prompt_carries_no_dash_for_the_model_to_copy():
+    # Rule 7 forbids dashes in the output, and a model copies the
+    # punctuation it is shown.
+    assert "—" not in RETRY_SYSTEM and "–" not in RETRY_SYSTEM
+
+
+def test_the_retry_instruction_says_rewrite_and_forbids_truncating():
+    """The distinction 6.3 turns on, stated in the prompt itself.
+
+    A retry that cut the tail off would be the forbidden repair wearing
+    a second call's clothes, so the instruction has to rule it out
+    rather than merely not ask for it.
+    """
+    lowered = RETRY_SYSTEM.lower()
+    assert "never truncate" in lowered
+    assert "ellipsis" in lowered
+
+
+def test_a_retried_line_is_still_validated_and_can_still_be_refused():
+    # The second pass earns nothing if it is trusted more than the
+    # first. An invented number in a rewrite is still an invented number.
+    out = parse({"headlines": [{"id": "p1", "headline": "Achieve $9M ARR"}]},
+                [patch("p1")])
+    assert out["headlines"] == {} and out["refused"] == {INVENTED_NUMBER: 1}
+
+
+def test_the_retry_only_ever_adds_to_the_first_pass():
+    """Found by sabotage, and only because the result surprised me.
+
+    Swapping the merge for an assignment discards every line the first
+    pass got right and keeps only the recovered ones, and the whole
+    suite stayed GREEN: the worker tests read source, and the one
+    written for this checked the exception path rather than the success
+    path. So the merge moved into the service where a test can execute
+    it. A retry that loses more than it recovers is the shape of every
+    optimisation that ships a regression.
+    """
+    first = {"headlines": {"a": "Kept from pass one"}, "refused": {TOO_LONG: 1},
+             "retryable": [{"id": "b", "attempt": "x" * 60, "reason": TOO_LONG}]}
+    second = {"headlines": {"b": "Recovered on pass two"}, "refused": {}}
+    merged = apply_retry(first, second)
+    assert merged["headlines"] == {"a": "Kept from pass one",
+                                   "b": "Recovered on pass two"}
+    assert merged["recovered"] == 1
+
+
+def test_a_retry_that_recovers_nothing_still_keeps_pass_one():
+    merged = apply_retry({"headlines": {"a": "Kept"}, "refused": {TOO_LONG: 1}},
+                         {"headlines": {}, "refused": {TOO_LONG: 1}})
+    assert merged["headlines"] == {"a": "Kept"}
+    assert merged["recovered"] == 0
+
+
+def test_only_the_surviving_refusal_is_reported():
+    # A line refused then rewritten was not refused. Counting both would
+    # say a batch failed twice as often as it did, and the refusal
+    # counts are the signal for whether the writer is improving.
+    merged = apply_retry({"headlines": {}, "refused": {TOO_LONG: 5}},
+                         {"headlines": {"a": "Short enough"}, "refused": {}})
+    assert merged["refused"] == {}

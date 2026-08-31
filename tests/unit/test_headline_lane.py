@@ -265,3 +265,52 @@ def test_the_empty_patch_list_shortcut_cannot_hide_the_same_bug():
     body = main[main.index("async def _attach_woven_links"):]
     body = body[:body.index("by_patch")]
     assert "if not patches:" in body
+
+
+# --------------------------------------------------------------------
+# The second pass, where it runs and what it must not cost
+# --------------------------------------------------------------------
+
+def test_both_callers_run_the_retry_pass():
+    for name, body in (("worker lane", _lane()), ("backfill", BACKFILL)):
+        assert "RETRY_SYSTEM" in body, f"{name} does not retry a refused line"
+        assert "build_retry_content" in body, name
+
+
+def test_a_failed_retry_does_not_cost_the_first_passs_headlines():
+    """The lane already holds good lines when the retry is attempted.
+
+    Losing them to a second call that failed would make the improvement
+    a net loss, which is the shape of every "optimisation" that ships a
+    regression.
+    """
+    lane = _lane()
+    block = lane[lane.index('if out["retryable"]:'):lane.index('for pid, line in')]
+    assert "except Exception" in block
+    assert 'logger.warning("headline_retry_failed"' in block
+
+
+def test_the_merge_is_delegated_rather_than_rewritten_here():
+    """The merge lives in the service because a test could not see it here.
+
+    Sabotage swapping `update` for an assignment discarded every
+    first-pass headline and the whole suite stayed green, since these
+    tests read source. `apply_retry` is executable and
+    test_headlines.py exercises it directly, so the rule these callers
+    have to follow is simply: do not do it yourself.
+    """
+    for name, body in (("worker lane", _lane()), ("backfill", BACKFILL)):
+        assert "headlines.apply_retry" in body, name
+        assert '["headlines"].update(' not in body, (
+            f"{name} merges the retry itself; the executable version in "
+            "the service is the only one a test covers"
+        )
+
+
+def test_the_retry_happens_at_most_once():
+    # A stubborn fact costs two calls, never a loop. Pinned because a
+    # while-loop here would be an unbounded spend on the exact inputs
+    # that are hardest to satisfy.
+    lane = _lane()
+    assert lane.count("headlines.RETRY_SYSTEM") == 1
+    assert "while" not in lane
