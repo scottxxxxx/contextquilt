@@ -92,3 +92,32 @@ def test_the_seam_route_is_covered_too():
              if isinstance(n, ast.AsyncFunctionDef)}
     assert "woven_meeting_seam" in names
     assert _digest_keys_read_by("woven_meeting_seam") == set()
+
+
+def test_the_served_log_records_the_scope_it_filtered_on():
+    """Rule 8's last sentence, pointed at CQ's own half.
+
+    2026-08-31: Scott saw another project's patches under a project
+    heading. This log recorded candidates, tiles and window but NOT the
+    project it filtered on, so answering "did a scope arrive, and which
+    one" meant running the candidate SQL against every project id the
+    user has until one returned exactly the count in the log. It was a
+    different project's id: the client sent one project's id under
+    another's heading and CQ filtered correctly on what it was given.
+
+    A drop the other team cannot see has to be audible from the side
+    that made it.
+    """
+    line = MAIN[MAIN.index('logger.info("woven_digest_served"'):]
+    line = line[:line.index(")\n")]
+    for field in ("project_id=", "project=", "project_known="):
+        assert field in line, f"the served log omits {field}"
+
+
+def test_project_known_is_logged_because_it_distinguishes_two_answers():
+    # "the filter matched nothing" and "this project does not exist for
+    # this user" are different answers and only one of them is a client
+    # bug. Serving both as an empty array is what made the screen
+    # ambiguous in the first place.
+    line = MAIN[MAIN.index('logger.info("woven_digest_served"'):]
+    assert "project_known=project_known" in line[:line.index(")\n")]
