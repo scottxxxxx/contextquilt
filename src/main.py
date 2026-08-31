@@ -48,6 +48,7 @@ from contextquilt.services import insight_cards
 from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
+from contextquilt.services import woven_digest as woven_digest_svc
 from contextquilt.services import facet_runtime
 from contextquilt.services.consolidation import (
     CLUSTER_WINDOW_DAYS,
@@ -7155,6 +7156,298 @@ async def undismiss_descriptions(
     logger.info("descriptions_undismissed", user_id=user_id,
                 entity_id=entity_id, count=len(rows))
     return {"restored": len(rows), "who_they_are": "regenerating"}
+
+
+# ---------------------------------------------------------------
+# Woven (Memory tab redesign, 2026-08-31)
+# ---------------------------------------------------------------
+
+WOVEN_CANDIDATE_SQL = """
+    SELECT cp.patch_id, cp.patch_type, cp.value, cp.origin_id,
+           cp.created_at, cp.last_observed_at, cp.completed_at,
+           cp.sensitivity, cp.project_id,
+           (SELECT COUNT(*) FROM patch_connections pc
+             WHERE (pc.from_patch_id = cp.patch_id
+                 OR pc.to_patch_id = cp.patch_id)
+               AND COALESCE(pc.status, 'active') = 'active') AS edge_count
+      FROM context_patches cp
+      JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+     WHERE ps.subject_key = $1
+       AND COALESCE(cp.status, 'active') = 'active'
+       AND cp.created_at >= (NOW() AT TIME ZONE 'utc') - ($2::int * INTERVAL '1 day')
+       {PROJECT}
+     ORDER BY cp.created_at DESC
+     LIMIT 400
+"""
+
+# Labels for "stitched to", derived from the LINKED patch rather than
+# invented: section 6.4 requires a label that reads as a thing and that
+# every link resolve to a patch the user can open. Both directions of
+# the edge count, because "informs" and "informed by" are the same
+# thread from either end.
+WOVEN_LINKS_SQL = """
+    SELECT pc.from_patch_id, pc.to_patch_id, pc.connection_role,
+           other.patch_id AS other_id,
+           other.value->>'text' AS other_text,
+           other.patch_type AS other_type
+      FROM patch_connections pc
+      JOIN context_patches other
+        ON other.patch_id = CASE WHEN pc.from_patch_id = ANY($1::uuid[])
+                                 THEN pc.to_patch_id ELSE pc.from_patch_id END
+     WHERE (pc.from_patch_id = ANY($1::uuid[]) OR pc.to_patch_id = ANY($1::uuid[]))
+       AND COALESCE(pc.status, 'active') = 'active'
+       AND COALESCE(other.status, 'active') = 'active'
+       AND other.patch_type <> 'person'
+"""
+
+
+def _woven_window_days(raw: Optional[str]) -> int:
+    """`7d` / `30d` / a bare integer. Anything else is 7.
+
+    Never 4xx on a malformed window: this is a browse surface and a
+    typo in a query param should not cost the user their memory tab.
+    """
+    if not raw:
+        return 7
+    text = str(raw).strip().lower().rstrip("d")
+    try:
+        value = int(text)
+    except (TypeError, ValueError):
+        return 7
+    return value if 1 <= value <= 3650 else 7
+
+
+@app.get("/v1/quilt/{user_id}/woven", tags=["Quilt"])
+async def woven_digest(
+    user_id: str,
+    window: Optional[str] = Query("7d", description="7d, 30d, or a day count"),
+    limit: int = Query(6, ge=1, le=6),
+    project_id: Optional[str] = Query(None, description="Scope by project id"),
+    project: Optional[str] = Query(None, description="Scope by project NAME"),
+    app_id: str = Depends(verify_application_access),
+):
+    """The week's quilt: the few patches worth a tile, already ranked.
+
+    The app makes no ranking decisions (Woven handoff section 5), so
+    everything here is pruned and ordered before it leaves. Selection,
+    scoring and the tile layout live in `services/woven_digest`, which
+    is pure, so this route is a fetch and a call.
+
+    TWO TIME BASES IN ONE RESPONSE, and that is deliberate rather than a
+    bug to tidy. The header numbers (`total_memories`, `meetings_count`,
+    `since`) are LIFETIME, because the screen opens with "2,770 things
+    you'd have forgotten" and "SINCE MARCH". The `patches` array is the
+    WINDOW, because the grid under it says "THIS WEEK'S PATCHES". Making
+    them consistent is the obvious fix and it guts the opening claim.
+
+    Titles, durations and minute marks are absent on purpose: doc 15
+    item 5, CQ wins on state and the app wins on content, so
+    ShoulderSurf joins `origin_id` to its own records.
+    """
+    subject_key = f"user:{user_id}"
+    days = _woven_window_days(window)
+
+    # BOTH SPELLINGS, and the reason is a failure mode rather than
+    # politeness. The handoff's section 5 spells the param `project`
+    # while this route grew up with `project_id`, and a project NAME
+    # arriving in the id slot matches no row, so the tab renders empty
+    # with a 200 and nothing anywhere errors. Recall already takes both
+    # for the same reason, so this is the house pattern rather than a
+    # new one.
+    project_clause = ""
+    args: list = [subject_key, days]
+    if project_id:
+        project_clause = "AND cp.project_id = $3"
+        args.append(project_id)
+    elif project:
+        project_clause = "AND cp.project = $3"
+        args.append(project)
+
+    # AND THE REAL FIX IS NOT THE SPELLING. "no such project" and "this
+    # project had a quiet week" are the same observable when a filter
+    # returns nothing, and only one of them is a bug. So a supplied
+    # filter that matches NO patch at all in this user's whole quilt is
+    # reported as unknown rather than served as an empty week. Scoped to
+    # the user, and deliberately checked against the WHOLE quilt rather
+    # than the window: a real project with a quiet week must still read
+    # as quiet.
+    project_known = None
+    if project_id or project:
+        col = "project_id" if project_id else "project"
+        try:
+            project_known = bool(await db_pool.fetchval(
+                f"""
+                SELECT 1 FROM context_patches cp
+                  JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                 WHERE ps.subject_key = $1 AND cp.{col} = $2
+                 LIMIT 1
+                """,
+                subject_key, project_id or project,
+            ))
+        except Exception as exc:
+            # Unknown rather than false: a failed check must not accuse
+            # a real project of not existing.
+            logger.warning("woven_project_check_failed", error=str(exc)[:200])
+            project_known = None
+
+    try:
+        rows = await db_pool.fetch(
+            WOVEN_CANDIDATE_SQL.replace("{PROJECT}", project_clause), *args)
+    except Exception as exc:
+        logger.warning("woven_candidates_failed", user_id=user_id,
+                       error=str(exc)[:200])
+        raise HTTPException(status_code=500, detail="woven fetch failed")
+
+    candidates = [dict(r) for r in rows]
+    edge_counts = {str(r["patch_id"]): int(r["edge_count"] or 0) for r in rows}
+    digest = woven_digest_svc.build_digest(
+        candidates, limit=limit, edge_counts=edge_counts)
+
+    await _attach_woven_links(digest["patches"])
+
+    totals = await _woven_lifetime_totals(subject_key)
+    logger.info("woven_digest_served", user_id=user_id, window_days=days,
+                candidates=len(candidates), tiles=len(digest["patches"]),
+                dropped=digest["dropped"])
+    return {
+        **totals,
+        "patches": digest["patches"],
+        "rows": [list(r) for r in digest["row_pairs"]],
+        "window_days": days,
+        # Why a thin week is thin, so a client can say so rather than
+        # rendering an unexplained empty state.
+        "dropped": digest["dropped"],
+        # null when no filter was passed, true for a project this user
+        # actually has, false when the filter matched nothing anywhere.
+        # False plus an empty `patches` means "wrong project", not
+        # "quiet week", and the client should say so.
+        "project_known": project_known,
+    }
+
+
+@app.get("/v1/quilt/{user_id}/meetings/{origin_id}/woven", tags=["Quilt"])
+async def woven_meeting_seam(
+    user_id: str,
+    origin_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """One meeting's patches, in CAPTURE ORDER, for the seam screen.
+
+    Not ranked: the seam is a record of a conversation and reordering it
+    would break the one thing that screen is for, which is reading the
+    meeting back in the order it happened. Same pruning as the home
+    quilt so a rejected or sensitive patch cannot appear here either.
+    """
+    subject_key = f"user:{user_id}"
+    try:
+        rows = await db_pool.fetch(
+            """
+            SELECT cp.patch_id, cp.patch_type, cp.value, cp.origin_id,
+                   cp.created_at, cp.completed_at, cp.sensitivity
+              FROM context_patches cp
+              JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+             WHERE ps.subject_key = $1 AND cp.origin_id = $2
+               AND COALESCE(cp.status, 'active') = 'active'
+             ORDER BY cp.created_at ASC, cp.patch_id ASC
+            """,
+            subject_key, origin_id,
+        )
+    except Exception as exc:
+        logger.warning("woven_seam_failed", user_id=user_id,
+                       origin=origin_id, error=str(exc)[:200])
+        raise HTTPException(status_code=500, detail="woven seam fetch failed")
+
+    patches, dropped = [], {}
+    for row in rows:
+        patch = dict(row)
+        reason = woven_digest_svc.why_not_a_tile(patch)
+        if reason:
+            dropped[reason] = dropped.get(reason, 0) + 1
+            continue
+        # Same JSONB-as-string trap the digest service hit: asyncpg
+        # hands `value` back as a JSON STRING unless a codec is
+        # registered, so `or {}` yields a str and `.get` explodes or
+        # silently misses. One helper, both routes.
+        value = woven_digest_svc._value(patch)
+        patches.append({
+            "patch_id": patch["patch_id"],
+            "patch_type": patch["patch_type"],
+            "fact": (value.get("text") or "").strip(),
+            "source_meeting_id": patch.get("origin_id"),
+            "occurred_at": patch.get("created_at"),
+        })
+
+    await _attach_woven_links(patches)
+    return {"meeting_id": origin_id, "patches": patches, "dropped": dropped}
+
+
+async def _attach_woven_links(patches: list) -> None:
+    """Add `stitched_to` in place: up to 4 per patch, strongest first.
+
+    `{patch_id, label}` rather than a bare string. The prototype renders
+    flat labels in pills that do not navigate, but section 6.4 requires
+    every link to resolve to a patch the user can open, so the id ships
+    too. The prototype is authoritative about what the screen LOOKS
+    like, not about what it does.
+    """
+    if not patches:
+        return
+    ids = [str(p["patch_id"]) for p in patches]
+    try:
+        rows = await db_pool.fetch(WOVEN_LINKS_SQL, ids)
+    except Exception as exc:
+        # A link is decoration on a fact. Losing it must never cost the
+        # fact, so this degrades to no links rather than failing.
+        logger.warning("woven_links_failed", error=str(exc)[:200])
+        return
+
+    by_patch: dict = {}
+    for r in rows:
+        for side in ("from_patch_id", "to_patch_id"):
+            pid = str(r[side])
+            if pid in ids and str(r["other_id"]) != pid:
+                by_patch.setdefault(pid, []).append(r)
+
+    for patch in patches:
+        pid = str(patch["patch_id"])
+        seen, links = set(), []
+        for r in by_patch.get(pid, []):
+            other = str(r["other_id"])
+            if other in seen:
+                continue
+            seen.add(other)
+            links.append({
+                "patch_id": other,
+                "label": woven_digest_svc.stitch_label(r["other_text"]),
+            })
+            if len(links) >= 4:
+                break
+        patch["stitched_to"] = links
+
+
+async def _woven_lifetime_totals(subject_key: str) -> dict:
+    """The header's numbers, which are ALL-TIME and not the window."""
+    try:
+        row = await db_pool.fetchrow(
+            """
+            SELECT COUNT(*) AS memories,
+                   COUNT(DISTINCT cp.origin_id) AS meetings,
+                   MIN(cp.created_at) AS since
+              FROM context_patches cp
+              JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+             WHERE ps.subject_key = $1
+               AND COALESCE(cp.status, 'active') = 'active'
+            """,
+            subject_key,
+        )
+    except Exception as exc:
+        logger.warning("woven_totals_failed", error=str(exc)[:200])
+        return {"total_memories": None, "meetings_count": None, "since": None}
+    return {
+        "total_memories": int(row["memories"] or 0),
+        "meetings_count": int(row["meetings"] or 0),
+        "since": row["since"].isoformat() if row["since"] else None,
+    }
 
 
 @app.post("/v1/people/{user_id}/merge", tags=["People"])

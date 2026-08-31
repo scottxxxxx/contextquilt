@@ -30,9 +30,13 @@ from contextquilt.services.woven_digest import (
     USER_SCOPED_TYPES,
     assign_weights,
     build_digest,
+    layout,
+    row_spans_exact,
     row_is_exact,
     row_pairs,
     salience,
+    stitch_label,
+    STITCH_LABEL_MAX,
     why_not_a_tile,
 )
 
@@ -84,24 +88,33 @@ def test_every_digest_size_tiles_exactly(count):
         )
 
 
-@pytest.mark.parametrize("count", [1, 2, 3, 4, 5, 6])
-def test_weights_never_increase_with_rank(count):
-    # A weaker patch must never be shown larger than a stronger one.
-    w = assign_weights(count)
-    assert w == sorted(w, reverse=True), w
+def test_tile_size_is_decorative_and_that_is_recorded():
+    """In the prototype, size does NOT encode importance.
 
+    This test asserted the opposite until the prototype was read. The
+    spans are a fixed pattern applied by POSITION, so the fourth tile is
+    larger than the first, and any client reading tile size as a ranking
+    signal will be wrong. Section 5 still holds: it says index 0 is the
+    strongest and takes the FIRST tile, not the biggest.
 
-def test_a_single_tile_is_outside_the_grid_and_that_is_recorded():
-    # No span equals 6, so one tile cannot fill a row. The client renders
-    # it full width; this pins that we did not pretend otherwise.
-    assert not row_is_exact(assign_weights(1))
-
-
-def test_the_strongest_patch_still_gets_the_largest_tile():
-    # Section 5 requires index 0 to be the strongest and take the first
-    # tile. The outside-in pairing preserves that while fixing the rows.
+    Kept rather than deleted, inverted, because "this used to say the
+    opposite and here is why it changed" is what a future reader needs
+    before they change it back.
+    """
     weights = assign_weights(6)
-    assert weights[0] == max(weights)
+    assert weights != sorted(weights, reverse=True)
+    assert weights[3] > weights[0]
+
+
+def test_a_single_tile_fills_the_row():
+    # Thin weeks reach the client because the spec forbids padding, and
+    # a lone tile at any narrower span leaves the rest of the row empty
+    # beside it, which reads as a missing tile rather than a thin week.
+    assert layout(1)["spans"] == [6]
+
+
+def test_index_zero_is_the_first_tile():
+    # Section 5's actual promise, which survives the prototype's layout.
     assert row_pairs(6)[0][0] == 0
 
 
@@ -228,3 +241,185 @@ def test_salience_is_computed_but_kept_off_the_public_shape():
     out = build_digest([patch("a")], limit=6)
     assert "_salience" in out["patches"][0]
     assert "salience" not in out["patches"][0]
+
+
+# --------------------------------------------------------------------
+# Stitch labels (section 6.4)
+# --------------------------------------------------------------------
+
+def test_a_label_keeps_the_concrete_number():
+    """The bug this test exists for: a bare hyphen is not a boundary.
+
+    An early version broke on any "-" and turned "60-67% small firms"
+    into "Target market of 60", destroying the figure that both 6.3 and
+    6.4 say to keep. Only an em dash or a SPACED hyphen separates
+    clauses; an unspaced one is inside a number or a compound word.
+    """
+    assert stitch_label("Target market of 60-67% small firms is ideal") \
+        == "Target market of 60-67%"
+
+
+def test_a_label_stops_at_a_clause_boundary_rather_than_a_character_count():
+    assert stitch_label("Data security and privacy: zero data retention") \
+        == "Data security"
+    assert stitch_label("Zero data retention - no exceptions") \
+        == "Zero data retention"
+
+
+def test_a_label_never_ends_on_a_dangling_word():
+    """Cutting mid-phrase is unavoidable without a model. Ending on a
+    conjunction is not, and it is the difference between a short label
+    and a broken one, which is the same objection as a trailing
+    ellipsis."""
+    for text in ("Competitors are shipping insecure implementations of it",
+                 "Data security and privacy concerns raised by the client",
+                 "A plan for the migration and the rollout and the rest"):
+        label = stitch_label(text)
+        assert label.split()[-1].lower() not in {
+            "and", "or", "of", "the", "a", "an", "to", "for", "with"}, label
+
+
+def test_a_label_never_carries_an_ellipsis():
+    long_text = "Achieve three million in annual recurring revenue by scaling"
+    assert "..." not in stitch_label(long_text)
+    assert "…" not in stitch_label(long_text)
+
+
+def test_labels_respect_the_length_cap():
+    for text in ("x" * 200, "Camino Caseworks business plan documenting scope",
+                 "Short one"):
+        assert len(stitch_label(text)) <= STITCH_LABEL_MAX
+
+
+def test_an_empty_patch_yields_an_empty_label_rather_than_raising():
+    assert stitch_label("") == ""
+    assert stitch_label(None) == ""
+
+
+# --------------------------------------------------------------------
+# JSONB arrives as a STRING. This emptied the quilt for every user.
+# --------------------------------------------------------------------
+
+def test_a_json_string_value_is_parsed_not_dropped():
+    """The bug that rendered an empty quilt for everyone.
+
+    `value` is JSONB and asyncpg returns it as a JSON STRING unless a
+    codec is registered, which this pool does not do. An earlier version
+    checked `isinstance(value, dict)` and returned empty for anything
+    else, so EVERY patch dropped as `no_text`.
+
+    Caught on real data in one run, and only because `dropped` reports
+    which rule fired: 351 candidates, 351 `no_text`. Without that map it
+    would have been an empty screen with no explanation.
+    """
+    import json as _json
+    raw = {"patch_id": "a", "patch_type": "takeaway", "origin_id": "m1",
+           "value": _json.dumps({"text": "Zero data retention"})}
+    assert why_not_a_tile(raw) is None
+    out = build_digest([raw], limit=6)
+    assert len(out["patches"]) == 1
+    assert out["patches"][0]["fact"] == "Zero data retention"
+
+
+def test_every_value_field_survives_the_string_form():
+    # Not just `text`: the shelve stamp, the sensitivity flag and the
+    # recurrence counter all live in the same blob, and reading them
+    # through a different path is how one of them gets missed.
+    import json as _json
+    shelved = {"patch_id": "s", "patch_type": "takeaway", "origin_id": "m",
+               "value": _json.dumps({"text": "x", "shelved_at": "2026-08-30"})}
+    assert why_not_a_tile(shelved) == DROP_SHELVED
+
+    recurring = {"patch_id": "r", "patch_type": "takeaway", "origin_id": "m",
+                 "value": _json.dumps({"text": "x", "restatement_count": 2})}
+    plain = {"patch_id": "p", "patch_type": "takeaway", "origin_id": "m",
+             "value": _json.dumps({"text": "x"})}
+    assert salience(recurring) > salience(plain)
+
+
+@pytest.mark.parametrize("bad", ["not json at all", "[1,2,3]", "null", ""])
+def test_an_unparseable_value_drops_cleanly_rather_than_raising(bad):
+    # A malformed blob must cost that patch a tile, never the request.
+    assert why_not_a_tile({"patch_id": "x", "patch_type": "takeaway",
+                           "origin_id": "m", "value": bad}) == "no_text"
+
+
+def test_one_type_does_not_take_the_whole_quilt():
+    """Type rhythm, and it is a judgment call rather than a spec rule.
+
+    Section 6.1 caps weight-3 tiles at two "so the quilt has rhythm",
+    which establishes visual rhythm as a legitimate selection concern.
+    Colour is the same argument: type drives the fabric hue, so an
+    unconstrained ranking on a commitment-heavy week returns five
+    commitments and the quilt renders as one purple block. Measured on
+    real data the top six were four commitments and two blockers.
+    """
+    cands = [patch(f"c{i}", ptype="commitment", text=f"Ship thing {i}")
+             for i in range(6)]
+    cands += [patch(f"d{i}", ptype="decision", text=f"Decide thing {i}")
+              for i in range(3)]
+    types = [p["patch_type"] for p in build_digest(cands, limit=6)["patches"]]
+    # Two types and six tiles: the honest spread is three and three.
+    assert types.count("commitment") == 3 and types.count("decision") == 3
+
+
+def test_the_cap_is_the_even_share_rather_than_a_flat_two():
+    """The bug the first version of this shipped with.
+
+    A flat cap of two deferred four commitments on a two-type week and
+    then backfilled two of them, so the output was four commitments and
+    the cap had done nothing but shuffle. A cap the material cannot meet
+    is not a cap. With three types the even share IS two.
+    """
+    cands = [patch(f"c{i}", ptype="commitment", text=f"Ship {i}") for i in range(6)]
+    cands += [patch(f"d{i}", ptype="decision", text=f"Decide {i}") for i in range(3)]
+    cands += [patch(f"b{i}", ptype="blocker", text=f"Blocked on {i}") for i in range(3)]
+    counts = {}
+    for p in build_digest(cands, limit=6)["patches"]:
+        counts[p["patch_type"]] = counts.get(p["patch_type"], 0) + 1
+    assert max(counts.values()) == 2 and len(counts) == 3
+
+
+def test_a_single_type_week_still_fills_rather_than_padding():
+    """The cap yields rather than reaching for weaker material.
+
+    An honest monochrome quilt beats a decorative one built from patches
+    that did not earn a tile, so if the week genuinely holds one type,
+    the tiles are that type in rank order.
+    """
+    cands = [patch(f"c{i}", ptype="commitment", text=f"Ship thing {i}")
+             for i in range(6)]
+    out = build_digest(cands, limit=6)
+    assert len(out["patches"]) == 6
+    assert {p["patch_type"] for p in out["patches"]} == {"commitment"}
+
+
+def test_the_cap_never_promotes_an_unqualified_patch():
+    # Strictly a tie-break among patches that already passed pruning.
+    cands = [patch(f"c{i}", ptype="commitment", text=f"Ship {i}") for i in range(4)]
+    cands.append(patch("bad", ptype="decision", text=""))     # no text
+    types = [p["patch_type"] for p in build_digest(cands, limit=6)["patches"]]
+    assert "decision" not in types
+
+
+def test_the_quilt_still_fills_when_the_variety_runs_out():
+    """The backfill, which sabotage found had NO test at all.
+
+    Removing the backfill entirely left the suite green, and per our own
+    rule that surprise is the finding rather than a compliment. The
+    one-type test never reaches this code: with a single type the cap
+    becomes the limit, so nothing is ever deferred.
+
+    The case that DOES reach it is uneven material. Five commitments and
+    one decision, six slots, cap three: the loop takes three commitments
+    and the one decision and runs out of variety at four. Without the
+    backfill the user gets a four-tile quilt while two qualified patches
+    sit unused, which is the cap causing exactly the padding-in-reverse
+    it was supposed to prevent.
+    """
+    cands = [patch(f"c{i}", ptype="commitment", text=f"Ship {i}") for i in range(5)]
+    cands += [patch("d0", ptype="decision", text="Decide the pricing")]
+    out = build_digest(cands, limit=6)
+    assert len(out["patches"]) == 6, "the quilt went short when variety ran out"
+    types = [p["patch_type"] for p in out["patches"]]
+    assert types.count("commitment") == 5 and types.count("decision") == 1
