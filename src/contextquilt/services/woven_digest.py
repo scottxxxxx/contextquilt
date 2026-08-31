@@ -286,7 +286,37 @@ LAYOUTS: Dict[int, Dict[str, Any]] = {
         "heights": [118, 118, 96, 96, 104, 104],
         "rows": [(0, 1), (2, 3), (4, 5)]},
 }
-MAX_TILES = max(LAYOUTS)
+PROTOTYPE_MAX = max(LAYOUTS)
+
+# Scott raised the ceiling from 6 to 60 with paging (2026-08-31), after
+# measuring that a real week holds 322 eligible tiles for him and 125
+# for the next busiest user, and that serving more costs NO model spend:
+# there is no LLM call on the read path, and headlines are written once
+# at ingest. The costs are payload (713 bytes a tile) and this table.
+MAX_TILES = 60
+
+# ROW TEMPLATES FOR A QUILT LONGER THAN THE PROTOTYPE SPECIFIES.
+#
+# 1 through 6 stay EXACTLY as the design fixes them and are not
+# generated: the prototype is authoritative about what the screen looks
+# like, and a formula that happened to reproduce those six would still
+# be a second source of truth about them. Upstream prompt caching also
+# depends on recall output being byte-stable, and the six-tile shape is
+# what ships today.
+#
+# Above six, the rows repeat this cycle. Each template sums to exactly 6
+# columns, which is the invariant the whole grid rests on, and the cycle
+# is six rows long so the same row shape never lands three times
+# running. That is section 6.1's rhythm argument applied down the scroll
+# rather than across one screen.
+ROW_CYCLE: List[Tuple[Tuple[int, ...], int]] = [
+    ((3, 3), 118),
+    ((2, 4), 96),
+    ((2, 2, 2), 104),
+    ((4, 2), 96),
+    ((3, 3), 118),
+    ((2, 4), 104),
+]
 
 # The FLOOR on how many tiles one patch type may take. Two, matching
 # section 6.1's own cap on weight-3 tiles and for the same stated
@@ -312,7 +342,37 @@ def layout(count: int) -> Dict[str, Any]:
     """
     if count <= 0:
         return {"spans": [], "heights": [], "rows": []}
-    return LAYOUTS[min(count, MAX_TILES)]
+    if count <= PROTOTYPE_MAX:
+        return LAYOUTS[count]
+
+    spans: List[int] = []
+    heights: List[int] = []
+    rows: List[Tuple[int, ...]] = []
+    placed, step = 0, 0
+    count = min(count, MAX_TILES)
+
+    # Stop while a remainder of 1 to 3 is left, because those are
+    # exactly the prototype's own single-row layouts and reusing them
+    # means the last row of a long quilt is a shape the design already
+    # approved rather than one this loop invented.
+    while count - placed > 3:
+        template, height = ROW_CYCLE[step % len(ROW_CYCLE)]
+        if count - placed < len(template):
+            break
+        rows.append(tuple(range(placed, placed + len(template))))
+        spans.extend(template)
+        heights.extend([height] * len(template))
+        placed += len(template)
+        step += 1
+
+    remainder = count - placed
+    if remainder:
+        tail = LAYOUTS[remainder]
+        rows.append(tuple(range(placed, placed + remainder)))
+        spans.extend(tail["spans"])
+        heights.extend(tail["heights"])
+
+    return {"spans": spans, "heights": heights, "rows": rows}
 
 
 def assign_weights(count: int) -> List[int]:
@@ -340,11 +400,153 @@ def row_spans_exact(spans: Sequence[int]) -> bool:
     return sum(spans) == COLUMNS
 
 
+
+def _order_with_rhythm(
+    kept: List[Tuple[float, Dict[str, Any]]], page: int,
+) -> List[Tuple[float, Dict[str, Any]]]:
+    """Rank order, rearranged so no PAGE is dominated by one type.
+
+    Section 6.1 caps weight-3 tiles at two "so the quilt has rhythm",
+    which establishes visual rhythm as a legitimate selection concern.
+    Type drives the fabric hue, so the same argument applies to colour:
+    an unconstrained ranking on a commitment-heavy week returns five
+    commitments and the screen is one purple block. Measured on real
+    data, the top six were four commitments and two blockers.
+
+    THE CAP IS PER PAGE, not per quilt, and that is what makes it work
+    at 60 tiles as well as 6. A cap on the whole selection would be met
+    trivially by a long list and do nothing; a cap on each page of what
+    the user actually sees at once keeps the mix all the way down the
+    scroll.
+
+    THE CAP IS ALSO DERIVED, NOT FIXED, and the first version got that
+    wrong. A flat two deferred four commitments on a week holding only
+    two types, then backfilled two of them anyway, so the cap had done
+    nothing but shuffle. A cap the material cannot meet is not a cap.
+    It is the even share, floored at two.
+
+    Nothing is ever dropped or promoted: every patch that ranked appears
+    exactly once, in an order that is a permutation of rank. A week that
+    genuinely holds one type comes back in pure rank order rather than
+    padded, because an honest monochrome quilt beats a decorative one.
+    """
+    pool = list(kept)
+    out: List[Tuple[float, Dict[str, Any]]] = []
+    while pool:
+        # THE WHOLE REMAINING POOL, not a window off the front. A
+        # window was the first version and it failed exactly where it
+        # was needed: on a commitment-heavy week the first 24 ranked
+        # patches are ALL commitments, so it counted one type, set the
+        # cap to the page size, and returned six commitments. The cap
+        # was computed from the very concentration it exists to break.
+        types_here = len({p.get("patch_type") or "" for _, p in pool})
+        cap = page if types_here <= 1 else max(
+            MIN_TILES_PER_TYPE, -(-page // types_here))
+
+        taken: List[int] = []
+        per_type: Dict[str, int] = {}
+        for idx, (_, patch) in enumerate(pool):
+            if len(taken) >= page:
+                break
+            ptype = patch.get("patch_type") or ""
+            if per_type.get(ptype, 0) >= cap:
+                continue
+            per_type[ptype] = per_type.get(ptype, 0) + 1
+            taken.append(idx)
+        # Variety ran out before the page filled: take the next in rank
+        # rather than showing a short page.
+        if len(taken) < page:
+            for idx in range(len(pool)):
+                if len(taken) >= page:
+                    break
+                if idx not in taken:
+                    taken.append(idx)
+            taken.sort()
+        for idx in taken:
+            out.append(pool[idx])
+        pool = [pair for i, pair in enumerate(pool) if i not in set(taken)]
+    return out
+
+
+def _arrange_for_contrast(
+    chosen: List[Tuple[float, Dict[str, Any]]],
+) -> List[Tuple[float, Dict[str, Any]]]:
+    """Order one page so touching tiles differ in type, rank-preferring.
+
+    Counts alone do not make a quilt. A page can be well mixed by the
+    numbers and still read as blocks, because what the eye sees is
+    NEIGHBOURS, not totals. Rows are runs of consecutive positions, so
+    breaking runs in this flat order breaks them in every row.
+
+    Greedy and rank-preferring: at each position take the
+    highest-ranked remaining tile whose type differs from the one just
+    placed, and fall back to the plain highest-ranked when every
+    remaining tile matches. A week of one type therefore comes out in
+    exact rank order rather than being shuffled for the sake of it.
+
+    WHY THIS IS FREE, and it is the reason arrangement can be decided
+    separately from priority at all: priority decides WHICH patches are
+    on the page, and this only decides where they sit within it. The
+    prototype's own span pattern is [3, 3, 2, 4, 2, 4], so the largest
+    tile is in position four and size was never monotonic in rank. It
+    is a decorative arrangement, which is exactly what makes it safe to
+    permute.
+
+    An earlier version swapped only tiles of EQUAL span, to guarantee
+    nothing changed size. It could not fix the common case: the six
+    tile layout has just two span-3 slots, so two commitments landing
+    there had no eligible partner anywhere on the page and the run
+    survived.
+
+    Deterministic, because recall output must stay byte-stable within a
+    UTC day for upstream prompt caching.
+    """
+    # Grouped by type, each group still in rank order, so the tile a
+    # type contributes is always its best remaining one.
+    groups: Dict[str, List[Tuple[float, Dict[str, Any]]]] = {}
+    for pair in chosen:
+        groups.setdefault(pair[1].get("patch_type") or "", []).append(pair)
+
+    out: List[Tuple[float, Dict[str, Any]]] = []
+    previous = None
+    while any(groups.values()):
+        # THE MOST PLENTIFUL TYPE FIRST, not simply a different one.
+        # Taking any different type was the previous version and it
+        # produced two blocks at 24 tiles: it alternated the two
+        # commonest types until they ran out, then alternated the next
+        # two. Spending down the largest group first is what spreads
+        # every type across the whole page, and it is the same greedy
+        # that solves "rearrange so no two neighbours match".
+        options = [k for k, v in groups.items() if v and k != previous]
+        if not options:
+            options = [k for k, v in groups.items() if v]
+        # Ties on count are broken by SALIENCE, not alphabetically, and
+        # that is not a detail. Sorting the name was the first version
+        # and on real data it produced a perfect stripe: with fifteen
+        # types each contributing the same couple of tiles, every count
+        # tied and the quilt cycled blocker, commitment, constraint,
+        # decision, deliverable, event in alphabetical order forever.
+        # Regular, and the opposite of a quilt.
+        #
+        # Ranking the group by its best remaining tile makes the pattern
+        # follow the WEEK rather than the alphabet, so it is irregular
+        # because the data is, and it puts the more consequential memory
+        # earlier whenever the mix allows. Patch id last, so equal
+        # scores can never reorder between two calls.
+        options.sort(key=lambda k: (-len(groups[k]), -groups[k][0][0],
+                                    str(groups[k][0][1].get("patch_id") or "")))
+        pick = options[0]
+        out.append(groups[pick].pop(0))
+        previous = pick
+    return out
+
+
 def build_digest(
     candidates: Iterable[Dict[str, Any]],
     limit: int = 6,
     today: Optional[date] = None,
     edge_counts: Optional[Dict[str, int]] = None,
+    offset: int = 0,
 ) -> Dict[str, Any]:
     """Ordered, pruned, weighted tiles plus the reasons for every drop.
 
@@ -369,59 +571,30 @@ def build_digest(
     # stability defect the spec names, arriving by the back door.
     kept.sort(key=lambda pair: (-pair[0], str(pair[1].get("patch_id") or "")))
 
-    # TYPE RHYTHM, and this is a judgment call rather than a rule from
-    # the spec, so it is labelled as one and is one constant to revert.
+    # SELECTION AND ARRANGEMENT ARE TWO JOBS, and doing them in one
+    # pass is why the first version rendered as a block of one colour.
     #
-    # Section 6.1 caps weight-3 tiles at two "so the quilt has rhythm",
-    # which establishes that visual rhythm is a legitimate selection
-    # concern rather than a purity violation. Colour is the same
-    # argument: type drives the fabric hue, so an unconstrained ranking
-    # on a commitment-heavy week returns five commitments and the quilt
-    # renders as one purple block. Measured on real data, the top six
-    # were four commitments and two blockers.
+    #   WHICH patches  -> priority. Rank decides, always.
+    #   WHERE they sit -> the quilt. Position decides nothing about
+    #                     whether a patch is shown, only where.
     #
-    # THE CAP IS DERIVED, NOT FIXED, and the first version got this
-    # wrong. A flat cap of two deferred four commitments on a week that
-    # held only two types, then backfilled two of them anyway, so the
-    # result was four commitments and the cap had done nothing but
-    # shuffle. A cap only means something if the material can meet it:
-    # with two types and six tiles the honest spread is three and three.
-    # So the cap is the even share, floored at two.
-    #
-    # Strictly a TIE-BREAK among already-qualified patches: nothing
-    # unqualified is promoted, and if the week genuinely holds one type
-    # the cap becomes the limit and the quilt fills in rank order rather
-    # than padding with weaker material, because an honest monochrome
-    # quilt beats a decorative one built from patches that did not earn
-    # a tile.
-    ceiling = max(limit, 0)
-    types_available = len({p.get("patch_type") or "" for _, p in kept[:ceiling * 4]})
-    per_type_cap = ceiling
-    if types_available > 1:
-        share = -(-ceiling // types_available)          # ceil, no float
-        per_type_cap = max(MIN_TILES_PER_TYPE, share)
-
-    chosen: List[Tuple[float, Dict[str, Any]]] = []
-    deferred: List[Tuple[float, Dict[str, Any]]] = []
-    per_type: Dict[str, int] = {}
-    for score, patch in kept:
-        if len(chosen) >= ceiling:
-            break
-        ptype = patch.get("patch_type") or ""
-        if per_type.get(ptype, 0) >= per_type_cap:
-            deferred.append((score, patch))
-            continue
-        per_type[ptype] = per_type.get(ptype, 0) + 1
-        chosen.append((score, patch))
-    # A week whose variety ran out still fills, in rank order, rather
-    # than showing four tiles because no fifth type existed.
-    for pair in deferred:
-        if len(chosen) >= ceiling:
-            break
-        chosen.append(pair)
-
+    # Scott asked for both on 2026-08-31: "prioritize them somehow, but
+    # show a mix so it is actually reminiscent of a quilt". Ranking
+    # alone gives a correct list that looks like a spreadsheet; mixing
+    # alone gives a pretty screen that buries the thing that mattered.
+    # Clamped HERE rather than trusting the route, because the route is
+    # not the only caller and the failure is silent: `zip` below would
+    # truncate the tiles to the layout's length while `row_pairs` still
+    # described the longer list, so the grid would reference positions
+    # that were never served.
+    limit = min(max(limit, 0), MAX_TILES)
+    ordered = _order_with_rhythm(kept, max(limit, 1))
+    total = len(ordered)
+    start = max(offset, 0)
+    chosen = ordered[start:start + max(limit, 0)]
     plan = layout(len(chosen))
     weights = assign_weights(len(chosen))
+    chosen = _arrange_for_contrast(chosen)
 
     return {
         "patches": [
@@ -458,6 +631,14 @@ def build_digest(
         ],
         "row_pairs": row_pairs(len(chosen)),
         "dropped": dropped,
+        # Paging, so a client never has to infer whether there is more.
+        # `total_available` counts what EARNED a tile, after pruning, so
+        # it is the honest denominator for "showing N of M" rather than
+        # a raw candidate count that includes rows the quilt can never
+        # show.
+        "total_available": total,
+        "offset": start,
+        "has_more": start + len(chosen) < total,
     }
 
 # Section 6.4: a stitch label is at most 24 characters and "reads as a

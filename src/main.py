@@ -7221,7 +7221,8 @@ def _woven_window_days(raw: Optional[str]) -> int:
 async def woven_digest(
     user_id: str,
     window: Optional[str] = Query("7d", description="7d, 30d, or a day count"),
-    limit: int = Query(6, ge=1, le=6),
+    limit: int = Query(6, ge=1, le=60, description="Tiles per page, 1-60"),
+    offset: int = Query(0, ge=0, description="Tiles already shown, for paging"),
     project_id: Optional[str] = Query(None, description="Scope by project id"),
     project: Optional[str] = Query(None, description="Scope by project NAME"),
     app_id: str = Depends(verify_application_access),
@@ -7301,13 +7302,14 @@ async def woven_digest(
     candidates = [dict(r) for r in rows]
     edge_counts = {str(r["patch_id"]): int(r["edge_count"] or 0) for r in rows}
     digest = woven_digest_svc.build_digest(
-        candidates, limit=limit, edge_counts=edge_counts)
+        candidates, limit=limit, edge_counts=edge_counts, offset=offset)
 
     await _attach_woven_links(digest["patches"])
 
     totals = await _woven_lifetime_totals(subject_key)
     logger.info("woven_digest_served", user_id=user_id, window_days=days,
                 candidates=len(candidates), tiles=len(digest["patches"]),
+                offset=offset, total=digest["total_available"],
                 dropped=digest["dropped"])
     return {
         **totals,
@@ -7322,6 +7324,21 @@ async def woven_digest(
         # False plus an empty `patches` means "wrong project", not
         # "quiet week", and the client should say so.
         "project_known": project_known,
+        # PAGING. Scott raised the ceiling from 6 to 60 on 2026-08-31,
+        # after it was measured that a real week holds 322 eligible
+        # tiles for the heaviest user and 125 for the next, and that
+        # serving more costs NO model spend: nothing on the read path
+        # calls an LLM and headlines are written once at ingest. The
+        # real cost is payload, about 713 bytes a tile, which is an
+        # argument for paging rather than for a cap.
+        #
+        # `total_available` counts what EARNED a tile, after pruning, so
+        # "showing 6 of 322" is honest. A raw candidate count would
+        # include rows the quilt can never show and would promise a
+        # scroll that ends early.
+        "total_available": digest["total_available"],
+        "offset": digest["offset"],
+        "has_more": digest["has_more"],
     }
 
 
