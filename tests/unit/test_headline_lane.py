@@ -226,3 +226,42 @@ def test_the_digest_route_serves_the_service_output_verbatim():
         "the digest route is re-projecting service output; a field added "
         "to build_digest would silently not reach the wire"
     )
+
+
+# --------------------------------------------------------------------
+# Wire-shape stability, which SS pays for and cannot see from their side
+# --------------------------------------------------------------------
+
+def test_a_failed_link_query_serves_null_rather_than_dropping_the_key():
+    """Absent, empty and null were one observable on the failure path.
+
+    `_attach_woven_links` used to return early when its query failed,
+    leaving `stitched_to` off EVERY patch. Three states collapsed into
+    one, and the wire shape varied under a condition the client cannot
+    see. ShoulderSurf hit the consequence: a decoder requiring the key
+    threw, the fetch returned nil, and the screen fell back to its local
+    builder, which on a device is indistinguishable from a 404. A first
+    successful deploy could have read as an undeployed route.
+
+    Three states now, the same ones doc 16 uses for `capabilities`: a
+    list means these are the links, `[]` means none, null means CQ could
+    not tell.
+    """
+    main = (ROOT / "src" / "main.py").read_text()
+    body = main[main.index("async def _attach_woven_links"):]
+    body = body[:body.index("async def _woven_lifetime_totals")]
+    handler = body[body.index("except Exception"):body.index("by_patch")]
+    assert 'patch["stitched_to"] = None' in handler, (
+        "the failure path drops the key again; absent and empty become "
+        "one state and the client cannot tell a broken query from none"
+    )
+
+
+def test_the_empty_patch_list_shortcut_cannot_hide_the_same_bug():
+    # `if not patches: return` is safe only because there is nothing to
+    # stamp. Pinned so it is not later "tidied" into covering the
+    # failure path too.
+    main = (ROOT / "src" / "main.py").read_text()
+    body = main[main.index("async def _attach_woven_links"):]
+    body = body[:body.index("by_patch")]
+    assert "if not patches:" in body
