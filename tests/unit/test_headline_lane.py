@@ -265,3 +265,98 @@ def test_the_empty_patch_list_shortcut_cannot_hide_the_same_bug():
     body = main[main.index("async def _attach_woven_links"):]
     body = body[:body.index("by_patch")]
     assert "if not patches:" in body
+
+
+# --------------------------------------------------------------------
+# The second pass, where it runs and what it must not cost
+# --------------------------------------------------------------------
+
+def test_both_callers_run_the_retry_pass():
+    for name, body in (("worker lane", _lane()), ("backfill", BACKFILL)):
+        assert "RETRY_SYSTEM" in body, f"{name} does not retry a refused line"
+        assert "build_retry_content" in body, name
+
+
+def test_a_failed_retry_does_not_cost_the_first_passs_headlines():
+    """The lane already holds good lines when the retry is attempted.
+
+    Losing them to a second call that failed would make the improvement
+    a net loss, which is the shape of every "optimisation" that ships a
+    regression.
+    """
+    lane = _lane()
+    block = lane[lane.index('if out["retryable"]:'):lane.index('for pid, line in')]
+    assert "except Exception" in block
+    assert 'logger.warning("headline_retry_failed"' in block
+
+
+def test_the_merge_is_delegated_rather_than_rewritten_here():
+    """The merge lives in the service because a test could not see it here.
+
+    Sabotage swapping `update` for an assignment discarded every
+    first-pass headline and the whole suite stayed green, since these
+    tests read source. `apply_retry` is executable and
+    test_headlines.py exercises it directly, so the rule these callers
+    have to follow is simply: do not do it yourself.
+    """
+    for name, body in (("worker lane", _lane()), ("backfill", BACKFILL)):
+        assert "headlines.apply_retry" in body, name
+        assert '["headlines"].update(' not in body, (
+            f"{name} merges the retry itself; the executable version in "
+            "the service is the only one a test covers"
+        )
+
+
+def test_the_retry_happens_at_most_once():
+    # A stubborn fact costs two calls, never a loop. Pinned because a
+    # while-loop here would be an unbounded spend on the exact inputs
+    # that are hardest to satisfy.
+    lane = _lane()
+    assert lane.count("headlines.RETRY_SYSTEM") == 1
+    assert "while" not in lane
+
+
+# --------------------------------------------------------------------
+# The writer's question is not the reader's
+# --------------------------------------------------------------------
+
+def test_the_writer_asks_whether_a_patch_COULD_tile_not_whether_it_does():
+    """The bug that made the lane a no-op, caught by CI in one commit.
+
+    The gate means a patch with no headline cannot earn a tile. The
+    headline lane selects exactly the patches with no headline and then
+    asks whether each could earn one. Asking the READER's question there
+    answers `no_headline_written` for every candidate by construction,
+    so the lane finds nothing to do and writes zero headlines forever
+    while logging a perfectly healthy zero.
+
+    Nothing in the unit suite could have caught it: every fixture here
+    supplies a headline, because a tile needs one. The DB test that
+    EXECUTES the fetch did.
+    """
+    from contextquilt.services.woven_digest import why_not_a_tile, DROP_NO_HEADLINE
+    bare = {"patch_id": "a", "patch_type": "commitment", "origin_id": "m1",
+            "value": {"text": "Send the revised scope by Thursday"}}
+    assert why_not_a_tile(bare) == DROP_NO_HEADLINE          # the reader
+    assert why_not_a_tile(bare, require_headline=False) is None  # the writer
+
+
+def test_the_writer_still_honours_every_OTHER_prune_rule():
+    # One function, one copy of the rules. Relaxing the headline check
+    # must not relax person, shelved, sensitive, resolved or orphan.
+    from contextquilt.services.woven_digest import why_not_a_tile
+    for bad, why in (
+        ({"patch_type": "person", "value": {"text": "Steven Williams"}}, "person"),
+        ({"patch_type": "event", "value": {"text": "A thing happened"}}, "orphan"),
+        ({"patch_type": "commitment", "origin_id": "m1",
+          "value": {"text": "Ship it", "shelved_at": "2026-08-01"}}, "shelved"),
+    ):
+        assert why_not_a_tile(dict(bad, patch_id="x"),
+                              require_headline=False) is not None, why
+
+
+def test_both_writers_ask_the_writers_question():
+    for name, body in (("worker lane", _lane()), ("backfill", BACKFILL)):
+        assert "require_headline=False" in body, (
+            f"{name} asks the reader's question; it would select nothing"
+        )

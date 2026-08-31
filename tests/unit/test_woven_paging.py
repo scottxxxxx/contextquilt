@@ -29,9 +29,12 @@ from contextquilt.services.woven_digest import (
 )
 
 
-def patch(pid, ptype="takeaway", text="Ship the gateway", origin="m1"):
+def patch(pid, ptype="takeaway", text="Ship the gateway", origin="m1",
+          headline="a line"):
+    # A tile without a headline is not a tile (section 6.3 applied at
+    # selection), so the helper supplies one.
     return {"patch_id": pid, "patch_type": ptype, "origin_id": origin,
-            "value": {"text": text}, "created_at": None}
+            "value": {"text": text, "headline": headline}, "created_at": None}
 
 
 def mixed(counts):

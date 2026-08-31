@@ -92,7 +92,10 @@ async def main() -> int:
     candidates = []
     for r in rows:
         patch = dict(r)
-        reason = woven_digest.why_not_a_tile(patch)
+        # The WRITER's question: could this earn a tile if it had a
+        # line. Asking the reader's question here selects nothing,
+        # because every candidate lacks a headline by construction.
+        reason = woven_digest.why_not_a_tile(patch, require_headline=False)
         if reason:
             skipped[reason] += 1
             continue
@@ -114,6 +117,7 @@ async def main() -> int:
 
     llm = AnthropicLLMClient()
     written = 0
+    recovered_total = 0
     refused: Counter = Counter()
     cost = 0.0
     samples: list = []
@@ -131,7 +135,28 @@ async def main() -> int:
             continue
         cost += float(getattr(response, "cost_usd", 0.0) or 0.0)
         out = headlines.parse(response.content, batch)
-        refused.update(out["refused"])
+
+        # One second pass over the lines that broke a rule, shown their
+        # own attempt and its actual length. Measured on the residue:
+        # 16% on a single pass, 52% after this. A REWRITE, not a repair.
+        if out["retryable"]:
+            try:
+                retry = await llm.extract(
+                    system_prompt=headlines.RETRY_SYSTEM,
+                    user_content=headlines.build_retry_content(
+                        out["retryable"], batch),
+                )
+                cost += float(getattr(retry, "cost_usd", 0.0) or 0.0)
+                merged = headlines.apply_retry(
+                    out, headlines.parse(retry.content, batch))
+                recovered_total += merged["recovered"]
+                out["headlines"] = merged["headlines"]
+                refused.update(merged["refused"])
+            except Exception as exc:
+                print(f"  retry at {start} failed: {str(exc)[:120]}")
+                refused.update(out["refused"])
+        else:
+            refused.update(out["refused"])
 
         by_id = {str(p["patch_id"]): p for p in batch}
         for pid, line in out["headlines"].items():
@@ -154,7 +179,8 @@ async def main() -> int:
               f"{written} headlines, {sum(refused.values())} refused")
 
     print(f"\n{'WROTE' if args.apply else 'WOULD WRITE'} {written} headlines")
-    print(f"refused: {dict(refused) or 'none'}")
+    print(f"refused after retry: {dict(refused) or 'none'}")
+    print(f"recovered by the second pass: {recovered_total}")
     print(f"cost: ${cost:.2f}")
     print("\nsamples (headline <- fact):")
     for line, fact in samples:

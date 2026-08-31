@@ -183,7 +183,10 @@ async def test_rows_it_returns_are_shaped_for_the_live_tile_predicate():
             rows = await conn.fetch(sql, *args)
             assert rows
             for r in rows:
-                assert why_not_a_tile(dict(r)) is None
+                # The WRITER's question: these rows have no headline
+                # by construction, so the reader's question answers
+                # `no_headline_written` for all of them.
+                assert why_not_a_tile(dict(r), require_headline=False) is None
             raise _Rollback()
     except _Rollback:
         pass

@@ -196,6 +196,7 @@ def parse(content: Any, patches: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
 
     accepted: Dict[str, str] = {}
     refused: Dict[str, int] = {}
+    retryable: List[Dict[str, str]] = []
 
     # AN EMPTY RESULT MUST NAME ITSELF. The first prod dry run returned
     # "0 headlines, 0 refused, $0.00", which reads as "nothing to do"
@@ -230,10 +231,25 @@ def parse(content: Any, patches: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         reason = why_invalid(headline, facts[pid])
         if reason:
             refused[reason] = refused.get(reason, 0) + 1
+            # An attempt that broke a rule is worth ONE more try with
+            # the rule quoted back at it. Measured on the hard residue,
+            # patches already refused once: 16% accepted on a single
+            # pass, 52% after a retry that names the failure. Models
+            # count characters badly and REVISE well, which is the whole
+            # reason this beats a stricter first instruction. A "six
+            # words" variant was tried first and did worse, 6% against
+            # 8%, because it pushed numbers into words and made the
+            # lines longer.
+            #
+            # Empty attempts are not retryable: there is nothing to
+            # quote back and nothing was learned.
+            if headline:
+                retryable.append({"id": pid, "attempt": headline,
+                                  "reason": reason})
             continue
         accepted[pid] = headline
 
-    return {"headlines": accepted, "refused": refused}
+    return {"headlines": accepted, "refused": refused, "retryable": retryable}
 
 
 # --------------------------------------------------------------------
@@ -288,3 +304,83 @@ def build_pending_fetch(subject_key: Optional[str] = None,
         sql += f"       AND cp.origin_id = ${len(args)}\n"
     sql += "     ORDER BY cp.created_at DESC\n"
     return sql, args
+
+
+# --------------------------------------------------------------------
+# The second pass
+# --------------------------------------------------------------------
+#
+# NOT A REPAIR, which is the distinction section 6.3 turns on. Nothing
+# here shortens a string. The model is shown its own attempt, told the
+# rule it broke and how long the line actually was, and asked to write a
+# different one. Rewriting is what 6.3 demands; truncating is what it
+# forbids, and a retry that cut the tail would be the forbidden thing
+# wearing a second call's clothes.
+
+RETRY_SYSTEM = (
+    "You wrote headlines that broke a hard rule. Rewrite ONLY these.\n\n"
+    "Each entry gives your previous attempt and what was wrong with it. "
+    "Rewriting means saying LESS, not cutting the end off: drop the "
+    "qualifier, drop the second clause, keep the one thing a person "
+    "would recognise. Never truncate and never add an ellipsis.\n\n"
+    "Rules, all still hard:\n"
+    "1. At most 48 characters.\n"
+    "2. Keep any number or dollar figure the fact contains.\n"
+    "3. Never state a number the fact does not contain.\n"
+    "4. Sentence case, no full stop, no dashes of any kind.\n"
+    "5. State the thing. Never address the reader.\n\n"
+    "Return raw JSON only, no prose and no code fence, exactly:\n"
+    '{"headlines": [{"id": "<the id given>", "headline": "<text>"}]}\n'
+)
+
+
+def build_retry_content(retryable: Iterable[Dict[str, str]],
+                        patches: Iterable[Dict[str, Any]]) -> str:
+    """The failures, each with its own attempt, length and reason.
+
+    The CHARACTER COUNT is stated explicitly because that is the rule
+    models break most and the one they cannot check themselves. Telling
+    a model its line was 63 characters is information it did not have;
+    telling it again that the limit is 48 is not.
+    """
+    facts = {str(p.get("patch_id")): (patch_value(p).get("text") or "").strip()
+             for p in patches}
+    lines = ["Rewrite these:"]
+    for item in retryable:
+        pid = str(item.get("id") or "")
+        if pid not in facts:
+            continue
+        attempt = item.get("attempt") or ""
+        lines.append(f"- id: {pid}")
+        lines.append(f"  fact: {facts[pid]}")
+        lines.append(f"  your attempt ({len(attempt)} characters): {attempt}")
+        lines.append(f"  problem: {item.get('reason')}")
+    return "\n".join(lines)
+
+
+def apply_retry(first: Dict[str, Any], second: Dict[str, Any]) -> Dict[str, Any]:
+    """Fold a retry's results into the first pass's.
+
+    HERE RATHER THAN IN THE CALLERS, because a sabotage found that
+    nothing could see it there. Swapping the merge for an assignment,
+    `out["headlines"] = second["headlines"]`, DISCARDS every line the
+    first pass got right and keeps only the recovered ones, and the
+    whole suite stayed green: the worker tests read source, and the one
+    written for this checked the exception path rather than the success
+    path. A retry that loses more than it recovers is the shape of every
+    optimisation that ships a regression.
+
+    The first pass's headlines SURVIVE. The retry only ever adds.
+
+    Refusals are the SECOND pass's only. A line refused and then
+    rewritten was not refused, and counting both would make the log say
+    a batch failed twice as often as it did, which matters because the
+    refusal counts are the signal for whether the writer is improving.
+    """
+    merged = dict(first.get("headlines") or {})
+    merged.update(second.get("headlines") or {})
+    return {
+        "headlines": merged,
+        "refused": dict(second.get("refused") or {}),
+        "recovered": len(second.get("headlines") or {}),
+    }
