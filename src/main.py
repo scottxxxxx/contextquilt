@@ -7526,7 +7526,7 @@ async def woven_digest(
     totals = await _woven_lifetime_totals(subject_key)
     logger.info("woven_digest_served", user_id=user_id, window_days=days,
                 candidates=len(candidates), tiles=len(digest["patches"]),
-                offset=offset, total=digest["total_available"],
+                offset=offset, total=digest["tiles_available"],
                 dropped=digest["dropped"])
     return {
         **totals,
