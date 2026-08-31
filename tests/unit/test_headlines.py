@@ -24,6 +24,9 @@ from contextquilt.services.headlines import (
     EMPTY,
     IMPERATIVE,
     INVENTED_NUMBER,
+    NOTHING_ASKED,
+    NOTHING_RETURNED,
+    NO_JSON,
     MAX_HEADLINE_CHARS,
     TERMINAL_PERIOD,
     TOO_LONG,
@@ -190,3 +193,51 @@ def test_the_prompt_carries_no_dash_for_the_model_to_copy():
 def test_the_batch_prompt_skips_textless_patches():
     body = build_user_content([patch("a"), {"patch_id": "b", "value": {}}])
     assert "id: a" in body and "id: b" not in body
+
+
+# --------------------------------------------------------------------
+# An empty result has to name itself
+# --------------------------------------------------------------------
+
+def test_a_value_arriving_as_a_json_string_still_reaches_the_prompt():
+    """The bug that shipped, and the third instance of it in one night.
+
+    `value` is JSONB and asyncpg hands it back as a JSON STRING. Both
+    readers here checked `isinstance(value, dict)`, so every patch
+    looked textless, `build_user_content` emitted a prompt with NO facts
+    in it, and the model correctly returned an empty list. The first
+    prod dry run reported "0 headlines, 0 refused, $0.00", which reads
+    exactly like a healthy batch with nothing to do.
+    """
+    import json as _json
+    p = patch("a")
+    p["value"] = _json.dumps(p["value"])
+    body = build_user_content([p])
+    assert "id: a" in body and "Target market" in body
+
+
+def test_a_prompt_with_no_facts_is_reported_rather_than_silent():
+    out = parse({"headlines": []}, [])
+    assert out["refused"] == {NOTHING_ASKED: 1}
+
+
+def test_an_empty_model_answer_is_reported_rather_than_silent():
+    out = parse({"headlines": []}, [patch("a")])
+    assert out["headlines"] == {}
+    assert out["refused"] == {NOTHING_RETURNED: 1}
+
+
+def test_prose_instead_of_json_is_reported_rather_than_silent():
+    # The client does not enforce json_schema on the wire, so a prose
+    # answer is a real outcome and must be distinguishable from an
+    # honest empty one.
+    assert parse("Here are your headlines!", [patch("a")])["refused"] == {NO_JSON: 1}
+
+
+def test_a_healthy_batch_reports_no_batch_level_reason():
+    out = parse({"headlines": [
+        {"id": "p1", "headline": "60-67% small firms is the sweet spot"},
+    ]}, [patch("p1")])
+    assert out["headlines"]
+    for reason in (NO_JSON, NOTHING_RETURNED, NOTHING_ASKED):
+        assert reason not in out["refused"]
