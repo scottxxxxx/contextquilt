@@ -32,9 +32,19 @@ project from the ingest request instead. So this script CANNOT
 currently separate GP's two hypotheses, and saying so IS the result
 rather than a failure to report one.
 
-It is kept anyway, for two reasons. The trap above is worth not
+THE SECOND TRAP, and it cost 4 of the 38 on the first run. The behavior
+lane's first row is 2026-08-17, and a backfill ran that call over
+HISTORICAL meetings that day. Those meetings' own non-behavior patches
+were created weeks earlier, so inside a 14-day window they look
+behavior-only while being nothing of the kind: one had 28 non-behavior
+patches dating from 2026-06-25. So silence is tested UNWINDOWED, "this
+origin has no non-behavior patch EVER", and the windowed count is
+reported separately as excluded artifacts. Corrected 38 to 34 before
+the number left the building.
+
+It is kept anyway, for two reasons. The traps above are worth not
 re-falling into. And the coverage number stands on its own: on
-2026-08-30, 38 of 162 meetings in 14 days produced ONLY behavior
+2026-08-30, 34 of 162 meetings in 14 days produced ONLY behavior
 patches, median 6 and max 17. A meeting yielding 17 behavior
 observations and no commitment, decision or takeaway is not explained
 by "too short".
@@ -60,7 +70,11 @@ async def main():
         """
         SELECT p.origin_id, p.total, p.behavior, p.day,
                opa.project_id AS assigned_project,
-               (opa.origin_id IS NOT NULL) AS has_assignment_row
+               (opa.origin_id IS NOT NULL) AS has_assignment_row,
+               -- Unwindowed, and load bearing: see THE SECOND TRAP.
+               (SELECT COUNT(*) FROM context_patches e
+                 WHERE e.origin_id = p.origin_id
+                   AND e.patch_type <> 'behavior') AS nonbehavior_ever
           FROM (
               SELECT origin_id,
                      COUNT(*) AS total,
@@ -86,7 +100,7 @@ async def main():
 
     cell = collections.defaultdict(lambda: [0, 0])  # [silent, produced]
     for r in rows:
-        silent = r["behavior"] == r["total"]
+        silent = r["behavior"] == r["total"] and r["nonbehavior_ever"] == 0
         cell[bucket(r)][0 if silent else 1] += 1
 
     print(f"\n{'meeting project state':36} {'main SILENT':>12} {'produced':>10}")
@@ -94,7 +108,12 @@ async def main():
         tot = silent + ok
         print(f"  {k:34} {silent:6} ({silent/tot:3.0%})  {ok:8}")
 
-    silent_rows = [r for r in rows if r["behavior"] == r["total"]]
+    silent_rows = [r for r in rows
+                   if r["behavior"] == r["total"] and r["nonbehavior_ever"] == 0]
+    artifacts = [r for r in rows
+                 if r["behavior"] == r["total"] and r["nonbehavior_ever"] > 0]
+    print(f"\nwindow artifacts excluded (behavior-only INSIDE the window, but "
+          f"the meeting has older non-behavior patches): {len(artifacts)}")
     print(f"\nmain extraction produced NOTHING: {len(silent_rows)} of {len(rows)}")
     sizes = sorted(r["total"] for r in silent_rows)
     if sizes:
