@@ -7373,6 +7373,7 @@ async def woven_meeting_seam(
             "patch_id": patch["patch_id"],
             "patch_type": patch["patch_type"],
             "fact": (value.get("text") or "").strip(),
+            "headline": value.get("headline") or None,
             "source_meeting_id": patch.get("origin_id"),
             "occurred_at": patch.get("created_at"),
         })

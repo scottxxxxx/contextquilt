@@ -423,3 +423,29 @@ def test_the_quilt_still_fills_when_the_variety_runs_out():
     assert len(out["patches"]) == 6, "the quilt went short when variety ran out"
     types = [p["patch_type"] for p in out["patches"]]
     assert types.count("commitment") == 5 and types.count("decision") == 1
+
+
+def test_the_headline_is_served_and_null_is_a_real_state():
+    """Section 6.3 is enforced by refusal rather than repair.
+
+    Every repair available is a truncation, which is the exact thing 6.3
+    forbids, so a line that broke a rule leaves the patch with NO
+    headline. That is the same served state as a patch stored before the
+    lane existed. The key must always be present, or the client cannot
+    tell a null from a field a middlebox dropped.
+    """
+    out = build_digest([
+        patch("a", text="Target market is small firms", headline="Small firms win"),
+        patch("b", text="Privacy will be the differentiator"),
+    ], limit=6)
+    by_id = {p["patch_id"]: p for p in out["patches"]}
+    assert by_id["a"]["headline"] == "Small firms win"
+    assert "headline" in by_id["b"] and by_id["b"]["headline"] is None
+
+
+def test_a_headline_arriving_as_a_json_string_value_still_serves():
+    # The JSONB trap again, on the newest field rather than the oldest.
+    import json as _json
+    p = patch("a", text="Zero data retention", headline="Zero retention")
+    p["value"] = _json.dumps(p["value"])
+    assert build_digest([p], limit=6)["patches"][0]["headline"] == "Zero retention"
