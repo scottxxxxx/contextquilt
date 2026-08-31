@@ -24,6 +24,31 @@ what the USER decided the meeting belongs to, independent of what
 extraction produced, so it can disagree with the patches. Absence of a
 row means never stated, which is NOT the same fact as a NULL project_id
 meaning explicitly unassigned; both are kept apart below.
+
+AND THAT TABLE IS TOO SPARSE TO SETTLE IT EITHER. On the 2026-08-30 run
+only 4 of 162 meetings had an assignment row at all, because a row is
+written when a user explicitly assigns and most meetings take their
+project from the ingest request instead. So this script CANNOT
+currently separate GP's two hypotheses, and saying so IS the result
+rather than a failure to report one.
+
+It is kept anyway, for two reasons. The trap above is worth not
+re-falling into. And the coverage number stands on its own: on
+2026-08-30, 38 of 162 meetings in 14 days produced ONLY behavior
+patches, median 6 and max 17. A meeting yielding 17 behavior
+observations and no commitment, decision or takeaway is not explained
+by "too short".
+
+One caveat on that number, because the file should not overclaim what
+it counts. Dedup means a meeting whose content all merged into EXISTING
+patches creates no new rows and looks identical from here. So this
+counts meetings that produced no NEW non-behavior patch, which is not
+quite "the main extraction returned nothing". For Scott's tire store
+meeting the stronger claim does hold: one patch total, and no prior
+tire content anywhere in the corpus to have merged into.
+
+Usage:
+    DATABASE_URL=postgres://... python scripts/measure_extraction_coverage.py
 """
 import asyncio, os, collections
 import asyncpg
