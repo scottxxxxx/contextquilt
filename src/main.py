@@ -408,6 +408,7 @@ _RECALL_LABELS = {
         "blockers": "Blockers",
         "roles": "Roles",
         "key_facts": "Key facts",
+        "goals": "Goals",
     },
     "es": {
         "project": "Proyecto",
@@ -419,6 +420,7 @@ _RECALL_LABELS = {
         "blockers": "Bloqueadores",
         "roles": "Roles",
         "key_facts": "Datos clave",
+        "goals": "Objetivos",
     },
     "fr": {
         "project": "Projet",
@@ -430,6 +432,7 @@ _RECALL_LABELS = {
         "blockers": "Blocages",
         "roles": "Rôles",
         "key_facts": "Faits clés",
+        "goals": "Objectifs",
     },
     "pt": {
         "project": "Projeto",
@@ -441,6 +444,7 @@ _RECALL_LABELS = {
         "blockers": "Bloqueios",
         "roles": "Funções",
         "key_facts": "Fatos importantes",
+        "goals": "Metas",
     },
     "ja": {
         "project": "プロジェクト",
@@ -452,6 +456,7 @@ _RECALL_LABELS = {
         "blockers": "ブロッカー",
         "roles": "役割",
         "key_facts": "重要な事実",
+        "goals": "目標",
     },
 }
 
@@ -1454,6 +1459,16 @@ async def recall_context(
                 person_entity_type=recall_vocab.person_entity_type,
             )
         except Exception as fmt_exc:  # pragma: no cover — defensive; test coverage is flat-mode
+            # An empty block and a formatter that raised are the same
+            # observable to every caller, which is how a KeyError on a
+            # missing locale label served "" to grouped-mode recalls for
+            # months without anyone seeing it. Keep the safety, lose the
+            # silence (same argument as the role-semantics decline log).
+            logger.warning(
+                "recall_grouped_format_failed",
+                error=str(fmt_exc), locale=locale, user_id=user_id,
+                patch_count=len(scored_for_output),
+            )
             context = ""
     else:
         try:

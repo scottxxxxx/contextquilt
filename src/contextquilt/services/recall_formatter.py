@@ -29,6 +29,23 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 # richer block than a quick mid-meeting prompt). The formatter works in
 # characters; ~4 chars/token is the repo's standing heuristic (same one
 # the worker's queue budgeting uses).
+# Section labels for grouped mode. The endpoint overrides these per
+# locale; anything a locale omits falls back to the English here.
+_DEFAULT_LABELS = {
+    "project": "Project",
+    "people": "People",
+    "connections": "Connections",
+    "about_you": "About you",
+    "decisions": "Decisions",
+    "commitments": "Open commitments",
+    "blockers": "Blockers",
+    "roles": "Roles",
+    "key_facts": "Key facts",
+    "goals": "Goals",
+    "constraints": "Constraints",
+    "events": "Recent events",
+}
+
 DEFAULT_RECALL_TOKEN_BUDGET = 700
 MIN_RECALL_TOKEN_BUDGET = 100
 MAX_RECALL_TOKEN_BUDGET = 2000
@@ -329,20 +346,13 @@ def format_category_grouped(
     `labels` is the i18n label dict from the recall endpoint. When
     omitted, sensible English defaults are used.
     """
-    labels = labels or {
-        "project": "Project",
-        "people": "People",
-        "connections": "Connections",
-        "about_you": "About you",
-        "decisions": "Decisions",
-        "commitments": "Open commitments",
-        "blockers": "Blockers",
-        "roles": "Roles",
-        "key_facts": "Key facts",
-        "goals": "Goals",
-        "constraints": "Constraints",
-        "events": "Recent events",
-    }
+    # Merged over the defaults rather than replacing them. The endpoint
+    # passes a LOCALE table, and a locale table that is missing a key the
+    # formatter indexes directly used to raise KeyError, which main.py
+    # then swallowed into an empty context block. Merging means a missing
+    # key degrades to its English label instead of erasing the whole
+    # block, and adding a key to one locale can never break another.
+    labels = {**_DEFAULT_LABELS, **(labels or {})}
     sections: List[str] = []
 
     people = [r for r in entity_rows if (r.get("entity_type") if isinstance(r, dict) else r["entity_type"]) == person_entity_type]
