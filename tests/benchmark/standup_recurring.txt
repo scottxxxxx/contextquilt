@@ -1,0 +1,14 @@
+Daily Standup - Platform Team
+
+[Suresh (you)] Morning everyone, let's go around. Pallavi, where are you on the asset management release?
+[Pallavi] I finished the QA validation for the workspace configuration changes yesterday. Two of the regression cases still fail, I'll have them by end of day.
+[Suresh (you)] Good. Xhoi is out of office today so we'll skip her update, she's back Thursday.
+[Vijay] I picked up the ACL blocking issue. It's the same permissions bug we saw on issue 38, I've got a fix in review.
+[Suresh (you)] Vijay, you always end up being the one who untangles the permissions stuff. Can you write up how the ACL layer actually works so it isn't just in your head?
+[Vijay] Sure, I'll draft it this week.
+[Pallavi] One thing, the CTS change request didn't get approved on Friday. Rashmi is chasing the approval, she owns the change advisory board relationship.
+[Suresh (you)] Right. I'll raise it at CAB on Friday, I run that meeting.
+[Sukumar] Quick one, the latency fix is ready for production promotion. I'd rather not push it until QA signs off.
+[Suresh (you)] Agreed, hold it. Sukumar, you always gate on QA and I think that's correct.
+[Sukumar] I've been burned before.
+[Suresh (you)] Anything blocking? No? Good, that's standup.

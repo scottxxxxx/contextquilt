@@ -404,6 +404,56 @@ def _patch_types_section(manifest: Dict[str, Any]) -> str:
     return "\n".join(lines).rstrip()
 
 
+# The `description` rules, kept as ONE literal because this exact text
+# was A/B tested and the source must be byte-identical to what was
+# measured. Paraphrasing it here would make the eval a statement about
+# a prompt that no longer exists.
+#
+# The old rule asked for "what this transcript SHOWS about the entity"
+# and, where no role was stated, told the model to "describe the
+# conduct". It was written to stop a real defect, inferring a
+# profession from the topic, which is exactly how Steven Williams
+# became an immigration attorney. But its cure produced descriptions
+# of a Tuesday: "Participant in standup meeting", "QA validation
+# tester, out of office today", "Mentioned in context of hardware form
+# issue investigation".
+#
+# The cost of that: 0 of 122 description rows across 43 people had EVER
+# been confirmed as the same perception, because each one genuinely
+# contained something new. The series recorded paraphrase drift instead
+# of perception change, "how they're changing" said Suresh changed ten
+# times in thirteen days, and a semantic judge built to fix it answered
+# CHANGED on 47 of 47 real pairs and was RIGHT to.
+#
+# MEASURED, 3 runs per arm on a standup transcript shaped like the
+# failure, one shared classifier grading both arms in a single call:
+#
+#     OLD   6 durable, 12 episodes, 0 nulls
+#     NEW  14 durable,  0 episodes, 4 nulls
+#
+# The first two attempts at this text moved almost nothing (3 episodes
+# against 2), because they were measured on a SALES transcript where
+# every named person is a third party mentioned once. That instrument
+# could not exercise the defect. The transcript is now in
+# tests/benchmark/standup_recurring.txt.
+DESCRIPTION_RULES = """- `description` is what is durably TRUE OF THIS PERSON, and it must still be accurate in a month. A role or title they stated or were given by name, or a responsibility they visibly own, is what belongs here.
+- BEFORE YOU WRITE ONE, ASK: will this still be true in a month? If the answer is no, the value is null. Most people named in one meeting have no durable description, and null is the RIGHT answer for them, not a failure to try.
+- NEVER infer a profession, title or affiliation from the topic. A person discussing immigration law is NOT thereby an immigration attorney, and a person asking about a budget is NOT thereby in finance.
+- IT IS NOT A RECORD OF THIS MEETING. Attendance, a passing state, a task in flight, and the fact that somebody was mentioned all fail the month test.
+    WRONG: "Participant in standup meeting"            (attendance)
+    WRONG: "QA validation tester, out of office today"  (passing state)
+    WRONG: "Uploading the recordings via FTP"           (a task in flight)
+    WRONG: "Mentioned in context of the form issue"     (being mentioned)
+    RIGHT: "QA lead for asset management releases"      (a standing)
+    RIGHT: null                                         (nothing durable shown)
+- DO NOT WELD TODAY ONTO A ROLE. Where you have a durable standing, write it and STOP. Appending what they are doing this week turns a good description into half a Tuesday, and the half that rots is the half a reader will trust.
+    WRONG: "QA lead for asset management releases, validating the workspace changes"
+    RIGHT: "QA lead for asset management releases"
+    WRONG: "Owns the change advisory board relationship; chasing the CTS approval"
+    RIGHT: "Owns the change advisory board relationship"
+- ONE ACTION IS NOT A ROLE. If all you saw was somebody doing a thing once, that is null. Write a standing only where the transcript shows it IS their standing: they were named as owning it, they were given the title, or they are described as the person who handles it generally."""
+
+
 def _entity_types_section(manifest: Dict[str, Any]) -> str:
     """The entities array: object shape, declared types, and the rules
     that decide who gets indexed.
@@ -447,7 +497,7 @@ def _entity_types_section(manifest: Dict[str, Any]) -> str:
         "",
         "Each entity: {\"name\": \"<exact name as mentioned in this "
         "transcript>\", \"type\": \"<one of the types below>\", "
-        "\"description\": \"<brief context from this transcript>\"}",
+        "\"description\": \"<what is durably true of them, or null>\"}",
         "",
     ]
 
@@ -484,14 +534,10 @@ def _entity_types_section(manifest: Dict[str, Any]) -> str:
         "consistently: one entity per person, not one per surface form.\n"
         "- `relationships` may only reference names that appear in "
         "`entities`.\n"
-        "- `description` states only what this transcript SHOWS about the "
-        "entity: a role or title the person gave themselves or was given by "
-        "name, or what they were seen doing here. Never infer a profession, "
-        "title or affiliation from the topic. A person discussing "
-        "immigration law is NOT thereby an immigration attorney, and a "
-        "person asking about a budget is NOT thereby in finance. If no role "
-        "was stated, describe the conduct: \"raised privilege concerns about "
-        "AI in legal drafting\", not \"attorney\"."
+        # Concatenated with +, not juxtaposition: DESCRIPTION_RULES is a
+        # name rather than a literal, and juxtaposing it with the
+        # strings above is a SyntaxError rather than a silent join.
+        + DESCRIPTION_RULES
     )
     lines.append(body)
     return "\n".join(lines).rstrip()

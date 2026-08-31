@@ -302,10 +302,18 @@ def test_killed_sections_not_advertised_in_shapes(minimal_manifest):
 # person. The rule lives in the DEFAULT entity guidance, which is what
 # every app without its own `entity_guidance` renders.
 
-_DESC_RULE_MARKER = "Never infer a profession, title or affiliation from the topic"
+_DESC_RULE_MARKER = "- `description` is what is durably TRUE OF THIS PERSON"
 
 
 def test_description_rule_renders_for_ss_manifest():
+    """The marker moved on 2026-08-31 when the rule was rewritten.
+
+    The old rule asked for "what this transcript SHOWS" and told the
+    model to describe the conduct where no role was stated, which
+    produced descriptions of a Tuesday and meant 0 of 122 rows were ever
+    confirmed as the same perception. The anti-inference contrast pair
+    below is unchanged and is the half that must never be lost.
+    """
     import json
     from pathlib import Path
 
