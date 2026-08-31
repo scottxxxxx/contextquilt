@@ -7524,9 +7524,26 @@ async def woven_digest(
     await _attach_woven_links(digest["patches"])
 
     totals = await _woven_lifetime_totals(subject_key)
+    # THE SCOPE IS LOGGED BECAUSE ITS ABSENCE COST A RECONSTRUCTION.
+    #
+    # 2026-08-31: Scott opened a project called "Immigration Interview
+    # App" and saw another project's work under it. This line recorded
+    # candidates, tiles and window and NOT the project it filtered on,
+    # so answering "did a scope arrive, and which one" took running the
+    # candidate SQL against every project id this user has until one
+    # returned exactly the 29 the log showed. It was CBE's id: the
+    # client had sent one project's id under another's heading, and CQ
+    # had filtered correctly on what it was given.
+    #
+    # One line here would have answered it immediately. `project_known`
+    # goes too, because "the filter matched nothing" and "this project
+    # does not exist for this user" are different answers and only one
+    # of them is a client bug.
     logger.info("woven_digest_served", user_id=user_id, window_days=days,
                 candidates=len(candidates), tiles=len(digest["patches"]),
                 offset=offset, total=digest["tiles_available"],
+                project_id=project_id, project=project,
+                project_known=project_known,
                 dropped=digest["dropped"])
     return {
         **totals,
