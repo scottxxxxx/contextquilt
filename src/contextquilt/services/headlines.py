@@ -255,7 +255,7 @@ def build_pending_fetch(subject_key: Optional[str] = None,
     sql, args = PENDING_SELECT, []
     if subject_key is not None:
         args.append(subject_key)
-        sql += f"       AND ps.subject_key = ${len(args)}\n"
+        sql += f"       AND cp.subject_key = ${len(args)}\n"
     if origin_id is not None:
         args.append(origin_id)
         sql += f"       AND cp.origin_id = ${len(args)}\n"
