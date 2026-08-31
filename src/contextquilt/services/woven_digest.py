@@ -33,6 +33,7 @@ re-derived on the device.
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import date
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -95,11 +96,33 @@ DROP_SENSITIVE = "sensitive_content"
 DROP_SHELVED = "shelved_by_user"
 
 
-def _text(patch: Dict[str, Any]) -> str:
+def _value(patch: Dict[str, Any]) -> Dict[str, Any]:
+    """The patch's value as a dict, whatever the driver handed back.
+
+    `value` is JSONB and asyncpg returns it as a JSON STRING unless a
+    codec is registered, which this pool does not do. An earlier version
+    of this module checked `isinstance(value, dict)` and returned empty
+    for anything else, so EVERY patch dropped as `no_text` and the quilt
+    rendered empty for every user. Caught on real data in one run
+    because `dropped` reports the rule that fired: 351 candidates, 351
+    `no_text`. Elsewhere in the codebase this is already handled with
+    `row["value"] if isinstance(row["value"], str)`; this module simply
+    did not know.
+    """
     value = patch.get("value")
     if isinstance(value, dict):
-        return (value.get("text") or "").strip()
-    return ""
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _text(patch: Dict[str, Any]) -> str:
+    return (_value(patch).get("text") or "").strip()
 
 
 def why_not_a_tile(patch: Dict[str, Any]) -> Optional[str]:
@@ -117,7 +140,7 @@ def why_not_a_tile(patch: Dict[str, Any]) -> Optional[str]:
     if ptype == "person":
         return DROP_PERSON
 
-    value = patch.get("value") if isinstance(patch.get("value"), dict) else {}
+    value = _value(patch)
 
     # A user who let something go does not want it back as a tile.
     if value.get("shelved_at"):
@@ -157,7 +180,7 @@ def salience(patch: Dict[str, Any], today: Optional[date] = None,
     0-to-1 score on a memory is the shape doc 16 forbade for confidence.
     Kept because ordering needs a number and QA needs to see it.
     """
-    value = patch.get("value") if isinstance(patch.get("value"), dict) else {}
+    value = _value(patch)
     text = _text(patch)
 
     score = CONSEQUENCE.get(patch.get("patch_type"), DEFAULT_CONSEQUENCE)
@@ -260,6 +283,12 @@ LAYOUTS: Dict[int, Dict[str, Any]] = {
 }
 MAX_TILES = max(LAYOUTS)
 
+# How many tiles one patch type may take before a different type gets a
+# turn. Two, matching section 6.1's own cap on weight-3 tiles and for
+# the same stated reason: rhythm. A judgment call, one constant, easily
+# reverted; see the note in `build_digest`.
+MAX_TILES_PER_TYPE = 2
+
 # The handoff's mapping, kept so a weight can still be reported for
 # clients that reason in those terms. Derived FROM the span rather than
 # the other way round, because the span is what the prototype fixes.
@@ -332,7 +361,42 @@ def build_digest(
     # two calls. A tile that moved because a sort was unstable is the
     # stability defect the spec names, arriving by the back door.
     kept.sort(key=lambda pair: (-pair[0], str(pair[1].get("patch_id") or "")))
-    chosen = kept[:max(limit, 0)]
+
+    # TYPE RHYTHM, and this is a judgment call rather than a rule from
+    # the spec, so it is labelled as one and is one constant to revert.
+    #
+    # Section 6.1 caps weight-3 tiles at two "so the quilt has rhythm",
+    # which establishes that visual rhythm is a legitimate selection
+    # concern rather than a purity violation. Colour is the same
+    # argument: type drives the fabric hue, so an unconstrained ranking
+    # on a commitment-heavy week returns five commitments and the quilt
+    # renders as one purple block. Measured on real data, the top six
+    # were four commitments and two blockers.
+    #
+    # So a type takes at most two tiles while a different type is
+    # available. Strictly a TIE-BREAK among already-qualified patches:
+    # nothing unqualified is promoted, and if the week genuinely holds
+    # only commitments the cap yields rather than padding with weaker
+    # material, because an honest monochrome quilt beats a decorative
+    # one built from patches that did not earn a tile.
+    chosen: List[Tuple[float, Dict[str, Any]]] = []
+    deferred: List[Tuple[float, Dict[str, Any]]] = []
+    per_type: Dict[str, int] = {}
+    for score, patch in kept:
+        if len(chosen) >= max(limit, 0):
+            break
+        ptype = patch.get("patch_type") or ""
+        if per_type.get(ptype, 0) >= MAX_TILES_PER_TYPE:
+            deferred.append((score, patch))
+            continue
+        per_type[ptype] = per_type.get(ptype, 0) + 1
+        chosen.append((score, patch))
+    # A thin week of one type still fills, in rank order, rather than
+    # showing four tiles because the cap ran out of variety.
+    for pair in deferred:
+        if len(chosen) >= max(limit, 0):
+            break
+        chosen.append(pair)
     plan = layout(len(chosen))
     weights = assign_weights(len(chosen))
 

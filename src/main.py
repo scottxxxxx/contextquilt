@@ -7364,7 +7364,11 @@ async def woven_meeting_seam(
         if reason:
             dropped[reason] = dropped.get(reason, 0) + 1
             continue
-        value = patch.get("value") or {}
+        # Same JSONB-as-string trap the digest service hit: asyncpg
+        # hands `value` back as a JSON STRING unless a codec is
+        # registered, so `or {}` yields a str and `.get` explodes or
+        # silently misses. One helper, both routes.
+        value = woven_digest_svc._value(patch)
         patches.append({
             "patch_id": patch["patch_id"],
             "patch_type": patch["patch_type"],

@@ -294,3 +294,91 @@ def test_labels_respect_the_length_cap():
 def test_an_empty_patch_yields_an_empty_label_rather_than_raising():
     assert stitch_label("") == ""
     assert stitch_label(None) == ""
+
+
+# --------------------------------------------------------------------
+# JSONB arrives as a STRING. This emptied the quilt for every user.
+# --------------------------------------------------------------------
+
+def test_a_json_string_value_is_parsed_not_dropped():
+    """The bug that rendered an empty quilt for everyone.
+
+    `value` is JSONB and asyncpg returns it as a JSON STRING unless a
+    codec is registered, which this pool does not do. An earlier version
+    checked `isinstance(value, dict)` and returned empty for anything
+    else, so EVERY patch dropped as `no_text`.
+
+    Caught on real data in one run, and only because `dropped` reports
+    which rule fired: 351 candidates, 351 `no_text`. Without that map it
+    would have been an empty screen with no explanation.
+    """
+    import json as _json
+    raw = {"patch_id": "a", "patch_type": "takeaway", "origin_id": "m1",
+           "value": _json.dumps({"text": "Zero data retention"})}
+    assert why_not_a_tile(raw) is None
+    out = build_digest([raw], limit=6)
+    assert len(out["patches"]) == 1
+    assert out["patches"][0]["fact"] == "Zero data retention"
+
+
+def test_every_value_field_survives_the_string_form():
+    # Not just `text`: the shelve stamp, the sensitivity flag and the
+    # recurrence counter all live in the same blob, and reading them
+    # through a different path is how one of them gets missed.
+    import json as _json
+    shelved = {"patch_id": "s", "patch_type": "takeaway", "origin_id": "m",
+               "value": _json.dumps({"text": "x", "shelved_at": "2026-08-30"})}
+    assert why_not_a_tile(shelved) == DROP_SHELVED
+
+    recurring = {"patch_id": "r", "patch_type": "takeaway", "origin_id": "m",
+                 "value": _json.dumps({"text": "x", "restatement_count": 2})}
+    plain = {"patch_id": "p", "patch_type": "takeaway", "origin_id": "m",
+             "value": _json.dumps({"text": "x"})}
+    assert salience(recurring) > salience(plain)
+
+
+@pytest.mark.parametrize("bad", ["not json at all", "[1,2,3]", "null", ""])
+def test_an_unparseable_value_drops_cleanly_rather_than_raising(bad):
+    # A malformed blob must cost that patch a tile, never the request.
+    assert why_not_a_tile({"patch_id": "x", "patch_type": "takeaway",
+                           "origin_id": "m", "value": bad}) == "no_text"
+
+
+def test_one_type_does_not_take_the_whole_quilt():
+    """Type rhythm, and it is a judgment call rather than a spec rule.
+
+    Section 6.1 caps weight-3 tiles at two "so the quilt has rhythm",
+    which establishes visual rhythm as a legitimate selection concern.
+    Colour is the same argument: type drives the fabric hue, so an
+    unconstrained ranking on a commitment-heavy week returns five
+    commitments and the quilt renders as one purple block. Measured on
+    real data the top six were four commitments and two blockers.
+    """
+    cands = [patch(f"c{i}", ptype="commitment", text=f"Ship thing {i}")
+             for i in range(6)]
+    cands += [patch(f"d{i}", ptype="decision", text=f"Decide thing {i}")
+              for i in range(3)]
+    types = [p["patch_type"] for p in build_digest(cands, limit=6)["patches"]]
+    assert types.count("commitment") <= 2
+
+
+def test_a_single_type_week_still_fills_rather_than_padding():
+    """The cap yields rather than reaching for weaker material.
+
+    An honest monochrome quilt beats a decorative one built from patches
+    that did not earn a tile, so if the week genuinely holds one type,
+    the tiles are that type in rank order.
+    """
+    cands = [patch(f"c{i}", ptype="commitment", text=f"Ship thing {i}")
+             for i in range(6)]
+    out = build_digest(cands, limit=6)
+    assert len(out["patches"]) == 6
+    assert {p["patch_type"] for p in out["patches"]} == {"commitment"}
+
+
+def test_the_cap_never_promotes_an_unqualified_patch():
+    # Strictly a tie-break among patches that already passed pruning.
+    cands = [patch(f"c{i}", ptype="commitment", text=f"Ship {i}") for i in range(4)]
+    cands.append(patch("bad", ptype="decision", text=""))     # no text
+    types = [p["patch_type"] for p in build_digest(cands, limit=6)["patches"]]
+    assert "decision" not in types
