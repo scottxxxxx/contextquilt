@@ -112,6 +112,7 @@ from contextquilt.services.people_identity import (
     people_vocabulary,
     stated_roles_payload,
 )
+from contextquilt.services.cue_matching import build_cue_fetch, match_cues
 from contextquilt.services.recall_signals import (
     build_coverage_line,
     build_signal_lines,
@@ -934,11 +935,9 @@ async def recall_context(
     # entity index, so the same right to a number of its own.
     timings["cue_index_ms"] = round((time.monotonic() - cue_t) * 1000, 2)
 
-    matched_cues = []
-    if known_cues:
-        for cue in sorted(known_cues):
-            if cue in text_lower:
-                matched_cues.append(cue)
+    # Word-boundary matched, not a bare substring: see cue_matching for
+    # what `if cue in text_lower` was actually matching on prod.
+    matched_cues = match_cues(known_cues, text_lower)
 
     # Project scope decides whether an entity-less query is still answerable.
     # A scope-shaped question ("anyone have any commitments?") has no entity
@@ -1254,27 +1253,21 @@ async def recall_context(
         )
 
     # Cue fetch leg: patches indexed under a matched cue surface directly,
-    # regardless of project scope or the latest-20 window — this is the
-    # associative-recall path ("the pricing model" pulls the pricing
-    # commitments even when no entity name was spoken).
+    # outside the latest-20 window — this is the associative-recall path
+    # ("the pricing model" pulls the pricing commitments even when no
+    # entity name was spoken). Scoped to the caller's project when there
+    # is one, on the flat leg's own predicate: see cue_matching for what
+    # an unscoped cue leg served on 2026-08-30 and what is still open.
     cue_rows: list = []
     if matched_cues:
+        cue_sql, cue_args = build_cue_fetch(
+            subject_key, matched_cues, universal_types, max_age_days,
+            AGE.format(d="$4", u="$3"),
+            recall_project_id=recall_project_id,
+            recall_project=recall_project,
+        )
         try:
-            cue_rows = await db_pool.fetch(
-                """
-                SELECT DISTINCT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
-                       cp.created_at, cp.last_observed_at
-                FROM patch_cues pc
-                JOIN context_patches cp ON cp.patch_id = pc.patch_id
-                JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
-                WHERE ps.subject_key = $1 AND pc.cue = ANY($2)
-                  AND COALESCE(cp.status, 'active') = 'active'
-                  {AGE}
-                ORDER BY cp.created_at DESC, cp.patch_id ASC
-                LIMIT 10
-                """.replace("{AGE}", AGE.format(d="$4", u="$3")),
-                subject_key, matched_cues, universal_types, max_age_days
-            )
+            cue_rows = await db_pool.fetch(cue_sql, *cue_args)
         except Exception:
             cue_rows = []  # lagging DB — see cue-index rehydrate above
 
