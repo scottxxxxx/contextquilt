@@ -19,12 +19,23 @@ what it is.
 
 Found on first run, 2026-08-30, on prod: `artifact` (5 rows, still
 active, most recent 08-25) is an ENTITY type that the extraction model
-borrowed as a patch type, plus `gap`, `coaching_note`, `rehearsal` and
-`pattern` from 07-15. Their text is genuinely useful, which is what
-makes them worth reporting rather than sweeping: an undeclared type
-falls through to facet defaults in the runtime, renders bare in the
-context block, and a client switching on a known-type enum drops it.
-Captured memory, then orphaned.
+borrowed as a patch type. Nothing on the write path rejected it, so it
+takes facet defaults in the runtime, renders bare in the context block,
+and is dropped by a client switching on a known-type enum.
+
+RULED 2026-08-30, AND `artifact` IS NOT TO BE ACTED ON. Scott's call is
+that the memory layer should not be concerned with artifacts at all, so
+the five rows stay as they are and the write path is unchanged. This
+script still reports it, deliberately, because suppressing a known case
+is how a tool loses the ability to tell you about an unknown one. Read
+a lone `artifact` line as the expected output of a clean run.
+
+If anyone ever does revisit it, the place is the EXTRACTION PROMPT and
+not the query path: the model is picking a name out of `ENTITY_TYPES`
+when it should be picking a patch type. These rows are documents
+MENTIONED IN A MEETING, minted by CQ's own extraction
+(`source_prompt=meeting_summary`, `origin_mode=inferred`, written at
+worker.py:404), not references a user attached to a query.
 
 READ ONLY BY CONSTRUCTION. There is no --apply and no write anywhere in
 this file, because what to DO about an undeclared type (reject at the
