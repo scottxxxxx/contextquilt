@@ -6711,6 +6711,82 @@ async def get_person(
     # Derived, never stored: a stored flag would need clearing, and the
     # thing that clears it is a worker pass that has no reason to know
     # this field exists.
+    # WHY THERE IS NO TRAJECTORY CARD, which is a different question
+    # from whether there is one.
+    #
+    # 2026-08-31: Scott asked why "how they're changing" had disappeared.
+    # It had not broken. Suresh's card was archived that afternoon with
+    # cause `lapsed` because his speaking turns went from 316 against
+    # 201 (a real shift) to 271 against 258, a 5% move, under a card
+    # that requires a 20 point gap AND a 40% relative change before it
+    # will claim anything. The lens correctly withdrew a claim that had
+    # stopped being true, and the screen showed a hole.
+    #
+    # An absence with no reason is indistinguishable from a bug, and the
+    # reader resolves that ambiguity against us every time. This is the
+    # same rule as `dropped` on the woven route, `project_known`'s three
+    # states, and `reconciling` above.
+    #
+    # LAPSED AND NEVER-QUALIFIED MUST NOT COLLAPSE, which is
+    # ShoulderSurf's condition and it is right. "This was a trend and it
+    # flattened" earns a sentence, because steady is a finding and it is
+    # the one a reader would not have guessed. "There has never been
+    # enough here to measure" earns silence, and dressing it up as a
+    # finding of steadiness would be inventing one.
+    trajectory_status = None
+    try:
+        recent_card = await db_pool.fetchrow(
+            """
+            SELECT cp.status, cp.updated_at, cp.value
+              FROM context_patches cp
+              JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+             WHERE ps.subject_key = $1
+               AND cp.patch_type = 'insight'
+               AND cp.value->>'lens' = $2
+               AND (cp.value->>'source_entity_id' = $3
+                    OR cp.value->>'source_person' = ANY($4::text[]))
+             ORDER BY cp.updated_at DESC
+             LIMIT 1
+            """,
+            f"user:{user_id}", trajectory_svc.LENS, entity_id,
+            [str(pid) for pid in (row.get("_patch_ids")
+                                  or ([row["patch_id"]] if row.get("patch_id") else []))],
+        )
+        if recent_card is None:
+            # Never qualified. Silence, per SS: a not-yet is not a
+            # finding, and this state must never render as steadiness.
+            trajectory_status = {"state": "never_qualified", "since": None,
+                                 "measure": None, "withdrawn_claim": None}
+        elif (recent_card["status"] or "active") == "active":
+            trajectory_status = {"state": "active", "since": None,
+                                 "measure": None, "withdrawn_claim": None}
+        else:
+            cv = recent_card["value"]
+            if isinstance(cv, str):
+                cv = json.loads(cv)
+            cause = (cv or {}).get("archive_cause")
+            facts = (cv or {}).get("facts") or {}
+            trajectory_status = {
+                # `lapsed` is the only one that earns a sentence. Any
+                # other archive cause is reported as itself rather than
+                # folded into lapsed, because a card removed by a
+                # correction did not flatten.
+                "state": "lapsed" if cause == "lapsed" else "withdrawn",
+                "since": recent_card["updated_at"].isoformat()
+                if recent_card["updated_at"] else None,
+                "measure": facts.get("measure_key") or cv.get("measure_key"),
+                # What it used to say, so the client can be specific
+                # rather than generic: "turns were up sharply through
+                # late August, the last 8 meetings are level" beats "no
+                # significant change". Named for what it is so nobody
+                # renders it as a live claim.
+                "withdrawn_claim": cv.get("text"),
+            }
+    except Exception as exc:
+        # Null means CQ cannot tell. Claiming "never qualified" because
+        # a query failed would be inventing the quietest possible lie.
+        logger.warning("trajectory_status_unavailable", error=str(exc)[:140])
+
     reconciling = None
     try:
         rec = await db_pool.fetchrow(
@@ -6842,6 +6918,10 @@ async def get_person(
         # The 5.15 hero: how this person is changing against their own
         # past. Object or null; null is the common case, not the edge.
         "trajectory": trajectory_card,
+        # WHY there is no card, which is a different question from
+        # whether there is one. Null only when CQ could not tell.
+        # `lapsed` earns a sentence, `never_qualified` earns silence.
+        "trajectory_status": trajectory_status,
         # A list (possibly empty) unless the fetch failed, which is the
         # only cannot-tell. See capabilities.insights for whether this
         # app can ever produce them at all.
