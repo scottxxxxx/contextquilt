@@ -1,128 +1,186 @@
-"""READ ONLY. When does the MAIN extraction produce nothing?
+#!/usr/bin/env python3
+"""Where do extracted patches disappear, and does transcript length explain it?
 
-Scott's tire store meeting kept ONE patch, a behavior observation, and
-the main extraction produced nothing. His vet visit produced ten
-including a real commitment. GP asked the right question about those
-two: does the difference track the PRESENCE OF A PROJECT, or did the
-vet visit simply have more to extract? Different fixes, and a sample of
-two cannot separate them.
+WHAT THIS FILE REPLACES, because the mistake is worth keeping. The
+first version reconstructed the answer from `context_patches`: a
+meeting whose only patches are `behavior` was called one where the main
+extraction produced nothing, since the behavior lane is a separate call
+(doc 19.5). That reconstruction is INVALID. Six patch types are
+ORIGIN-NULL BY DESIGN (see the origin_id design ruling): measured over
+14 days, person 140/140, insight 108/108, project 83/83, preference
+47/47, trait 30/30, org 17/17, so 425 patches carry no origin_id at
+all. A meeting that produced a pile of person and project patches looks
+silent to an origin-keyed query while having produced plenty.
 
-The behavior lane is a SEPARATE LLM call (doc 19.5). So a meeting whose
-patches are ALL behavior is one where the behavior call fired and the
-main extraction returned nothing. That is the observable, and it needs
-no transcript, which CQ deliberately does not keep.
+It gave a confidently wrong headline. One meeting was reported as "17
+behavior observations and not one commitment, so `too short` cannot
+explain it". Its actual call: 47,949 chars of transcript, 34 patches
+parsed, 15 stored. The patches were there and the query could not see
+them.
 
-THE INSTRUMENT TRAP, and why the project signal comes from
-`origin_project_assignments` rather than from the patches. The obvious
-version asks whether any patch on the meeting carries a project. That
-is CIRCULAR: only 79 of 1486 behavior patches are scoped, so "every
-patch is behavior" almost entails "no patch is scoped", and the two
-variables are one variable. Measured that way the correlation comes out
-at a perfect 100%, which is an artifact of the query and not a fact
-about the world. `origin_project_assignments` (migration 43) records
-what the USER decided the meeting belongs to, independent of what
-extraction produced, so it can disagree with the patches. Absence of a
-row means never stated, which is NOT the same fact as a NULL project_id
-meaning explicitly unassigned; both are kept apart below.
+`extraction_metrics` is the authoritative instrument and was there the
+whole time. It records, PER CALL: `transcript_chars`,
+`patches_before_filters` (literally
+`len(response.content["patches"])`, the parsed model response before
+any filter), `patches_after_filters`, `patches_extracted` (post-dedup),
+`entities_extracted`, `output_tokens` and `origin_id`. The lesson is
+the one already in the operator notes: check what a query resolves
+THROUGH, and prefer the artifact to a reconstruction of it.
 
-AND THAT TABLE IS TOO SPARSE TO SETTLE IT EITHER. On the 2026-08-30 run
-only 4 of 162 meetings had an assignment row at all, because a row is
-written when a user explicitly assigns and most meetings take their
-project from the ingest request instead. So this script CANNOT
-currently separate GP's two hypotheses, and saying so IS the result
-rather than a failure to report one.
+THE STAGE DECOMPOSITION, which is why the raw column matters:
 
-THE SECOND TRAP, and it cost 4 of the 38 on the first run. The behavior
-lane's first row is 2026-08-17, and a backfill ran that call over
-HISTORICAL meetings that day. Those meetings' own non-behavior patches
-were created weeks earlier, so inside a 14-day window they look
-behavior-only while being nothing of the kind: one had 28 non-behavior
-patches dating from 2026-06-25. So silence is tested UNWINDOWED, "this
-origin has no non-behavior patch EVER", and the windowed count is
-reported separately as excluded artifacts. Corrected 38 to 34 before
-the number left the building.
+    before = 0             the model returned no patches, or the
+                           response did not parse into any (the
+                           Anthropic client does not enforce
+                           json_schema on the wire, so a prose answer
+                           parses to nothing)
+    before > 0, after = 0  the sanitizer chain stripped everything
+    after > 0, stored = 0  dedup absorbed it all, which is not a defect
 
-It is kept anyway, for two reasons. The traps above are worth not
-re-falling into. And the coverage number stands on its own: on
-2026-08-30, 34 of 162 meetings in 14 days produced ONLY behavior
-patches, median 6 and max 17. A meeting yielding 17 behavior
-observations and no commitment, decision or takeaway is not explained
-by "too short".
+Measured 2026-08-30 over 254 calls in 14 days: 119 parsed zero patches,
+1 was stripped by sanitizers, 1 absorbed by dedup. So essentially all
+of the loss is at the model, none of it downstream.
 
-One caveat on that number, because the file should not overclaim what
-it counts. Dedup means a meeting whose content all merged into EXISTING
-patches creates no new rows and looks identical from here. So this
-counts meetings that produced no NEW non-behavior patch, which is not
-quite "the main extraction returned nothing". For Scott's tire store
-meeting the stronger claim does hold: one patch total, and no prior
-tire content anywhere in the corpus to have merged into.
+AND LENGTH LARGELY EXPLAINS IT. Zero-yield calls had a median
+transcript of 786 chars against 13,774 for productive ones, and 90% of
+transcripts under 2000 chars produced nothing. Scott's tire store
+meeting, which started this investigation, was 2,303 chars with the
+owner marker present: a couple of minutes of audio, not a
+personal-versus-work problem and not the missing project.
+
+THE RESIDUAL IS THE INTERESTING PART. Eleven transcripts over 10,000
+chars still parsed to zero. One (22,901 chars) burned 4,163 output
+tokens and produced zero patches AND zero entities, which is the
+signature of a response that did not parse. The others sit at 600-900
+output tokens with 1,300-1,700 reasoning chars, meaning the model
+reasoned and then emitted an empty patches array. Those are two
+different failures and this script does not separate them.
+
+READ ONLY. No --apply, no write anywhere in this file.
 
 Usage:
     DATABASE_URL=postgres://... python scripts/measure_extraction_coverage.py
+    DATABASE_URL=postgres://... python scripts/measure_extraction_coverage.py --days 30
 """
-import asyncio, os, collections
+from __future__ import annotations
+
+import argparse
+import asyncio
+import collections
+import os
+import statistics
+import sys
+
 import asyncpg
 
+BANDS = (2000, 5000, 10000, 20000, 40000)
 
-async def main():
-    c = await asyncpg.connect(os.environ["DATABASE_URL"])
-    rows = await c.fetch(
-        """
-        SELECT p.origin_id, p.total, p.behavior, p.day,
-               opa.project_id AS assigned_project,
-               (opa.origin_id IS NOT NULL) AS has_assignment_row,
-               -- Unwindowed, and load bearing: see THE SECOND TRAP.
-               (SELECT COUNT(*) FROM context_patches e
-                 WHERE e.origin_id = p.origin_id
-                   AND e.patch_type <> 'behavior') AS nonbehavior_ever
-          FROM (
-              SELECT origin_id,
-                     COUNT(*) AS total,
-                     COUNT(*) FILTER (WHERE patch_type = 'behavior') AS behavior,
-                     MIN(created_at)::date AS day
-                FROM context_patches
-               WHERE origin_id IS NOT NULL
-                 AND created_at > NOW() - INTERVAL '14 days'
-               GROUP BY origin_id
-          ) p
-          LEFT JOIN origin_project_assignments opa
-                 ON opa.origin_id = p.origin_id::text
-        """
-    )
-    print(f"meetings with patches in the last 14 days: {len(rows)}")
-
-    def bucket(r):
-        if not r["has_assignment_row"]:
-            return "no assignment row (never stated)"
-        if r["assigned_project"] is None:
-            return "row says explicitly unassigned"
-        return "assigned to a project"
-
-    cell = collections.defaultdict(lambda: [0, 0])  # [silent, produced]
-    for r in rows:
-        silent = r["behavior"] == r["total"] and r["nonbehavior_ever"] == 0
-        cell[bucket(r)][0 if silent else 1] += 1
-
-    print(f"\n{'meeting project state':36} {'main SILENT':>12} {'produced':>10}")
-    for k, (silent, ok) in sorted(cell.items()):
-        tot = silent + ok
-        print(f"  {k:34} {silent:6} ({silent/tot:3.0%})  {ok:8}")
-
-    silent_rows = [r for r in rows
-                   if r["behavior"] == r["total"] and r["nonbehavior_ever"] == 0]
-    artifacts = [r for r in rows
-                 if r["behavior"] == r["total"] and r["nonbehavior_ever"] > 0]
-    print(f"\nwindow artifacts excluded (behavior-only INSIDE the window, but "
-          f"the meeting has older non-behavior patches): {len(artifacts)}")
-    print(f"\nmain extraction produced NOTHING: {len(silent_rows)} of {len(rows)}")
-    sizes = sorted(r["total"] for r in silent_rows)
-    if sizes:
-        print(f"  their patch counts: min={sizes[0]} "
-              f"median={sizes[len(sizes)//2]} max={sizes[-1]}")
-    allsizes = sorted(r["total"] for r in rows)
-    print(f"  all meetings:       min={allsizes[0]} "
-          f"median={allsizes[len(allsizes)//2]} max={allsizes[-1]}")
-    await c.close()
+METRICS_SQL = """
+    SELECT origin_id, transcript_chars, output_tokens, reasoning_chars,
+           patches_before_filters AS before_f,
+           patches_after_filters  AS after_f,
+           patches_extracted      AS stored,
+           entities_extracted     AS entities,
+           owner_marker_present   AS owner_marker
+      FROM extraction_metrics
+     WHERE created_at > NOW() - ($1::int * INTERVAL '1 day')
+"""
 
 
-asyncio.run(main())
+def band(n: int) -> str:
+    for edge in BANDS:
+        if n < edge:
+            return f"<{edge}"
+    return f">={BANDS[-1]}"
+
+
+def stage_of(row) -> str:
+    before = row["before_f"] or 0
+    after = row["after_f"] or 0
+    stored = row["stored"] or 0
+    if before == 0:
+        return "model returned nothing / did not parse"
+    if after == 0:
+        return "sanitizers stripped everything"
+    if stored == 0:
+        return "dedup absorbed everything"
+    return "stored something"
+
+
+async def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--days", type=int, default=14, help="window (default 14)")
+    ap.add_argument("--long-threshold", type=int, default=10000,
+                    help="chars above which a zero-yield call is anomalous")
+    args = ap.parse_args()
+
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        print("DATABASE_URL is not set", file=sys.stderr)
+        return 2
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        rows = await conn.fetch(METRICS_SQL, args.days)
+    finally:
+        await conn.close()
+
+    if not rows:
+        print(f"no extraction_metrics rows in the last {args.days} days")
+        return 0
+
+    print(f"extraction calls, last {args.days} days: {len(rows)}")
+
+    stages = collections.Counter(stage_of(r) for r in rows)
+    print("\nwhere the patches went:")
+    for name, n in stages.most_common():
+        print(f"  {name:44} {n:5}  ({n / len(rows):.0%})")
+
+    empty = [r for r in rows if (r["before_f"] or 0) == 0]
+    full = [r for r in rows if (r["before_f"] or 0) > 0]
+    sized = [r for r in rows if r["transcript_chars"] is not None]
+
+    if sized:
+        print("\ntranscript length, the direct test of 'less to extract':")
+        for label, group in (("yielded ZERO patches", empty), ("yielded patches", full)):
+            group = [r for r in group if r["transcript_chars"] is not None]
+            if not group:
+                continue
+            chars = sorted(r["transcript_chars"] for r in group)
+            print(f"  {label:24} n={len(group):4}  "
+                  f"median={statistics.median(chars):8.0f}  "
+                  f"min={chars[0]:7}  max={chars[-1]:8}")
+
+        print("\nzero-yield rate by length band:")
+        per = collections.defaultdict(lambda: [0, 0])
+        for r in sized:
+            slot = per[band(r["transcript_chars"])]
+            slot[1] += 1
+            if (r["before_f"] or 0) == 0:
+                slot[0] += 1
+        for edge in [f"<{e}" for e in BANDS] + [f">={BANDS[-1]}"]:
+            if edge in per:
+                zero, total = per[edge]
+                print(f"  {edge:>9}  {zero:4} / {total:4}   {zero / total:6.0%} nothing")
+
+    anomalies = [r for r in empty
+                 if (r["transcript_chars"] or 0) >= args.long_threshold]
+    print(f"\nzero-yield on a transcript >= {args.long_threshold} chars: "
+          f"{len(anomalies)}   <-- length does NOT explain these")
+    if anomalies:
+        print(f"  {'origin':10} {'chars':>7} {'out_tok':>8} {'reason_ch':>10} "
+              f"{'ent':>4} {'owner':>6}")
+        for r in sorted(anomalies, key=lambda r: -(r["transcript_chars"] or 0)):
+            print(f"  {str(r['origin_id'] or '-')[:8]:10} "
+                  f"{r['transcript_chars']:>7} {r['output_tokens'] or 0:>8} "
+                  f"{r['reasoning_chars'] or 0:>10} {r['entities'] or 0:>4} "
+                  f"{str(r['owner_marker'])[:5]:>6}")
+        print("\n  A high output_tokens with zero entities AND zero patches is the "
+              "signature of\n  a response that did not parse. Low output with high "
+              "reasoning_chars is the model\n  reasoning and then emitting an empty "
+              "patches array. Different failures.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
