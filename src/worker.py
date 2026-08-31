@@ -38,6 +38,8 @@ from contextquilt.services.extraction_prompts import (
     select_open_commitments,
 )
 from contextquilt.services.closure_evidence import BELIEVED, classify_closure
+from contextquilt.services import headlines
+from contextquilt.services import woven_digest
 from contextquilt.services.deadline_resolver import run_deadline_micropass
 from contextquilt.services.extraction_schema import (
     PATCH_TYPES,
@@ -2124,6 +2126,13 @@ def _uuid_or_none(v):
         return uuid.UUID(str(v)) if v else None
     except (ValueError, AttributeError):
         return None
+
+
+# Headline lane tunables. Batched so one instruction covers many
+# patches; capped so a single enormous meeting cannot turn a lane
+# priced at $0.35 per 30 days into an open-ended one.
+HEADLINE_BATCH = 25
+HEADLINE_MAX_PER_MEETING = 100
 
 
 class ColdPathWorker:
@@ -6120,6 +6129,12 @@ class ColdPathWorker:
                     timestamp, project, project_id, user_label,
                     resolved_manifest,
                 )
+                # AND THE HEADLINES FOR THEM. The behavior patches just
+                # stored can tile, so skipping this here would leave a
+                # gated meeting's tiles showing raw fact text while
+                # every other meeting's showed a written line. The lane
+                # is a no-op when nothing tileable landed.
+                await self._generate_headlines(user_id, origin_id, app_id)
                 return
 
             response = await llm.extract(
@@ -6655,6 +6670,12 @@ class ColdPathWorker:
                 timestamp, project, project_id, user_label,
                 resolved_manifest,
             )
+
+            # Headlines LAST among the write lanes, because it reads
+            # back what every earlier lane stored rather than producing
+            # patches of its own. Running it earlier would headline the
+            # main extraction and miss the behavior patches.
+            await self._generate_headlines(user_id, origin_id, app_id)
 
             # Alignment events (design e6ee7ae8, phase 1): its own call,
             # after everything above is stored, because it needs this
@@ -7237,6 +7258,102 @@ class ColdPathWorker:
             return stored
         except Exception as exc:
             logger.warning("behavior_observations_failed", user_id=user_id,
+                           origin=origin_id, reason=str(exc)[:200])
+            return 0
+
+    async def _generate_headlines(
+        self, user_id: str, origin_id, app_id,
+    ) -> int:
+        """The one line a tile can hold, written rather than truncated.
+
+        Woven handoff section 6.3. The `fact` is the record and stays
+        untouched; the headline is what fits on cloth. Truncating a fact
+        to 48 characters puts a visibly broken sentence on the home
+        screen, which is the most prominent text in the product, so the
+        line is WRITTEN by a model and REFUSED when it breaks a rule.
+        `services/headlines.why_invalid` does the refusing, and it
+        refuses rather than repairs because every repair available is a
+        truncation, which is the exact thing 6.3 forbids.
+
+        ITS OWN CALL, for the reason doc 19.5 records. Fifteen types
+        already compete for the main extraction's attention and a
+        sixteenth instruction about prose style would lose, quietly.
+
+        ONLY FOR PATCHES THAT CAN ACTUALLY TILE, and this is a cost
+        decision as much as a correctness one. `why_not_a_tile` is the
+        single source of truth for that, imported rather than restated,
+        so a patch this lane pays to headline is a patch the quilt can
+        show. Priced on real volume before building: $0.35 per 30 days
+        across all users unfiltered, so the filter is not what makes it
+        affordable, it is what stops it being wasteful.
+
+        IDEMPOTENT BY QUERY. It selects patches that have no headline
+        yet rather than tracking what it has done, so a re-ingest, a
+        retry or the backfill can all run over the same meeting without
+        paying twice or overwriting a line that is already there.
+
+        `updated_at` IS DELIBERATELY NOT MOVED. There is no trigger on
+        this table, so it moves only if set, and a headline is
+        presentation rather than a new observation. Types that are
+        neither self-typed nor completable anchor their decay on
+        `updated_at`, so stamping it here would silently extend the life
+        of every patch this lane touched. The recall path never reads
+        the headline and the woven route serves it directly, so nothing
+        needs a delta-sync bump to see it.
+
+        Never raises. This runs after everything real is already stored.
+        """
+        try:
+            # Built in the service so a DB test can EXECUTE it. The
+            # first version filtered on `cp.user_id`, a column this
+            # table does not have since migration 26, and every test
+            # covering this lane reads source, so all of them passed.
+            sql, params = headlines.build_pending_fetch(
+                subject_key=f"user:{user_id}", origin_id=origin_id)
+            rows = await self.db.fetch(sql, *params)
+            candidates = [
+                dict(r) for r in rows
+                if woven_digest.why_not_a_tile(dict(r)) is None
+            ]
+            if not candidates:
+                return 0
+
+            llm = await self._get_llm_for_app(app_id)
+            written = 0
+            refused: dict = {}
+            # Batched so the instruction is paid once per batch rather
+            # than once per patch, and capped so one enormous meeting
+            # cannot turn a cheap lane into an expensive one.
+            for start in range(0, min(len(candidates), HEADLINE_MAX_PER_MEETING),
+                               HEADLINE_BATCH):
+                batch = candidates[start:start + HEADLINE_BATCH]
+                response = await llm.extract(
+                    system_prompt=headlines.SYSTEM,
+                    user_content=headlines.build_user_content(batch),
+                )
+                out = headlines.parse(response.content, batch)
+                for reason, n in out["refused"].items():
+                    refused[reason] = refused.get(reason, 0) + n
+                for pid, line in out["headlines"].items():
+                    # `updated_at` untouched on purpose; see the docstring.
+                    await self.db.execute(
+                        """
+                        UPDATE context_patches
+                           SET value = jsonb_set(
+                                 COALESCE(value, '{}'::jsonb),
+                                 '{headline}', to_jsonb($2::text), true)
+                         WHERE patch_id = $1
+                        """,
+                        pid, line,
+                    )
+                    written += 1
+
+            logger.info("headlines_written", user_id=user_id, origin=origin_id,
+                        candidates=len(candidates), written=written,
+                        refused=refused or None)
+            return written
+        except Exception as exc:
+            logger.warning("headlines_failed", user_id=user_id,
                            origin=origin_id, reason=str(exc)[:200])
             return 0
 

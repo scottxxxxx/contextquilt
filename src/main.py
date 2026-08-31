@@ -7373,6 +7373,7 @@ async def woven_meeting_seam(
             "patch_id": patch["patch_id"],
             "patch_type": patch["patch_type"],
             "fact": (value.get("text") or "").strip(),
+            "headline": value.get("headline") or None,
             "source_meeting_id": patch.get("origin_id"),
             "occurred_at": patch.get("created_at"),
         })
@@ -7397,8 +7398,24 @@ async def _attach_woven_links(patches: list) -> None:
         rows = await db_pool.fetch(WOVEN_LINKS_SQL, ids)
     except Exception as exc:
         # A link is decoration on a fact. Losing it must never cost the
-        # fact, so this degrades to no links rather than failing.
+        # fact, so this degrades rather than failing.
+        #
+        # BUT IT DEGRADES TO NULL, NOT TO AN ABSENT KEY. Returning here
+        # used to leave `stitched_to` off EVERY patch, so a failed link
+        # query and a patch with no links were one observable and the
+        # wire shape varied under a condition no client can see.
+        # ShoulderSurf hit the consequence from the other side: a
+        # decoder requiring the key threw, the fetch returned nil, and
+        # the screen fell back to its local builder, which on a device
+        # is INDISTINGUISHABLE FROM A 404. A first successful deploy
+        # could have read as a route that was never shipped.
+        #
+        # Three states, the same ones doc 16 uses for `capabilities`: a
+        # list means these are the links, `[]` means none, null means
+        # CQ could not tell.
         logger.warning("woven_links_failed", error=str(exc)[:200])
+        for patch in patches:
+            patch["stitched_to"] = None
         return
 
     by_patch: dict = {}

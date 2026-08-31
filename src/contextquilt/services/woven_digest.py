@@ -424,6 +424,15 @@ def build_digest(
                 "patch_id": patch.get("patch_id"),
                 "patch_type": patch.get("patch_type"),
                 "fact": _text(patch),
+                # NULL IS A REAL STATE, not a missing value to paper
+                # over. Section 6.3's rules are enforced by refusal
+                # rather than repair, because every repair available is
+                # a truncation and that is the exact thing 6.3 forbids,
+                # so a patch whose written line broke a rule ships with
+                # no headline and the client falls back to the fact.
+                # Patches stored before the lane existed are the same
+                # state until the backfill reaches them.
+                "headline": _value(patch).get("headline") or None,
                 "weight": weight,
                 "span": span,
                 "height": height,
