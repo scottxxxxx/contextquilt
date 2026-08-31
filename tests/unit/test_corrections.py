@@ -5,6 +5,7 @@ from datetime import date
 import pytest
 
 from src.contextquilt.services.corrections import (
+    CORRECTION_SIMILARITY_FLOOR,
     CORRECTION_SYSTEM,
     FALLBACK_PATCH_TYPE,
     MAX_CANDIDATES,
@@ -238,3 +239,87 @@ def test_the_instruction_asks_for_every_one_rather_than_the_best():
     assert "every one of them" in lowered
     assert "not just the closest" in lowered
     assert "corrected_patch_ids" in CORRECTION_SYSTEM
+
+
+# --------------------------------------------------------------------
+# The candidate set, which is the binding constraint
+# --------------------------------------------------------------------
+
+def _handle_correction_body() -> str:
+    from pathlib import Path
+    src = (Path(__file__).resolve().parents[2] / "src" / "worker.py").read_text()
+    body = src[src.index("async def handle_correction"):]
+    return body[:body.index("async def handle_completion")]
+
+
+def test_the_candidate_set_is_not_ranked_by_recency_alone():
+    """The defect that survived making the reply plural.
+
+    Scott wrote that Steven is not an attorney and neither is his
+    mother. The five patches saying otherwise were four days old. He has
+    4,058 ACTIVE patches, and the newest 60 held exactly ONE mentioning
+    an attorney: a correction of his own from earlier the same day. So
+    the model superseded a CORRECT patch and never saw a wrong one.
+
+    Making the answer plural bought nothing, because the contradicted
+    patches were never in the room. A bigger reply cannot fix a
+    candidate set chosen on the wrong axis.
+    """
+    body = _handle_correction_body()
+    assert "similarity(COALESCE(cp.value->>'text', ''), $2)" in body
+    assert "subject_hits" in body
+
+
+def test_the_subject_entity_the_route_has_always_sent_is_finally_read():
+    """`subject_entity_id` was enqueued by the person card and ignored here.
+
+    The signal that says WHO a correction is about was on the wire from
+    the day the card shipped, and the matching stage never opened it.
+    """
+    body = _handle_correction_body()
+    assert 'metadata.get("subject_entity_id")' in body
+    assert "entity_aliases" in body, "aliases must count, or a rephrased name misses"
+
+
+def test_the_ranking_puts_the_screen_first_then_the_subject():
+    # What the user was literally looking at outranks everything; the
+    # person the correction is about outranks a merely similar sentence;
+    # recency is the tail rather than the axis.
+    body = _handle_correction_body()
+    order = body[body.index("candidates = ("):body.index("by_id = {")]
+    assert "in_block + subject_hits + similar + recent" in order
+
+
+def test_a_failed_subject_lookup_costs_relevance_not_the_correction():
+    # A missing alias table or a bad id must not lose a user-stated fact.
+    body = _handle_correction_body()
+    # Sliced on the indented form: "name_rows = await self.db.fetch"
+    # CONTAINS the unindented needle, so the naive slice ended before
+    # the handler and this test failed for the wrong reason on its first
+    # run. A substring that is a suffix of another name is its own small
+    # instrument failure.
+    block = body[body.index("subject_names: list = []"):
+                 body.index("\n        rows = await self.db.fetch")]
+    assert "except Exception" in block
+    assert 'logger.warning("correction_subject_names_failed"' in block
+
+
+def test_the_similarity_floor_is_below_the_dedup_gray_zone():
+    """A denial and an assertion share fewer trigrams than two assertions.
+
+    "Steven is not an attorney" against "Steven Williams: immigration
+    attorney with domain expertise" is the shape this has to catch, and
+    the dedup path's 0.35 would miss it by a mile.
+    """
+    assert CORRECTION_SIMILARITY_FLOOR < 0.35
+    assert 0 < CORRECTION_SIMILARITY_FLOOR <= 0.15
+
+
+def test_the_candidate_legs_are_logged_with_their_sizes():
+    # "Superseded one of five" and "superseded one of one" are the same
+    # line unless the legs are counted, and this whole class of bug was
+    # invisible for exactly that reason.
+    body = _handle_correction_body()
+    assert 'logger.info("correction_candidates"' in body
+    for field in ("in_block=", "subject=", "similar=", "scanned="):
+        assert field in body

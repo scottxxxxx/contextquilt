@@ -131,6 +131,7 @@ from contextquilt.services.corrections import (
     build_correction_content,
     parse_completion_response,
     parse_correction_response,
+    CORRECTION_SIMILARITY_FLOOR,
 )
 from contextquilt.services.entity_aliasing import (
     find_alias_candidate,
@@ -5371,34 +5372,106 @@ class ColdPathWorker:
         project = metadata.get("project")
         subject_key = f"user:{user_id}"
 
-        # Candidate set: scoped active patches, newest first. In-block
-        # candidates rank first — those lines were on the user's screen.
+        # THE CANDIDATE SET IS THE BINDING CONSTRAINT, and recency alone
+        # is the wrong axis. This is the defect that survived the fix
+        # for superseding many patches, and it was invisible until a
+        # real correction was replayed through the fixed lane.
+        #
+        # Steven Williams, 2026-08-31: Scott wrote that Steven is not an
+        # attorney and neither is his mother. The five patches that say
+        # otherwise were written on 08-28. He has 4,058 ACTIVE patches,
+        # and the newest 60 contained exactly ONE mentioning an
+        # attorney, which was a correction of his own from earlier the
+        # same day. So the model dutifully superseded a CORRECT patch
+        # and never saw a single wrong one. Making the reply plural
+        # bought nothing, because the contradicted patches were never
+        # in the room.
+        #
+        # Three legs now, unioned and then ranked, so a correction is
+        # matched against material that is actually about it:
+        #
+        #   in-block   what was literally on the user's screen
+        #   subject    patches naming the person this correction is
+        #              about, using `subject_entity_id`, which the
+        #              person-card route has been sending all along and
+        #              nothing here ever read
+        #   similar    trigram similarity to the correction text, the
+        #              same pg_trgm the dedup path already relies on
+        #   recent     the previous behaviour, as the tail
         scope_sql = ""
-        params: list = [subject_key]
+        params: list = [subject_key, correction_text]
         if project_id:
-            scope_sql = "AND (cp.project_id = $2 OR cp.project_id IS NULL)"
+            scope_sql = "AND (cp.project_id = $3 OR cp.project_id IS NULL)"
             params.append(project_id)
         elif project:
-            scope_sql = "AND (cp.project = $2 OR cp.project IS NULL)"
+            scope_sql = "AND (cp.project = $3 OR cp.project IS NULL)"
             params.append(project)
+
+        # Names to match a subject-scoped correction against. Resolved
+        # through the entity graph rather than by string, so an alias or
+        # a rephrased surface form still matches.
+        subject_names: list = []
+        subject_entity_id = metadata.get("subject_entity_id")
+        if subject_entity_id:
+            try:
+                name_rows = await self.db.fetch(
+                    """
+                    SELECT e.name FROM entities e
+                     WHERE e.entity_id = $1::uuid
+                    UNION
+                    SELECT a.alias FROM entity_aliases a
+                     WHERE a.entity_id = $1::uuid
+                    """,
+                    subject_entity_id,
+                )
+                subject_names = [r[0] for r in name_rows if r[0]]
+            except Exception as exc:
+                # A missing alias table or a bad id costs relevance, not
+                # the correction.
+                logger.warning("correction_subject_names_failed",
+                               reason=str(exc)[:140])
+
         rows = await self.db.fetch(
             f"""
             SELECT cp.patch_id, cp.patch_type, cp.value->>'text' AS text,
-                   cp.project, cp.project_id, cp.origin_id, cp.origin_type
+                   cp.project, cp.project_id, cp.origin_id, cp.origin_type,
+                   similarity(COALESCE(cp.value->>'text', ''), $2) AS sim
             FROM context_patches cp
             JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
             WHERE ps.subject_key = $1
               AND COALESCE(cp.status, 'active') = 'active'
               {scope_sql}
             ORDER BY cp.created_at DESC, cp.patch_id ASC
-            LIMIT 60
+            LIMIT 400
             """,
             *params,
         )
-        in_block = [r for r in rows if r["text"] and r["text"] in context_block]
-        others = [r for r in rows if r not in in_block]
-        candidates = (in_block + others)[:MAX_CANDIDATES]
+
+        def _names_it(row) -> bool:
+            text = (row["text"] or "").lower()
+            return any(n.lower() in text for n in subject_names)
+
+        in_block, subject_hits, similar, recent = [], [], [], []
+        for r in rows:
+            if r["text"] and context_block and r["text"] in context_block:
+                in_block.append(r)
+            elif subject_names and _names_it(r):
+                subject_hits.append(r)
+            elif (r["sim"] or 0) >= CORRECTION_SIMILARITY_FLOOR:
+                similar.append(r)
+            else:
+                recent.append(r)
+        # Within each leg, the most similar first: a correction about a
+        # person still names several of their patches, and the ones it
+        # actually contradicts read closest to it.
+        subject_hits.sort(key=lambda r: -(r["sim"] or 0))
+        similar.sort(key=lambda r: -(r["sim"] or 0))
+        candidates = (in_block + subject_hits + similar + recent)[:MAX_CANDIDATES]
         by_id = {str(r["patch_id"]): r for r in candidates}
+        logger.info("correction_candidates",
+                    in_block=len(in_block), subject=len(subject_hits),
+                    similar=len(similar), scanned=len(rows),
+                    used=len(candidates))
 
         today = datetime.utcnow().date()
         allowed_types, fallback_type = await self._correction_vocabulary(app_id)
