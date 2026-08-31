@@ -131,7 +131,8 @@ def _text(patch: Dict[str, Any]) -> str:
     return (_value(patch).get("text") or "").strip()
 
 
-def why_not_a_tile(patch: Dict[str, Any]) -> Optional[str]:
+def why_not_a_tile(patch: Dict[str, Any],
+                   require_headline: bool = True) -> Optional[str]:
     """The reason this patch cannot earn a tile, or None.
 
     Section 6.2, in the order that costs least to evaluate. Returns the
@@ -202,7 +203,22 @@ def why_not_a_tile(patch: Dict[str, Any]) -> Optional[str]:
     # The seam route is deliberately NOT gated: it is one meeting in
     # capture order with no tiling and no size constraint, so a fact
     # there is the record rather than a broken tile.
-    if not _value(patch).get("headline"):
+    # `require_headline=False` IS FOR THE WRITER, and without it the
+    # writer cannot run at all. The headline lane selects patches that
+    # have NO headline and then asks this function whether each one
+    # could earn a tile. With the gate on, every candidate answers
+    # `no_headline_written` by construction, the lane finds nothing to
+    # do, and it writes zero headlines forever while looking healthy.
+    #
+    # That shipped for one commit and CI caught it, in the DB test that
+    # EXECUTES the fetch rather than reading it. Nothing in the unit
+    # suite could have: they all supply a headline in the fixture,
+    # because a tile needs one.
+    #
+    # So the reader asks "can this be shown", and the writer asks "could
+    # this be shown if I gave it a line". One function, one copy of
+    # every other rule.
+    if require_headline and not _value(patch).get("headline"):
         return DROP_NO_HEADLINE
     return None
 

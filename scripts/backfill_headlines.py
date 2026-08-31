@@ -92,7 +92,10 @@ async def main() -> int:
     candidates = []
     for r in rows:
         patch = dict(r)
-        reason = woven_digest.why_not_a_tile(patch)
+        # The WRITER's question: could this earn a tile if it had a
+        # line. Asking the reader's question here selects nothing,
+        # because every candidate lacks a headline by construction.
+        reason = woven_digest.why_not_a_tile(patch, require_headline=False)
         if reason:
             skipped[reason] += 1
             continue

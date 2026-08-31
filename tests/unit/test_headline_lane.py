@@ -314,3 +314,49 @@ def test_the_retry_happens_at_most_once():
     lane = _lane()
     assert lane.count("headlines.RETRY_SYSTEM") == 1
     assert "while" not in lane
+
+
+# --------------------------------------------------------------------
+# The writer's question is not the reader's
+# --------------------------------------------------------------------
+
+def test_the_writer_asks_whether_a_patch_COULD_tile_not_whether_it_does():
+    """The bug that made the lane a no-op, caught by CI in one commit.
+
+    The gate means a patch with no headline cannot earn a tile. The
+    headline lane selects exactly the patches with no headline and then
+    asks whether each could earn one. Asking the READER's question there
+    answers `no_headline_written` for every candidate by construction,
+    so the lane finds nothing to do and writes zero headlines forever
+    while logging a perfectly healthy zero.
+
+    Nothing in the unit suite could have caught it: every fixture here
+    supplies a headline, because a tile needs one. The DB test that
+    EXECUTES the fetch did.
+    """
+    from contextquilt.services.woven_digest import why_not_a_tile, DROP_NO_HEADLINE
+    bare = {"patch_id": "a", "patch_type": "commitment", "origin_id": "m1",
+            "value": {"text": "Send the revised scope by Thursday"}}
+    assert why_not_a_tile(bare) == DROP_NO_HEADLINE          # the reader
+    assert why_not_a_tile(bare, require_headline=False) is None  # the writer
+
+
+def test_the_writer_still_honours_every_OTHER_prune_rule():
+    # One function, one copy of the rules. Relaxing the headline check
+    # must not relax person, shelved, sensitive, resolved or orphan.
+    from contextquilt.services.woven_digest import why_not_a_tile
+    for bad, why in (
+        ({"patch_type": "person", "value": {"text": "Steven Williams"}}, "person"),
+        ({"patch_type": "event", "value": {"text": "A thing happened"}}, "orphan"),
+        ({"patch_type": "commitment", "origin_id": "m1",
+          "value": {"text": "Ship it", "shelved_at": "2026-08-01"}}, "shelved"),
+    ):
+        assert why_not_a_tile(dict(bad, patch_id="x"),
+                              require_headline=False) is not None, why
+
+
+def test_both_writers_ask_the_writers_question():
+    for name, body in (("worker lane", _lane()), ("backfill", BACKFILL)):
+        assert "require_headline=False" in body, (
+            f"{name} asks the reader's question; it would select nothing"
+        )

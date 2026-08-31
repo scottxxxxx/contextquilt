@@ -7313,7 +7313,8 @@ class ColdPathWorker:
             rows = await self.db.fetch(sql, *params)
             candidates = [
                 dict(r) for r in rows
-                if woven_digest.why_not_a_tile(dict(r)) is None
+                if woven_digest.why_not_a_tile(
+                    dict(r), require_headline=False) is None
             ]
             if not candidates:
                 return 0
