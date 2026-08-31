@@ -1305,6 +1305,7 @@ async def store_entities(
     speaker_questions: dict | None = None,
     speaker_role_signals: dict | None = None,
     speaker_semantic_signals: dict | None = None,
+    llm=None,
 ):
     """
     Store extracted entities to Postgres, resolving alternate surface
@@ -1736,9 +1737,66 @@ async def store_entities(
                 )
                 verdict = described_as.classify_observation(
                     description, dict(latest) if latest else None, origin_id,
+                    judge_available=description_judge_enabled(),
                 )
                 if verdict["action"] == described_as.IGNORE:
                     return
+
+                # THE LEXICAL SCORE COULD NOT DECIDE, so ask.
+                #
+                # Measured before this existed: 0 of 122 rows across 43
+                # people had EVER been confirmed. Median similarity
+                # between consecutive descriptions of the same person
+                # was 0.11 against a 0.6 threshold, so every meeting
+                # appended and the series recorded paraphrase drift
+                # rather than perception change. "How they are changing"
+                # said Suresh changed ten times in thirteen days.
+                #
+                # Priced first: 79 comparable writes in 30 days, about
+                # two cents. Batching would have saved one cent and cost
+                # a restructure of this function, and doc 19.5's
+                # argument for a dedicated call is about ATTENTION
+                # rather than money: two short strings do not contend
+                # for it.
+                #
+                # NEVER RAISES AND FAILS TOWARD APPEND. A wrong CONFIRM
+                # destroys a real perception change, which is the only
+                # thing this series exists to record; a wrong APPEND
+                # leaves one extra row, which is the noise we already
+                # had. Same posture as the dedup judge, for the same
+                # reason.
+                if verdict["action"] == described_as.NEEDS_JUDGE:
+                    same = None
+                    try:
+                        # PASSED IN, never `self`. This function is
+                        # module level and has no `self`: reaching for
+                        # one raises NameError, which the guard below
+                        # would swallow into `same = None`, which
+                        # resolves to APPEND, which is exactly today's
+                        # behaviour. The judge would have been dead on
+                        # arrival and looked healthy, in a lane whose
+                        # whole purpose is that nothing ever confirms.
+                        if llm is None:
+                            raise RuntimeError(
+                                "no llm passed to store_entities; the "
+                                "description judge cannot run")
+                        response = await llm.extract(
+                            system_prompt=described_as.JUDGE_SYSTEM,
+                            user_content=described_as.build_judge_content(
+                                latest["description"], description),
+                        )
+                        same = described_as.parse_judge_verdict(response.content)
+                    except Exception as exc:
+                        logger.warning("described_as_judge_failed",
+                                       entity_id=str(entity_id),
+                                       reason=str(exc)[:140])
+                    verdict = described_as.resolve_judged(
+                        same, verdict.get("similarity"))
+                    logger.info("described_as_judged",
+                                entity_id=str(entity_id),
+                                action=verdict["action"],
+                                reason=verdict["reason"],
+                                similarity=verdict.get("similarity"))
                 if verdict["action"] == described_as.CONFIRM:
                     await db.execute(
                         """
@@ -2132,6 +2190,15 @@ def _uuid_or_none(v):
 # Headline lane tunables. Batched so one instruction covers many
 # patches; capped so a single enormous meeting cannot turn a lane
 # priced at $0.35 per 30 days into an open-ended one.
+# Kill switch for the description confirm judge, matching
+# CQ_SEMANTIC_DEDUP_ENABLED and CQ_ROLE_SEMANTICS_ENABLED. Off turns the
+# write path back into today's pure-lexical behaviour exactly, rather
+# than into some third thing.
+def description_judge_enabled() -> bool:
+    return os.getenv("CQ_DESCRIPTION_JUDGE_ENABLED", "true").lower() not in (
+        "0", "false", "no")
+
+
 HEADLINE_BATCH = 25
 HEADLINE_MAX_PER_MEETING = 100
 
@@ -5868,9 +5935,19 @@ class ColdPathWorker:
                     no_collapse_types=no_collapse_patch_types(manifest),
                     origin_scoped_types=origin_scoped_patch_types(manifest),
                 )
+                # For the description confirm judge. Resolved here
+                # rather than reaching for a name that is not in scope:
+                # `store_entities` is module level and has no `self`,
+                # and a NameError inside it would be swallowed into an
+                # APPEND that looks exactly like today's behaviour.
+                try:
+                    entity_llm = await self._get_llm_for_app(app_id)
+                except Exception:
+                    entity_llm = None
                 entities_stored = await store_entities(
                     conn, self.redis, user_id, entities, metadata,
                     person_entity_type=people_vocabulary(manifest).person_entity_type,
+                    llm=entity_llm,
                 )
                 relationships_stored = await store_relationships(
                     conn, user_id, relationships, metadata
@@ -6646,6 +6723,10 @@ class ColdPathWorker:
 
             entities_stored = await store_entities(
                 self.db, self.redis, user_id, entities, metadata,
+                # For the description confirm judge. Without a client
+                # the judge cannot run and every observation appends,
+                # which is the behaviour this lane exists to end.
+                llm=llm,
                 # Who actually spoke, so the appearance carries the capacity
                 # the identity gate needs. Read off the same normalized
                 # transcript the extraction saw.

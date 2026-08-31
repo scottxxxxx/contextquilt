@@ -39,6 +39,7 @@ read in the API, so the rule is testable without a database.
 """
 from __future__ import annotations
 
+import json
 import re
 from typing import Any, Dict, Mapping, Optional, Sequence
 
@@ -60,6 +61,9 @@ MAX_SERIES = 20
 APPEND = "append"
 CONFIRM = "confirm"
 IGNORE = "ignore"
+# A fourth outcome, reachable ONLY when the caller says it can run the
+# judge. Every existing caller keeps today's behaviour byte for byte.
+NEEDS_JUDGE = "needs_judge"
 
 
 def _norm(text: Optional[str]) -> str:
@@ -99,6 +103,7 @@ def classify_observation(
     latest: Optional[Mapping[str, Any]],
     origin_id: Optional[str] = None,
     threshold: float = SAME_PERCEPTION_SIMILARITY,
+    judge_available: bool = False,
 ) -> Dict[str, Any]:
     """What this observation does to the series.
 
@@ -125,6 +130,30 @@ def classify_observation(
     score = similarity(description, latest.get("description"))
     if score >= threshold:
         return {"action": CONFIRM, "reason": "same_perception", "similarity": score}
+
+    # THE LEXICAL THRESHOLD CANNOT DO THIS JOB, and the measurement is
+    # unambiguous. Across the six most-described people, 52 consecutive
+    # pairs: median similarity 0.11, MAXIMUM 0.33, against a 0.6
+    # threshold. Zero of 122 rows across 43 people had ever been
+    # confirmed. Every meeting appended, so the series recorded
+    # PARAPHRASE DRIFT rather than perception change, and "how they are
+    # changing" said someone changed ten times in thirteen days.
+    #
+    # It is not a number that wants tuning. Dropping the threshold to
+    # 0.3 confirms 1 pair in 52, and low enough to catch these would
+    # start merging genuinely different people's descriptions.
+    # "Meeting facilitator and lead" and "Project lead for AI for Work
+    # standup" are the same perception in different words and score
+    # 0.03. Nothing lexical closes that gap, because there is no shared
+    # vocabulary to measure.
+    #
+    # So an inconclusive lexical score asks a model, exactly as the
+    # dedup path's gray zone does. The caller declares whether it can:
+    # a backfill or a test that cannot run a judge gets today's answer
+    # unchanged, which keeps every existing caller identical.
+    if judge_available:
+        return {"action": NEEDS_JUDGE, "reason": "lexically_inconclusive",
+                "similarity": score}
     return {"action": APPEND, "reason": "perception_changed", "similarity": score}
 
 
@@ -165,4 +194,97 @@ def series_payload(rows: Sequence[Mapping[str, Any]], cap: int = MAX_SERIES) -> 
         "iterations": len(ordered),
         "history": [one(r) for r in ordered[:cap]],
         "truncated": len(ordered) > cap,
+    }
+
+
+# ====================================================================
+# The judge: is this the same perception in different words
+# ====================================================================
+#
+# CONSERVATIVE TOWARD APPEND, and the direction is the whole design.
+# A wrong CONFIRM destroys a real perception change, which is the only
+# thing this series exists to record. A wrong APPEND leaves one extra
+# row, which is the noise we already have. So "unsure" resolves to
+# APPEND, a judge failure resolves to APPEND, and an unparseable answer
+# resolves to APPEND. The dedup path takes the same posture for the same
+# reason: judge failure inserts rather than losing a memory.
+
+JUDGE_SYSTEM = (
+    "You compare two descriptions of the SAME person, written after two "
+    "different meetings, and decide whether the second says something "
+    "NEW about them or simply says the same thing in different words.\n\n"
+    "Answer SAME only when the two describe the same role, capacity or "
+    "standing. Different wording, different emphasis, more or fewer "
+    "details of the same role are all SAME. A person called 'meeting "
+    "facilitator and lead' in one and 'project lead facilitating "
+    "standup' in another is SAME: one role, two phrasings.\n\n"
+    "Answer CHANGED when the second states a different role, a new "
+    "responsibility, a move between teams or projects, or a fact about "
+    "them that the first does not contain and that a reader would want "
+    "to know had appeared.\n\n"
+    "When you are unsure, answer CHANGED. Recording a change that was "
+    "only a rewording costs one extra line. Recording a rewording as "
+    "the same perception erases a change that really happened, and "
+    "nothing later can recover it.\n\n"
+    "Return raw JSON only, no prose and no code fence, exactly:\n"
+    '{"verdict": "SAME" or "CHANGED", "why": "<one short clause>"}\n'
+)
+
+
+def build_judge_content(held: str, observed: str) -> str:
+    """The two descriptions, oldest first, unlabelled by date.
+
+    No dates and no meeting ids on purpose: nothing in this system
+    persists a meeting date, and a model shown an ingest clock would
+    reason about recency instead of about content.
+    """
+    return (
+        f"Held description:\n{(held or '').strip()}\n\n"
+        f"New description:\n{(observed or '').strip()}\n"
+    )
+
+
+def parse_judge_verdict(content: Any) -> Optional[bool]:
+    """True = same perception, False = changed, None = unusable.
+
+    None and False both lead to APPEND, and they are kept distinct
+    anyway so the log can say whether the model declined or the parse
+    did. An empty answer with a reason and an empty answer without are
+    different states, which is the rule this codebase keeps paying for.
+    """
+    obj = content
+    if isinstance(obj, str):
+        match = re.search(r"\{.*\}", obj, re.DOTALL)
+        if not match:
+            return None
+        try:
+            obj = json.loads(match.group())
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(obj, dict):
+        return None
+    verdict = obj.get("verdict")
+    if not isinstance(verdict, str):
+        return None
+    verdict = verdict.strip().upper()
+    if verdict == "SAME":
+        return True
+    if verdict == "CHANGED":
+        return False
+    return None
+
+
+def resolve_judged(same: Optional[bool], similarity_score=None) -> Dict[str, Any]:
+    """Turn a judge verdict into the action the write path performs."""
+    if same is True:
+        return {"action": CONFIRM, "reason": "judge_same_perception",
+                "similarity": similarity_score}
+    return {
+        "action": APPEND,
+        # Three distinguishable causes for the same action, because
+        # "the model said changed", "the model was unusable" and "the
+        # judge never ran" are different facts about the system.
+        "reason": "judge_perception_changed" if same is False
+        else "judge_unusable",
+        "similarity": similarity_score,
     }

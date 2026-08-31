@@ -10,6 +10,8 @@ series was destroyed as it was created.
 """
 
 import sys
+
+import pytest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -157,3 +159,129 @@ def test_the_stored_text_is_never_rewritten():
 def test_the_person_page_serves_the_series_and_degrades():
     assert '"described_as": described_as_series,' in MAIN
     assert "described_as_series_unavailable" in MAIN
+
+
+# --------------------------------------------------------------------
+# The confirm judge: the lexical threshold could not do this job
+# --------------------------------------------------------------------
+
+def test_the_lexical_path_is_unchanged_for_callers_that_cannot_judge():
+    """Every existing caller keeps today's answer, byte for byte.
+
+    Backfills, scripts and tests that have no LLM must not start
+    receiving a fourth action they do not handle, so the new outcome is
+    reachable ONLY when the caller says it can judge.
+    """
+    held = {"description": "Meeting facilitator and lead"}
+    out = da.classify_observation("Project lead facilitating standup", held, "m1")
+    assert out["action"] == da.APPEND
+    assert out["reason"] == "perception_changed"
+
+
+def test_an_inconclusive_score_asks_the_judge_when_one_is_available():
+    """The measurement that forced this.
+
+    Across the six most-described people, 52 consecutive pairs: median
+    similarity 0.11, MAXIMUM 0.33, against a 0.6 threshold. Zero of 122
+    rows across 43 people had ever been confirmed, so the series
+    recorded paraphrase drift rather than perception change and "how
+    they are changing" said Suresh changed ten times in thirteen days.
+
+    Not a number that wants tuning: 0.3 confirms 1 pair in 52, and low
+    enough to catch these would merge different people's descriptions.
+    """
+    held = {"description": "Meeting facilitator and lead"}
+    out = da.classify_observation("Project lead facilitating standup", held, "m1",
+                               judge_available=True)
+    assert out["action"] == da.NEEDS_JUDGE
+    assert out["similarity"] < 0.6
+
+
+def test_the_cheap_lexical_confirm_still_short_circuits_the_judge():
+    # An obvious rewording must not cost a call.
+    held = {"description": "Immigration attorney exploring case intake automation"}
+    out = da.classify_observation(
+        "Immigration attorney exploring case intake automation.", held, "m1",
+        judge_available=True)
+    assert out["action"] == da.CONFIRM
+
+
+def test_a_first_observation_never_calls_the_judge():
+    # Nothing to compare against, so a call would be pure cost.
+    out = da.classify_observation("Project lead", None, "m1", judge_available=True)
+    assert out["action"] == da.APPEND
+    assert out["reason"] == "first_observation"
+
+
+def test_the_same_meeting_arriving_twice_never_calls_the_judge():
+    # Doc 19.4. A re-ingest must not confirm and inflate the count into
+    # evidence of stability, and must not pay for a call to decide that.
+    held = {"description": "Project lead", "last_origin_id": "m1"}
+    out = da.classify_observation("Something else entirely", held, "m1",
+                               judge_available=True)
+    assert out["action"] == da.IGNORE
+
+
+@pytest.mark.parametrize("content,expected", [
+    ({"verdict": "SAME"}, True),
+    ({"verdict": "same"}, True),
+    ({"verdict": "CHANGED"}, False),
+    ('prose then {"verdict": "SAME"} trailing', True),
+    ({"verdict": "MAYBE"}, None),
+    ({"verdict": 7}, None),
+    ({}, None),
+    ("no json here", None),
+    (None, None),
+])
+def test_the_verdict_parses_or_declines_cleanly(content, expected):
+    assert da.parse_judge_verdict(content) is expected
+
+
+@pytest.mark.parametrize("same,action", [
+    (True, da.CONFIRM),
+    (False, da.APPEND),
+    (None, da.APPEND),
+])
+def test_unsure_and_broken_both_resolve_toward_append(same, action):
+    """The direction is the whole design.
+
+    A wrong da.CONFIRM destroys a real perception change, which is the only
+    thing this series exists to record. A wrong da.APPEND leaves one extra
+    row, which is the noise we already had. So unsure appends, a failed
+    judge appends, and an unparseable answer appends. The dedup path
+    takes the same posture: judge failure inserts rather than losing a
+    memory.
+    """
+    assert da.resolve_judged(same)["action"] == action
+
+
+def test_the_three_append_causes_stay_distinguishable():
+    # "the model said changed", "the model was unusable" and "the judge
+    # never ran" are different facts about the system, and collapsing
+    # them would hide a judge that had stopped working behind a result
+    # identical to it working and disagreeing.
+    assert da.resolve_judged(False)["reason"] == "judge_perception_changed"
+    assert da.resolve_judged(None)["reason"] == "judge_unusable"
+    assert da.classify_observation("a totally different role here",
+                                {"description": "Project lead"}, "m1"
+                                )["reason"] == "perception_changed"
+
+
+def test_the_instruction_tells_the_model_which_way_to_fail():
+    """Doc 19.3: an unstated rule is a rule the model writes for itself.
+
+    A judge asked "same or changed" with no tie-break guidance splits
+    the difference on exactly the ambiguous cases this lane is made of.
+    """
+    lowered = da.JUDGE_SYSTEM.lower()
+    assert "unsure" in lowered and "changed" in lowered
+    assert "erases a change" in lowered
+
+
+def test_the_judge_prompt_carries_no_dash_and_no_dates():
+    # No dashes: a model copies the punctuation it is shown. No dates:
+    # nothing in this system persists a meeting date, and a model shown
+    # an ingest clock reasons about recency instead of content.
+    assert "—" not in da.JUDGE_SYSTEM and "–" not in da.JUDGE_SYSTEM
+    body = da.build_judge_content("Held one", "New one")
+    assert "date" not in body.lower() and "meeting_id" not in body
