@@ -210,61 +210,98 @@ def salience(patch: Dict[str, Any], today: Optional[date] = None,
     return round(max(score, 0.0), 4)
 
 
-# Weights in RANK order plus the row plan, per digest size. A TABLE
-# rather than a formula, for the same reason CONSEQUENCE is one: the
-# constraint is small, finite and argued once, and a formula that
-# happened to satisfy it would still need every case checked. Every
-# entry here is verified by test to fill each row to exactly 6 columns
-# and to keep weights non-increasing by rank, so the strongest patch is
-# never shown smaller than a weaker one.
+# THE LAYOUT IS TAKEN FROM THE PROTOTYPE, not from the handoff's prose,
+# because the prototype is the thing Scott wants it to look like and the
+# two disagree in three places.
 #
-# Rows are NOT always consecutive. At six tiles the pairing is outside
-# in, rank 0 with rank 5, which is what lets the array stay in rank
-# order (section 5 requires index 0 to be strongest) while every row
-# still fills the grid.
+# `Memory Quilt.dc.html` renders a 6-column grid with spans [3,3,2,4,2,4]
+# and heights [118,118,96,96,104,104]. Read as rows that is:
 #
-# One tile is outside the grid entirely: no single span equals 6, so the
-# client renders it full width. Recorded as a real case rather than
-# excluded, because the spec forbids padding a thin week to reach a
-# tile count.
-LAYOUTS: Dict[int, Tuple[List[int], List[Tuple[int, ...]]]] = {
-    1: ([1], [(0,)]),
-    2: ([3, 1], [(0, 1)]),
-    3: ([1, 1, 1], [(0, 1, 2)]),
-    4: ([3, 2, 2, 1], [(0, 3), (1, 2)]),
-    5: ([2, 2, 1, 1, 1], [(0, 1), (2, 3, 4)]),
-    6: ([3, 3, 2, 2, 1, 1], [(0, 5), (1, 4), (2, 3)]),
+#     row 1   span 3 + 3   both 118px
+#     row 2   span 2 + 4   both  96px
+#     row 3   span 2 + 4   both 104px
+#
+# Three things follow, and each contradicts the written handoff.
+#
+# ONE. The span multiset maps to weights {3,3,2,2,1,1}, which is what
+# this module already derived when section 6.1's {3,2,2,1,1,1} turned
+# out not to tile. The prototype independently confirms the correction.
+#
+# TWO. HEIGHT IS A PROPERTY OF THE ROW, NOT OF THE WEIGHT. Section 4.2's
+# `tileHeight` computes height from weight (3->118, 2->104, 1->96),
+# which would put a 118 next to a 96 in the same row and produce a
+# ragged quilt. The prototype gives every tile in a row the same height
+# and varies height BETWEEN rows. That is the look; the computed version
+# is not.
+#
+# THREE, and this is a product decision rather than a bug. In the
+# prototype, TILE SIZE DOES NOT ENCODE IMPORTANCE. The spans are a fixed
+# decorative pattern applied by position, so the fourth tile is larger
+# than the first. Section 5 says index 0 is the strongest and takes the
+# first tile, which is still true: first, not biggest. Anyone who later
+# wants size to mean rank has to change the pattern, and the quilt will
+# stop looking like this.
+#
+# Rows are consecutive here, unlike the outside-in pairing this module
+# used before reading the prototype. Consecutive is simpler and it is
+# what the artifact does.
+LAYOUTS: Dict[int, Dict[str, Any]] = {
+    # tiles: (spans by position, row heights, row groupings)
+    1: {"spans": [6], "heights": [118], "rows": [(0,)]},
+    2: {"spans": [3, 3], "heights": [118, 118], "rows": [(0, 1)]},
+    3: {"spans": [2, 2, 2], "heights": [104, 104, 104], "rows": [(0, 1, 2)]},
+    4: {"spans": [3, 3, 2, 4], "heights": [118, 118, 96, 96],
+        "rows": [(0, 1), (2, 3)]},
+    5: {"spans": [3, 3, 2, 2, 2], "heights": [118, 118, 104, 104, 104],
+        "rows": [(0, 1), (2, 3, 4)]},
+    6: {"spans": [3, 3, 2, 4, 2, 4],
+        "heights": [118, 118, 96, 96, 104, 104],
+        "rows": [(0, 1), (2, 3), (4, 5)]},
 }
 MAX_TILES = max(LAYOUTS)
 
+# The handoff's mapping, kept so a weight can still be reported for
+# clients that reason in those terms. Derived FROM the span rather than
+# the other way round, because the span is what the prototype fixes.
+WEIGHT_FOR_SPAN = {2: 1, 3: 2, 4: 3, 6: 3}
 
-def assign_weights(count: int) -> List[int]:
-    """Weights in rank order for a digest of `count` tiles.
 
-    Follows section 5's tiling rule rather than section 6.1's assignment
-    rule, because 6.1's {3,2,2,1,1,1} cannot tile in any order. See the
-    module docstring. Caps weight-3 tiles at two, which 6.1 asks for.
+def layout(count: int) -> Dict[str, Any]:
+    """Spans, row heights and row groupings for a digest of `count` tiles.
+
+    A table rather than a formula: the constraint is small and finite,
+    every entry is verified by test to fill each row to exactly 6
+    columns and to hold one height per row, and a formula that happened
+    to satisfy both would still need every case checked.
     """
     if count <= 0:
-        return []
-    return list(LAYOUTS[min(count, MAX_TILES)][0])
+        return {"spans": [], "heights": [], "rows": []}
+    return LAYOUTS[min(count, MAX_TILES)]
+
+
+def assign_weights(count: int) -> List[int]:
+    """Weights in DISPLAY order, derived from the prototype's spans."""
+    return [WEIGHT_FOR_SPAN[s] for s in layout(count)["spans"]]
 
 
 def row_pairs(count: int) -> List[Tuple[int, ...]]:
-    """Rank indexes grouped into rows that each fill the grid exactly.
+    """Index groupings, one per rendered row.
 
     Handed to the client rather than re-derived there: the grouping is a
-    consequence of the weight distribution, and two implementations of
-    one rule is how they drift.
+    consequence of the span pattern, and two implementations of one
+    layout rule is how they drift.
     """
-    if count <= 0:
-        return []
-    return list(LAYOUTS[min(count, MAX_TILES)][1])
+    return [tuple(r) for r in layout(count)["rows"]]
 
 
 def row_is_exact(weights: Sequence[int]) -> bool:
     """Does this row of weights fill the grid exactly?"""
     return sum(SPAN_FOR_WEIGHT.get(w, 0) for w in weights) == COLUMNS
+
+
+def row_spans_exact(spans: Sequence[int]) -> bool:
+    """Same question asked of spans, which is what the prototype fixes."""
+    return sum(spans) == COLUMNS
 
 
 def build_digest(
@@ -296,6 +333,7 @@ def build_digest(
     # stability defect the spec names, arriving by the back door.
     kept.sort(key=lambda pair: (-pair[0], str(pair[1].get("patch_id") or "")))
     chosen = kept[:max(limit, 0)]
+    plan = layout(len(chosen))
     weights = assign_weights(len(chosen))
 
     return {
@@ -305,11 +343,14 @@ def build_digest(
                 "patch_type": patch.get("patch_type"),
                 "fact": _text(patch),
                 "weight": weight,
+                "span": span,
+                "height": height,
                 "source_meeting_id": patch.get("origin_id"),
                 "occurred_at": patch.get("created_at"),
                 "_salience": score,
             }
-            for (score, patch), weight in zip(chosen, weights)
+            for (score, patch), weight, span, height in zip(
+                chosen, weights, plan["spans"], plan["heights"])
         ],
         "row_pairs": row_pairs(len(chosen)),
         "dropped": dropped,

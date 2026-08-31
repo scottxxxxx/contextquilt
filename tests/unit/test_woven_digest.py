@@ -30,6 +30,8 @@ from contextquilt.services.woven_digest import (
     USER_SCOPED_TYPES,
     assign_weights,
     build_digest,
+    layout,
+    row_spans_exact,
     row_is_exact,
     row_pairs,
     salience,
@@ -84,24 +86,33 @@ def test_every_digest_size_tiles_exactly(count):
         )
 
 
-@pytest.mark.parametrize("count", [1, 2, 3, 4, 5, 6])
-def test_weights_never_increase_with_rank(count):
-    # A weaker patch must never be shown larger than a stronger one.
-    w = assign_weights(count)
-    assert w == sorted(w, reverse=True), w
+def test_tile_size_is_decorative_and_that_is_recorded():
+    """In the prototype, size does NOT encode importance.
 
+    This test asserted the opposite until the prototype was read. The
+    spans are a fixed pattern applied by POSITION, so the fourth tile is
+    larger than the first, and any client reading tile size as a ranking
+    signal will be wrong. Section 5 still holds: it says index 0 is the
+    strongest and takes the FIRST tile, not the biggest.
 
-def test_a_single_tile_is_outside_the_grid_and_that_is_recorded():
-    # No span equals 6, so one tile cannot fill a row. The client renders
-    # it full width; this pins that we did not pretend otherwise.
-    assert not row_is_exact(assign_weights(1))
-
-
-def test_the_strongest_patch_still_gets_the_largest_tile():
-    # Section 5 requires index 0 to be the strongest and take the first
-    # tile. The outside-in pairing preserves that while fixing the rows.
+    Kept rather than deleted, inverted, because "this used to say the
+    opposite and here is why it changed" is what a future reader needs
+    before they change it back.
+    """
     weights = assign_weights(6)
-    assert weights[0] == max(weights)
+    assert weights != sorted(weights, reverse=True)
+    assert weights[3] > weights[0]
+
+
+def test_a_single_tile_fills_the_row():
+    # Thin weeks reach the client because the spec forbids padding, and
+    # a lone tile at any narrower span leaves the rest of the row empty
+    # beside it, which reads as a missing tile rather than a thin week.
+    assert layout(1)["spans"] == [6]
+
+
+def test_index_zero_is_the_first_tile():
+    # Section 5's actual promise, which survives the prototype's layout.
     assert row_pairs(6)[0][0] == 0
 
 
