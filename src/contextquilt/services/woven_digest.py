@@ -283,11 +283,13 @@ LAYOUTS: Dict[int, Dict[str, Any]] = {
 }
 MAX_TILES = max(LAYOUTS)
 
-# How many tiles one patch type may take before a different type gets a
-# turn. Two, matching section 6.1's own cap on weight-3 tiles and for
-# the same stated reason: rhythm. A judgment call, one constant, easily
-# reverted; see the note in `build_digest`.
-MAX_TILES_PER_TYPE = 2
+# The FLOOR on how many tiles one patch type may take. Two, matching
+# section 6.1's own cap on weight-3 tiles and for the same stated
+# reason: rhythm. The effective cap rises when the week offers few
+# types, because a cap that cannot be met is not a cap, it is just a
+# reordering. A judgment call, one constant, easily reverted; see the
+# note in `build_digest`.
+MIN_TILES_PER_TYPE = 2
 
 # The handoff's mapping, kept so a weight can still be reported for
 # clients that reason in those terms. Derived FROM the span rather than
@@ -373,30 +375,46 @@ def build_digest(
     # renders as one purple block. Measured on real data, the top six
     # were four commitments and two blockers.
     #
-    # So a type takes at most two tiles while a different type is
-    # available. Strictly a TIE-BREAK among already-qualified patches:
-    # nothing unqualified is promoted, and if the week genuinely holds
-    # only commitments the cap yields rather than padding with weaker
-    # material, because an honest monochrome quilt beats a decorative
-    # one built from patches that did not earn a tile.
+    # THE CAP IS DERIVED, NOT FIXED, and the first version got this
+    # wrong. A flat cap of two deferred four commitments on a week that
+    # held only two types, then backfilled two of them anyway, so the
+    # result was four commitments and the cap had done nothing but
+    # shuffle. A cap only means something if the material can meet it:
+    # with two types and six tiles the honest spread is three and three.
+    # So the cap is the even share, floored at two.
+    #
+    # Strictly a TIE-BREAK among already-qualified patches: nothing
+    # unqualified is promoted, and if the week genuinely holds one type
+    # the cap becomes the limit and the quilt fills in rank order rather
+    # than padding with weaker material, because an honest monochrome
+    # quilt beats a decorative one built from patches that did not earn
+    # a tile.
+    ceiling = max(limit, 0)
+    types_available = len({p.get("patch_type") or "" for _, p in kept[:ceiling * 4]})
+    per_type_cap = ceiling
+    if types_available > 1:
+        share = -(-ceiling // types_available)          # ceil, no float
+        per_type_cap = max(MIN_TILES_PER_TYPE, share)
+
     chosen: List[Tuple[float, Dict[str, Any]]] = []
     deferred: List[Tuple[float, Dict[str, Any]]] = []
     per_type: Dict[str, int] = {}
     for score, patch in kept:
-        if len(chosen) >= max(limit, 0):
+        if len(chosen) >= ceiling:
             break
         ptype = patch.get("patch_type") or ""
-        if per_type.get(ptype, 0) >= MAX_TILES_PER_TYPE:
+        if per_type.get(ptype, 0) >= per_type_cap:
             deferred.append((score, patch))
             continue
         per_type[ptype] = per_type.get(ptype, 0) + 1
         chosen.append((score, patch))
-    # A thin week of one type still fills, in rank order, rather than
-    # showing four tiles because the cap ran out of variety.
+    # A week whose variety ran out still fills, in rank order, rather
+    # than showing four tiles because no fifth type existed.
     for pair in deferred:
-        if len(chosen) >= max(limit, 0):
+        if len(chosen) >= ceiling:
             break
         chosen.append(pair)
+
     plan = layout(len(chosen))
     weights = assign_weights(len(chosen))
 

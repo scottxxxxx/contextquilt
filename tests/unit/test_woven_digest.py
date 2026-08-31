@@ -359,7 +359,25 @@ def test_one_type_does_not_take_the_whole_quilt():
     cands += [patch(f"d{i}", ptype="decision", text=f"Decide thing {i}")
               for i in range(3)]
     types = [p["patch_type"] for p in build_digest(cands, limit=6)["patches"]]
-    assert types.count("commitment") <= 2
+    # Two types and six tiles: the honest spread is three and three.
+    assert types.count("commitment") == 3 and types.count("decision") == 3
+
+
+def test_the_cap_is_the_even_share_rather_than_a_flat_two():
+    """The bug the first version of this shipped with.
+
+    A flat cap of two deferred four commitments on a two-type week and
+    then backfilled two of them, so the output was four commitments and
+    the cap had done nothing but shuffle. A cap the material cannot meet
+    is not a cap. With three types the even share IS two.
+    """
+    cands = [patch(f"c{i}", ptype="commitment", text=f"Ship {i}") for i in range(6)]
+    cands += [patch(f"d{i}", ptype="decision", text=f"Decide {i}") for i in range(3)]
+    cands += [patch(f"b{i}", ptype="blocker", text=f"Blocked on {i}") for i in range(3)]
+    counts = {}
+    for p in build_digest(cands, limit=6)["patches"]:
+        counts[p["patch_type"]] = counts.get(p["patch_type"], 0) + 1
+    assert max(counts.values()) == 2 and len(counts) == 3
 
 
 def test_a_single_type_week_still_fills_rather_than_padding():
@@ -382,3 +400,26 @@ def test_the_cap_never_promotes_an_unqualified_patch():
     cands.append(patch("bad", ptype="decision", text=""))     # no text
     types = [p["patch_type"] for p in build_digest(cands, limit=6)["patches"]]
     assert "decision" not in types
+
+
+def test_the_quilt_still_fills_when_the_variety_runs_out():
+    """The backfill, which sabotage found had NO test at all.
+
+    Removing the backfill entirely left the suite green, and per our own
+    rule that surprise is the finding rather than a compliment. The
+    one-type test never reaches this code: with a single type the cap
+    becomes the limit, so nothing is ever deferred.
+
+    The case that DOES reach it is uneven material. Five commitments and
+    one decision, six slots, cap three: the loop takes three commitments
+    and the one decision and runs out of variety at four. Without the
+    backfill the user gets a four-tile quilt while two qualified patches
+    sit unused, which is the cap causing exactly the padding-in-reverse
+    it was supposed to prevent.
+    """
+    cands = [patch(f"c{i}", ptype="commitment", text=f"Ship {i}") for i in range(5)]
+    cands += [patch("d0", ptype="decision", text="Decide the pricing")]
+    out = build_digest(cands, limit=6)
+    assert len(out["patches"]) == 6, "the quilt went short when variety ran out"
+    types = [p["patch_type"] for p in out["patches"]]
+    assert types.count("commitment") == 5 and types.count("decision") == 1
