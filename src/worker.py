@@ -3351,7 +3351,8 @@ class ColdPathWorker:
                        (SELECT array_agg(DISTINCT a.alias) FROM entity_aliases a
                          WHERE a.entity_id = e.entity_id) AS aliases,
                        (SELECT count(*) FROM entity_descriptions d
-                         WHERE d.entity_id = e.entity_id) AS perceptions,
+                         WHERE d.entity_id = e.entity_id
+                           AND d.dismissed_at IS NULL) AS perceptions,
                        (SELECT count(*) FROM person_appearances pa
                          WHERE pa.entity_id = e.entity_id) AS meetings,
                        (SELECT array_agg(DISTINCT pr.name) FROM person_appearances pa
@@ -3394,12 +3395,21 @@ class ColdPathWorker:
                     """,
                     subject_key, role_type, [k + "%" for k in keys],
                 )]
+            # Dismissed perceptions are excluded here as well as from the
+            # served series, and that is what makes a dismissal take
+            # effect rather than merely hide. `who_they_are` regenerates
+            # when its INPUT FINGERPRINT changes, so dropping a row from
+            # this set rewrites the summary without the bad premise on
+            # the next profile pass. No new synthesis logic: the existing
+            # regeneration rule does the work, which is why the dismissal
+            # had to land in the inputs rather than in the output.
             percs = [dict(r) for r in await self.db.fetch(
                 """
                 SELECT description, first_origin_id, observation_count,
                        first_observed_at, last_observed_at
                 FROM entity_descriptions
                 WHERE user_id = $1 AND entity_id = $2::uuid
+                  AND dismissed_at IS NULL
                 ORDER BY first_observed_at DESC
                 LIMIT 20
                 """,

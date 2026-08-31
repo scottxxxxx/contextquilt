@@ -1289,3 +1289,86 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+
+  /v1/people/{user_id}/{entity_id}/descriptions/dismiss:
+    post:
+      operationId: dismissDescriptions
+      summary: Say a meeting's perception of this person is wrong
+      description: >
+        Marks every live `entity_descriptions` row for this person as
+        dismissed. The rows are RETAINED: the meeting did say it, so the
+        row is a true record of what was said, and what is wrong is
+        treating it as true of the person. A tombstone would make "the
+        user rejected this" indistinguishable from "this was never
+        observed", the same argument that shaped shelve.
+
+
+        Whole-person rather than per-row on purpose: a user is rejecting
+        a characterisation, not auditing rows, and every live row feeds
+        the same summary.
+
+
+        Two affordances, one endpoint. Without `note` this is "this is
+        inaccurate". With `note` it is "correct this", and the note is
+        kept verbatim on the row AND enqueued down the existing
+        correction lane, where the contradicted patch is superseded and
+        the new fact lands as origin_mode=declared connected by
+        `replaces`. A failed enqueue never fails the dismissal.
+
+
+        `who_they_are` is not rewritten here. It regenerates when its
+        input fingerprint changes and the dismissed rows have just left
+        that input set, so the response reports "regenerating" rather
+        than pretending to a fresh sentence.
+      tags: [People]
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+        - { name: entity_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                note:
+                  type: string
+                  maxLength: 2000
+                  description: The user's own correction, when they gave one.
+                source:
+                  type: string
+                  default: user_card
+                  description: >
+                    Which affordance said so, open vocabulary:
+                    user_card, user_chat, correction.
+      responses:
+        "200":
+          description: Count dismissed, whether a correction was enqueued.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  dismissed: { type: integer }
+                  correction_enqueued: { type: boolean }
+                  who_they_are: { type: string, example: regenerating }
+    delete:
+      operationId: undismissDescriptions
+      summary: Undo a dismissal
+      description: >
+        Clears every dismissal stamp for this person and the series
+        returns. Nothing was destroyed, so nothing is reconstructed.
+      tags: [People]
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+        - { name: entity_id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: Count restored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  restored: { type: integer }
+                  who_they_are: { type: string, example: regenerating }

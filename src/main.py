@@ -3,7 +3,7 @@ Context Quilt - Hot Path API (FastAPI)
 Implements 'Zero-Latency' Context Enrichment & MCP Endpoints
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Request, Query, status
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, Query, status, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
@@ -6655,6 +6655,13 @@ async def get_person(
         # fetch on the released connection raised "connection has been
         # released back to the pool" into a guard written for a missing
         # table, which logged at debug and served null. Receipt
+        # `dismissed_at IS NULL`: a perception the user said was wrong
+        # leaves the series but stays in the table (migration 46). The
+        # meeting did say it; what was wrong is treating it as true of
+        # the person. Excluding rather than deleting also keeps "the
+        # user dismissed this" distinguishable from "this was never
+        # observed", which is the argument that shaped `shelve`.
+        #
         # 2026-08-21: Suresh had four rows in entity_descriptions and
         # described_as: null on the wire, for every person, since #286.
         # The guard hid it because null is the honest answer to a lagging
@@ -6665,6 +6672,7 @@ async def get_person(
                    first_observed_at, last_observed_at
             FROM entity_descriptions
             WHERE user_id = $1 AND entity_id = $2::uuid
+              AND dismissed_at IS NULL
             ORDER BY first_observed_at DESC
             """,
             user_id, entity_id,
@@ -6999,6 +7007,154 @@ async def _fold_person_patches(
         str(survivor_id), source, loser_ids,
     )
     return ([str(p) for p in loser_ids], int(items_moved))
+
+
+class DescriptionDismissal(BaseModel):
+    """What the user said when they rejected a perception.
+
+    `note` is the difference between the two affordances the card
+    offers. "This is inaccurate" is a bare dismissal and carries none.
+    "Correct this" carries the user's own words, and those words are
+    kept verbatim on the row rather than only being fed to a model,
+    because the correction is a thing the user SAID and the record of
+    what was said is the asset.
+    """
+    note: Optional[str] = Field(
+        default=None, max_length=2000,
+        description="The user's own correction, when they gave one",
+    )
+    source: Optional[str] = Field(
+        default="user_card",
+        description="Which affordance said so: user_card, user_chat, correction",
+    )
+
+
+@app.post("/v1/people/{user_id}/{entity_id}/descriptions/dismiss", tags=["People"])
+async def dismiss_descriptions(
+    user_id: str,
+    entity_id: str,
+    body: DescriptionDismissal | None = Body(default=None),
+    app_id: str = Depends(verify_application_access),
+):
+    """Mark every live perception of this person as wrong.
+
+    A meeting's description of a person can simply be false, and until
+    migration 46 there was no way to say so: `entity_descriptions` had
+    no status column, no API write path, and chat corrections operate on
+    `context_patches` and never arrive here. The card showed the STATED
+    role correctly ("Stated, not inferred" beats an inference, and that
+    precedence rule worked), while the inferred series underneath it
+    and the `who_they_are` summary above both kept repeating the wrong
+    one.
+
+    THE ROW IS RETAINED. The meeting did say it, so the row is a true
+    record of what was said; what is wrong is treating it as true of the
+    person. Deleting would destroy an accurate observation and make "the
+    user rejected this" indistinguishable from "this was never observed"
+    -- the same argument that shaped `shelve`, where a tombstone would
+    have been indistinguishable from decay.
+
+    Whole-person rather than per-row on purpose. A user looking at a
+    card is rejecting a CHARACTERISATION, not auditing rows, and every
+    live row feeds the same summary. Per-row dismissal would ask them to
+    understand a data model to fix a sentence.
+
+    Reversible with DELETE. Returns the count so the caller can render
+    what happened rather than assume it.
+    """
+    payload = body or DescriptionDismissal()
+    try:
+        rows = await db_pool.fetch(
+            """
+            UPDATE entity_descriptions
+               SET dismissed_at = NOW(),
+                   dismissed_source = $3,
+                   dismissed_note = $4
+             WHERE user_id = $1 AND entity_id = $2::uuid
+               AND dismissed_at IS NULL
+            RETURNING description_id
+            """,
+            user_id, entity_id, (payload.source or "user_card"), payload.note,
+        )
+    except Exception as exc:
+        logger.warning("description_dismiss_failed", user_id=user_id,
+                       entity_id=entity_id, error=str(exc)[:200])
+        raise HTTPException(status_code=500, detail="dismiss failed")
+
+    logger.info("descriptions_dismissed", user_id=user_id, entity_id=entity_id,
+                count=len(rows), source=(payload.source or "user_card"),
+                had_note=bool(payload.note))
+
+    # "Correct this" rather than "this is inaccurate": the note is a
+    # fact the user STATED, so it goes down the existing correction lane
+    # rather than a parallel path of its own. handle_correction already
+    # supersedes the contradicted patch by id, lands the new fact as
+    # origin_mode='declared', and connects them with `replaces`. Building
+    # a second writer would be a second source of truth about one person.
+    #
+    # Enqueued rather than awaited: the user is looking at a card, the
+    # dismissal has already taken effect on this response, and the patch
+    # rewrite is cold-path work. Failure here must not fail the
+    # dismissal, which is why it is guarded and only logged.
+    if payload.note:
+        try:
+            await redis_client.xadd("memory_updates", {"data": json.dumps({
+                "user_id": user_id,
+                "app_id": app_id,
+                "task_type": "correction",
+                "interaction_type": "correction",
+                "content": payload.note,
+                "metadata": {
+                    "source": "person_card",
+                    "subject_entity_id": entity_id,
+                },
+            })})
+            logger.info("description_correction_enqueued",
+                        user_id=user_id, entity_id=entity_id)
+        except Exception as exc:
+            logger.warning("description_correction_enqueue_failed",
+                           user_id=user_id, entity_id=entity_id,
+                           error=str(exc)[:200])
+    # The summary is rebuilt by the worker's profile pass, not here: it
+    # regenerates when its input fingerprint changes and the dismissed
+    # rows have just left that input set. Saying so on the wire means a
+    # client renders "updating" rather than expecting a fresh sentence.
+    return {
+        "dismissed": len(rows),
+        "correction_enqueued": bool(payload.note),
+        "who_they_are": "regenerating",
+    }
+
+
+@app.delete("/v1/people/{user_id}/{entity_id}/descriptions/dismiss", tags=["People"])
+async def undismiss_descriptions(
+    user_id: str,
+    entity_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """Undo a dismissal. Every stamp cleared, the series comes back.
+
+    Nothing was destroyed, so there is nothing to reconstruct.
+    """
+    try:
+        rows = await db_pool.fetch(
+            """
+            UPDATE entity_descriptions
+               SET dismissed_at = NULL, dismissed_source = NULL,
+                   dismissed_note = NULL
+             WHERE user_id = $1 AND entity_id = $2::uuid
+               AND dismissed_at IS NOT NULL
+            RETURNING description_id
+            """,
+            user_id, entity_id,
+        )
+    except Exception as exc:
+        logger.warning("description_undismiss_failed", user_id=user_id,
+                       entity_id=entity_id, error=str(exc)[:200])
+        raise HTTPException(status_code=500, detail="undismiss failed")
+    logger.info("descriptions_undismissed", user_id=user_id,
+                entity_id=entity_id, count=len(rows))
+    return {"restored": len(rows), "who_they_are": "regenerating"}
 
 
 @app.post("/v1/people/{user_id}/merge", tags=["People"])
