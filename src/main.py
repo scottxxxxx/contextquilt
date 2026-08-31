@@ -3,7 +3,7 @@ Context Quilt - Hot Path API (FastAPI)
 Implements 'Zero-Latency' Context Enrichment & MCP Endpoints
 """
 
-from fastapi import FastAPI, HTTPException, Depends, Header, Request, Query, status, Body
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, Query, status  # SABOTAGE: Body unimported
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
