@@ -235,11 +235,22 @@ def test_the_order_is_stable_across_calls():
 
 
 def test_salience_is_computed_but_kept_off_the_public_shape():
-    # Underscore-prefixed: internal, for ordering and QA. Serving it
-    # alongside an already-ordered array carries nothing the index does
-    # not, and GhostPour declined to take it too.
+    """Rule 7, committed by this test's own author, in this test.
+
+    The name said the score is kept OFF the public shape. The comment
+    said GhostPour had declined to take it. The assertion required it to
+    be PRESENT, and so the field shipped on the wire for an evening
+    while a green test with the right name sat over it.
+
+    Nobody opened it, because the name already said the reassuring
+    thing. GP found the field by forwarding it verbatim and noticing
+    that two teams had agreed it would not be there, which is the only
+    vantage point from which the contradiction was visible at all.
+
+    A comment cannot be wrong out loud. A name can, and this one was.
+    """
     out = build_digest([patch("a")], limit=6)
-    assert "_salience" in out["patches"][0]
+    assert "_salience" not in out["patches"][0]
     assert "salience" not in out["patches"][0]
 
 
@@ -449,3 +460,19 @@ def test_a_headline_arriving_as_a_json_string_value_still_serves():
     p = patch("a", text="Zero data retention", headline="Zero retention")
     p["value"] = _json.dumps(p["value"])
     assert build_digest([p], limit=6)["patches"][0]["headline"] == "Zero retention"
+
+
+def test_no_internal_field_travels_at_all():
+    """The sweep, rather than one field by name.
+
+    `_salience` was caught because someone remembered it. A list of
+    known internals is a list somebody must maintain, and the entry that
+    gets forgotten is the one whose presence is silent, so this asserts
+    the CONVENTION instead: nothing underscore-prefixed goes out.
+    """
+    out = build_digest([patch("a", text="Ship the gateway")], limit=6)
+    served = out["patches"][0]
+    assert not any(k.startswith("_") for k in served), (
+        f"internal fields on the wire: "
+        f"{[k for k in served if k.startswith('_')]}"
+    )
