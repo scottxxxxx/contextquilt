@@ -96,7 +96,7 @@ DROP_SENSITIVE = "sensitive_content"
 DROP_SHELVED = "shelved_by_user"
 
 
-def _value(patch: Dict[str, Any]) -> Dict[str, Any]:
+def patch_value(patch: Dict[str, Any]) -> Dict[str, Any]:
     """The patch's value as a dict, whatever the driver handed back.
 
     `value` is JSONB and asyncpg returns it as a JSON STRING unless a
@@ -119,6 +119,11 @@ def _value(patch: Dict[str, Any]) -> Dict[str, Any]:
             return {}
         return parsed if isinstance(parsed, dict) else {}
     return {}
+
+
+# The private name kept as an alias: main.py's seam route and the tests
+# already call it, and renaming a helper is not what this fix is about.
+_value = patch_value
 
 
 def _text(patch: Dict[str, Any]) -> str:

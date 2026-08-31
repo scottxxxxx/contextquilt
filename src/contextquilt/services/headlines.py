@@ -47,6 +47,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
+from contextquilt.services.woven_digest import patch_value
+
 MAX_HEADLINE_CHARS = 48
 
 # Refusal reasons, not booleans. A generator that reports only that it
@@ -60,6 +62,14 @@ DROPPED_FIGURE = "concrete_figure_dropped"
 IMPERATIVE = "addresses_the_user"
 EMPTY = "empty"
 DASH = "contains_a_dash"
+
+# Reasons a BATCH produced nothing, as opposed to a single line being
+# refused. Separate names because "the model answered in prose", "the
+# model returned an empty list" and "we asked about nothing" are three
+# different bugs and only the last is ours upstream.
+NO_JSON = "response_was_not_json"
+NOTHING_RETURNED = "model_returned_no_headlines"
+NOTHING_ASKED = "prompt_carried_no_facts"
 
 # Any figure a reader would call concrete: currency, percentage, a
 # range, a bare number. Deliberately NOT matching an unspaced hyphen as
@@ -162,7 +172,7 @@ def build_user_content(patches: Iterable[Dict[str, Any]]) -> str:
     """
     lines = ["Facts to headline:"]
     for patch in patches:
-        value = patch.get("value") if isinstance(patch.get("value"), dict) else {}
+        value = patch_value(patch)
         text = (value.get("text") or "").strip()
         if not text:
             continue
@@ -181,14 +191,31 @@ def parse(content: Any, patches: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     """
     facts = {}
     for patch in patches:
-        value = patch.get("value") if isinstance(patch.get("value"), dict) else {}
+        value = patch_value(patch)
         facts[str(patch.get("patch_id"))] = (value.get("text") or "").strip()
 
-    rows = []
-    if isinstance(content, dict):
-        rows = content.get("headlines") or []
     accepted: Dict[str, str] = {}
     refused: Dict[str, int] = {}
+
+    # AN EMPTY RESULT MUST NAME ITSELF. The first prod dry run returned
+    # "0 headlines, 0 refused, $0.00", which reads as "nothing to do"
+    # and was actually a total failure: `value` arrived as a JSON string,
+    # every patch looked textless, and the prompt went out with no facts
+    # in it at all. Nothing in the output distinguished that from a
+    # healthy batch of zero.
+    #
+    # This is the `dropped` argument one level down, and it is the third
+    # time tonight the same silence has cost something: an empty answer
+    # with a reason and an empty answer without are different states.
+    rows = []
+    if not isinstance(content, dict):
+        refused[NO_JSON] = 1
+    else:
+        rows = content.get("headlines") or []
+        if not rows and facts:
+            refused[NOTHING_RETURNED] = 1
+    if not facts:
+        refused[NOTHING_ASKED] = 1
 
     for row in rows:
         if not isinstance(row, dict):
