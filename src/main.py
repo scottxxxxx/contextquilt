@@ -89,6 +89,7 @@ from contextquilt.services.people_network import (
 from contextquilt.services import described_as
 from contextquilt.services import who_they_are
 from contextquilt.services import trajectory as trajectory_svc
+from contextquilt.services import project_meetings
 from contextquilt.services import project_resolve
 from contextquilt.services import project_roster
 from contextquilt.services.entity_aliasing import person_candidates, tokenize_name
@@ -9905,15 +9906,15 @@ async def list_project_people(
         user_id, project_id,
     )
     observed = await db_pool.fetch(
-        """
+        f"""
         SELECT DISTINCT pa.entity_id::text AS entity_id, e.name,
                count(DISTINCT pa.origin_id) OVER (PARTITION BY pa.entity_id)
                  AS meetings
           FROM person_appearances pa
           JOIN entities e ON e.entity_id = pa.entity_id
-          JOIN origin_project_assignments opa
-            ON opa.origin_id = pa.origin_id
-         WHERE pa.user_id = $1 AND opa.project_id = $2
+          JOIN ({project_meetings.meetings_for_project_sql('$2')}) m
+            ON m.origin_id = pa.origin_id
+         WHERE pa.user_id = $1
            AND e.merged_into IS NULL
         """,
         user_id, project_id,
@@ -9963,13 +9964,13 @@ async def resolve_project(
     reinvented the bug this endpoint was written to end.
     """
     rows = await db_pool.fetch(
-        """
+        f"""
         SELECT p.project_id, p.name, p.status,
                (SELECT count(*) FROM context_patches cp
                  WHERE cp.project_id = p.project_id
                    AND COALESCE(cp.status, 'active') = 'active') AS patch_count,
-               (SELECT count(*) FROM origin_project_assignments opa
-                 WHERE opa.project_id = p.project_id) AS meeting_count
+               {project_meetings.meeting_count_sql('p.project_id')}
+                 AS meeting_count
           FROM projects p
          WHERE p.user_id = $1
         """,
