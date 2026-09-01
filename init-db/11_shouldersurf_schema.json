@@ -1,6 +1,6 @@
 {
   "app_id": "shouldersurf",
-  "version": 12,
+  "version": 13,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
@@ -394,7 +394,7 @@
       "domain_type": "behavior",
       "facet": "Episode",
       "permanence": "quarter",
-      "display_name": "Behavioral Observation",
+      "display_name": "Behavior",
       "description": "One observed instance of HOW a named participant conducted themselves in this meeting: what they asked for before agreeing, how they responded to a piece of framing, what moved their position. This is the unit the profile pass reads. Every other episode type records what happened; this one records how somebody behaved while it happened. Records conduct that a reader could have watched, never a verdict about who a person is.",
       "value_shape": {
         "text": "string",
