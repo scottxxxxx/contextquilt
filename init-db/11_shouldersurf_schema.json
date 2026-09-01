@@ -1,6 +1,6 @@
 {
   "app_id": "shouldersurf",
-  "version": 13,
+  "version": 14,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
@@ -352,25 +352,6 @@
       }
     },
     {
-      "domain_type": "observation",
-      "facet": "Episode",
-      "permanence": "quarter",
-      "display_name": "Observation",
-      "description": "A factual, non-evaluative note about how something in the world behaves, stated in the meeting and worth keeping. Distinct from `takeaway`, which is EVALUATIVE and carries a decision implication, and from `behavior`, which is about how a NAMED PERSON conducted themselves. Declared 2026-09-01 for the same reason as `artifact`.",
-      "value_shape": {
-        "text": "string"
-      },
-      "completable": false,
-      "project_scoped": false,
-      "self_only": false,
-      "extraction_rules": {
-        "required_fields": [
-          "text"
-        ],
-        "guidance": "Emit for a durable factual observation about a system, product or environment: 'opening the app on iPad stops background music playback'. If the statement judges something or implies a choice it is a `takeaway`. If it describes what a named person did it is a `behavior`. If it is a dated occurrence it is an `event`. When two of these fit, prefer the more specific one and do not emit both. Hard cap: 2 per meeting."
-      }
-    },
-    {
       "domain_type": "event",
       "facet": "Episode",
       "permanence": "quarter",
@@ -527,7 +508,7 @@
       "to_types": [
         "goal"
       ],
-      "description": "Forward-looking: this commitment/decision/project advances toward a goal."
+      "description": "This commitment, decision or project exists to advance a stated GOAL. Direction: FROM the item TO the goal. Emit it whenever a goal patch exists in this output and an item plainly serves it, which is most meetings that state a goal at all: 'our aim this quarter is three firms on the pilot' makes every commitment about recruiting a firm aims_for that goal, and 'we need the demo stable for attorneys' makes the stable-build commitment aims_for it. The tell is that the item would not exist without the goal. Do not emit it for a goal the item merely mentions in passing, and never invent a goal to attach to."
     },
     {
       "label": "bound_by",
@@ -540,7 +521,7 @@
       "to_types": [
         "constraint"
       ],
-      "description": "This action or project is bound by a hard rule that must be respected."
+      "description": "This commitment, decision or project is limited by a stated CONSTRAINT, a rule that must be respected while doing it. Direction: FROM the item TO the constraint. Emit it whenever a constraint patch exists in this output and an item has to work inside it: 'we cannot send client data to a third-party model' makes the self-hosted deployment commitment bound_by that constraint, and 'no flash during the ceremony' makes the ceremony shot list bound_by it. The speaker often says it outright ('that constrains the work I just took on'); when they do, the edge is mandatory. Never emit it for a constraint the item is unrelated to."
     },
     {
       "label": "describes",

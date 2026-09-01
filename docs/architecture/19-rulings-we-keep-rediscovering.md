@@ -397,6 +397,91 @@ behave like a middlebox and confirming four of them went red.
 
 ---
 
+## 19.11 When a carrier disappears, enumerate everything riding on it.
+
+**Rule.** A contract can travel by more than one carrier, and the
+convenient one is usually the invisible one. When a carrier stops
+(a client stops sending a schema, a proxy stops forwarding a header, a
+serializer changes shape), the failure surfaces in ONE field, the one
+somebody happened to look at, and gets fixed in that field. Every
+other field that was riding the same carrier stays broken, silently,
+because the fix was aimed at the symptom and not at the carrier. So
+when a carrier goes, the question is not "what broke" but "what was
+this carrying", and the answer is a list, and the list must be
+enumerated before the first fix ships, because the first fix is what
+ends the investigation.
+
+Distinct from 19.2, which says a contract with one carrier disappears
+silently. This one is about what happens AFTER that is discovered: the
+discovery is made in one place, and the same carrier was holding up
+several.
+
+**Paid for three times in three months, one root cause, one codebase.**
+
+1. **Entities, 2026-06-10 to 2026-08-15** (CQ). The Anthropic-direct
+   cutover stopped putting `json_schema` on the wire. The entities
+   array had its shape and its types ONLY in that schema; the prompt
+   carried one line about it. Entity extraction fell from 4.37 to 1.24
+   per meeting and stayed there for nine weeks. The fix rendered the
+   entity types into the prompt, and its own docstring in
+   `_entity_types_section` explains the mechanism precisely. It fixed
+   entities.
+2. **`connects_to`, found 2026-09-01** (CQ). The edge object's key
+   names, `label` / `target_text` / `target_type`, existed only in that
+   same schema. The model invented `{"type": ..., "target": ...}`, and
+   both readers discarded it: the vocabulary enforcer for having no
+   label, the storage path for having no target text. On a real
+   transcript, 22 edges emitted and 22 dropped. Nine of twelve
+   declared edge labels had produced 44 edges between them in a
+   lifetime, and three had never fired. Stating the shape in the
+   prompt took the same transcript from 0 edges kept to 32, and
+   `owed_to` from 2 in all of production history to 5 in two runs.
+3. **`relationships`, found the same afternoon** (CQ). The entity
+   relationship array had its `from` / `to` / `type` shape only in the
+   schema; the prompt said "array of edges between entities". The
+   model returned relationships with no source at all, and
+   `store_relationships` skipped them. "Priya reports to Steven" and
+   "Priya is at Harborview Legal" were simply lost. Stating the shape
+   took the cheap model from every relationship discarded to nine
+   usable and zero discarded, with `reports_to` and `member_of`
+   producing for the first time.
+
+Three fields. One carrier. The August fix was made by someone who
+understood the mechanism well enough to write it down, and it still
+stopped one field short, because the question asked was "why are
+entities broken" and not "what else was in that schema". Nobody
+grepped `build_output_schema` for every array it declared, which would
+have produced the list in under a minute.
+
+**The cost of not enumerating** was that the second and third fixes
+each arrived as a separate product complaint. A person card read "you
+owe Steven nothing open" above two items naming Steven, and that was
+traced, over hours, to the `connects_to` shape. `reports_to` and
+`member_of` were called unfixable, and a model upgrade was priced,
+before the `relationships` shape was found. Both were the same
+one-line class of bug as the June fix, and both were reachable from
+it in June by reading one function.
+
+**Applying it.** When a carrier stops, before shipping the fix for the
+field that surfaced:
+
+- Name the carrier explicitly. "The schema is no longer sent" is a
+  carrier statement; "entities are broken" is a symptom statement.
+- Enumerate what rode on it. For a schema, that is every array and
+  every object shape it declared. For a proxy, every header and query
+  param it forwarded. Write the list into the fix.
+- For each item on the list, find where else the contract lives. If
+  the answer is nowhere, that item is broken too, whether or not
+  anyone has complained.
+- Then fix the field that surfaced, and say in the commit which others
+  were checked and what was found.
+
+The tell that this rule is needed is a fix whose explanation is
+complete and correct and describes a mechanism more general than the
+one field it repairs.
+
+---
+
 ## See also
 
 - **Doc 16 §5.10 / §5.13**: a served name may assert only what was
