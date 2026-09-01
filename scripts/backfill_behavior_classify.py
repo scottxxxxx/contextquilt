@@ -45,7 +45,8 @@ SELECT = """
       JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
       LEFT JOIN LATERAL (
            SELECT app_id FROM context_patch_acl a
-            WHERE a.patch_id = cp.patch_id ORDER BY app_id LIMIT 1) acl ON TRUE
+            WHERE a.patch_id = cp.patch_id
+            ORDER BY a.can_write DESC, app_id LIMIT 1) acl ON TRUE
      WHERE COALESCE(cp.status, 'active') = 'active'
        AND cp.patch_type = 'behavior'
        AND COALESCE(cp.value->>'text', '') <> ''
@@ -67,12 +68,14 @@ def _value(raw):
 async def _manifests(pool) -> dict:
     """Latest manifest per app, only for apps that declare behavior."""
     rows = await pool.fetch(
-        "SELECT DISTINCT ON (app_id) app_id::text AS app_id, manifest "
+        "SELECT DISTINCT ON (app_id) app_id::text AS app_id, version, manifest "
         "  FROM app_schemas ORDER BY app_id, version DESC")
     out = {}
     for r in rows:
         m = r["manifest"]
         m = json.loads(m) if isinstance(m, str) else m
+        if isinstance(m, dict):
+            m["_registry_version"] = r["version"]
         if any(isinstance(t, dict) and t.get("domain_type") == "behavior"
                for t in (m or {}).get("patch_types", [])):
             out[r["app_id"]] = m
@@ -111,6 +114,11 @@ async def main() -> int:
     ap.add_argument("--out", default="/tmp/behavior_classify_verdicts.json")
     ap.add_argument("--from", dest="from_file",
                     help="apply verdicts from a prior dry run instead of judging")
+    ap.add_argument("--app-id", help="judge with THIS app's latest manifest for "
+                    "every row (default: the manifest of the app holding the "
+                    "row's write ACL). Two apps can hold manifests; the one "
+                    "that writes is the one whose vocabulary the row was "
+                    "extracted under (found 2026-09-02).")
     args = ap.parse_args()
 
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL"], min_size=1, max_size=3)
@@ -118,6 +126,9 @@ async def main() -> int:
     if args.user:
         params.append(f"user:{args.user}")
         sql += f"       AND ps.subject_key = ${len(params)}\n"
+    # Deterministic order so --seed reproduces one sample across runs
+    # and across judges; without it two runs compare different rows.
+    sql += "     ORDER BY cp.patch_id\n"
     rows = [dict(r) for r in await pool.fetch(sql, *params)]
     print(f"{len(rows)} active behavior rows")
     if args.sample:
@@ -141,8 +152,17 @@ async def main() -> int:
         for r in rows:
             by_app.setdefault(r["app_id"], []).append(r)
         for app_id, app_rows in by_app.items():
-            manifest = manifests.get(app_id) or next(iter(manifests.values()))
-            print(f"app {app_id}: {len(app_rows)} rows, manifest v{manifest.get('version')}")
+            if args.app_id:
+                manifest = manifests.get(args.app_id)
+                if not manifest:
+                    print(f"--app-id {args.app_id} has no manifest declaring behavior")
+                    await pool.close()
+                    return 1
+            else:
+                manifest = manifests.get(app_id) or next(iter(manifests.values()))
+            print(f"app {app_id}: {len(app_rows)} rows, judged with manifest of "
+                  f"{args.app_id or app_id}: body v{manifest.get('version')}, "
+                  f"registry row v{manifest.get('_registry_version')}")
             verdicts.update(await judge_rows(app_rows, manifest, llm))
         json.dump({"verdicts": verdicts,
                    "rows": [{"patch_id": r["patch_id"],

@@ -13,11 +13,13 @@ import re
 
 from contextquilt.services.behavior_classifier import (
     CONVERTIBLE_TYPES,
+    DEFAULT_MODEL,
     KEEP_TYPE,
     apply_classifier_verdicts,
     build_classifier_content,
     build_classifier_system,
     classifier_types,
+    model_override,
     parse_classifier_verdicts,
 )
 
@@ -193,3 +195,27 @@ def test_the_helper_stores_kept_plus_retyped_and_nothing_dropped():
     returns = re.findall(r"^\s*return (.+?)\s*$", body, re.M)
     assert 'split["kept"] + split["retyped"]' in returns
     assert not any("dropped" in r for r in returns)
+
+
+# --- the model ----------------------------------------------------------
+
+def test_the_default_model_is_sonnet_and_the_env_wins(monkeypatch):
+    """Measured 2026-09-02 on the same 120 rows and the same prompt:
+    Haiku dropped 26 rows Sonnet kept, and the hand-read ones were
+    conduct filed as somebody else's commitment. A wrong drop here is
+    a memory nobody can re-observe."""
+    assert DEFAULT_MODEL == "claude-sonnet-4-6"
+    monkeypatch.delenv("CQ_BEHAVIOR_CLASSIFIER_MODEL", raising=False)
+    assert model_override() == DEFAULT_MODEL
+    monkeypatch.setenv("CQ_BEHAVIOR_CLASSIFIER_MODEL", "claude-haiku-4-5-20251001")
+    assert model_override() == "claude-haiku-4-5-20251001"
+
+
+def test_the_prompt_carries_the_owner_test_and_the_name_removal_test():
+    """The two lines the ratchet added, each for a measured miss: Haiku
+    filed delegations as the delegate's commitment; both models kept
+    facts about the world that stay true with the owner's name removed."""
+    sys_prompt = build_classifier_system(MANIFEST)
+    assert "the row is about its OWNER" in sys_prompt
+    assert "remove the owner's name" in sys_prompt
+    assert "stay behavior" in sys_prompt

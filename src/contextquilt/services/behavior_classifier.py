@@ -33,7 +33,18 @@ FAIL OPEN. A judge failure, a malformed answer, an unknown type or a
 missing item all resolve to KEEP. This call must never lose a memory the
 lane would otherwise have stored; it may only decline to store one it
 was sure about. Kill switch CQ_BEHAVIOR_CLASSIFIER_ENABLED; model
-override CQ_BEHAVIOR_CLASSIFIER_MODEL, else the app's own client.
+CQ_BEHAVIOR_CLASSIFIER_MODEL, default Sonnet (see DEFAULT_MODEL).
+
+MEASURED, not claimed (2026-09-02, Scott's rows, two 120-row samples,
+one hand reader): with this prompt Sonnet keeps 103 and 104 of 120,
+and every drop in both samples read as correct or a toss-up, so the
+loss side is clean. The kept side still carries roughly one status
+relay in twelve ("Explained that version 2.2 launched two weeks ago"),
+which puts agreement with the hand read near 92%, not the 95% asked
+for. A stricter wording reached about 95% on the first sample and paid
+for it with three real drops in 120, and the difference between the
+two is inside what one reader can resolve on ambiguous rows. The
+lenient side was chosen on purpose.
 
 The module is the pure part: prompt, content, parse, apply. The call
 and the log live in the worker beside the lane, and
@@ -65,13 +76,25 @@ MAX_ITEMS = 24
 ENABLED_ENV = "CQ_BEHAVIOR_CLASSIFIER_ENABLED"
 MODEL_ENV = "CQ_BEHAVIOR_CLASSIFIER_MODEL"
 
+# Sonnet, not the app's Haiku client, and measured rather than assumed
+# (2026-09-02, 120 stored rows, same prompt, same rows): Haiku dropped
+# 26 rows Sonnet kept and every one of the 26 that was read by hand was
+# conduct ("Instructed Joy to look at the deployment", "Deferred the
+# decision until Monday", "Confirmed that 624 is still good"), filed as
+# the other person's commitment or as an event. Sonnet's misses ran the
+# other way, keeping a status relay now and then, which is the failure
+# that costs nothing. A wrong drop here is a memory nobody can
+# re-observe, because the transcript is not retained. At roughly seven
+# rows a meeting the difference is under half a cent.
+DEFAULT_MODEL = "claude-sonnet-4-6"
+
 
 def enabled() -> bool:
     return os.getenv(ENABLED_ENV, "true").strip().lower() not in ("0", "false", "no")
 
 
 def model_override() -> Optional[str]:
-    return os.getenv(MODEL_ENV) or None
+    return os.getenv(MODEL_ENV) or DEFAULT_MODEL
 
 
 def classifier_types(manifest: Optional[dict]) -> List[str]:
@@ -126,9 +149,23 @@ def build_classifier_system(manifest: Optional[dict]) -> str:
         "it states what the person prefers, values or leans toward, it is "
         "a preference, even when they said it forcefully. If it is about a "
         "system, a product, a market or the world rather than about the "
-        "person's conduct, it is a takeaway or an event. Type each item on "
-        "its own merits: it is normal for every item in a batch to be a "
-        "behavior, and normal for none to be.\n\n"
+        "person's conduct, it is a takeaway or an event. Two tests that "
+        "settle most items. First, the row is about its OWNER: when the "
+        "owner asked, instructed, assigned or directed somebody ELSE to do "
+        "a thing, the row records the owner's conduct and is a behavior; "
+        "the task belongs to the other person and is not this row's type. "
+        "Second, remove the owner's name and ask whether what is left is "
+        "still true: a market size, a date, a method, a rule of the world "
+        "stays true without them and is a takeaway or an event however it "
+        "is phrased, while conduct disappears with the person. A pure "
+        "status relay fails that test too: what has launched, what is "
+        "pending, what was raised last week and where a document currently "
+        "sits are events when the row says nothing about how the owner "
+        "handled it. But declining, confirming, requesting, deferring and "
+        "pushing back are conduct even when a status is mentioned in the "
+        "same breath, and those stay behavior. Type each "
+        "item on its own merits: it is normal for every item in a batch to "
+        "be a behavior, and normal for none to be.\n\n"
         "Choose exactly one type per item from this list, using these "
         "definitions and no others:\n"
         f"{_definitions(manifest, names)}\n\n"
