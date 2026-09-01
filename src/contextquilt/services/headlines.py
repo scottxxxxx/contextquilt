@@ -62,6 +62,7 @@ DROPPED_FIGURE = "concrete_figure_dropped"
 IMPERATIVE = "addresses_the_user"
 EMPTY = "empty"
 DASH = "contains_a_dash"
+PLACEHOLDER_NAME = "diarization_placeholder"
 
 # Reasons a BATCH produced nothing, as opposed to a single line being
 # refused. Separate names because "the model answered in prose", "the
@@ -85,6 +86,31 @@ _IMPERATIVE = re.compile(
     r"consider|note that|you should|you need)\b", re.I)
 
 _DASHES = ("—", "–")
+
+# "Speaker 3", "Speaker_10", "Unknown Speaker". A diarization label is
+# the transcript's way of saying it does not know who spoke, and it is
+# not a name. The rest of the system already holds that ruling:
+# `is_placeholder_or_self_person` refuses these out of the entities
+# array, and `drop_placeholder_entities` strips them again on the way
+# to storage. The headline is the ONE surface where the string is most
+# visible to a user, and it was the one place nothing checked, so 18
+# live headlines read "Speaker 3 create checklist snapshot by Friday"
+# on the most prominent text in the product.
+#
+# SAME VOCABULARY, DIFFERENT QUESTION, and that is why this is a
+# separate expression rather than a call to that predicate. It asks
+# "IS this string a placeholder name" and matches on a prefix. A
+# headline needs "does this line CONTAIN one", mid sentence, because
+# the label arrives inside a written line and never as the whole of it.
+#
+# Deliberately NOT matching a bare "unknown". The diarization LABEL is
+# what is being refused, and "unknown" alone is ordinary English that
+# belongs in a headline ("Unknown cause of the latency spike"). A rule
+# that ate that would refuse good lines to catch a form that has never
+# appeared in the data.
+_PLACEHOLDER = re.compile(
+    r"\bspeakers?[\s_]*\d+\b|\b(?:unknown|unidentified)\s+speakers?\b",
+    re.I)
 
 
 def _figures(text: str) -> set:
@@ -121,6 +147,8 @@ def why_invalid(headline: Optional[str], fact: str) -> Optional[str]:
         return DASH
     if _IMPERATIVE.match(text):
         return IMPERATIVE
+    if _PLACEHOLDER.search(text):
+        return PLACEHOLDER_NAME
 
     head_figures = _figures(text)
     fact_figures = _figures(fact or "")
@@ -152,7 +180,12 @@ SYSTEM = (
     "5. Sentence case. No full stop at the end.\n"
     "6. State the thing. Never address the reader, never instruct "
     "them, never begin with Remember or Ask or Check.\n"
-    "7. Use no dashes of any kind. A comma or two sentences instead.\n\n"
+    "7. Use no dashes of any kind. A comma or two sentences instead.\n"
+    "8. Never write a transcript speaker label. If the fact says "
+    "Speaker 3 or Unknown Speaker, that is the transcript saying it "
+    "does not know who spoke, not a name. Write the line without "
+    "the actor: \"Create checklist snapshot by Friday\", never "
+    "\"Speaker 3 create checklist snapshot by Friday\".\n\n"
     "Good, from real facts:\n"
     '  "Zero data retention. No exceptions."\n'
     '  "60-67% small firms is the sweet spot"\n'
@@ -328,7 +361,8 @@ RETRY_SYSTEM = (
     "2. Keep any number or dollar figure the fact contains.\n"
     "3. Never state a number the fact does not contain.\n"
     "4. Sentence case, no full stop, no dashes of any kind.\n"
-    "5. State the thing. Never address the reader.\n\n"
+    "5. State the thing. Never address the reader.\n"
+    "6. Never write a transcript speaker label such as Speaker 3. Drop the actor and state what happened.\n\n"
     "Return raw JSON only, no prose and no code fence, exactly:\n"
     '{"headlines": [{"id": "<the id given>", "headline": "<text>"}]}\n'
 )
