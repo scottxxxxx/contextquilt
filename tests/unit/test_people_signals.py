@@ -245,3 +245,60 @@ def test_presence_anchor_counts_days_not_rows():
         {"last_seen_at": datetime(2026, 8, 5, 17, tzinfo=timezone.utc), "turn_count": 6},
     ]
     assert presence_anchor(same_day)["meetings_present"] == 1
+
+
+# ---------------------------------------------- you_owe honesty gate
+
+from datetime import datetime, timezone
+from contextquilt.services.people_signals import (
+    OWED_TO_OBSERVABLE_SINCE, owed_to_instrument_has_looked)
+
+_C = {"commitment", "blocker"}
+_self = lambda o: o == "Scott"
+_AFTER = OWED_TO_OBSERVABLE_SINCE
+_BEFORE = datetime(2026, 8, 15, tzinfo=timezone.utc)
+
+
+def _row(**kw):
+    base = {"patch_type": "commitment", "origin_id": "m1",
+            "created_at": _AFTER, "owner": "Scott"}
+    base.update(kw)
+    return base
+
+
+def test_an_empty_answer_needs_a_working_instrument():
+    """`[]` asserts "we looked and found nothing". Before the fix the
+    instrument had never worked, so nothing captured then can support
+    that claim. Scott's card said "nothing open" above two items that
+    named the person."""
+    assert owed_to_instrument_has_looked([_row(created_at=_BEFORE)], _C, _self) is False
+
+
+def test_a_post_fix_extracted_commitment_is_enough():
+    assert owed_to_instrument_has_looked([_row()], _C, _self) is True
+
+
+def test_a_hand_written_item_is_not_evidence_either_way():
+    # The client composer sends no owed_to, so a manual item (no
+    # origin) could never carry the edge and cannot vouch for absence.
+    assert owed_to_instrument_has_looked([_row(origin_id=None)], _C, _self) is False
+
+
+def test_somebody_elses_commitment_does_not_count():
+    # you_owe is about what the USER owes; a counterparty's item says
+    # nothing about the user's edges.
+    assert owed_to_instrument_has_looked([_row(owner="Steven")], _C, _self) is False
+
+
+def test_a_non_completable_type_does_not_count():
+    assert owed_to_instrument_has_looked([_row(patch_type="decision")], _C, _self) is False
+
+
+def test_the_boundary_day_itself_counts():
+    # On or after, so the fix day is inside the window.
+    assert owed_to_instrument_has_looked([_row(created_at=_AFTER)], _C, _self) is True
+
+
+def test_one_good_row_among_many_bad_is_enough():
+    rows = [_row(created_at=_BEFORE), _row(origin_id=None), _row()]
+    assert owed_to_instrument_has_looked(rows, _C, _self) is True

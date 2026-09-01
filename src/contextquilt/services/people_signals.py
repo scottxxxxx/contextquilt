@@ -283,3 +283,48 @@ def last_seen_in(appearances: list) -> "dict | None":
         "last_seen_at": ts.isoformat() if hasattr(ts, "isoformat") else ts,
         "capacities": sorted(best.get("capacities") or []),
     }
+
+
+# The day `owed_to` edges became producible. Before this, the edge shape
+# was carried only by a JSON schema the Anthropic client does not put on
+# the wire, so the model invented keys and every edge was discarded on
+# arrival. Two survived in three months across 9,088 connections.
+OWED_TO_OBSERVABLE_SINCE = datetime(2026, 9, 1, tzinfo=timezone.utc)
+
+
+def owed_to_instrument_has_looked(open_items: List[dict],
+                                  completable_types,
+                                  is_self_owned,
+                                  since: datetime = OWED_TO_OBSERVABLE_SINCE) -> bool:
+    """Whether an EMPTY `you_owe` would be an observation or a guess.
+
+    `[]` asserts "we looked and found nothing", and that is only honest
+    when the instrument that looks has ever worked for this user. It had
+    not. Scott's Steven card read "You owe Steven: nothing open" above
+    two open items naming Steven in their text, because
+    `owed_to_available` follows the manifest DECLARING the label, and
+    declared is not the same as populated.
+
+    True when at least one of the user's open commitments was captured
+    by a working instrument: extracted (it carries an origin) on or
+    after the fix, and owned by the user. A hand-written item can never
+    carry the edge, because the client composer does not send one, so it
+    is not evidence either way and does not count.
+
+    Transcripts are not retained, so pre-fix rows can never be re-read.
+    This gate is what stops a permanent falsehood from wearing the shape
+    of a fact. A real edge is always served regardless; this only decides
+    between `[]` and null when there is none.
+    """
+    for r in open_items or ():
+        if r.get("patch_type") not in completable_types:
+            continue
+        if not r.get("origin_id"):
+            continue
+        created = r.get("created_at")
+        if created is None or created < since:
+            continue
+        if not is_self_owned(r.get("owner")):
+            continue
+        return True
+    return False

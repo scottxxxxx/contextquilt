@@ -48,6 +48,7 @@ from contextquilt.services import insight_cards
 from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
+from contextquilt.services import people_signals
 from contextquilt.services import woven_digest as woven_digest_svc
 from contextquilt.services import facet_runtime
 from contextquilt.services.consolidation import (
@@ -5833,13 +5834,42 @@ async def _people_core(
         you_owe = None
         if owed_to_available and patch_id:
             owed_ids = owed_by_person.get(patch_id) or ()
-            you_owe = [
+            owed = [
                 r for r in open_items
                 if r["shelved_at"] is None
                 and r["patch_type"] in completable_set
                 and str(r["patch_id"]) in owed_ids
                 and is_self_owned(r["owner"], user_label)
             ]
+            # AN EMPTY LIST ASSERTS "WE LOOKED AND FOUND NOTHING", and
+            # that is only honest when the instrument that looks has
+            # ever worked. It had not. `owed_to` edges could not be
+            # produced before OWED_TO_OBSERVABLE_SINCE: the edge shape
+            # lived only in a JSON schema the model never received, so
+            # every edge it emitted was discarded on arrival. Two
+            # survived in three months across 9,088 connections.
+            #
+            # Scott's Steven card read "You owe Steven: nothing open"
+            # above two open items that named Steven in their text.
+            # `owed_to_available` was true because the manifest DECLARES
+            # the label, and declared is not the same as populated.
+            #
+            # So: a real edge is served whenever it exists. An empty
+            # answer is served only if at least one of the user's open
+            # commitments was captured by a working instrument, meaning
+            # extracted (it has an origin) on or after the fix. A
+            # hand-written item can never carry the edge, because the
+            # client composer does not send one, so it is not evidence
+            # either way. Otherwise the honest answer is null: not that
+            # we heard. Transcripts are not retained, so the pre-fix
+            # rows can never be re-read, and this gate is what stops a
+            # permanent falsehood from wearing the shape of a fact.
+            if owed:
+                you_owe = owed
+            elif people_signals.owed_to_instrument_has_looked(
+                    open_items, completable_set,
+                    lambda o: is_self_owned(o, user_label)):
+                you_owe = []
 
         # History legs: same matching predicates as the open ledger (owner
         # name/alias or owns edge; owed_to edge + self ownership), applied
