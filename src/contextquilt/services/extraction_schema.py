@@ -427,6 +427,7 @@ def enforce_connection_vocabulary(
     }
 
     kept = flipped = dropped = 0
+    emitted: dict = {}
     dropped_detail: list = []
     pending_flips: list = []  # (target_patch, new_edge) — applied after the scan
 
@@ -442,6 +443,8 @@ def enforce_connection_vocabulary(
             if not isinstance(edge, dict):
                 continue
             label = edge.get("label")
+            if isinstance(label, str) and label:
+                emitted[label] = emitted.get(label, 0) + 1
             to_type = edge.get("target_type")
             verdict, spec_role = classify_connection(label, from_type, to_type, label_specs)
             if verdict == "valid":
@@ -481,13 +484,35 @@ def enforce_connection_vocabulary(
         if not duplicate:
             connects.append(new_edge)
 
-    if flipped or dropped:
-        content["_connection_vocabulary_enforced"] = {
-            "kept": kept,
-            "flipped": flipped,
-            "dropped": dropped,
-            "dropped_detail": dropped_detail[:20],
-        }
+    # ALWAYS RECORDED, and the gate that used to sit here is how nine
+    # edge labels died without anybody noticing.
+    #
+    # This block was `if flipped or dropped`, so it spoke only when the
+    # model emitted something INVALID. A label the model simply never
+    # emits produces nothing to flip and nothing to drop, so it made no
+    # sound at all. Measured 2026-09-01 across ~6,200 lifetime edges:
+    # `belongs_to`, `owns` and `works_on` carry 99.3% of them, six more
+    # labels produced 44 between them, and `member_of`, `reports_to` and
+    # `held_by` have NEVER been produced once. `owed_to` stands at 2,
+    # which is why a person card can say "you owe them nothing open"
+    # about somebody you owe two things.
+    #
+    # Every one of those is declared in the manifest and rendered into
+    # the prompt with its description and its type constraints, so the
+    # model is fully informed and uses three. That is a finding, and the
+    # old gate guaranteed nobody would ever see it: an empty result must
+    # name itself.
+    content["_connection_vocabulary_enforced"] = {
+        "kept": kept,
+        "flipped": flipped,
+        "dropped": dropped,
+        "dropped_detail": dropped_detail[:20],
+        # WHICH labels, not just how many. A count cannot distinguish
+        # forty healthy edges spread across the vocabulary from forty
+        # that are all `belongs_to`.
+        "labels_emitted": dict(sorted(emitted.items())),
+        "labels_declared": len(label_specs),
+    }
     return content
 
 
@@ -1020,6 +1045,13 @@ def sanitize_behavior_observations(content: dict) -> dict:
         if is_placeholder_or_self_person(owner):
             reason = "placeholder_owner"
             word = str(owner)[:40]
+        elif _is_self_owner(owner):
+            reason = "self_observation"
+            word = str(owner)[:40]
+        elif (_PREFERENCE_FORM.search(text)
+              and not _SOMEONE_ELSES.search(text)):
+            reason = "preference_not_conduct"
+            word = _PREFERENCE_FORM.search(text).group(0)
         elif TASK_HANDOFF.search(text):
             # "Another stage already does all of that and will do it
             # better than you" is the prompt's own line about
@@ -1438,6 +1470,47 @@ BEHAVIOR_OBSERVATION_TYPES = frozenset({"behavior"})
 # "Volunteered to take the escalation before anyone assigned it", so a
 # broad promise rule would delete the examples the prompt asks for.
 # Measured: 22 rows in production, every one a task.
+# A statement of PREFERENCE, which the manifest's preference type claims
+# by name: "Any statement of the form 'prefers X', 'prefers X over Y',
+# 'leans toward X', or 'values X' is a preference". Scott read
+# "Articulated a preference for lifestyle business outcomes" labelled
+# BEHAVIOR and said, correctly, that prefer is the root of preference.
+#
+# TIGHT ON PURPOSE, and the loose version was written first and thrown
+# away. Bare `values` is a plural noun in this corpus ("null values in
+# the results", "what values are going under the other category") and
+# bare `preferred` is usually an adjective ("her preferred doctors"). A
+# loose rule caught 12 rows of which 4 were none of the above.
+_PREFERENCE_FORM = re.compile(
+    r"\b(prefers|prefer to|would (?:have )?prefer(?:red)?|"
+    r"preference for|leans? toward|leaned toward)\b", re.I)
+
+# ...and NOT when the preference belongs to somebody else. "Pushed back
+# on Scott's initial preference for on-premise hardware by asking
+# clarifying questions" is Steven's CONDUCT; the preference in it is
+# Scott's, referenced. Without this guard that row is destroyed by a
+# rule aimed at something else.
+_SOMEONE_ELSES = re.compile(r"\b\w+'s\s+(?:\w+\s+){0,2}preference\b", re.I)
+
+# The (you) speaker. The behavior prompt: "Never record an observation
+# about the speaker marked (you). That is the user, and this corpus is
+# about the people they work with."
+#
+# ORDER IS LOAD BEARING. This runs at position 3 in the chain, BEFORE
+# `sanitize_you_marker_from_patches` at position 6 strips the marker,
+# so the evidence is still on the row when this looks. Move either one
+# and this rule silently stops finding anything.
+_SELF_OWNER = re.compile(r"\(\s*you\s*\)", re.I)
+
+
+def _is_self_owner(owner: object) -> bool:
+    """True when the owner is the app user rather than a counterparty."""
+    if not isinstance(owner, str) or not owner.strip():
+        return False
+    low = owner.strip().lower()
+    return bool(_SELF_OWNER.search(low)) or low in _OWNER_YOU_TOKENS
+
+
 TASK_HANDOFF = re.compile(
     r"^\s*(agreed to|committed to|promised to|will (?:send|provide|deliver))\b",
     re.I)
