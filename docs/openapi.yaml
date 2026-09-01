@@ -1066,6 +1066,106 @@ paths:
               schema:
                 $ref: "#/components/schemas/CreateProjectResponse"
 
+  /v1/projects/{user_id}/resolve:
+    get:
+      operationId: resolveProject
+      summary: Resolve Project
+      description: >
+        Resolve a project reference to CQ's own record, or refuse to.
+        Built after a client-side repair matched projects BY NAME and
+        pointed one project's record at another's id, so a project view
+        asked CQ for the wrong project and got a correct answer to the
+        wrong question. Repairs should match on ID; this is where one
+        holding only a name comes to ask.
+
+
+        IT DOES NOT GUESS. Three answers: `resolved` (one project, with
+        CQ's exact stored name), `ambiguous` (several, with candidates
+        and NO project_id), `unknown` (none, or an id CQ does not hold
+        for this user).
+
+
+        Prefer `project_id=`: it answers the question that detects
+        drift, which is whether the id the client holds is real for this
+        user. An `unknown` there means the caller is scoped to something
+        that does not exist in CQ, a state otherwise invisible from the
+        device.
+
+
+        Candidate counts are for a HUMAN to choose between two real
+        projects. A client that ranks them and takes the largest has
+        reinvented the bug this endpoint ends.
+      tags: [Projects]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: name
+          in: query
+          required: false
+          description: Project name to resolve to CQ's id.
+          schema:
+            type: string
+        - name: project_id
+          in: query
+          required: false
+          description: Project id to validate against CQ's record.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: >
+            An answer or an explicit refusal. Always 200: an unknown
+            project is a fact about the caller's state, not a failed
+            request, and a 404 would make "this id is wrong" look like
+            "the endpoint is missing".
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  query:
+                    type: object
+                    description: >
+                      The parameters as received, echoed so a dropped
+                      query param is visible rather than inferred from
+                      an empty answer.
+                    properties:
+                      name:
+                        type: string
+                        nullable: true
+                      project_id:
+                        type: string
+                        nullable: true
+                  status:
+                    type: string
+                    enum: [resolved, ambiguous, unknown]
+                  match:
+                    type: string
+                    nullable: true
+                    enum: [by_id, exact, normalized, null]
+                  project_id:
+                    type: string
+                    nullable: true
+                    description: Null unless status is resolved.
+                  name:
+                    type: string
+                    nullable: true
+                    description: CQ's exact stored name, null unless resolved.
+                  candidates:
+                    type: array
+                    description: Populated only when status is ambiguous.
+                    items:
+                      type: object
+                      properties:
+                        project_id: {type: string}
+                        name: {type: string}
+                        status: {type: string, nullable: true}
+                        patch_count: {type: integer}
+                        meeting_count: {type: integer}
+
   /v1/projects/{user_id}/{project_id}:
     patch:
       operationId: updateProject
