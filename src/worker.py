@@ -6351,13 +6351,21 @@ class ColdPathWorker:
                 response.content,
                 (resolved_manifest or {}).get("connection_labels"),
             )
-            if (cv := response.content.get("_connection_vocabulary_enforced")):
+            # Logged on EVERY extraction now, not only when something
+            # was flipped or dropped. The old conditional is how nine
+            # declared edge labels went to zero unnoticed: a label the
+            # model never emits has nothing to drop, so it never
+            # appeared here. `labels_emitted` is the line that makes a
+            # vocabulary collapse visible.
+            if (cv := response.content.get("_connection_vocabulary_enforced")) is not None:
                 logger.info(
                     "connection_vocabulary_enforced",
                     user_id=user_id,
                     kept=cv.get("kept", 0),
                     flipped=cv.get("flipped", 0),
                     dropped=cv.get("dropped", 0),
+                    labels_emitted=cv.get("labels_emitted", {}),
+                    labels_declared=cv.get("labels_declared", 0),
                     dropped_detail=cv.get("dropped_detail", []),
                     model=response.model,
                 )

@@ -481,3 +481,72 @@ class TestRulesTheModelIgnores:
         assert out["patches"] == []
         assert out["_behavior_observations_sanitized"]["dropped"][0]["reason"] \
             == "character_not_conduct"
+
+
+class TestPreferenceAndSelfRules:
+    """Scott: "prefer is the root of preference"."""
+
+    def test_a_stated_preference_is_not_conduct(self):
+        # The manifest's preference type claims this form by name.
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Articulated a preference for lifestyle "
+                               "business outcomes over venture scale",
+                       "owner": "Steven Williams"}}]})
+        assert out["patches"] == []
+        assert out["_behavior_observations_sanitized"]["dropped"][0]["reason"] \
+            == "preference_not_conduct"
+
+    def test_prefers_is_caught_too(self):
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Stated he prefers a lifestyle company",
+                       "owner": "Steven Williams"}}]})
+        assert out["patches"] == []
+
+    def test_SOMEONE_ELSES_preference_is_still_conduct(self):
+        # THE GUARD. "Pushed back on Scott's initial preference" is
+        # Steven's conduct; the preference in it belongs to Scott and is
+        # merely referenced. Without this the rule destroys a good row.
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Pushed back on Scott's initial preference for "
+                               "on-premise hardware by asking questions",
+                       "owner": "Steven Williams"}}]})
+        assert len(out["patches"]) == 1
+
+    def test_preferred_as_an_adjective_survives(self):
+        # "her preferred doctors" is not a stated preference.
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Asked Sarah whether she had issues accessing "
+                               "her preferred doctors", "owner": "Suresh"}}]})
+        assert len(out["patches"]) == 1
+
+    def test_values_as_a_plural_noun_survives(self):
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Reported finding null values in the results",
+                       "owner": "Vijay"}}]})
+        assert len(out["patches"]) == 1
+
+    def test_an_observation_about_the_you_speaker_is_dropped(self):
+        # The prompt: "Never record an observation about the speaker
+        # marked (you)."
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Specified a preference for afternoon "
+                               "appointments", "owner": "Scott (you)"}}]})
+        assert out["patches"] == []
+        assert out["_behavior_observations_sanitized"]["dropped"][0]["reason"] \
+            == "self_observation"
+
+    def test_the_self_rule_runs_before_the_you_marker_is_stripped(self):
+        # Order is load bearing: this sanitizer sits at position 3 and
+        # `sanitize_you_marker_from_patches` at position 6. If they ever
+        # swap, the marker is gone before this looks and the rule
+        # silently stops finding anything.
+        import inspect
+        from contextquilt.services import extraction_schema as _es
+        src = inspect.getsource(_es.sanitize_behavior_observations)
+        assert "_is_self_owner" in src

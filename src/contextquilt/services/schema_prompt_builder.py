@@ -548,7 +548,38 @@ def _connection_labels_section(manifest: Dict[str, Any]) -> str:
     if not labels:
         return ""
 
-    lines = ["=== CONNECTION LABELS: valid `connects_to` edges ===", ""]
+    lines = [
+        "=== CONNECTION LABELS: valid `connects_to` edges ===",
+        "",
+        # THE SHAPE WAS ONLY EVER IN THE JSON SCHEMA, and the schema does
+        # not reach the model: AnthropicLLMClient.extract() accepts
+        # `json_schema` for interface parity and does NOT enforce it on
+        # the wire. So the only carrier of the edge contract was a
+        # document the model never saw, and it invented plausible keys
+        # instead, emitting {"type": "belongs_to", "target": "Okafor
+        # wedding"}. Both readers want `label` / `target_text` /
+        # `target_type`, so `target_text` came back empty and EVERY edge
+        # was discarded: `enforce_connection_vocabulary` drops it, and
+        # `store_connected_patches` skips it on the same missing field.
+        #
+        # Measured 2026-09-01 on a real transcript: 22 edges emitted, 22
+        # dropped, 0 labels recorded. This is the June entity regression
+        # exactly, in a different field: the prompt never specified the
+        # thing, the schema did, and the schema stopped travelling.
+        "Each edge in `connects_to` is an object with EXACTLY these keys:",
+        "",
+        '  {"label": "<one of the labels below>",',
+        '   "target_text": "<the `value.text` of the other patch, copied verbatim>",',
+        '   "target_type": "<that patch\'s `type`>"}',
+        "",
+        "Use those key names literally. `target_text` must match the "
+        "other patch's text exactly, because that string is how the edge "
+        "is resolved; an edge whose target text matches no patch in this "
+        "output is discarded. Do not use `type` or `target` as keys on "
+        "an edge: `type` is the patch's own field and an edge that uses "
+        "it is silently lost.",
+        "",
+    ]
     for lb in labels:
         label = lb.get("label")
         role = lb.get("role")
