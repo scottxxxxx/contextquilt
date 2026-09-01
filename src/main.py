@@ -89,6 +89,7 @@ from contextquilt.services.people_network import (
 from contextquilt.services import described_as
 from contextquilt.services import who_they_are
 from contextquilt.services import trajectory as trajectory_svc
+from contextquilt.services import project_resolve
 from contextquilt.services.entity_aliasing import person_candidates, tokenize_name
 from contextquilt.services.people_identity import (
     IdentityRequestError,
@@ -9715,6 +9716,65 @@ async def get_user_projects(
         patch_count=r["patch_count"],
         created_at=r["created_at"].isoformat() if r["created_at"] else None
     ) for r in rows]
+
+@app.get("/v1/projects/{user_id}/resolve", tags=["Projects"])
+async def resolve_project(
+    user_id: str,
+    name: Optional[str] = Query(None, description="Project name to resolve to CQ's id"),
+    project_id: Optional[str] = Query(None, description="Project id to validate against CQ's record"),
+    app_id: str = Depends(verify_application_access),
+):
+    """Resolve a project reference to CQ's own record, or refuse to.
+
+    Built 2026-08-31 after a client-side repair matched projects BY NAME
+    and pointed one project's record at another's id. Scott opened
+    "Immigration  Interview App" and saw CBE's work: the app asked CQ
+    for CBE's project id under the Immigration heading, and CQ filtered
+    exactly as asked. His ruling was that repairs match on ID, never on
+    name, and this is where a repair holding only a name comes to ask.
+
+    IT WILL NOT GUESS. An endpoint that returned a best match would move
+    the guess from the client into CQ without removing it, and guessing
+    is what caused the incident. Three answers:
+
+      resolved    one project. `project_id` and CQ's exact stored `name`
+      ambiguous   several. `candidates`, and NO project_id
+      unknown     none, or an id CQ does not hold for this user
+
+    `project_id=` IS THE ONE A REPAIR SHOULD PREFER, because it answers
+    the question that actually detects drift: is the id I am holding
+    real for this user. An `unknown` there means the client is scoped to
+    something that does not exist in CQ, which is exactly the state that
+    produced the incident and is invisible from the device.
+
+    The candidate counts exist so a HUMAN can choose between two real
+    projects. A client that ranks them and takes the largest has
+    reinvented the bug this endpoint was written to end.
+    """
+    rows = await db_pool.fetch(
+        """
+        SELECT p.project_id, p.name, p.status,
+               (SELECT count(*) FROM context_patches cp
+                 WHERE cp.project_id = p.project_id
+                   AND COALESCE(cp.status, 'active') = 'active') AS patch_count,
+               (SELECT count(*) FROM origin_project_assignments opa
+                 WHERE opa.project_id = p.project_id) AS meeting_count
+          FROM projects p
+         WHERE p.user_id = $1
+        """,
+        user_id,
+    )
+    answer = project_resolve.resolve(
+        [dict(r) for r in rows], name=name, project_id=project_id)
+    logger.info("project_resolve", user_id=user_id, asked_name=name,
+                asked_project_id=project_id, status=answer["status"],
+                match=answer["match"], candidates=len(answer["candidates"]))
+    # The query is echoed so a caller comparing what it asked against
+    # what it got can see a dropped parameter rather than infer one from
+    # an empty answer. A middlebox has eaten a query param on this
+    # system before.
+    return {"query": {"name": name, "project_id": project_id}, **answer}
+
 
 @app.post("/v1/projects/{user_id}", tags=["Projects"])
 async def create_project(
