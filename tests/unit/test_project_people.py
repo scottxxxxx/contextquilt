@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MAIN = (ROOT / "src" / "main.py").read_text()
 MIGRATION = (ROOT / "init-db" / "47_project_people.sql").read_text()
 
+from contextquilt.services import project_meetings
 from contextquilt.services.project_roster import merge_roster
 
 
@@ -199,11 +200,37 @@ def test_an_empty_project_is_an_empty_roster_not_a_crash():
     assert out == {"people": [], "declared_count": 0, "observed_count": 0}
 
 
-def test_observed_membership_comes_from_assignments_not_patch_stamps():
-    # A meeting's assignment is the record of what belongs to a project;
-    # a patch's project stamp is set at ingest and is a different claim.
+def test_observed_membership_reads_assignments_AND_patch_stamps():
+    """REVERSED 2026-09-01, and the reversal is the point.
+
+    This test used to assert the opposite: that observed membership
+    comes from assignments and NOT from patch stamps, on the reasoning
+    that an assignment is the record of what belongs to a project while
+    a patch's stamp is a different claim set at ingest.
+
+    The distinction was real and the conclusion was wrong. Measured on
+    production the day it was found, `origin_project_assignments` held
+    FIVE rows in the entire database, because only the explicit rescope
+    route writes it. So the observed leg had never once matched a
+    person, and 85 of 160 projects reported 0 meetings while holding
+    real ones, ABM among them with 94.
+
+    That mattered the moment explicit membership shipped: an observed
+    leg that can never match makes `meetings: 0` on every declared
+    member, and Scott had already ruled that 0 is a real state rather
+    than missing data. It would have been missing data every time.
+
+    Both records are evidence. A meeting arriving already scoped stamps
+    its patches; a rescope writes an assignment. UNION, not a choice.
+    """
     body = _route("list_project_people")
-    assert "origin_project_assignments" in body
+    # Both sources reached, through the ONE shared definition rather
+    # than a second copy of the SQL living here.
+    assert "project_meetings.meetings_for_project_sql" in body
+    sql = project_meetings.meetings_for_project_sql("$2")
+    assert "origin_project_assignments" in sql
+    assert "context_patches" in sql
+    assert "UNION" in sql
 
 
 def test_merged_people_do_not_appear_twice():
