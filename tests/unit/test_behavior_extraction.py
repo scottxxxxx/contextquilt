@@ -167,3 +167,42 @@ def test_the_yield_tool_still_accepts_no_since():
     tool = pathlib.Path("scripts/inspect_behavior_yield.py").read_text()
     assert "since = None" in tool
     assert "if args.since:" in tool
+
+
+# --- the lane is fenced by the same sanitizer as the main chain --------
+
+def test_the_lane_runs_the_sanitizer_before_the_sink():
+    """`sanitize_behavior_observations` was wired into the MAIN
+    extraction's chain on 2026-09-01 and this lane, which writes 93% of
+    the corpus, went parse -> sink untouched. One rule on two carriers
+    (doc 19.11): the fix landed on the one somebody was looking at."""
+    body = WORKER.split("async def _extract_behavior_observations")[1].split(
+        "async def ")[0]
+    assert "sanitize_behavior_observations(" in body
+    assert body.index("sanitize_behavior_observations(") < body.index(
+        "store_connected_patches(")
+
+
+def test_the_sanitizer_accepts_the_lane_output_shape():
+    """The lane feeds the parser's own output straight into the
+    sanitizer. A placeholder owner is refused, a named one survives,
+    and a stated preference comes back as a preference held by the
+    person, exactly as it would from the main chain."""
+    from contextquilt.services.extraction_schema import (
+        sanitize_behavior_observations,
+    )
+    patches = parse_behavior_response(_resp(
+        ("Asked for the cost breakdown before agreeing", "Denby"),
+        ("Pushed back on the timeline", "Speaker 2"),
+        ("Prefers to test and validate before committing", "Steven"),
+    ))
+    out = sanitize_behavior_observations({"patches": patches})
+    kept = out["patches"]
+    assert [p["value"]["owner"] for p in kept] == ["Denby", "Steven"]
+    assert kept[0]["type"] == "behavior"
+    assert kept[1]["type"] == "preference"
+    assert any(e.get("label") == "held_by" and e.get("target_text") == "Steven"
+               for e in kept[1]["connects_to"])
+    report = out["_behavior_observations_sanitized"]
+    assert report["count"] == 1
+    assert report["dropped"][0]["reason"] == "placeholder_owner"

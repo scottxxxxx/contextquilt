@@ -7335,6 +7335,28 @@ class ColdPathWorker:
             patches = behavior_extraction.parse_behavior_response(
                 response.content, user_label=user_label, defects=defects,
             )
+            # THE SANITIZER RUNS IN THIS LANE TOO. Its rules (placeholder
+            # owner, self observation, task handoff, character verdict,
+            # stated preference converted with `held_by`) were enforced
+            # in code on 2026-09-01 because both models ignore them in
+            # the prompt. They were wired into the MAIN extraction's
+            # chain only, and this lane, which writes 93% of the
+            # behavior corpus, went parse -> sink with no rule applied.
+            # The backfill cleaned history the same day, so the live gap
+            # was invisible from every number anybody looked at (24 rows
+            # written here since, none violating, because those meetings
+            # carried real names). One rule, two carriers, doc 19.11.
+            sanitized = sanitize_behavior_observations({"patches": patches})
+            patches = sanitized.get("patches") or []
+            if (bo := sanitized.get("_behavior_observations_sanitized")):
+                logger.info(
+                    "behavior_observations_sanitized", user_id=user_id,
+                    origin=origin_id, lane="behavior_observations",
+                    dropped=bo["count"], dropped_detail=bo["dropped"][:20],
+                    retyped=(bo.get("retyped") or [])[:20],
+                )
+                if not patches and bo["count"]:
+                    defects.append("all_sanitized")
             if not patches:
                 logger.info("behavior_observations_none", user_id=user_id,
                             origin=origin_id,
