@@ -1,6 +1,6 @@
 {
   "app_id": "shouldersurf",
-  "version": 11,
+  "version": 12,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
@@ -229,6 +229,26 @@
       }
     },
     {
+      "domain_type": "artifact",
+      "facet": "Connection",
+      "permanence": "quarter",
+      "display_name": "Artifact",
+      "description": "A named document, prototype, sheet, deck or recording that exists as a thing the group can open. Distinct from `deliverable`, which is the workstream being built: the deliverable is the chatbot, the artifact is the defect-tracking sheet kept while building it. Declared 2026-09-01 because the extractor was already emitting this type and CQ was storing it undeclared, so it had no display name and no facet and the client dropped every one of them.",
+      "value_shape": {
+        "text": "string",
+        "kind": "string?"
+      },
+      "completable": false,
+      "project_scoped": true,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": [
+          "text"
+        ],
+        "guidance": "Emit ONLY for an artifact named in the transcript that a person could go and open: 'CIGNA Rebuild Lab prototype', 'HDBot defects and testing feedback sheet', 'single vs multi-agent decision document'. Optional 'kind' may say document, prototype, sheet, deck, recording. Do NOT emit for the workstream itself, which is a `deliverable`, and do NOT emit for a document somebody merely promises to produce, which is a `commitment` until it exists. Rare by nature: most meetings name none."
+      }
+    },
+    {
       "domain_type": "role",
       "facet": "Connection",
       "permanence": "year",
@@ -329,6 +349,25 @@
           "text"
         ],
         "guidance": "Takeaways are EVALUATIVE observations with decision implications — 'Flux introduces churn risk', 'board wants measurable outcomes in reports', 'buyers prioritize schools over commute', 'Liu's motion patterns suggest fishing'. Restated facts, procedural statements, and plot summaries are NOT takeaways. Hard cap: 3 per meeting."
+      }
+    },
+    {
+      "domain_type": "observation",
+      "facet": "Episode",
+      "permanence": "quarter",
+      "display_name": "Observation",
+      "description": "A factual, non-evaluative note about how something in the world behaves, stated in the meeting and worth keeping. Distinct from `takeaway`, which is EVALUATIVE and carries a decision implication, and from `behavior`, which is about how a NAMED PERSON conducted themselves. Declared 2026-09-01 for the same reason as `artifact`.",
+      "value_shape": {
+        "text": "string"
+      },
+      "completable": false,
+      "project_scoped": false,
+      "self_only": false,
+      "extraction_rules": {
+        "required_fields": [
+          "text"
+        ],
+        "guidance": "Emit for a durable factual observation about a system, product or environment: 'opening the app on iPad stops background music playback'. If the statement judges something or implies a choice it is a `takeaway`. If it describes what a named person did it is a `behavior`. If it is a dated occurrence it is an `event`. When two of these fit, prefer the more specific one and do not emit both. Hard cap: 2 per meeting."
       }
     },
     {
