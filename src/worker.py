@@ -139,6 +139,7 @@ from contextquilt.services.entity_aliasing import (
     person_candidates,
 )
 from contextquilt.services import behavior_extraction
+from contextquilt.services import behavior_classifier
 from contextquilt.services import extraction_gate
 from contextquilt.services import role_semantics
 from contextquilt.services import alignment as alignment_svc
@@ -7363,6 +7364,18 @@ class ColdPathWorker:
                             defect=defects[0] if defects else "empty")
                 return 0
 
+            # The semantic half of the same fence: one batched call,
+            # every declared type offered as contrast, a verdict of
+            # anything the main extraction owns drops the row. Fails
+            # open. See behavior_classifier for the argument.
+            patches = await self._classify_behavior_observations(
+                patches, manifest, llm, user_id, origin_id,
+            )
+            if not patches:
+                logger.info("behavior_observations_none", user_id=user_id,
+                            origin=origin_id, defect="all_classified_elsewhere")
+                return 0
+
             stored = await store_connected_patches(
                 self.db, user_id, patches, "behavior_observations", app_id,
                 timestamp, project, project_id, origin_id, origin_type,
@@ -7380,6 +7393,53 @@ class ColdPathWorker:
             logger.warning("behavior_observations_failed", user_id=user_id,
                            origin=origin_id, reason=str(exc)[:200])
             return 0
+
+    async def _classify_behavior_observations(
+        self, patches: list, manifest, llm, user_id: str, origin_id,
+    ) -> list:
+        """Type check on the behavior lane's output, with contrast.
+
+        Returns the patches to store: the ones the judge called behavior
+        (or said nothing usable about) plus stated preferences already
+        converted. Everything the judge assigned to a type the main
+        extraction owns is dropped, and the drop is logged with its
+        texts, because the client cannot build this half and a silent
+        drop is the shape rule 8 warns about.
+
+        Never raises, and any failure returns the input unchanged: this
+        call may decline to store a row it was sure about and may never
+        lose one it was not.
+        """
+        if not patches or not behavior_classifier.enabled():
+            return list(patches)
+        try:
+            names = behavior_classifier.classifier_types(manifest)
+            response = await llm.extract(
+                system_prompt=behavior_classifier.build_classifier_system(manifest),
+                user_content=behavior_classifier.build_classifier_content(patches),
+                model=behavior_classifier.model_override(),
+            )
+            verdicts = behavior_classifier.parse_classifier_verdicts(
+                response.content, len(patches), names,
+            )
+            split = behavior_classifier.apply_classifier_verdicts(patches, verdicts)
+            histogram: dict = {}
+            for v in verdicts:
+                histogram[v or "none"] = histogram.get(v or "none", 0) + 1
+            logger.info(
+                "behavior_classifier_verdicts", user_id=user_id,
+                origin=origin_id, judged=len(patches),
+                kept=len(split["kept"]), retyped=len(split["retyped"]),
+                dropped=len(split["dropped"]),
+                dropped_detail=split["dropped"][:20], verdicts=histogram,
+                model=getattr(response, "model", None),
+                cost_usd=getattr(response, "cost_usd", None),
+            )
+            return split["kept"] + split["retyped"]
+        except Exception as exc:
+            logger.warning("behavior_classifier_failed", user_id=user_id,
+                           origin=origin_id, reason=str(exc)[:200])
+            return list(patches)
 
     async def _generate_headlines(
         self, user_id: str, origin_id, app_id,
