@@ -384,3 +384,53 @@ def apply_retry(first: Dict[str, Any], second: Dict[str, Any]) -> Dict[str, Any]
         "refused": dict(second.get("refused") or {}),
         "recovered": len(second.get("headlines") or {}),
     }
+
+
+def self_headline(fact: Optional[str]) -> Optional[str]:
+    """A fact that is ALREADY a valid headline is the headline.
+
+    Measured 2026-09-01 on the residue: of 123 tileable patches carrying
+    no headline, 21 were facts that pass every rule in `why_invalid`
+    unchanged. "Kevin Thompson case", "Boland case", "Rivera case". They
+    had been through the writer twice and come back empty both times,
+    and the model was being asked to improve on a line that was already
+    correct.
+
+    THE GATE MAKES THIS A PRODUCT BUG RATHER THAN A COST ONE. A patch
+    with no headline is not selected as a tile, so those 21 memories
+    could not appear in the quilt at all, no matter how far the user
+    paged. Twenty-one is small; the class is not, because every short
+    declarative fact this system ever stores lands in it.
+
+    Checked against the SAME validator the model's output faces, so a
+    fact adopted here cannot be one the writer would have been refused
+    for: same 48 characters, same figure rules, same no-dash, no-
+    imperative, no-cut-sentence. Nothing is waived for being original.
+
+    Returns None when the fact cannot serve, which is the signal to
+    spend a model call on it.
+    """
+    # No separate empty check: `why_invalid` already answers EMPTY for a
+    # blank line, and a second guard in front of it is a branch no test
+    # can distinguish. A sabotage removing it changed nothing, which is
+    # the honest signal that it was never load bearing.
+    text = (fact or "").strip()
+    return text if why_invalid(text, text) is None else None
+
+
+def partition_by_self_headline(patches: Iterable[Dict[str, Any]]):
+    """(already_have_one, need_a_written_line).
+
+    Applied BEFORE the model call, so a fact that is its own headline
+    costs nothing and cannot be refused. It also shrinks every batch,
+    which is the cheaper half of the same change.
+    """
+    free: Dict[str, str] = {}
+    remaining: List[Dict[str, Any]] = []
+    for patch in patches or ():
+        line = self_headline(patch_value(patch).get("text"))
+        if line:
+            free[str(patch.get("patch_id"))] = line
+        else:
+            remaining.append(patch)
+    return free, remaining

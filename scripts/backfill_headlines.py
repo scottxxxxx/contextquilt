@@ -115,6 +115,13 @@ async def main() -> int:
     if not args.apply:
         print("\nDRY RUN. Re-run with --apply to write.\n")
 
+    # Free ones first: a fact that is already a valid headline needs no
+    # model call and cannot be refused. It also shrinks every batch.
+    free, candidates = headlines.partition_by_self_headline(candidates)
+    print(f"  already valid as their own headline: {len(free)} "
+          f"(no model call)")
+    print(f"  needing a written line:              {len(candidates)}\n")
+
     llm = AnthropicLLMClient()
     written = 0
     recovered_total = 0
@@ -178,7 +185,18 @@ async def main() -> int:
         print(f"  {start + len(batch)}/{len(candidates)} considered, "
               f"{written} headlines, {sum(refused.values())} refused")
 
-    print(f"\n{'WROTE' if args.apply else 'WOULD WRITE'} {written} headlines")
+    if args.apply:
+        for pid, line in free.items():
+            await pool.execute(
+                """
+                UPDATE context_patches
+                   SET value = jsonb_set(COALESCE(value, '{}'::jsonb),
+                         '{headline}', to_jsonb($2::text), true)
+                 WHERE patch_id = $1
+                """, pid, line)
+    written += len(free)
+    print(f"\n{'WROTE' if args.apply else 'WOULD WRITE'} {written} headlines "
+          f"({len(free)} taken from the fact, no model call)")
     print(f"refused after retry: {dict(refused) or 'none'}")
     print(f"recovered by the second pass: {recovered_total}")
     print(f"cost: ${cost:.2f}")

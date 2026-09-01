@@ -32,6 +32,8 @@ from contextquilt.services.headlines import (
     TOO_LONG,
     RETRY_SYSTEM,
     apply_retry,
+    partition_by_self_headline as da_partition,
+    self_headline as da_self,
     build_retry_content,
     build_user_content,
     parse,
@@ -351,3 +353,78 @@ def test_only_the_surviving_refusal_is_reported():
     merged = apply_retry({"headlines": {}, "refused": {TOO_LONG: 5}},
                          {"headlines": {"a": "Short enough"}, "refused": {}})
     assert merged["refused"] == {}
+
+
+# --------------------------------------------------------------------
+# A fact that is already a valid headline IS the headline
+# --------------------------------------------------------------------
+
+def test_a_short_valid_fact_is_its_own_headline():
+    """Measured on the residue, 2026-09-01.
+
+    Of 123 tileable patches carrying no headline, 21 were facts that
+    pass every rule unchanged: "Kevin Thompson case", "Boland case",
+    "Rivera case". They had been through the writer TWICE and come back
+    empty both times, because the model was being asked to improve on a
+    line that was already correct.
+
+    The gate makes this a product bug rather than a cost one: no
+    headline means no tile, so those memories could not appear in the
+    quilt at all.
+    """
+    assert da_self("Kevin Thompson case") == "Kevin Thompson case"
+    assert da_self("Boland case") == "Boland case"
+
+
+def test_the_same_validator_judges_an_adopted_fact():
+    """Nothing is waived for being original.
+
+    A fact adopted here must not be one the writer would have been
+    refused for, or the rule becomes "48 characters unless we thought of
+    it first".
+    """
+    assert da_self("x" * 60) is None                      # too long
+    assert da_self("Kevin Thompson — the case") is None   # a dash
+    assert da_self("Remember to call Kevin") is None      # imperative
+    assert da_self("The case is closed.") is None         # cut sentence
+
+
+def test_a_fact_carrying_a_figure_still_passes_as_itself():
+    # It cannot drop a figure it already contains, so the figure rules
+    # are satisfied trivially rather than skipped.
+    assert da_self("Anderson owes $2,300") == "Anderson owes $2,300"
+
+
+@pytest.mark.parametrize("bad", [None, "", "   "])
+def test_an_empty_fact_is_not_a_headline(bad):
+    """Rejected by the VALIDATOR, not by a guard in front of it.
+
+    The first version had its own empty check. A sabotage removing that
+    check changed nothing, because `why_invalid` already answers EMPTY
+    for a blank line. A branch no test can distinguish is not a
+    safeguard, it is a second opinion nobody asked for, so it is gone
+    and this test now covers the path that actually decides.
+    """
+    assert da_self(bad) is None
+
+
+def test_the_partition_sends_only_the_rest_to_the_model():
+    """The cheaper half of the same change.
+
+    A fact that is its own headline costs no call and cannot be refused,
+    and every batch gets smaller.
+    """
+    free, rest = da_partition([
+        {"patch_id": "a", "value": {"text": "Rivera case"}},
+        {"patch_id": "b", "value": {"text": "y" * 60}},
+    ])
+    assert free == {"a": "Rivera case"}
+    assert [p["patch_id"] for p in rest] == ["b"]
+
+
+def test_the_partition_handles_a_json_string_value():
+    # The JSONB trap, on the newest code path rather than the oldest.
+    import json as _json
+    free, rest = da_partition([
+        {"patch_id": "a", "value": _json.dumps({"text": "Glass case"})}])
+    assert free == {"a": "Glass case"} and rest == []
