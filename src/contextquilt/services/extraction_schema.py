@@ -971,6 +971,36 @@ def strip_prose_from_person_names(content: dict) -> dict:
     return content
 
 
+def convert_to_preference(patch: dict) -> dict:
+    """Retype a behavior-lane patch as the preference it states.
+
+    The user's own preference loses its owner: ownership is already
+    implicit, and `held_by` pointing at the (you) speaker is the case
+    the manifest says needs no edge. A counterparty's preference keeps
+    the owner and gains a `held_by` edge to that person, the edge the
+    manifest built for exactly this. Shared by the sanitizer's wording
+    rule and the classifier's verdict so the two conversions cannot
+    drift into producing different shapes for one fact.
+
+    Mutates and returns the patch.
+    """
+    value = patch.get("value") if isinstance(patch.get("value"), dict) else {}
+    owner = value.get("owner")
+    patch["type"] = "preference"
+    if _is_self_owner(owner):
+        value.pop("owner", None)
+    elif isinstance(owner, str) and owner.strip():
+        edges = patch.setdefault("connects_to", [])
+        if not any(isinstance(e, dict) and e.get("label") == "held_by"
+                   for e in edges):
+            edges.append({
+                "label": "held_by",
+                "target_type": "person",
+                "target_text": owner.strip(),
+            })
+    return patch
+
+
 def sanitize_behavior_observations(content: dict) -> dict:
     """Drop behavioral observations that state character instead of conduct.
 
@@ -1064,22 +1094,7 @@ def sanitize_behavior_observations(content: dict) -> dict:
         if (_PREFERENCE_FORM.search(text)
                 and not _SOMEONE_ELSES.search(text)
                 and not is_placeholder_or_self_person(owner)):
-            patch["type"] = "preference"
-            if _is_self_owner(owner):
-                # The user's own preference. No edge: ownership is
-                # already implicit, and `held_by` pointing at the (you)
-                # speaker is the case the manifest says needs no edge.
-                if isinstance(value, dict):
-                    value.pop("owner", None)
-            elif isinstance(owner, str) and owner.strip():
-                edges = patch.setdefault("connects_to", [])
-                if not any(isinstance(e, dict) and e.get("label") == "held_by"
-                           for e in edges):
-                    edges.append({
-                        "label": "held_by",
-                        "target_type": "person",
-                        "target_text": owner.strip(),
-                    })
+            convert_to_preference(patch)
             retyped.append({"text": text[:120], "owner": owner,
                             "to": "preference"})
             kept.append(patch)
