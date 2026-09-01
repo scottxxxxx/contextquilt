@@ -347,3 +347,54 @@ def test_description_rule_is_part_of_default_guidance_not_bolted_on(minimal_mani
     prompt = build_prompt(m)
     assert "RULES: custom." in prompt
     assert _DESC_RULE_MARKER not in prompt
+
+
+class TestEdgeShapeIsInThePrompt:
+    """The edge contract lived ONLY in the JSON schema, which the
+    Anthropic client accepts for interface parity and does not put on
+    the wire. So the model never saw it, invented `{"type": ...,
+    "target": ...}`, and every edge was discarded twice over:
+    `enforce_connection_vocabulary` drops an edge with no `label`, and
+    `store_connected_patches` skips one with no `target_text`.
+
+    Measured before the fix: 22 edges emitted, 22 dropped, 0 labels.
+    After: 32 kept, 0 dropped, and `owed_to` produced 5 edges in two
+    runs against 2 in all of production history.
+
+    This is the June entity regression in a different field, and these
+    tests exist so it cannot come back a third time.
+    """
+
+    def _prompt(self):
+        import json
+        from pathlib import Path
+        manifest = json.loads(
+            (Path(__file__).resolve().parents[2]
+             / "init-db" / "11_shouldersurf_schema.json").read_text())
+        return build_prompt(manifest)
+
+    def test_the_three_edge_keys_are_named_in_the_prompt(self):
+        p = self._prompt()
+        for key in ("label", "target_text", "target_type"):
+            assert f'"{key}"' in p, f"{key} must be stated in the prompt"
+
+    def test_the_wrong_keys_are_named_as_wrong(self):
+        # Telling a model what not to write is what stops it reaching
+        # for the plausible-looking pair it reached for before.
+        p = self._prompt()
+        assert "`type` or `target` as keys on an edge" in p
+
+    def test_target_text_is_described_as_the_resolution_key(self):
+        # An edge whose target_text matches no patch is dropped, so the
+        # model has to know the string is load bearing rather than
+        # descriptive.
+        assert "resolved" in self._prompt()
+
+    def test_the_shape_sits_with_the_labels_not_somewhere_else(self):
+        # It has to be where the model is choosing a label, not 200
+        # lines away in the output-shape preamble.
+        p = self._prompt()
+        assert p.index("EXACTLY these keys") > p.index("CONNECTION LABELS")
+        # The BULLET form, because `belongs_to` also appears earlier
+        # inside the deliverable type guidance.
+        assert p.index("EXACTLY these keys") < p.index("- `belongs_to`")

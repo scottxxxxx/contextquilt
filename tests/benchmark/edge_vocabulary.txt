@@ -1,0 +1,15 @@
+Immigration App working session - Sep 1, 2026
+
+[Scott (you)] Quick one before we start, Steven, I'll send you my feedback on the business plan tonight.
+[Steven] Appreciated. I need it before I talk to the attorneys on Thursday.
+[Scott (you)] And I'll get the app archive deployed to a stable build by the weekend so you can demo it without it falling over.
+[Steven] That's the one that matters. My mother is practicing immigration law and she's the first real reviewer.
+[Steven] For what it's worth, I'd rather we stayed a lifestyle business making one to three million a year than chase a unicorn.
+[Scott (you)] Noted. That does change how we price.
+[Steven] Also, legal is non-negotiable: we cannot send client data to a third party model. Everything self hosted.
+[Scott (you)] Understood, that constrains the deployment work I just took on.
+[Priya] I report to Steven on the compliance side, so route anything privacy related through me first.
+[Priya] I'm at Harborview Legal, we're the pilot firm, and our whole aim this quarter is getting three firms onto the pilot.
+[Steven] Priya, can you get me the intake questionnaire by Friday? I'm blocked on it for the decision tree.
+[Priya] Yes. I can't start until Marcus approves the data sharing agreement though, that's the blocker.
+[Scott (you)] Fine. The reason we're doing the stable build at all is that last week's demo crashed in front of a reviewer.
