@@ -87,3 +87,38 @@ class TestSelfHeadlineHonoursTheRule:
 
     def test_a_fact_that_is_a_label_is_not_taken_as_its_own_headline(self):
         assert h.self_headline("Speaker 3 case") is None
+
+
+class TestASpeakerNumberIsNotAConcreteFigure:
+    """The two rules met and their intersection was a wall.
+
+    Found an hour after the placeholder rule shipped, by running the
+    cleanup it was written for. The rule says drop "Speaker 3"; the
+    figure rule says keep the fact's concrete numbers; and `3` was
+    being counted as one. 16 of 18 correct rewrites were refused as
+    `concrete_figure_dropped`. Each rule was right and no line could
+    satisfy both.
+    """
+
+    def test_a_speaker_number_is_not_counted_as_a_figure(self):
+        assert h._figures("Asked Speaker 7 about the API key") == set()
+
+    def test_the_correct_rewrite_is_now_accepted(self):
+        fact = ("Requested that Speaker 3 create a visual snapshot of "
+                "the checklist data by Friday")
+        assert h.why_invalid("Create checklist snapshot by Friday", fact) is None
+
+    def test_a_real_figure_beside_a_speaker_number_is_still_required(self):
+        # The relaxation must not swallow the rule it sits next to.
+        fact = "Speaker 3 committed $5000 to the rollout"
+        assert h._figures(fact) == {"$5000"}
+        assert h.why_invalid("Committed to the rollout", fact) == h.DROPPED_FIGURE
+        assert h.why_invalid("Committed $5000 to the rollout", fact) is None
+
+    def test_an_ordinary_number_is_untouched(self):
+        assert h._figures("Revenue grew 40% to $3M") == {"40%", "$3M"}
+
+    def test_stripping_happens_inside_figures_not_at_the_call_site(self):
+        # So a later caller cannot forget. Asserted by BEHAVIOUR of the
+        # helper itself, not by reading where it is called.
+        assert h._figures("Speaker 12 and Speaker 4 spoke") == set()
