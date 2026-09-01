@@ -173,3 +173,22 @@ def test_the_route_echoes_the_query_it_received():
     body = body[:body.index("@app.post(\"/v1/projects/{user_id}\"")]
     assert '"query": {"name": name, "project_id": project_id}' in body
     assert 'logger.info("project_resolve"' in body
+
+
+def test_a_candidates_project_status_is_not_called_status():
+    """One name must not answer two questions in one document.
+
+    The top level uses `status` for the discriminator. A candidate's own
+    lifecycle status nested inside it under the same name is the
+    `total_available` collision again: two right answers, one name, and
+    a reader cannot tell which question a value answers. Renamed before
+    the decoder existed rather than after.
+    """
+    out = resolve(ROWS, name="cbe")
+    assert out["status"] == AMBIGUOUS
+    for c in out["candidates"]:
+        assert "project_status" in c
+        assert "status" not in c, (
+            "a candidate carries `status`, which at the top level means "
+            "the discriminator"
+        )
