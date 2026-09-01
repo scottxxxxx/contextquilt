@@ -87,6 +87,7 @@ async def main() -> int:
           f"{sorted(BEHAVIOR_OBSERVATION_TYPES)}")
 
     refused = []
+    retype: list = []
     reasons: Counter = Counter()
     for row in rows:
         value = _value(row["value"])
@@ -95,7 +96,18 @@ async def main() -> int:
         # batch back by text would collide on duplicates.
         out = sanitize_behavior_observations(
             {"patches": [{"type": row["patch_type"], "value": value}]})
-        if out.get("patches"):
+        kept_patches = out.get("patches") or []
+        if kept_patches:
+            # RETYPED rather than refused. A stated preference has a
+            # right home, so the row is converted and the person is
+            # attached with `held_by` instead of being archived.
+            survivor = kept_patches[0]
+            if survivor.get("type") != row["patch_type"]:
+                edge = next((e for e in (survivor.get("connects_to") or [])
+                             if e.get("label") == "held_by"), None)
+                retype.append((row["patch_id"], survivor["type"],
+                               (edge or {}).get("target_text"),
+                               (value.get("text") or "")[:70]))
             continue
         info = (out.get("_behavior_observations_sanitized") or {})
         dropped = (info.get("dropped") or [{}])[0]
@@ -107,6 +119,10 @@ async def main() -> int:
     if args.limit:
         refused = refused[:args.limit]
 
+    print(f"the LIVE sanitizer RETYPES: {len(retype)}")
+    for pid, newt, person, text in retype[:10]:
+        print(f"  -> {newt}" + (f" held_by {person}" if person else " (self)"))
+        print(f"      {text}")
     print(f"the LIVE sanitizer refuses: {len(refused)}")
     print(f"  by reason: {dict(reasons)}")
     print(f"  surviving: {len(rows) - len(refused)}")
@@ -120,9 +136,41 @@ async def main() -> int:
         print(f"      {text}")
 
     if not args.apply:
-        print("\nDRY RUN. Re-run with --apply to archive.\n")
+        print("\nDRY RUN. Re-run with --apply to write.\n")
         await pool.close()
         return 0
+
+    # Retype first: it is the non-destructive half.
+    converted = 0
+    for pid, newt, person, _text in retype:
+        await pool.execute(
+            "UPDATE context_patches SET patch_type = $2, updated_at = NOW() "
+            " WHERE patch_id = $1 AND COALESCE(status,'active') = 'active'",
+            pid, newt)
+        if person:
+            # Resolve the person patch this preference is held by. Only
+            # an EXISTING person patch: inventing one here would create a
+            # person from a string, which is the thing the placeholder
+            # rules exist to prevent.
+            target = await pool.fetchval(
+                """SELECT cp.patch_id FROM context_patches cp
+                     JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+                    WHERE cp.patch_type = 'person'
+                      AND COALESCE(cp.status,'active') = 'active'
+                      AND lower(cp.value->>'text') = lower($1)
+                      AND ps.subject_key = (
+                          SELECT subject_key FROM patch_subjects
+                           WHERE patch_id = $2 LIMIT 1)
+                    LIMIT 1""", person, pid)
+            if target:
+                await pool.execute(
+                    """INSERT INTO patch_connections
+                         (from_patch_id, to_patch_id, connection_role,
+                          connection_label)
+                       VALUES ($1, $2, 'informs', 'held_by')
+                       ON CONFLICT DO NOTHING""", pid, target)
+        converted += 1
+    print(f"RETYPED {converted}")
 
     done = 0
     for pid, reason, _text, _owner in refused:

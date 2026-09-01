@@ -486,22 +486,49 @@ class TestRulesTheModelIgnores:
 class TestPreferenceAndSelfRules:
     """Scott: "prefer is the root of preference"."""
 
-    def test_a_stated_preference_is_not_conduct(self):
-        # The manifest's preference type claims this form by name.
+    def test_a_stated_preference_becomes_a_preference(self):
+        """CONVERTED, not deleted. Scott: "I want it corrected so that
+        Steven prefers to test and validate is a preference." The right
+        home exists, so dropping the row loses a real memory."""
         out = sanitize_behavior_observations({"patches": [
             {"type": "behavior",
              "value": {"text": "Articulated a preference for lifestyle "
                                "business outcomes over venture scale",
                        "owner": "Steven Williams"}}]})
-        assert out["patches"] == []
-        assert out["_behavior_observations_sanitized"]["dropped"][0]["reason"] \
-            == "preference_not_conduct"
+        assert len(out["patches"]) == 1
+        assert out["patches"][0]["type"] == "preference"
 
-    def test_prefers_is_caught_too(self):
+    def test_the_named_person_is_attached_with_held_by(self):
+        # `preference` is not self_only and carries a held_by edge
+        # (preference -> person) built for exactly this. It had ZERO
+        # edges in production only because the connects_to shape was
+        # never stated in the prompt.
         out = sanitize_behavior_observations({"patches": [
             {"type": "behavior",
              "value": {"text": "Stated he prefers a lifestyle company",
                        "owner": "Steven Williams"}}]})
+        edges = out["patches"][0]["connects_to"]
+        assert edges == [{"label": "held_by", "target_type": "person",
+                          "target_text": "Steven Williams"}]
+
+    def test_the_users_own_preference_needs_no_edge(self):
+        # held_by pointing at the (you) speaker is the case the manifest
+        # says needs no edge, because ownership is already implicit.
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Specified a preference for afternoon slots",
+                       "owner": "Scott (you)"}}]})
+        assert out["patches"][0]["type"] == "preference"
+        assert not out["patches"][0].get("connects_to")
+        assert "owner" not in out["patches"][0]["value"]
+
+    def test_a_placeholder_owner_is_still_dropped_not_retyped(self):
+        # No named person means nothing to attach it to, so there is no
+        # honest preference to convert into.
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Stated a preference for the granular way",
+                       "owner": "Speaker 3"}}]})
         assert out["patches"] == []
 
     def test_SOMEONE_ELSES_preference_is_still_conduct(self):
@@ -532,11 +559,12 @@ class TestPreferenceAndSelfRules:
 
     def test_an_observation_about_the_you_speaker_is_dropped(self):
         # The prompt: "Never record an observation about the speaker
-        # marked (you)."
+        # marked (you)." Non-preference text, because a self PREFERENCE
+        # is now converted rather than dropped.
         out = sanitize_behavior_observations({"patches": [
             {"type": "behavior",
-             "value": {"text": "Specified a preference for afternoon "
-                               "appointments", "owner": "Scott (you)"}}]})
+             "value": {"text": "Asked the team for the cost breakdown",
+                       "owner": "Scott (you)"}}]})
         assert out["patches"] == []
         assert out["_behavior_observations_sanitized"]["dropped"][0]["reason"] \
             == "self_observation"
