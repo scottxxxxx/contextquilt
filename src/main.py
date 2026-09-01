@@ -90,6 +90,7 @@ from contextquilt.services import described_as
 from contextquilt.services import who_they_are
 from contextquilt.services import trajectory as trajectory_svc
 from contextquilt.services import project_resolve
+from contextquilt.services import project_roster
 from contextquilt.services.entity_aliasing import person_candidates, tokenize_name
 from contextquilt.services.people_identity import (
     IdentityRequestError,
@@ -9716,6 +9717,216 @@ async def get_user_projects(
         patch_count=r["patch_count"],
         created_at=r["created_at"].isoformat() if r["created_at"] else None
     ) for r in rows]
+
+class ProjectPersonAdd(BaseModel):
+    """Who to add. A name OR an entity_id, never both required."""
+    name: Optional[str] = None
+    entity_id: Optional[str] = None
+    source: Optional[str] = "user_project_card"
+    create_new: Optional[bool] = False
+
+
+@app.post("/v1/projects/{user_id}/{project_id}/people", tags=["Projects"])
+async def add_project_person(
+    user_id: str,
+    project_id: str,
+    body: ProjectPersonAdd,
+    app_id: str = Depends(verify_application_access),
+):
+    """Say that a person is on this project.
+
+    Scott retired ShoulderSurf's "Contact" project note on 2026-08-31 and
+    this replaces it. That note stored a person as PROSE inside a
+    project: no entity, no aliases, no appearances, no insights, no
+    ledger, no `owed_to`, and no way to correct, merge or rename them. It
+    was a dead-end string that looked like a person. It also never
+    reached CQ at all; it lived in a CloudKit blob and was flattened into
+    project-chat prompts as an untyped bullet, so a model saw it many
+    times and CQ never did.
+
+    DECLARED BEATS INFERRED, which is the rule this endpoint exists to
+    honour. Until now CQ only ever inferred membership, from speaker
+    labels and ownership inside meetings, so a person who matters and has
+    never been in a recorded meeting was invisible. A user SAYING someone
+    is on a project is a fact, and it outranks an inference here exactly
+    as a stated role outranks an inferred description.
+
+    The person is resolved or created through `_resolve_or_create_person`,
+    the SAME path as `POST /v1/people` and reassign-speaker's `to_name`.
+    A name typed here and the same name typed onto a speaker must land on
+    one row: a second identity-authoring path would be a second source of
+    truth about one person, which is the defect this whole surface has
+    spent months removing.
+
+    Idempotent. Adding someone already on the project returns the
+    membership unchanged and says so, rather than erroring, because the
+    client cannot always know and a 409 would make a no-op look like a
+    failure.
+    """
+    name = (body.name or "").strip()
+    entity_id = (body.entity_id or "").strip()
+    if not name and not entity_id:
+        raise HTTPException(status_code=400,
+                            detail="name or entity_id is required")
+
+    # The project must be one CQ holds. An unknown project id is the
+    # state that produced tonight's incident, and silently accepting a
+    # membership against it would store a fact nothing can ever read.
+    known = await db_pool.fetchrow(
+        "SELECT name FROM projects WHERE user_id = $1 AND project_id = $2",
+        user_id, project_id,
+    )
+    if known is None:
+        raise HTTPException(
+            status_code=404,
+            detail=("no such project for this user; resolve it first with "
+                    "GET /v1/projects/{user_id}/resolve"))
+
+    created_person = False
+    async with db_pool.acquire() as conn:
+        vocab, _, _, _ = await _people_read_context(conn, app_id)
+        if entity_id:
+            row = await conn.fetchrow(
+                """SELECT entity_id::text AS entity_id, name FROM entities
+                    WHERE user_id = $1 AND entity_id = $2::uuid
+                      AND merged_into IS NULL""",
+                user_id, entity_id,
+            )
+            if row is None:
+                raise HTTPException(status_code=404, detail="no such person")
+            resolved = {"entity_id": row["entity_id"], "name": row["name"],
+                        "created": False}
+        else:
+            async with conn.transaction():
+                resolved = await _resolve_or_create_person(
+                    conn, user_id, app_id, name, "", body.source or "user_project_card",
+                    vocab, datetime.utcnow(), "project_membership",
+                    create_new=bool(body.create_new),
+                )
+            created_person = bool(resolved.get("created"))
+
+    # Retained, never deleted: re-adding someone previously removed
+    # clears the removal rather than writing a second row, so the history
+    # of the statement survives without duplicating it.
+    row = await db_pool.fetchrow(
+        """
+        INSERT INTO project_people
+            (user_id, project_id, entity_id, added_source)
+        VALUES ($1, $2, $3::uuid, $4)
+        ON CONFLICT (user_id, project_id, entity_id) DO UPDATE
+           SET removed_at = NULL, removed_source = NULL,
+               added_at = COALESCE(project_people.added_at, NOW())
+        RETURNING added_at, (xmax = 0) AS inserted
+        """,
+        user_id, project_id, str(resolved["entity_id"]),
+        body.source or "user_project_card",
+    )
+    logger.info("project_person_added", user_id=user_id, project_id=project_id,
+                entity_id=str(resolved["entity_id"]),
+                person_created=created_person, membership_new=row["inserted"])
+    # The echo, so the caller compares what it meant against what
+    # happened rather than reading a 200 as agreement.
+    return {
+        "project_id": project_id,
+        "project": known["name"],
+        "entity_id": str(resolved["entity_id"]),
+        # CQ's stored spelling, which may differ from what was typed.
+        "name": resolved["name"],
+        "person_created": created_person,
+        "membership_created": bool(row["inserted"]),
+        "added_at": row["added_at"].isoformat() if row["added_at"] else None,
+    }
+
+
+@app.delete("/v1/projects/{user_id}/{project_id}/people/{entity_id}",
+            tags=["Projects"])
+async def remove_project_person(
+    user_id: str,
+    project_id: str,
+    entity_id: str,
+    source: Optional[str] = Query("user_project_card"),
+    app_id: str = Depends(verify_application_access),
+):
+    """Take a person off a project, keeping the fact that they were on it.
+
+    Stamped rather than deleted. "They are not on this after all" is a
+    statement, and it has to stay distinguishable from never having been
+    added, which is the same argument that shaped `shelve` and
+    description dismissal. Re-adding clears the stamp.
+    """
+    row = await db_pool.fetchrow(
+        """
+        UPDATE project_people
+           SET removed_at = NOW(), removed_source = $4
+         WHERE user_id = $1 AND project_id = $2 AND entity_id = $3::uuid
+           AND removed_at IS NULL
+        RETURNING entity_id
+        """,
+        user_id, project_id, entity_id, source,
+    )
+    logger.info("project_person_removed", user_id=user_id,
+                project_id=project_id, entity_id=entity_id,
+                was_member=row is not None)
+    # Not an error when they were not on it: the caller wanted them off
+    # and they are off. `removed` says which actually happened.
+    return {"project_id": project_id, "entity_id": entity_id,
+            "removed": row is not None}
+
+
+@app.get("/v1/projects/{user_id}/{project_id}/people", tags=["Projects"])
+async def list_project_people(
+    user_id: str,
+    project_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """Who is on this project, and HOW CQ knows.
+
+    Two sources, never merged into one undifferentiated list:
+
+      declared  the user said so. Survives having no meetings at all.
+      observed  CQ saw them in a meeting assigned to this project.
+
+    `source` is `declared`, `observed`, or `both`. A client that flattens
+    these loses the only thing that distinguishes a fact from an
+    inference, and this whole surface runs on that distinction.
+
+    Declared members are returned even when CQ has never seen them in a
+    meeting, which is the entire point: that person was invisible before.
+    """
+    declared = await db_pool.fetch(
+        """
+        SELECT pp.entity_id::text AS entity_id, e.name, pp.added_at
+          FROM project_people pp
+          JOIN entities e ON e.entity_id = pp.entity_id
+         WHERE pp.user_id = $1 AND pp.project_id = $2
+           AND pp.removed_at IS NULL
+           AND e.merged_into IS NULL
+        """,
+        user_id, project_id,
+    )
+    observed = await db_pool.fetch(
+        """
+        SELECT DISTINCT pa.entity_id::text AS entity_id, e.name,
+               count(DISTINCT pa.origin_id) OVER (PARTITION BY pa.entity_id)
+                 AS meetings
+          FROM person_appearances pa
+          JOIN entities e ON e.entity_id = pa.entity_id
+          JOIN origin_project_assignments opa
+            ON opa.origin_id = pa.origin_id
+         WHERE pa.user_id = $1 AND opa.project_id = $2
+           AND e.merged_into IS NULL
+        """,
+        user_id, project_id,
+    )
+    # Merged in the service so a test can EXECUTE it. A sabotage that
+    # deleted the promotion to `both` left every source-reading test
+    # green here, because they check that the strings appear in this
+    # file and "both" also appears in the docstring above.
+    roster = project_roster.merge_roster(
+        [dict(r) for r in declared], [dict(r) for r in observed])
+    return {"project_id": project_id, **roster}
+
+
 
 @app.get("/v1/projects/{user_id}/resolve", tags=["Projects"])
 async def resolve_project(

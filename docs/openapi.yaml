@@ -1066,6 +1066,176 @@ paths:
               schema:
                 $ref: "#/components/schemas/CreateProjectResponse"
 
+  /v1/projects/{user_id}/{project_id}/people:
+    get:
+      operationId: listProjectPeople
+      summary: List Project People
+      description: >
+        Who is on this project, and HOW CQ knows. Two sources, never
+        merged: `declared` means the user said so and survives having no
+        meetings at all; `observed` means CQ saw them in a meeting
+        assigned to this project. `source` is declared, observed or
+        both. A client that flattens these loses the only thing
+        separating a fact from an inference.
+      tags: [Projects]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: project_id
+          in: path
+          required: true
+          schema: {type: string}
+      responses:
+        "200":
+          description: The roster, declared and observed kept distinct.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project_id: {type: string}
+                  declared_count: {type: integer}
+                  observed_count: {type: integer}
+                  people:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        entity_id: {type: string}
+                        name: {type: string}
+                        source:
+                          type: string
+                          enum: [declared, observed, both]
+                        meetings:
+                          type: integer
+                          description: >
+                            Meetings in this project CQ has seen them in.
+                            Zero for a purely declared member, which is
+                            the case this endpoint exists for.
+                        added_at:
+                          type: string
+                          nullable: true
+
+    post:
+      operationId: addProjectPerson
+      summary: Add Project Person
+      description: >
+        Say that a person is on this project. Replaces ShoulderSurf's
+        retired "Contact" project note, which stored a person as prose
+        and gave them no entity, aliases, appearances, insights, ledger
+        or `owed_to`.
+
+
+        DECLARED BEATS INFERRED. CQ otherwise only infers membership
+        from speaker labels and ownership inside meetings, so a person
+        who matters and has never been in a recorded meeting was
+        invisible.
+
+
+        The person resolves or is created through the same path as
+        `POST /v1/people`, so a name typed here and the same name typed
+        onto a speaker land on one row. Idempotent: adding someone
+        already on the project is a no-op reported as
+        `membership_created: false`, not a 409.
+      tags: [Projects]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: project_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: A name OR an entity_id.
+              properties:
+                name: {type: string, nullable: true}
+                entity_id: {type: string, nullable: true}
+                source: {type: string, nullable: true}
+                create_new:
+                  type: boolean
+                  nullable: true
+                  description: >
+                    Force a new person rather than resolving onto an
+                    existing near-match.
+      responses:
+        "200":
+          description: >
+            The echo. `person_created` and `membership_created` are
+            separate facts: a person can be created without the
+            membership being new, and the reverse.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project_id: {type: string}
+                  project: {type: string}
+                  entity_id: {type: string}
+                  name:
+                    type: string
+                    description: CQ's stored spelling, which may differ from what was sent.
+                  person_created: {type: boolean}
+                  membership_created: {type: boolean}
+                  added_at: {type: string, nullable: true}
+        "400":
+          description: Neither name nor entity_id supplied.
+        "404":
+          description: >
+            No such project for this user, or no such person when
+            entity_id was given. An unknown project id is refused rather
+            than stored, because a membership against an id CQ does not
+            hold is a fact nothing can read.
+
+  /v1/projects/{user_id}/{project_id}/people/{entity_id}:
+    delete:
+      operationId: removeProjectPerson
+      summary: Remove Project Person
+      description: >
+        Take a person off a project, keeping the fact that they were on
+        it. Stamped rather than deleted, so "not on this after all"
+        stays distinguishable from never having been added. Re-adding
+        clears the stamp. Not an error when they were not a member: the
+        caller wanted them off and they are off, and `removed` says
+        which actually happened.
+      tags: [Projects]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: project_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: entity_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: source
+          in: query
+          required: false
+          schema: {type: string}
+      responses:
+        "200":
+          description: Removal recorded, or reported as a no-op.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project_id: {type: string}
+                  entity_id: {type: string}
+                  removed: {type: boolean}
+
   /v1/projects/{user_id}/resolve:
     get:
       operationId: resolveProject
