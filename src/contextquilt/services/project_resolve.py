@@ -97,7 +97,15 @@ def resolve(rows: List[Dict[str, Any]], name: Optional[str] = None,
         "candidates": [{
             "project_id": str(r["project_id"]),
             "name": r.get("name"),
-            "status": r.get("status"),
+            # `project_status`, NOT `status`. The top level already uses
+            # `status` for the discriminator (resolved / ambiguous /
+            # unknown), and a nested key with the same name and a
+            # different meaning is the collision GhostPour caught in
+            # `total_available` earlier the same day: two right answers,
+            # one name, and the reader cannot tell which question a
+            # value answers. Renamed before ShoulderSurf wrote the
+            # decoder rather than after.
+            "project_status": r.get("status"),
             "patch_count": int(r.get("patch_count") or 0),
             "meeting_count": int(r.get("meeting_count") or 0),
         } for r in sorted(near, key=lambda r: str(r.get("name") or ""))],

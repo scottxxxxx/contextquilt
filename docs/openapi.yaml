@@ -1332,7 +1332,15 @@ paths:
                       properties:
                         project_id: {type: string}
                         name: {type: string}
-                        status: {type: string, nullable: true}
+                        project_status:
+                          type: string
+                          nullable: true
+                          description: >
+                            The PROJECT's lifecycle status. Deliberately
+                            not called `status`: the top level uses that
+                            name for the discriminator, and one name
+                            answering two questions is the collision
+                            this API has already been bitten by.
                         patch_count: {type: integer}
                         meeting_count: {type: integer}
 
