@@ -298,33 +298,38 @@ def owed_to_instrument_has_looked(open_items: List[dict],
                                   since: datetime = OWED_TO_OBSERVABLE_SINCE) -> bool:
     """Whether an EMPTY `you_owe` would be an observation or a guess.
 
-    `[]` asserts "we looked and found nothing", and that is only honest
-    when the instrument that looks has ever worked for this user. It had
-    not. Scott's Steven card read "You owe Steven: nothing open" above
-    two open items naming Steven in their text, because
-    `owed_to_available` follows the manifest DECLARING the label, and
-    declared is not the same as populated.
+    `[]` asserts "you owe this person nothing", and that is only honest
+    when EVERY open item the user owns was captured by a working
+    instrument. One unobservable item is enough to make the claim a
+    guess, because that item might be the one owed to this person.
 
-    True when at least one of the user's open commitments was captured
-    by a working instrument: extracted (it carries an origin) on or
-    after the fix, and owned by the user. A hand-written item can never
-    carry the edge, because the client composer does not send one, so it
-    is not evidence either way and does not count.
+    The first version of this gate asked only whether the instrument
+    had looked at SOMETHING. Five commitments extracted the day of the
+    fix satisfied it, and Scott's card went on saying "nothing open"
+    above two items it could never see, among 601 more. Looking at some
+    of the evidence does not license a claim about all of it.
 
-    Transcripts are not retained, so pre-fix rows can never be re-read.
-    This gate is what stops a permanent falsehood from wearing the shape
-    of a fact. A real edge is always served regardless; this only decides
-    between `[]` and null when there is none.
+    An item is observable when it was extracted (it carries an origin)
+    on or after the fix. A hand-written item never is: the client
+    composer sends no owed_to, so it could never carry the edge and
+    cannot vouch for absence. That means a user who writes items by
+    hand gets null here until the composer asks who the item is for,
+    which is the honest state rather than a defect.
+
+    A real edge is always served regardless; this only decides between
+    `[]` and null when there is none. True only when there is at least
+    one observable item AND no unobservable one.
     """
+    observable = 0
     for r in open_items or ():
         if r.get("patch_type") not in completable_types:
             continue
-        if not r.get("origin_id"):
-            continue
-        created = r.get("created_at")
-        if created is None or created < since:
-            continue
         if not is_self_owned(r.get("owner")):
             continue
-        return True
-    return False
+        created = r.get("created_at")
+        if r.get("origin_id") and created is not None and created >= since:
+            observable += 1
+        else:
+            # One item the instrument could not see is enough.
+            return False
+    return observable > 0

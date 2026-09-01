@@ -299,6 +299,20 @@ def test_the_boundary_day_itself_counts():
     assert owed_to_instrument_has_looked([_row(created_at=_AFTER)], _C, _self) is True
 
 
-def test_one_good_row_among_many_bad_is_enough():
+def test_one_unobservable_item_poisons_the_claim():
+    """The first version passed this with True, and Scott's card kept
+    saying "nothing open" above 601 items the instrument could never
+    see. Looking at SOME of the evidence does not license a claim about
+    all of it: one pre-fix or hand-written item might be the one owed."""
     rows = [_row(created_at=_BEFORE), _row(origin_id=None), _row()]
+    assert owed_to_instrument_has_looked(rows, _C, _self) is False
+
+
+def test_all_observable_is_the_only_way_to_earn_an_empty_list():
+    assert owed_to_instrument_has_looked([_row(), _row(), _row()], _C, _self) is True
+
+
+def test_somebody_elses_unobservable_item_does_not_poison_it():
+    # Only the USER'S items bear on what the user owes.
+    rows = [_row(), _row(owner="Steven", created_at=_BEFORE)]
     assert owed_to_instrument_has_looked(rows, _C, _self) is True
