@@ -402,3 +402,82 @@ class TestLensWiring:
         # delivery record that would then be quoted in a claim.
         assert by_lens["how_they_follow_through"]["items_observed"] == 0
         assert by_lens["how_they_follow_through"]["meetings_observed"] == 0
+
+
+class TestRulesTheModelIgnores:
+    """The prompt already says all of this. Both models do it anyway.
+
+    Measured 2026-09-01 with the behavior prompt UNCHANGED. On a
+    transcript carrying only Speaker-N labels, where the prompt's own
+    rule ("if you cannot attribute conduct to a named person, do not
+    record it") makes an empty list the correct answer, Haiku 4.5 and
+    Sonnet 4.6 EACH returned 15 observations with placeholder owners.
+    Neither model was better than the other.
+
+    A rule two models break identically is an unenforced rule, not a
+    wording problem and not a spend problem, so it moves into code.
+    Production held 207 placeholder-owner rows and 22 task handoffs.
+    """
+
+    def test_a_placeholder_owner_is_dropped(self):
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Asked for the cost breakdown",
+                       "owner": "Speaker 2"}}]})
+        assert out["patches"] == []
+        assert out["_behavior_observations_sanitized"]["dropped"][0]["reason"] \
+            == "placeholder_owner"
+
+    def test_a_real_name_survives(self):
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Asked for the cost breakdown",
+                       "owner": "Pallavi"}}]})
+        assert len(out["patches"]) == 1
+
+    def test_a_task_handoff_is_dropped(self):
+        # "Another stage already does all of that and will do it better
+        # than you" is the behavior prompt's own line about commitments.
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Committed to sharing the rollout plan",
+                       "owner": "Vijay"}}]})
+        assert out["patches"] == []
+        assert out["_behavior_observations_sanitized"]["dropped"][0]["reason"] \
+            == "commitment_not_conduct"
+
+    def test_the_prompts_own_right_shape_example_survives(self):
+        # THE TEST THAT KEEPS THE RULE NARROW. The behavior prompt lists
+        # this verbatim as a right-shape observation, so a broad
+        # promise-shaped rule would delete the very thing it asks for.
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Volunteered to take the escalation before "
+                               "anyone assigned it", "owner": "Vijay"}}]})
+        assert len(out["patches"]) == 1
+
+    def test_mid_sentence_agreed_to_is_not_a_handoff(self):
+        # Reporting what happened in the room, not taking on a task.
+        # This is why the pattern is anchored at the start.
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Asked whether Vijay agreed to the endpoint "
+                               "change", "owner": "Suresh"}}]})
+        assert len(out["patches"]) == 1
+
+    def test_other_types_pass_through_untouched(self):
+        # A commitment is ALLOWED to say "Committed to".
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "commitment",
+             "value": {"text": "Committed to sharing the rollout plan",
+                       "owner": "Vijay"}}]})
+        assert len(out["patches"]) == 1
+
+    def test_the_character_verdict_rule_still_fires(self):
+        out = sanitize_behavior_observations({"patches": [
+            {"type": "behavior",
+             "value": {"text": "Is defensive about code review feedback",
+                       "owner": "Yardley"}}]})
+        assert out["patches"] == []
+        assert out["_behavior_observations_sanitized"]["dropped"][0]["reason"] \
+            == "character_not_conduct"
