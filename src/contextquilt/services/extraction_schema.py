@@ -1015,6 +1015,7 @@ def sanitize_behavior_observations(content: dict) -> dict:
         return content
 
     dropped: list[dict] = []
+    retyped: list[dict] = []
     dropped_targets: set[tuple] = set()
     kept: list[dict] = []
 
@@ -1042,16 +1043,54 @@ def sanitize_behavior_observations(content: dict) -> dict:
         # wording problem and not a spend problem, it is an unenforced
         # rule, and this file is where this codebase enforces things.
         owner = value.get("owner") if isinstance(value, dict) else None
+
+        # A STATED PREFERENCE IS CONVERTED, NOT DELETED, and the
+        # distinction is Scott's: "I want it corrected so that Steven
+        # prefers to test and validate is a preference."
+        #
+        # This is checked FIRST, ahead of the owner rules, because the
+        # right home exists and dropping the row loses a real memory.
+        # `preference` is NOT self_only in the manifest and carries a
+        # `held_by` edge (preference -> person) built for exactly this,
+        # so a preference belonging to a named counterparty has always
+        # been expressible. It had ZERO edges in production only because
+        # the connects_to shape was never stated in the prompt, which is
+        # a bug fixed the same day as this.
+        #
+        # `trait` deliberately gets no such treatment: it is self_only,
+        # because a trait is a claim about what someone IS, and making
+        # character claims about people who never consented is the thing
+        # worth refusing rather than routing.
+        if (_PREFERENCE_FORM.search(text)
+                and not _SOMEONE_ELSES.search(text)
+                and not is_placeholder_or_self_person(owner)):
+            patch["type"] = "preference"
+            if _is_self_owner(owner):
+                # The user's own preference. No edge: ownership is
+                # already implicit, and `held_by` pointing at the (you)
+                # speaker is the case the manifest says needs no edge.
+                if isinstance(value, dict):
+                    value.pop("owner", None)
+            elif isinstance(owner, str) and owner.strip():
+                edges = patch.setdefault("connects_to", [])
+                if not any(isinstance(e, dict) and e.get("label") == "held_by"
+                           for e in edges):
+                    edges.append({
+                        "label": "held_by",
+                        "target_type": "person",
+                        "target_text": owner.strip(),
+                    })
+            retyped.append({"text": text[:120], "owner": owner,
+                            "to": "preference"})
+            kept.append(patch)
+            continue
+
         if is_placeholder_or_self_person(owner):
             reason = "placeholder_owner"
             word = str(owner)[:40]
         elif _is_self_owner(owner):
             reason = "self_observation"
             word = str(owner)[:40]
-        elif (_PREFERENCE_FORM.search(text)
-              and not _SOMEONE_ELSES.search(text)):
-            reason = "preference_not_conduct"
-            word = _PREFERENCE_FORM.search(text).group(0)
         elif TASK_HANDOFF.search(text):
             # "Another stage already does all of that and will do it
             # better than you" is the prompt's own line about
@@ -1077,6 +1116,10 @@ def sanitize_behavior_observations(content: dict) -> dict:
         dropped_targets.add((patch.get("type"), text.strip().lower()))
 
     if not dropped:
+        if retyped:
+            content["_behavior_observations_sanitized"] = {
+                "dropped": [], "count": 0, "retyped": retyped,
+            }
         return content
 
     content["patches"] = kept
@@ -1097,6 +1140,7 @@ def sanitize_behavior_observations(content: dict) -> dict:
     content["_behavior_observations_sanitized"] = {
         "dropped": dropped,
         "count": len(dropped),
+        "retyped": retyped,
     }
     return content
 
