@@ -114,7 +114,29 @@ _PLACEHOLDER = re.compile(
 
 
 def _figures(text: str) -> set:
-    return {m.group(0).strip().rstrip(".,") for m in _FIGURE.finditer(text or "")}
+    """Concrete figures in a string. A SPEAKER NUMBER IS NOT ONE.
+
+    Found an hour after the placeholder rule shipped, by running the
+    cleanup it was written for. The rule tells the model to drop
+    "Speaker 3" and write "Create checklist snapshot by Friday". The
+    model did exactly that, and then this function found the figure `3`
+    in the fact, found none in the headline, and refused the correct
+    answer as `concrete_figure_dropped`. 16 of the 18 rewrites died
+    that way.
+
+    So the two rules were each right and their intersection was a wall:
+    one required the label gone, the other required its digit kept, and
+    no line can satisfy both. Stripping the label here is what makes
+    the placeholder rule able to produce a tile instead of only a
+    refusal.
+
+    Done inside `_figures` rather than at the call site so a later
+    caller cannot forget. On a headline it is a no-op, because a
+    headline carrying a label has already been refused by the time
+    figures are counted.
+    """
+    cleaned = _PLACEHOLDER.sub(" ", text or "")
+    return {m.group(0).strip().rstrip(".,") for m in _FIGURE.finditer(cleaned)}
 
 
 def why_invalid(headline: Optional[str], fact: str) -> Optional[str]:
