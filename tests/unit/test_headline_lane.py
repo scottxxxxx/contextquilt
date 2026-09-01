@@ -285,7 +285,13 @@ def test_a_failed_retry_does_not_cost_the_first_passs_headlines():
     regression.
     """
     lane = _lane()
-    block = lane[lane.index('if out["retryable"]:'):lane.index('for pid, line in')]
+    # Anchored on a string that occurs ONCE. The first version sliced to
+    # `for pid, line in`, which stopped being unique when the
+    # self-headline path added an earlier loop of the same shape: the
+    # slice ran backwards and returned empty, and the assertion failed
+    # for a reason that had nothing to do with the property.
+    block = lane[lane.index('if out["retryable"]:'):
+                 lane.index('for pid, line in out["headlines"].items()')]
     assert "except Exception" in block
     assert 'logger.warning("headline_retry_failed"' in block
 

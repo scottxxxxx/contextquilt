@@ -7409,9 +7409,39 @@ class ColdPathWorker:
             if not candidates:
                 return 0
 
-            llm = await self._get_llm_for_app(app_id)
+            # A FACT THAT IS ALREADY A VALID HEADLINE IS THE HEADLINE,
+            # and it is taken before any model call. Measured on the
+            # residue: 21 of 123 tileable patches with no headline were
+            # facts that pass every rule unchanged, and they had been
+            # through the writer twice and come back empty both times.
+            # The gate makes that a product bug rather than a cost one:
+            # no headline means no tile, so those memories could not
+            # appear in the quilt at all.
+            free, candidates = headlines.partition_by_self_headline(candidates)
             written = 0
             refused: dict = {}
+            for pid, line in free.items():
+                await self.db.execute(
+                    """
+                    UPDATE context_patches
+                       SET value = jsonb_set(
+                             COALESCE(value, '{}'::jsonb),
+                             '{headline}', to_jsonb($2::text), true)
+                     WHERE patch_id = $1
+                    """,
+                    pid, line,
+                )
+                written += 1
+            if free:
+                logger.info("headlines_taken_from_fact", user_id=user_id,
+                            origin=origin_id, count=len(free))
+            if not candidates:
+                logger.info("headlines_written", user_id=user_id,
+                            origin=origin_id, written=written,
+                            from_fact=len(free), refused=None)
+                return written
+
+            llm = await self._get_llm_for_app(app_id)
             # Batched so the instruction is paid once per batch rather
             # than once per patch, and capped so one enormous meeting
             # cannot turn a cheap lane into an expensive one.
