@@ -394,7 +394,60 @@ class TestEdgeShapeIsInThePrompt:
         # It has to be where the model is choosing a label, not 200
         # lines away in the output-shape preamble.
         p = self._prompt()
-        assert p.index("EXACTLY these keys") > p.index("CONNECTION LABELS")
+        # The CONNECTS_TO occurrence specifically. "EXACTLY these keys"
+        # now appears twice, because the relationships shape uses the
+        # same wording and sits earlier, so a bare index() finds the
+        # wrong one and this test failed for a reason unrelated to its
+        # property.
+        anchor = "Each edge in `connects_to` is an object with EXACTLY these keys"
+        assert p.index(anchor) > p.index("CONNECTION LABELS")
         # The BULLET form, because `belongs_to` also appears earlier
         # inside the deliverable type guidance.
-        assert p.index("EXACTLY these keys") < p.index("- `belongs_to`")
+        assert p.index(anchor) < p.index("- `belongs_to`")
+
+
+class TestRelationshipShapeIsInThePrompt:
+    """The August entity fix stopped one field short.
+
+    It added the `entities` array to the prompt after the Anthropic
+    cutover took `json_schema` off the wire. `relationships` kept its
+    shape ONLY in the schema, and the prompt said just "array of edges
+    between entities". So the model guessed, and was observed returning
+    `{"label": "reports_to", "target_text": "Steven", "target_type":
+    "person"}` with no source at all. `store_relationships` requires
+    `from`/`to`/`type` and skips anything missing them, silently.
+
+    Measured 2026-09-01 on the cheap model, same transcript:
+        before   every relationship discarded, no `from`
+        after    9 usable, 0 discarded, reports_to and member_of both
+                 produced
+
+    No model change and no extra spend. Third instance of one bug: a
+    contract carried only by a schema that stopped travelling.
+    """
+
+    def _prompt(self):
+        import json
+        from pathlib import Path
+        return build_prompt(json.loads(
+            (Path(__file__).resolve().parents[2]
+             / "init-db" / "11_shouldersurf_schema.json").read_text()))
+
+    def test_from_to_and_type_are_named(self):
+        p = self._prompt()
+        for key in ('"from"', '"to"', '"type"'):
+            assert key in p
+
+    def test_an_edge_with_no_source_is_called_out_as_discarded(self):
+        assert "An edge with no `from` is discarded" in self._prompt()
+
+    def test_the_patch_edge_keys_are_named_as_wrong_here(self):
+        # The exact keys the model reached for. Naming them is what
+        # stops it reaching again.
+        p = self._prompt()
+        assert "never use `label`, `target_text` or `target_type` here" in p
+
+    def test_reporting_line_and_employer_are_pointed_here(self):
+        # These were the two facts being lost outright.
+        p = self._prompt()
+        assert "reports_to" in p and "member_of" in p

@@ -534,6 +534,36 @@ def _entity_types_section(manifest: Dict[str, Any]) -> str:
         "consistently: one entity per person, not one per surface form.\n"
         "- `relationships` may only reference names that appear in "
         "`entities`.\n"
+        # THE SHAPE, for the same reason this whole section exists.
+        #
+        # The 2026-08-15 fix added the entities array to the prompt
+        # after the Anthropic cutover took `json_schema` off the wire.
+        # It stopped one field short: `relationships` kept its shape
+        # ONLY in the schema, and the prompt said just "array of edges
+        # between entities". So the model guessed, and on 2026-09-01 it
+        # was observed returning
+        #   {"label": "reports_to", "target_text": "Steven",
+        #    "target_type": "person"}
+        # which has no source at all. `store_relationships` reads
+        # `from`/`to`/`type` and skips anything missing them, silently,
+        # so "Priya reports to Steven" was simply lost. Production shows
+        # the model guessing right some of the time: 763 relationships
+        # exist, of which reports_to is 18 and member_of 14.
+        "\nEach entry in `relationships` is an object with EXACTLY "
+        "these keys:\n"
+        '  {"from": "<the entity name the edge starts at>",\n'
+        '   "to": "<the entity name it points to>",\n'
+        '   "type": "<the relationship, e.g. reports_to, member_of, '
+        'works_on>"}\n'
+        "Both `from` and `to` are ENTITY NAMES copied exactly as they "
+        "appear in `entities`. An edge with no `from` is discarded, so "
+        "never omit it, and never use `label`, `target_text` or "
+        "`target_type` here: those belong to a patch's `connects_to` "
+        "and an entity relationship using them is lost.\n"
+        "This is where a person's employer and reporting line belong. "
+        "'I report to Steven' is from Priya to Steven, type reports_to. "
+        "'I'm at Harborview Legal' is from Priya to Harborview Legal, "
+        "type member_of.\n"
         # Concatenated with +, not juxtaposition: DESCRIPTION_RULES is a
         # name rather than a literal, and juxtaposing it with the
         # strings above is a SyntaxError rather than a silent join.
