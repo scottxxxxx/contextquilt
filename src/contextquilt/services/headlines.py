@@ -203,7 +203,13 @@ SYSTEM = (
     "6. State the thing. Never address the reader, never instruct "
     "them, never begin with Remember or Ask or Check.\n"
     "7. Use no dashes of any kind. A comma or two sentences instead.\n"
-    "8. Never write a transcript speaker label. If the fact says "
+    "8. When a fact has an owner, the headline NAMES them, first name "
+    "is enough. The owner did the thing, and a headline that drops "
+    "them turns an observation about a person into a claim about the "
+    "world. \"Steven insisted on self-hosted models\" is the "
+    "observation. \"Privacy requires self-hosted models\" is a "
+    "different and much larger claim that nobody made.\n"
+    "9. Never write a transcript speaker label. If the fact says "
     "Speaker 3 or Unknown Speaker, that is the transcript saying it "
     "does not know who spoke, not a name. Write the line without "
     "the actor: \"Create checklist snapshot by Friday\", never "
@@ -233,6 +239,25 @@ def build_user_content(patches: Iterable[Dict[str, Any]]) -> str:
             continue
         lines.append(f'- id: {patch.get("patch_id")}')
         lines.append(f'  type: {patch.get("patch_type")}')
+        # THE OWNER WAS NEVER SENT, and that was the whole defect.
+        #
+        # Measured 2026-09-01: 1,195 of 1,211 behavior headlines, 99%,
+        # do not name the person who did the thing. The writer was not
+        # ignoring the owner, it was never given one: this function sent
+        # id, type and fact and nothing else. The 16 that do name
+        # somebody are the ones where the name happened to sit inside
+        # the fact text.
+        #
+        # A behavior with its owner deleted stops being a behavior. Read
+        # the real example: "Emphasized data privacy, insisting on
+        # self-hosted models" (owner Steven Williams) became "Privacy
+        # requires self-hosted models, not cloud", which is not an
+        # observation about a person at all, it is a RULING about the
+        # world. Scott read that tile and asked why it was a behavior.
+        # It was, and the headline had made it something else.
+        owner = (value.get("owner") or "").strip()
+        if owner:
+            lines.append(f'  owner: {owner}')
         lines.append(f'  fact: {text}')
     return "\n".join(lines)
 

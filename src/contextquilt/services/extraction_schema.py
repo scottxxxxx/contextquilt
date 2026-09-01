@@ -1002,14 +1002,45 @@ def sanitize_behavior_observations(content: dict) -> dict:
         if not isinstance(text, str) or not text.strip():
             kept.append(patch)
             continue
-        word = character_word_in(text, CHARACTER_WORDS + CHARACTER_TRAIT_WORDS)
-        if word is None:
-            kept.append(patch)
-            continue
+        reason = word = None
+        # THE PROMPT ALREADY SAYS ALL OF THIS AND THE MODEL DOES IT
+        # ANYWAY, which is why these are here rather than in the prompt.
+        #
+        # Measured 2026-09-01 on the behavior prompt as written, which
+        # states outright that owner is "never a diarization label like
+        # Speaker 2" and that "if you cannot attribute conduct to a
+        # named person, do not record it". On a transcript carrying only
+        # Speaker-N labels, BOTH Haiku 4.5 and Sonnet 4.6 returned 15
+        # observations where the correct answer was an empty list, and
+        # neither model was better than the other. Production holds 207
+        # such rows. A rule two models ignore identically is not a
+        # wording problem and not a spend problem, it is an unenforced
+        # rule, and this file is where this codebase enforces things.
+        owner = value.get("owner") if isinstance(value, dict) else None
+        if is_placeholder_or_self_person(owner):
+            reason = "placeholder_owner"
+            word = str(owner)[:40]
+        elif TASK_HANDOFF.search(text):
+            # "Another stage already does all of that and will do it
+            # better than you" is the prompt's own line about
+            # commitments. Only the unambiguous openers: the prompt
+            # BLESSES "Volunteered to take the escalation before anyone
+            # assigned it" as right-shaped conduct, so promise-shaped
+            # text is not uniformly wrong and a broad rule would delete
+            # the examples the prompt asks for.
+            reason = "commitment_not_conduct"
+            word = TASK_HANDOFF.search(text).group(0)
+        else:
+            word = character_word_in(text, CHARACTER_WORDS + CHARACTER_TRAIT_WORDS)
+            if word is None:
+                kept.append(patch)
+                continue
+            reason = "character_not_conduct"
         dropped.append({
             "type": patch.get("type"),
             "text": text[:120],
             "word": word,
+            "reason": reason,
         })
         dropped_targets.add((patch.get("type"), text.strip().lower()))
 
@@ -1398,6 +1429,18 @@ PERSON_OWNED_ACTION_TYPES = frozenset(
 # time: cite observable behavior, never character. Same hardcoded-name
 # caveat as the set above.
 BEHAVIOR_OBSERVATION_TYPES = frozenset({"behavior"})
+
+# A task handed off, which the behavior prompt explicitly disclaims:
+# "You are not recording what was decided, what anybody committed to".
+# ANCHORED AT THE START on purpose. Mid-sentence "agreed to" is usually
+# reporting what somebody did in the room ("Asked whether Vijay agreed
+# to the change"), and the prompt's own right-shape list contains
+# "Volunteered to take the escalation before anyone assigned it", so a
+# broad promise rule would delete the examples the prompt asks for.
+# Measured: 22 rows in production, every one a task.
+TASK_HANDOFF = re.compile(
+    r"^\s*(agreed to|committed to|promised to|will (?:send|provide|deliver))\b",
+    re.I)
 
 # Owner-text values that MUST NOT trigger a synthetic person patch:
 # - the (you) speaker (their attribution is implicit via patch ownership)
