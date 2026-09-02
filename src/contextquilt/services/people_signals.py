@@ -218,9 +218,24 @@ def compute_person_signals(
     ))
     next_item = _summ(*candidates[0]) if candidates else None
 
+    # THE UNIT IS DAYS. `present_days` is a set of dates, so every count
+    # here is distinct calendar days on which the person was present,
+    # and three meetings on one Tuesday are one Tuesday, which is the
+    # right measure of a rhythm. The names `meetings_7d`, `meetings_30d`
+    # and `cadence.meetings_observed` said otherwise, and SS found it on
+    # 2026-09-01 from a device payload: six meetings listed above a tile
+    # reading "4 MEETINGS, 30D". Doc 16 section 5.13: a served name may
+    # assert only what was observed. The honest names are served
+    # alongside with the SAME values; the old ones keep serving unchanged
+    # until every client has moved, then retire. Additive, so no decoder
+    # has to guess (and GP has to forward the new keys, not drop them).
+    if cadence is not None:
+        cadence = {**cadence, "days_observed": cadence["meetings_observed"]}
     return {
         "meetings_7d": meetings_7d,
         "meetings_30d": meetings_30d,
+        "days_present_7d": meetings_7d,
+        "days_present_30d": meetings_30d,
         "turns_30d": turns_30d,
         "cadence": cadence,
         # Presence anchors for "met X ago" copy and NEW FACES gating.

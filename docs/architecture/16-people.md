@@ -1483,6 +1483,7 @@ was observed.** Two names failed and one is on the line.
 | `received_explicit` / `received_inferred` | pass, and the split is itself the honesty: the inferred half names its own uncertainty |
 | `unresolved`, `unmeasurable` | pass: both exist precisely to keep an unknown out of a count |
 | `object_regression` | pass by being null, and by asking about the restatement TEXTS (the conversation) rather than about the work |
+| `meetings_7d`, `meetings_30d`, `cadence.meetings_observed` | FAILED 2026-09-01, found by SS from a device payload: the values are distinct DAYS present (six meetings on four days served as 4). The number is right for a rhythm; the name is not. `days_present_7d`, `days_present_30d` and `cadence.days_observed` now carry the same values; the old names keep serving until clients move, then retire |
 
 `resolved` (which was `delivered` through the naming audit, and was
 renamed when the primitive widened rather than because the audit failed
