@@ -112,7 +112,7 @@ def do_check() -> int:
         return 1
 
     # 2. Is this app a writer? Reported here, enforced on the real run.
-    writer_guard(app_id, force=True)
+    writer_guard(app_id, force=False, report_only=True)
 
     # 3. Try fetching the current schema for this app_id (may be 404)
     url = f"{base_url}/v1/apps/{app_id}/schema"
@@ -161,7 +161,14 @@ def do_check() -> int:
 # and it says so out loud.
 # ---------------------------------------------------------------------------
 
-WRITER_WINDOW_DAYS = 30
+# How far back to look for ingest at all, and how far behind the newest
+# ingest anywhere an app may lag and still count as a writer. Relative,
+# not calendar: on 2026-09-01 the pre-split id had ingested 149 patches
+# "in the last 30 days" (its last on 08-12, during the switchover) and a
+# fixed window passed it. Twenty days behind the app that actually
+# writes is not a writer.
+WRITER_LOOKBACK_DAYS = 90
+WRITER_LAG_DAYS = 14
 
 WRITERS_SQL = """
     SELECT acl.app_id::text AS app_id,
@@ -179,27 +186,45 @@ WRITERS_SQL = """
 
 def judge_writer(app_id: str, writers: list) -> tuple[bool, str]:
     """Pure verdict: (ok, message). `writers` is rows of
-    (app_id, last_ingest, ingested) for the window, newest first."""
+    (app_id, last_ingest, ingested) for the lookback, newest first. An
+    app is a writer when its latest ingest is within WRITER_LAG_DAYS of
+    the newest ingest by ANY app."""
+    from datetime import timedelta
+
+    if not writers:
+        return False, ("REFUSED: no app has ingested an origin-bound patch in the "
+                       f"last {WRITER_LOOKBACK_DAYS} days.\n"
+                       "Pass --force only for a brand new app that has never written.")
+    newest = max(w[1] for w in writers)
+    cutoff = newest - timedelta(days=WRITER_LAG_DAYS)
     mine = [w for w in writers if str(w[0]) == app_id]
+    if mine and mine[0][1] >= cutoff:
+        _, last, n = mine[0]
+        return True, (f"app {app_id} ingested {n} origin-bound patches in the last "
+                      f"{WRITER_LOOKBACK_DAYS} days, latest {last}, within "
+                      f"{WRITER_LAG_DAYS} days of the newest ingest anywhere; it is a writer.")
+    lines = []
     if mine:
         _, last, n = mine[0]
-        return True, (f"app {app_id} ingested {n} origin-bound patches in the "
-                      f"last {WRITER_WINDOW_DAYS} days (latest {last}); it is a writer.")
-    lines = [f"REFUSED: app {app_id} has ingested NOTHING in the last "
-             f"{WRITER_WINDOW_DAYS} days, so a manifest registered on it never "
-             "reaches an extraction prompt."]
-    if writers:
-        lines.append("Apps that DID ingest, newest first:")
-        for a, last, n in writers:
-            lines.append(f"  {a}  latest {last}  ({n} patches)")
+        lines.append(f"REFUSED: app {app_id} last ingested {last} ({n} patches), "
+                     f"more than {WRITER_LAG_DAYS} days behind the newest ingest "
+                     f"({newest}). A manifest registered on it never reaches an "
+                     "extraction prompt.")
     else:
-        lines.append("No app has ingested in the window at all.")
+        lines.append(f"REFUSED: app {app_id} has ingested NOTHING in the last "
+                     f"{WRITER_LOOKBACK_DAYS} days, so a manifest registered on it "
+                     "never reaches an extraction prompt.")
+    lines.append("Apps that DID ingest, newest first (writers marked *):")
+    for a, last, n in writers:
+        mark = "*" if last >= cutoff else " "
+        lines.append(f" {mark} {a}  latest {last}  ({n} patches)")
     lines.append("Pass --force only for a brand new app that has never written.")
     return False, "\n".join(lines)
 
 
-def writer_guard(app_id: str, force: bool) -> int:
-    """0 to proceed, 1 to stop. Reads DATABASE_URL; refuses when absent."""
+def writer_guard(app_id: str, force: bool, report_only: bool = False) -> int:
+    """0 to proceed, 1 to stop. Reads DATABASE_URL; refuses when absent.
+    report_only (--check) prints the verdict and never stops."""
     dsn = os.environ.get("DATABASE_URL", "")
     if not dsn:
         if force:
@@ -217,7 +242,7 @@ def writer_guard(app_id: str, force: bool) -> int:
         async def _fetch():
             conn = await asyncpg.connect(dsn)
             try:
-                rows = await conn.fetch(WRITERS_SQL, WRITER_WINDOW_DAYS)
+                rows = await conn.fetch(WRITERS_SQL, WRITER_LOOKBACK_DAYS)
                 return [(r["app_id"], r["last_ingest"], r["ingested"]) for r in rows]
             finally:
                 await conn.close()
@@ -233,6 +258,9 @@ def writer_guard(app_id: str, force: bool) -> int:
     ok, msg = judge_writer(app_id, writers)
     print(msg)
     if ok:
+        return 0
+    if report_only:
+        print("(--check only reports; the real run stops here unless --force.)")
         return 0
     if force:
         print("Proceeding anyway under --force.")
