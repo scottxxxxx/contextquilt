@@ -616,7 +616,7 @@ def test_readiness_is_null_when_the_app_cannot_produce_insights():
 
 
 def test_the_computed_facts_are_served_beside_the_claim():
-    assert '"facts": iv.get("facts")' in MAIN
+    assert "\"facts\": people_i18n.localize_facts(" in MAIN and "iv.get(\"facts\")" in MAIN
 
 
 # --- the card the claim has to fit in ---------------------------------
