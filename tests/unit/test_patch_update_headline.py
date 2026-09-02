@@ -86,3 +86,46 @@ def test_the_worker_rewrites_one_patch_on_a_headline_patch_task():
     assert 'patch_id=str(payload["patch_id"])' in branch
     lane = _func_source(WORKER, "_generate_headlines")
     assert "patch_id=patch_id" in lane
+
+
+def test_every_name_the_route_uses_resolves_at_module_scope():
+    """2026-09-02: the route called `headlines_svc.self_headline` and the
+    import that was supposed to define `headlines_svc` never landed; a
+    source-reading test saw the right words and every text edit returned
+    500 for six hours. Rule 7: a name that sounds right and is never
+    opened. So resolve every free name the function body uses against
+    the module's own bindings, the way the interpreter would."""
+    import builtins
+    tree = ast.parse(MAIN)
+    module_names = set(dir(builtins))
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for a in node.names:
+                module_names.add((a.asname or a.name).split(".")[0])
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            module_names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for t in node.targets:
+                for n in ast.walk(t):
+                    if isinstance(n, ast.Name):
+                        module_names.add(n.id)
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)) and isinstance(node.target, ast.Name):
+            module_names.add(node.target.id)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "update_patch")
+    local = {a.arg for a in fn.args.args + fn.args.kwonlyargs}
+    for n in ast.walk(fn):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+            local.add(n.id)
+        elif isinstance(n, (ast.Import, ast.ImportFrom)):
+            for a in n.names:
+                local.add((a.asname or a.name).split(".")[0])
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            local.add(n.name)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            for a in n.args.args + n.args.kwonlyargs:
+                local.add(a.arg)
+    unresolved = sorted({n.id for n in ast.walk(fn)
+                         if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
+                         and n.id not in local and n.id not in module_names})
+    assert unresolved == [], unresolved
