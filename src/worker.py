@@ -4942,6 +4942,20 @@ class ColdPathWorker:
             await self.handle_completion(payload)
             return
 
+        # A user edit rewrote a fact; the API retired the headline that
+        # described the old wording and enqueued this so the tile is
+        # rewritten on the cold path rather than left stale or blank.
+        # One patch, same idempotent query, never raises.
+        if task_type == "headline_patch":
+            if user_id and payload.get("patch_id"):
+                written = await self._generate_headlines(
+                    user_id, None, payload.get("app_id"),
+                    patch_id=str(payload["patch_id"]),
+                )
+                logger.info("headline_patch_rewritten", user_id=user_id,
+                            patch_id=str(payload["patch_id"]), written=written)
+            return
+
         # End-of-meeting full transcript — process immediately, never buffer.
         # (this IS the complete meeting, sent by ShoulderSurf at session end)
         # Flush any orphaned buffered events for this origin — the transcript supersedes them.
@@ -7442,7 +7456,7 @@ class ColdPathWorker:
             return list(patches)
 
     async def _generate_headlines(
-        self, user_id: str, origin_id, app_id,
+        self, user_id: str, origin_id, app_id, patch_id=None,
     ) -> int:
         """The one line a tile can hold, written rather than truncated.
 
@@ -7489,7 +7503,8 @@ class ColdPathWorker:
             # table does not have since migration 26, and every test
             # covering this lane reads source, so all of them passed.
             sql, params = headlines.build_pending_fetch(
-                subject_key=f"user:{user_id}", origin_id=origin_id)
+                subject_key=f"user:{user_id}", origin_id=origin_id,
+                patch_id=patch_id)
             rows = await self.db.fetch(sql, *params)
             candidates = [
                 dict(r) for r in rows
