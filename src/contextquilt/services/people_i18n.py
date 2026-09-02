@@ -17,9 +17,23 @@ engine per the 08-23 ruling and is not attempted here. English is the
 fallback for every locale not in the table, so an English caller and a
 caller that sends no header see byte-identical output.
 
-The translations below were written by the CQ session and are to be
-REVIEWED by ShoulderSurf, whose app is at 100% on these three
-languages; a wrong word here is worse than an English one.
+The translations below were written by the CQ session and REVIEWED by
+ShoulderSurf on 2026-09-02, whose app is at 100% on these three
+languages. Five of their corrections are in, and each was a real
+defect rather than a preference: Spanish "acordarse" reads as "to
+remember", so a handover read as "after remembering"; two Spanish
+strings had no antecedent and no addressee in the two render sites
+where `subject` stands alone with no colon frame; French "reformulés"
+means rephrased when the measure is raised AGAIN, and their house form
+is to name the person rather than pick a gender ("il ou elle" was the
+one thing to avoid); Japanese 面談 is interview-flavoured and appears
+in zero of their keys against 332 using 会議.
+
+IMPORTANT for anyone adding a string here: `subject` renders in THREE
+places, and only one wraps it in a colon frame ("Esta persona: 3 de
+7: ..."). The count row under WHAT STANDS OUT and the working-with
+view render it as a bare standalone line. A noun phrase survives that;
+anything with an implied subject or addressee does not.
 """
 
 from __future__ import annotations
@@ -33,21 +47,21 @@ DEFAULT_LOCALE = "en"
 FACT_SUBJECT_LABELS: Dict[str, Dict[str, str]] = {
     "en": dict(FACT_SUBJECTS),
     "es": {
-        "went_quiet": "temas abiertos que no han surgido en los días recientes en que se reunieron",
+        "went_quiet": "temas abiertos que no han surgido en sus días de reunión recientes",
         "closed_late": "temas cerrados después de la fecha en que vencían",
         "re_dated": "temas cuya fecha de vencimiento cambió al menos una vez",
-        "handed_back": "temas que cambiaron de responsable después de acordarse",
-        "restated": "temas abiertos que ha vuelto a plantear en más de una reunión",
+        "handed_back": "temas que cambiaron de responsable una vez acordados",
+        "restated": "temas abiertos que esta persona ha vuelto a plantear en más de una reunión",
     },
     "fr": {
         "went_quiet": "sujets ouverts qui ne sont pas revenus lors de vos journées de réunion récentes",
         "closed_late": "sujets clos après leur date d'échéance",
         "re_dated": "sujets dont la date d'échéance a été déplacée au moins une fois",
         "handed_back": "sujets dont le responsable a changé après accord",
-        "restated": "sujets ouverts qu'il ou elle a reformulés dans plus d'une réunion",
+        "restated": "sujets ouverts que cette personne a soulevés dans plus d'une réunion",
     },
     "ja": {
-        "went_quiet": "最近の面談日に話題に上がらなかった未完了の項目",
+        "went_quiet": "最近の会議日に話題に上がらなかった未完了の項目",
         "closed_late": "期限を過ぎてから完了した項目",
         "re_dated": "期限が少なくとも一度変更された項目",
         "handed_back": "合意後に担当者が変わった項目",

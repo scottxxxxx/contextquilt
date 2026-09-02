@@ -2128,6 +2128,16 @@ class PatchUpdate(BaseModel):
     # the shipped name on this route and something may send it, and a
     # rename to fix a compatibility bug is how you get a third name.
     patch_type: Optional[str] = None
+    # A deliberate tile refresh with no text change. Scott ruled
+    # 2026-09-02 that an unchanged Save sends nothing on any edit screen,
+    # so a stale headline (worded by a rule that no longer applies) needs
+    # its own trigger rather than an incidental re-save. Recomputes the
+    # headline from the STORED text exactly as a fact edit does, touches
+    # nothing else, and moves neither origin_mode nor updated_at, because
+    # a headline is presentation and a bump would extend decay on a patch
+    # nobody re-observed. A flag on this route rather than a new
+    # sub-path, so no GP route change; GP's typed proxy must pass it.
+    refresh_headline: Optional[bool] = None
 
 class PatchCompletionRequest(BaseModel):
     evidence: Optional[str] = None  # short free-text note on what completed it (e.g. "user tapped done")
@@ -2829,6 +2839,13 @@ async def update_patch(
         # `deadline_date` is untouched (the caller owns that field).
         if fact_changed and update.deadline_date is None and value.get("deadline"):
             value["prior_deadline"] = value.pop("deadline")
+    elif update.refresh_headline:
+        own = headlines_svc.self_headline(str(value.get("text") or ""))
+        if own is not None:
+            value["headline"] = own
+        else:
+            value.pop("headline", None)
+            headline_job = True
     if update.owner is not None:
         value["owner"] = update.owner if update.owner else None
 
@@ -2867,14 +2884,31 @@ async def update_patch(
     # caller sending both contradictory values has a bug either way.
     new_type = update.category or update.patch_type or row["patch_type"]
 
-    await db_pool.execute(
-        """
-        UPDATE context_patches
-        SET value = $1, patch_type = $2, origin_mode = 'declared', updated_at = $3
-        WHERE patch_id = $4
-        """,
-        json.dumps(value), new_type, datetime.utcnow(), patch_id
+    # A refresh-only call writes `value` and nothing else: no
+    # origin_mode flip, because a refresh is not the user declaring
+    # anything, and no updated_at bump, because a headline is
+    # presentation and a bump would extend decay on a patch nobody
+    # re-observed (the headline lane makes the same argument).
+    refresh_only = bool(
+        update.refresh_headline
+        and update.fact is None and update.owner is None
+        and update.deadline_date is None
+        and not update.category and not update.patch_type
     )
+    if refresh_only:
+        await db_pool.execute(
+            "UPDATE context_patches SET value = $1 WHERE patch_id = $2",
+            json.dumps(value), patch_id,
+        )
+    else:
+        await db_pool.execute(
+            """
+            UPDATE context_patches
+            SET value = $1, patch_type = $2, origin_mode = 'declared', updated_at = $3
+            WHERE patch_id = $4
+            """,
+            json.dumps(value), new_type, datetime.utcnow(), patch_id
+        )
     if headline_job:
         # Enqueued rather than awaited: this is a write route, not the
         # cold path, and a model call here would hold the user's edit.
