@@ -58,6 +58,12 @@ def test_a_retired_headline_is_rewritten_by_the_worker_not_left_blank():
     body = _func_source(MAIN, "update_patch")
     assert '"task_type": "headline_patch"' in body
     assert '"patch_id": patch_id' in body
+    # The key the worker's router ACTUALLY reads. The first version sent
+    # only task_type and the job was ignored; a test that named the key
+    # the author thought was read passed anyway (2026-09-02).
+    assert '"interaction_type": "headline_patch"' in body
+    router = _func_source(WORKER, "process_task")
+    assert 'payload.get("interaction_type") or payload.get("type")' in router
     # Enqueued after the row is written, and guarded: a queue failure
     # must not fail the edit.
     assert body.index("UPDATE context_patches") < body.index('"headline_patch"')

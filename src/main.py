@@ -2881,6 +2881,12 @@ async def update_patch(
         try:
             await redis_client.xadd("memory_updates", {"data": json.dumps({
                 "user_id": user_id, "app_id": app_id,
+                # The worker's router reads `interaction_type` (or
+                # `type`), never `task_type`; the first version of this
+                # sent only `task_type` and the job was routed as an
+                # untyped task and ignored (2026-09-02). Both keys, like
+                # the description-correction enqueue beside it.
+                "interaction_type": "headline_patch",
                 "task_type": "headline_patch", "patch_id": patch_id,
             })})
         except Exception as exc:
