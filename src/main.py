@@ -50,6 +50,7 @@ from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import people_signals
+from contextquilt.services import people_i18n
 from contextquilt.services import woven_digest as woven_digest_svc
 from contextquilt.services import facet_runtime
 from contextquilt.services.consolidation import (
@@ -6331,6 +6332,7 @@ async def get_person(
     user_id: str,
     entity_id: str,
     app_id: str = Depends(verify_application_access),
+    accept_language: Optional[str] = Header(None, alias="Accept-Language"),
 ):
     """
     One person, with the meetings, projects and open items behind the
@@ -6726,7 +6728,13 @@ async def get_person(
                     # behind the sentence and anyone can audit the claim
                     # against them. Null for a lens a model reasoned its
                     # way to: it counted nothing, so it has no counts.
-                    "facts": iv.get("facts"),
+                    # The subject line under each count is CQ's own
+                    # fixed string, rendered verbatim by the client
+                    # inside a localized sentence; served in the
+                    # caller's language (Accept-Language), English
+                    # otherwise. See services/people_i18n.
+                    "facts": people_i18n.localize_facts(
+                        iv.get("facts"), people_i18n.resolve_locale(accept_language)),
                     # Lower sorts earlier; absent means after the
                     # ordered ones. Served because the client sorts by
                     # whether a lens is named, so an order that carries
