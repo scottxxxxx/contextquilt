@@ -45,6 +45,7 @@ from dashboard.router import router as dashboard_router
 from contextquilt.routers.app_schemas import router as app_schemas_router
 from contextquilt.services.recall_scorer import score_patches
 from contextquilt.services import insight_cards
+from contextquilt.services import headlines as headlines_svc
 from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
