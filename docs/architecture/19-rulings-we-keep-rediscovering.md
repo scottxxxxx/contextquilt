@@ -498,7 +498,69 @@ one field it repairs.
 
 ---
 
+## 19.12 A check that never watches the outcome passes by construction.
+
+**Rule.** A test that reads the source for the right words, a client
+that fires a write and discards the result, a log line that says what
+was attempted rather than what happened: each of these can only ever
+agree with its author. Before trusting a check, ask what it would look
+like if the thing it guards were broken. If the answer is "the same",
+the check is not one. Distinct from 19.10, which is about a signal with
+no channel to arrive through: here the channel exists, and the check
+was pointed at the intention instead of at the channel.
+
+**Paid for three times on 2026-09-02, twice in one route, once at the
+other end of the same request.**
+
+- The edit route called `headlines_svc.self_headline`. The import that
+  was meant to bind that name was inserted at an anchor that did not
+  exist in the file, so a `str.replace` silently did nothing, and the
+  grep that would have shown it printed nothing and was read as fine.
+  The test asserted that the call appeared in the source. It did. Every
+  PATCH that carried a fact returned 500 for 105 minutes, and the only
+  reason it was found is that Scott changed a word on his phone and
+  saw the old wording come back.
+- The same route enqueued a `headline_patch` job under `task_type`. The
+  worker's router reads `interaction_type`. The test asserted the key
+  the author believed was read. The job was routed as untyped and
+  ignored; the edit landed, the stale headline was retired, and nothing
+  rewrote it. Found by reading the worker log for a line that never
+  came.
+- ShoulderSurf's patch detail screen fired the save inside a bare
+  `Task`, threw the `Bool` away, and cleared the editing state before
+  the server answered. A failed save looked like a successful save that
+  then reverted, which Scott reported as "I changed it and it still
+  says the old thing". Their other two edit surfaces checked the result
+  and showed a failure; only this one was silent, and it is the one the
+  repair depended on.
+
+Neither side was watching the actual outcome, so a 500 stayed invisible
+on both ends at once. Rule 2 (prove the test can fail) is the sibling:
+both source-reading tests HAD been sabotaged and went red, because the
+sabotage removed the words the test looked for. A check that can fail
+on the wrong thing is still a check that passes by construction on the
+right one.
+
+**Applying it.**
+
+- A source-reading test gets an executing sibling, or at least a
+  resolution check: every free name the function loads is resolved
+  against the module's bindings the way the interpreter would
+  (`test_every_name_the_route_uses_resolves_at_module_scope`).
+- A test about a key another component reads asserts the key from THAT
+  component's source, not from the author's memory of it.
+- A client that writes reads the result before it changes what the
+  user sees, and says which of "not saved" and "saved" it was.
+- An edit script asserts every anchor it replaces. A silent no-op
+  replace is the whole first receipt.
+- The tell is a green test whose failure you cannot describe. If you
+  cannot say what red would have looked like, it was never going to be
+  red.
+
+---
+
 ## See also
+
 
 - **Doc 16 §5.10 / §5.13**: a served name may assert only what was
   OBSERVED, and where inference is unavoidable, publish the definition on
