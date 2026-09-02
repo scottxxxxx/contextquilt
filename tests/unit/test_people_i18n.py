@@ -38,7 +38,42 @@ def test_locale_resolution_takes_the_first_known_tag_and_falls_back_to_english()
     assert resolve_locale("ja-JP") == "ja"
 
 
-def test_localize_replaces_subject_by_key_and_leaves_everything_else():
+# THE REAL STORED SHAPE, copied from a production insight row on
+# 2026-09-02 rather than written from the model class. One OBJECT, and
+# the key field is `fact_key`. The first version of these tests invented
+# a list of {"key": ...} from `Fact.as_dict()` and passed while the
+# function localized nothing on real data.
+PROD_FACTS = {
+    "subject": "items whose due date moved at least once",
+    "fact_key": "re_dated",
+    "direction": "better",
+    "numerator": 0,
+    "denominator": 5,
+    "about_person": "Satyajit Nanda",
+    "roster_people": 8,
+    "roster_numerator": 25,
+    "roster_denominator": 151,
+}
+
+
+def test_localize_the_shape_production_actually_stores():
+    es = localize_facts(PROD_FACTS, "es")
+    assert es["subject"] == FACT_SUBJECT_LABELS["es"]["re_dated"]
+    # Everything else survives, including the numbers the receipts rail
+    # proves the claim with.
+    assert es["numerator"] == 0 and es["denominator"] == 5
+    assert es["roster_denominator"] == 151 and es["about_person"] == "Satyajit Nanda"
+    assert es["fact_key"] == "re_dated"
+
+
+def test_an_unknown_fact_key_keeps_its_stored_subject():
+    other = {**PROD_FACTS, "fact_key": "something_new", "subject": "kept as stored"}
+    assert localize_facts(other, "fr")["subject"] == "kept as stored"
+
+
+def test_a_list_and_the_key_spelling_from_the_model_class_also_work():
+    """`Fact.as_dict()` emits `key`, and a future lens could serve a
+    list. Both exist in this codebase, so both are handled."""
     facts = [{"key": "went_quiet", "numerator": 3, "denominator": 7,
               "subject": FACT_SUBJECTS["went_quiet"], "higher_is_worse": True},
              {"key": "unknown_key", "subject": "kept as stored"}]
@@ -49,10 +84,10 @@ def test_localize_replaces_subject_by_key_and_leaves_everything_else():
 
 
 def test_english_and_unknown_locales_return_the_stored_object_untouched():
-    facts = [{"key": "went_quiet", "subject": "x"}]
-    assert localize_facts(facts, "en") is facts
-    assert localize_facts(facts, "de") is facts
+    assert localize_facts(PROD_FACTS, "en") is PROD_FACTS
+    assert localize_facts(PROD_FACTS, "de") is PROD_FACTS
     assert localize_facts(None, "es") is None
+    assert localize_facts("not a fact", "es") == "not a fact"
 
 
 def test_the_detail_route_reads_accept_language_and_localizes_facts():

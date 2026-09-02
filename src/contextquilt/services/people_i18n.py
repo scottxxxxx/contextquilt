@@ -86,24 +86,41 @@ def resolve_locale(accept_language: Optional[str]) -> str:
     return DEFAULT_LOCALE
 
 
-def localize_facts(facts: Any, locale: str) -> Any:
-    """Replace each computed fact's `subject` with the locale's wording.
+# The stored shape, read off a production insight row on 2026-09-02
+# rather than assumed from `Fact.as_dict()`: `value.facts` is ONE OBJECT,
+# not a list, and its key field is `fact_key`, not `key`. The first
+# version of this function checked `isinstance(facts, list)` and read
+# `f["key"]`, so it returned every real row untouched and localized
+# nothing, while its tests passed against a fixture invented from the
+# wrong shape. Both spellings and both containers are handled here
+# because `Fact.as_dict()` genuinely emits `key` and a list is the
+# shape a future lens might serve; neither is speculation about the
+# wire, it is tolerance for two shapes that both exist in this codebase.
+def _localize_one(fact: Any, table: dict) -> Any:
+    if not isinstance(fact, dict):
+        return fact
+    key = fact.get("fact_key") or fact.get("key")
+    if key in table:
+        return {**fact, "subject": table[key]}
+    return fact
 
-    Facts are stored on the insight row at write time with the English
-    subject, so this runs at serve time, keyed by the fact's `key`. A
-    fact whose key the table does not know keeps its stored subject; a
-    locale the table does not know is English; English callers get the
-    stored bytes back untouched, so nothing changes for them.
+
+def localize_facts(facts: Any, locale: str) -> Any:
+    """Replace a computed fact's `subject` with the locale's wording.
+
+    Runs at serve time, because facts are stored with the English
+    subject at write time. A fact whose key the table does not know
+    keeps its stored subject; a locale the table does not know is
+    English; English callers get the stored object back untouched, so
+    nothing changes for them.
     """
-    if locale == DEFAULT_LOCALE or not isinstance(facts, list):
+    if locale == DEFAULT_LOCALE:
         return facts
     table = FACT_SUBJECT_LABELS.get(locale)
     if not table:
         return facts
-    out: List[Any] = []
-    for f in facts:
-        if isinstance(f, dict) and f.get("key") in table:
-            out.append({**f, "subject": table[f["key"]]})
-        else:
-            out.append(f)
-    return out
+    if isinstance(facts, dict):
+        return _localize_one(facts, table)
+    if isinstance(facts, list):
+        return [_localize_one(f, table) for f in facts]
+    return facts
