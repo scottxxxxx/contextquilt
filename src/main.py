@@ -4732,6 +4732,20 @@ async def reassign_speaker(
             # person just reassigned to, and cascade away the appearance
             # written above with it.
             # --------------------------------------------------------
+            # AND NEVER AN ENTITY THAT WAS PRESENT SOMEWHERE THIS REQUEST
+            # DID NOT NAME. 2026-09-02: "Kartik" was renamed to "Kartik
+            # Patnaik" in ONE meeting. The bare-name entity had no
+            # relationship edge, so this cleanup deleted it, and
+            # migration 30's ON DELETE CASCADE took its four appearance
+            # rows, three of them in meetings the request never
+            # mentioned, turn and question counts included. Seven active
+            # patches in those meetings still say owner "Kartik" and now
+            # point at nobody. "No graph anchor" cannot tell a real
+            # person recorded under a first name from a stale label;
+            # presence in a meeting outside the request can, and it is
+            # exact. Scott's ruling the same day: suggest it is the same
+            # person, never assume. Such an entity is LEFT on the roster
+            # for the client's duplicate matcher to propose.
             if not clear_owner:
                 from_label_names = list({fl.label for fl in req.from_labels})
                 merge_result = await conn.execute(
@@ -4747,9 +4761,15 @@ async def reassign_speaker(
                           SELECT to_entity_id FROM relationships
                           WHERE user_id = $1 AND to_entity_id IS NOT NULL
                       )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM person_appearances pa
+                          WHERE pa.entity_id = entities.entity_id
+                            AND pa.origin_id <> ALL($4::text[])
+                      )
                     """,
                     user_id, from_label_names,
                     str(presence_entity_id) if presence_entity_id else None,
+                    [str(m) for m in meeting_ids],
                 )
                 entities_merged = int(merge_result.rsplit(" ", 1)[-1])
 
@@ -4771,6 +4791,10 @@ async def reassign_speaker(
         "patches_updated": patches_updated,
         "connections_updated": 0,  # v1: patch attribution changes; connection structure unchanged
         "entities_merged": entities_merged,
+        # The honest name for the same number: nothing was joined, these
+        # label-named entities were DELETED. `entities_merged` keeps
+        # serving until clients move (doc 16 section 5.13).
+        "entities_deleted": entities_merged,
         "labels_skipped": labels_skipped,
         # How many (person, meeting) presence rows this call wrote or
         # merged into. A count of what happened, with no cause attached:

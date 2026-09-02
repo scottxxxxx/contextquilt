@@ -419,3 +419,22 @@ def test_speaker_metrics_exclude_the_meeting_level_denominator():
     assert "meeting_questions_by_user" not in SPEAKER_METRICS
     assert "turn_count" in SPEAKER_METRICS
     assert len(SPEAKER_METRICS) == 6
+
+
+def test_cleanup_never_deletes_an_entity_present_in_a_meeting_the_request_did_not_name():
+    """2026-09-02: "Kartik" renamed in one meeting; the bare-name entity
+    had no relationship edge, was deleted, and the cascade took three
+    other meetings of presence with it. Presence outside the request is
+    the exact predicate "no graph anchor" was standing in for."""
+    body = _reassign()
+    delete_sql = body.split("DELETE FROM entities")[1].split('"""')[0]
+    assert "NOT EXISTS" in delete_sql
+    assert "FROM person_appearances pa" in delete_sql
+    assert "pa.origin_id <> ALL($4::text[])" in delete_sql
+    assert "[str(m) for m in meeting_ids]" in body
+
+
+def test_the_count_is_served_under_its_honest_name_too():
+    body = _reassign()
+    assert '"entities_deleted": entities_merged' in body
+    assert '"entities_merged": entities_merged' in body
