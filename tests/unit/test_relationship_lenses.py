@@ -805,3 +805,14 @@ def test_the_prompt_still_tells_the_writer_a_limit_exists():
     from contextquilt.services.relationship_lenses import STANDS_OUT_SYSTEM
     assert "CHANGE THE VERB OR THE ORDER" in STANDS_OUT_SYSTEM
     assert "thrown away whole" in STANDS_OUT_SYSTEM
+
+
+def test_the_went_quiet_subject_says_days_because_the_count_is_days():
+    """The client renders this string verbatim. The count behind it is
+    the ledger's not_raised_since mode, distinct days present after the
+    item was last said, so the sentence may not say meetings (2026-09-01,
+    found by SS on the person page)."""
+    from contextquilt.services.relationship_lenses import FACT_SUBJECTS
+    subject = FACT_SUBJECTS["went_quiet"]
+    assert "days" in subject
+    assert "meetings" not in subject

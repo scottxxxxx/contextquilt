@@ -155,7 +155,11 @@ class Fact:
 # subject line is deliberately about the WORK and the relationship, never
 # about the person's character.
 FACT_SUBJECTS = {
-    "went_quiet": "open items that have not come up in your recent meetings with them",
+    # DAYS, not meetings: the count behind this is the ledger's
+    # not_raised_since mode, which counts distinct days present after
+    # the item was last said. SS found the served sentence asserting
+    # meetings on 2026-09-01 (doc 16 section 5.13).
+    "went_quiet": "open items that have not come up on your recent days meeting with them",
     "closed_late": "items that were closed after the date they were due",
     "re_dated": "items whose due date moved at least once",
     "handed_back": "items that changed owner after they were agreed",
