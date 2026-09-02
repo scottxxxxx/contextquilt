@@ -135,3 +135,36 @@ def test_every_name_the_route_uses_resolves_at_module_scope():
                          if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)
                          and n.id not in local and n.id not in module_names})
     assert unresolved == [], unresolved
+
+
+# --- the deliberate trigger ---------------------------------------------
+
+def test_refresh_headline_recomputes_from_stored_text_without_a_fact():
+    """Scott ruled an unchanged Save sends nothing on any edit screen, so
+    a stale tile gets its own trigger: `refresh_headline: true` on the
+    PATCH, no text. Same recompute as a fact edit, from the STORED text."""
+    body = _func_source(MAIN, "update_patch")
+    assert "elif update.refresh_headline:" in body
+    assert 'headlines_svc.self_headline(str(value.get("text") or ""))' in body
+    model = MAIN.split("class PatchUpdate(")[1].split("\nclass ")[0]
+    assert "refresh_headline: Optional[bool] = None" in model
+
+
+def test_a_refresh_only_call_moves_neither_updated_at_nor_origin_mode():
+    """A headline is presentation. A bump would extend decay on a patch
+    nobody re-observed, and an origin_mode flip would record a refresh as
+    the user declaring something."""
+    body = _func_source(MAIN, "update_patch")
+    assert "if refresh_only:" in body
+    branch = body.split("if refresh_only:")[1].split("else:")[0]
+    assert "updated_at" not in branch and "origin_mode" not in branch
+    assert "UPDATE context_patches SET value = $1 WHERE patch_id = $2" in branch
+
+
+def test_refresh_only_is_false_when_anything_else_is_being_written():
+    body = _func_source(MAIN, "update_patch")
+    guard = body.split("refresh_only = bool(")[1].split(")")[0]
+    for field in ("update.fact is None", "update.owner is None",
+                  "update.deadline_date is None", "not update.category",
+                  "not update.patch_type"):
+        assert field in guard, field
