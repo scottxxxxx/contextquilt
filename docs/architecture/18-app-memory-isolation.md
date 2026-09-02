@@ -162,3 +162,61 @@ arrives, rather than the filter every day until it does.
    measurement in section 2 changes and the decision deserves re-running.
    Section 3 does not change: the counterfactual argument is independent of
    how rich the data gets.
+
+## 7. The app registry, as of 2026-09-01
+
+Four rows in `applications`. Two are live tenants, one is test traffic,
+one is history.
+
+| app_id | name | what it is |
+| --- | --- | --- |
+| `886a527b-1d8f-46e1-aadc-d4b05e16256e` | ShoulderSurf | the SS tenant since the 08-07 split; the only meeting ingester; owns every SS patch including the pre-split history (see below) |
+| `bc6efb4c-2854-49c0-9e8d-437c99610588` | Tech Rehearsal | structured ingest; dormant since 07-15 |
+| `a3be3fee-8788-4483-a278-6f475490d149` | e2e-test | GhostPour's smoke tests, `user:smoke-*` subjects; never a real user |
+| `930824d3-2ccb-4869-b3f0-0ed2693f183f` | ghostpour | HISTORY. The identity SS traffic wrote under from 04-01 until the split, with an ingest tail to 08-12. Absent from GhostPour's config; nothing can mint a token for it |
+
+GhostPour holds the same two live ids for shouldersurf and
+techrehearsal (checked against their `config/apps.yml` on 2026-09-01,
+not against anyone's memory). N-400 Helper is a GhostPour tenant with NO
+ContextQuilt app_id on either side; when it asks, CQ mints one through
+admin registration and sends it to GP BEFORE the first write, so the
+state "exists on one side only" never occurs.
+
+**Ghostpour was retired twice, and the second retirement had to be
+done by hand.** It stopped ingesting on 08-12, but 2,671 patches (1,595
+active, 1,076 archived, 16 subjects) still carried it as their owning
+app in `context_patch_acl`, and the worker's derived writes (profile
+pass, consolidation) kept stamping it onto whatever they built from
+those rows. Retired as an ingest identity, live as a storage one.
+Nothing in CQ reads by app_id (section 5 chose subject spaces over
+per-app read filters), so nobody lost a row; the first consumer to add
+such a filter would have lost 1,595 silently. On 2026-09-01, at Scott's
+decision, ownership of all 2,671 rows moved to the ShoulderSurf id in
+one UPDATE; ghostpour now holds zero ACL rows. Its `applications` row
+and its 14 `app_schemas` rows stay, because they are the record of what
+was registered and when. `extraction_metrics`, `alignment_events` and
+`tier_signals` keep the historical app_id, because those are records of
+what happened rather than ownership.
+
+**The manifest goes to the app that ingests.** `_resolve_extraction_prompt`
+reads the INGESTING app's latest `app_schemas` row. On 2026-09-01 three
+manifest versions were registered on ghostpour and answered 200, and
+the worker kept extracting SS meetings under the previous wording for
+three weeks (doc 19.6 carries the receipt). `scripts/register_ss_schema.py`
+now refuses an app whose latest origin-bound ingest is more than 14 days
+behind the newest ingest anywhere, unless forced.
+
+**GhostPour's default-app rule, stated here in GP's own words so the
+consequence is on record on this side too.** A MISSING, BLANK, literal
+`"unknown"` or UNRECOGNISED `X-App-ID` resolves to `shouldersurf`, logs
+a warning and never 404s. It fails open deliberately: ShoulderSurf
+shipped to TestFlight for months before per-app config existed and
+older builds in the field may send no header. The consequence: there is
+no "unattributed" bucket. Unattributed traffic lands in ShoulderSurf's
+namespace.
+
+**One shared identity, three apps.** All three tenants sit under one
+Apple developer team, so Sign in with Apple issues one subject per user
+across all of them and app_id is the only tenant boundary that exists.
+CQ's subject spaces are per app by construction (section 5), so one
+human is three separate memories, which is the intended shape.
