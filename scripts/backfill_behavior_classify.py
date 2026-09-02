@@ -118,7 +118,7 @@ async def main() -> int:
                     "every row (default: the manifest of the app holding the "
                     "row's write ACL). Two apps can hold manifests; the one "
                     "that writes is the one whose vocabulary the row was "
-                    "extracted under (found 2026-09-02).")
+                    "extracted under (found 2026-09-01).")
     args = ap.parse_args()
 
     pool = await asyncpg.create_pool(os.environ["DATABASE_URL"], min_size=1, max_size=3)
