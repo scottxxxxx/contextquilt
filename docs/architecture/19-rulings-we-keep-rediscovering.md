@@ -223,11 +223,27 @@ witness its own correctness.
 - Aimed a truncation hazard at GhostPour's 10,000-char request-log ring
   buffer. Transcripts live in a different table with an uncapped column.
   The hazard was real for a store that was not the one in question.
+- **2026-09-01, registration.** Manifest v12, v13 and v14 were
+  registered on the app id ShoulderSurf had used until the 08-07
+  app-isolation split, because the registration memory carried that id.
+  Each POST answered 200, and the registry read that "verified" each one
+  read that same app's rows, so the check and the mistake resolved
+  through one copy. The worker builds the extraction prompt from the
+  INGESTING app's latest row, and the ingesting app had been the new id
+  for three weeks, so every meeting since 08-16 was extracted under the
+  v11 wording: no `artifact` type, the old display name, the short edge
+  descriptions whose "3 of 3" improvement had only ever been measured in
+  a local harness. Found by accident, when a backfill's ACL join resolved
+  the rows to the writing app and printed a manifest version nobody
+  expected. `scripts/register_ss_schema.py` now refuses an app that has
+  not ingested in thirty days unless forced.
 
 **Applying it.** When an approximation disagrees with the system, check
 against the system's own cited inputs before reporting a discrepancy. And
 when a check passes, ask what it would have looked like had it failed:
-if the answer is "the same", the check is not one.
+if the answer is "the same", the check is not one. When there are two
+copies of anything (two app ids, two tables, two manifests), a check
+that does not say WHICH copy it read has verified neither.
 
 ---
 

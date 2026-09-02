@@ -190,7 +190,7 @@ def test_the_helper_fails_open_and_has_a_kill_switch():
 
 def test_the_helper_stores_kept_plus_retyped_and_nothing_dropped():
     """Pinned to the WHOLE line. A substring check passed a sabotage that
-    appended the dropped rows to the same expression (2026-09-02)."""
+    appended the dropped rows to the same expression (2026-09-01)."""
     body = _helper()
     returns = re.findall(r"^\s*return (.+?)\s*$", body, re.M)
     assert 'split["kept"] + split["retyped"]' in returns
@@ -200,7 +200,7 @@ def test_the_helper_stores_kept_plus_retyped_and_nothing_dropped():
 # --- the model ----------------------------------------------------------
 
 def test_the_default_model_is_sonnet_and_the_env_wins(monkeypatch):
-    """Measured 2026-09-02 on the same 120 rows and the same prompt:
+    """Measured 2026-09-01 on the same 120 rows and the same prompt:
     Haiku dropped 26 rows Sonnet kept, and the hand-read ones were
     conduct filed as somebody else's commitment. A wrong drop here is
     a memory nobody can re-observe."""

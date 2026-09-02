@@ -76,10 +76,10 @@ def do_dry_run() -> int:
     base_url = os.environ.get("CQ_BASE_URL", "http://localhost:8000").rstrip("/")
     url = f"{base_url}/v1/apps/{app_id}/schema"
 
-    print("DRY RUN — no network call will be made")
+    print("DRY RUN: no network call will be made")
     print("---")
     print(f"Target URL:       POST {url}")
-    print(f"X-Admin-Key:      {'<set>' if os.environ.get('CQ_ADMIN_KEY') else '<NOT SET — real run will fail>'}")
+    print(f"X-Admin-Key:      {'<set>' if os.environ.get('CQ_ADMIN_KEY') else '<NOT SET: real run will fail>'}")
     print(f"X-Registered-By:  {os.environ.get('USER', 'ops')}@bootstrap")
     print("---")
     print("Manifest summary:")
@@ -108,17 +108,20 @@ def do_check() -> int:
                 print(f"ERROR: {base_url}/health returned HTTP {resp.status}", file=sys.stderr)
                 return 1
     except URLError as e:
-        print(f"ERROR: cannot reach {base_url}/health — {e}", file=sys.stderr)
+        print(f"ERROR: cannot reach {base_url}/health: {e}", file=sys.stderr)
         return 1
 
-    # 2. Try fetching the current schema for this app_id (may be 404)
+    # 2. Is this app a writer? Reported here, enforced on the real run.
+    writer_guard(app_id, force=True)
+
+    # 3. Try fetching the current schema for this app_id (may be 404)
     url = f"{base_url}/v1/apps/{app_id}/schema"
     req = Request(url=url, method="GET", headers={"X-Admin-Key": admin_key})
     try:
         with urlopen(req, timeout=10) as resp:
             body = resp.read().decode("utf-8")
             data = json.loads(body)
-            print("CHECK — app already has a schema registered:")
+            print("CHECK: app already has a schema registered:")
             print(f"  current version:     {data.get('version')}")
             print(f"  registered_at:       {data.get('registered_at')}")
             print(f"  registered_by:       {data.get('registered_by')}")
@@ -126,7 +129,7 @@ def do_check() -> int:
             return 0
     except HTTPError as e:
         if e.code == 404:
-            print("CHECK — app has no registered schema yet.")
+            print("CHECK: app has no registered schema yet.")
             print("Real run will register the FIRST version (revision 1).")
             return 0
         if e.code == 403:
@@ -139,9 +142,109 @@ def do_check() -> int:
         return 1
 
 
-def do_register() -> int:
+# ---------------------------------------------------------------------------
+# The writing-app guard.
+#
+# 2026-09-01: manifest v12, v13 and v14 were registered on the app id that
+# ShoulderSurf used until the 08-07 app-isolation split. The registration
+# answered 200, the registry read that "verified" it read that same app's
+# rows, and the worker builds its extraction prompt from the INGESTING
+# app's latest row, so every SS meeting since 08-16 was extracted under
+# the v11 wording. The env var carried a stale id and nothing in the path
+# could tell. Doc 19.6: check what your instrument resolves through.
+#
+# So the real run asks the database which apps have actually ingested a
+# meeting recently and refuses any other id. Derived lanes (profile pass,
+# consolidation, headlines) stamp the app of the source patches and keep
+# a dead app looking alive, so only origin-bound rows count. A brand new
+# app has never written and is refused too; that is what --force is for,
+# and it says so out loud.
+# ---------------------------------------------------------------------------
+
+WRITER_WINDOW_DAYS = 30
+
+WRITERS_SQL = """
+    SELECT acl.app_id::text AS app_id,
+           max(cp.created_at) AS last_ingest,
+           count(*) AS ingested
+      FROM context_patches cp
+      JOIN context_patch_acl acl ON acl.patch_id = cp.patch_id
+     WHERE acl.can_write
+       AND cp.origin_id IS NOT NULL
+       AND cp.created_at >= now() - ($1::int * interval '1 day')
+     GROUP BY 1
+     ORDER BY 2 DESC
+"""
+
+
+def judge_writer(app_id: str, writers: list) -> tuple[bool, str]:
+    """Pure verdict: (ok, message). `writers` is rows of
+    (app_id, last_ingest, ingested) for the window, newest first."""
+    mine = [w for w in writers if str(w[0]) == app_id]
+    if mine:
+        _, last, n = mine[0]
+        return True, (f"app {app_id} ingested {n} origin-bound patches in the "
+                      f"last {WRITER_WINDOW_DAYS} days (latest {last}); it is a writer.")
+    lines = [f"REFUSED: app {app_id} has ingested NOTHING in the last "
+             f"{WRITER_WINDOW_DAYS} days, so a manifest registered on it never "
+             "reaches an extraction prompt."]
+    if writers:
+        lines.append("Apps that DID ingest, newest first:")
+        for a, last, n in writers:
+            lines.append(f"  {a}  latest {last}  ({n} patches)")
+    else:
+        lines.append("No app has ingested in the window at all.")
+    lines.append("Pass --force only for a brand new app that has never written.")
+    return False, "\n".join(lines)
+
+
+def writer_guard(app_id: str, force: bool) -> int:
+    """0 to proceed, 1 to stop. Reads DATABASE_URL; refuses when absent."""
+    dsn = os.environ.get("DATABASE_URL", "")
+    if not dsn:
+        if force:
+            print("WARNING: no DATABASE_URL, writer guard skipped under --force.")
+            return 0
+        print("REFUSED: DATABASE_URL is not set, so the writer guard cannot run. "
+              "Run from the compose container (it has it) or pass --force.",
+              file=sys.stderr)
+        return 1
+    try:
+        import asyncio
+
+        import asyncpg
+
+        async def _fetch():
+            conn = await asyncpg.connect(dsn)
+            try:
+                rows = await conn.fetch(WRITERS_SQL, WRITER_WINDOW_DAYS)
+                return [(r["app_id"], r["last_ingest"], r["ingested"]) for r in rows]
+            finally:
+                await conn.close()
+
+        writers = asyncio.run(_fetch())
+    except Exception as exc:  # the guard failing is not a reason to write
+        if force:
+            print(f"WARNING: writer guard could not run ({str(exc)[:120]}); "
+                  "proceeding under --force.")
+            return 0
+        print(f"REFUSED: writer guard could not run: {str(exc)[:200]}", file=sys.stderr)
+        return 1
+    ok, msg = judge_writer(app_id, writers)
+    print(msg)
+    if ok:
+        return 0
+    if force:
+        print("Proceeding anyway under --force.")
+        return 0
+    return 1
+
+
+def do_register(force: bool = False) -> int:
     """POST the manifest. Real writes."""
     base_url, admin_key, app_id = require_env()
+    if writer_guard(app_id, force):
+        return 1
     manifest = load_manifest()
     manifest["app_id"] = app_id
 
@@ -188,6 +291,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Verify connectivity and whether the app already has a registered schema. No write.",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Register even when the writer guard refuses (a brand new app that has never ingested).",
+    )
     return parser.parse_args()
 
 
@@ -200,7 +308,7 @@ def main() -> int:
         return do_dry_run()
     if args.check:
         return do_check()
-    return do_register()
+    return do_register(force=args.force)
 
 
 if __name__ == "__main__":

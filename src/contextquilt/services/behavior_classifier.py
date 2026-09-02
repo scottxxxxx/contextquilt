@@ -35,7 +35,7 @@ lane would otherwise have stored; it may only decline to store one it
 was sure about. Kill switch CQ_BEHAVIOR_CLASSIFIER_ENABLED; model
 CQ_BEHAVIOR_CLASSIFIER_MODEL, default Sonnet (see DEFAULT_MODEL).
 
-MEASURED, not claimed (2026-09-02, Scott's rows, two 120-row samples,
+MEASURED, not claimed (2026-09-01, Scott's rows, two 120-row samples,
 one hand reader): with this prompt Sonnet keeps 103 and 104 of 120,
 and every drop in both samples read as correct or a toss-up, so the
 loss side is clean. The kept side still carries roughly one status
@@ -77,7 +77,7 @@ ENABLED_ENV = "CQ_BEHAVIOR_CLASSIFIER_ENABLED"
 MODEL_ENV = "CQ_BEHAVIOR_CLASSIFIER_MODEL"
 
 # Sonnet, not the app's Haiku client, and measured rather than assumed
-# (2026-09-02, 120 stored rows, same prompt, same rows): Haiku dropped
+# (2026-09-01, 120 stored rows, same prompt, same rows): Haiku dropped
 # 26 rows Sonnet kept and every one of the 26 that was read by hand was
 # conduct ("Instructed Joy to look at the deployment", "Deferred the
 # decision until Monday", "Confirmed that 624 is still good"), filed as
