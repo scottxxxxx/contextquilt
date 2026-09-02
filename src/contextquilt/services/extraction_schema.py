@@ -1001,6 +1001,23 @@ def convert_to_preference(patch: dict) -> dict:
     return patch
 
 
+# Gender is not observable in a transcript. A pronoun the model chose is
+# a claim about a person nobody made, and Scott saw one on a tile on
+# 2026-09-02 ("verify her Carta and ADP account access", about conduct
+# that was his own). Measured the same day: 113 of 892 active behavior
+# rows carried one. COUNTED here, not rewritten: a mechanical they/their
+# substitution breaks agreement ("she is" to "they is") and a rewrite
+# of stored text is a different decision from a refusal. The count goes
+# into the report so the worker log measures whether the prompt rule
+# is obeyed, meeting by meeting, before anything stronger is built.
+GENDERED_PRONOUN = re.compile(
+    r"\b(he|she|his|her|hers|him|himself|herself)\b", re.I)
+
+
+def count_gendered_pronouns(text: Optional[str]) -> int:
+    return len(GENDERED_PRONOUN.findall(text or ""))
+
+
 def sanitize_behavior_observations(content: dict) -> dict:
     """Drop behavioral observations that state character instead of conduct.
 
@@ -1130,10 +1147,17 @@ def sanitize_behavior_observations(content: dict) -> dict:
         })
         dropped_targets.add((patch.get("type"), text.strip().lower()))
 
+    gendered = sum(
+        count_gendered_pronouns((p.get("value") or {}).get("text"))
+        for p in kept
+        if isinstance(p, dict) and p.get("type") in BEHAVIOR_OBSERVATION_TYPES
+        and isinstance(p.get("value"), dict)
+    )
     if not dropped:
-        if retyped:
+        if retyped or gendered:
             content["_behavior_observations_sanitized"] = {
                 "dropped": [], "count": 0, "retyped": retyped,
+                "gendered_pronouns": gendered,
             }
         return content
 
@@ -1156,6 +1180,7 @@ def sanitize_behavior_observations(content: dict) -> dict:
         "dropped": dropped,
         "count": len(dropped),
         "retyped": retyped,
+        "gendered_pronouns": gendered,
     }
     return content
 

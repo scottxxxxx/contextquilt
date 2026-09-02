@@ -352,6 +352,7 @@ PATCH TEXT RULES:
 - For trait, preference, goal, and constraint patches: write in SECOND PERSON. Say "You prefer async" / "You want to ship by Q2" / "You can't deploy on Fridays", not "Scott prefers async."
 - NEVER include the "(you)" suffix in any patch text. The speaker label "[Scott (you)]" is an identification marker in the transcript, not part of anyone's name. Write "Scott" not "Scott (you)."
 - For all other patch types (commitment, decision, blocker, event, person, org, role, project, takeaway): use the speaker's name normally. "Larkin will import the agents", not second person.
+- NEVER use a gendered pronoun for anyone (he, she, his, her, him, himself, herself). Gender is not observable in a transcript and a name or a voice does not state it. Use the person's name, or they, them, their.
 
 VOICE EXAMPLES (trait / preference / goal / constraint; conjugate verbs and pronouns to match second-person):
 WRONG: "Scott (you) wants his voice to be recognized"

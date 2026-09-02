@@ -727,5 +727,9 @@ def _closing_rules() -> str:
         "3. Keep each patch's text concise (one clear sentence).\n"
         "4. If a section has nothing to extract, return an empty array.\n"
         "5. Only create connections that genuinely exist in the transcript.\n"
-        "6. Prefer consolidation: one commitment patch over three sub-tasks."
+        "6. Prefer consolidation: one commitment patch over three sub-tasks.\n"
+        "7. NEVER use a gendered pronoun for anyone (he, she, his, her, him, "
+        "himself, herself). Gender is not observable in a transcript and a "
+        "name or a voice does not state it. Use the person's name, or they, "
+        "them, their."
     )

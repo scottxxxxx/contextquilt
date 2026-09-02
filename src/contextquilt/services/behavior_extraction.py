@@ -64,7 +64,9 @@ Wrong shape, and why:
 
 RULES:
 - `owner` must be a named person exactly as the transcript names them. Never a role, never a diarization label like "Speaker 2", never "the team". If you cannot attribute conduct to a named person, do not record it.
+- `owner` is the person who DID the thing, never the person it concerned. If the speaker marked "(you)" asked for two minutes to check an account, that is the user's conduct even when the account or the system belonged to somebody else, and it is not recorded.
 - Never record an observation about the speaker marked "(you)". That is the user, and this corpus is about the people they work with.
+- NEVER use a gendered pronoun for anyone (he, she, his, her, him, himself, herself). Gender is not observable in a transcript and a name or a voice does not state it. Use the person's name, or they, them, their.
 - One observation per thing observed. Do not merge two moments into one sentence with "and also".
 - Prefer the specific to the general. "Asked for last quarter's numbers before agreeing" beats "wanted more data".
 - NEVER use a dash of any kind as punctuation. Use a comma, a colon, parentheses, or two sentences. A hyphen inside a genuinely hyphenated word is the only acceptable use.
