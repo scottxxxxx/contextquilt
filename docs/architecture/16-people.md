@@ -1479,10 +1479,12 @@ was observed.** Two names failed and one is on the line.
 | `chases` | FAILED, renamed `raised_without_advance`, boundary published as `RAISED_DEFINITION` (5.12) |
 | `delivered` | kept through the naming audit, then renamed `resolved` when the primitive widened, see below |
 | `re_dated`, `restated`, `reassigned`, `absorbed_by_user`, `open` | pass: each is a thing somebody said, on a date, in a meeting |
-| `hop_count`, `deadline_moves`, `days_open`, `first_stated_on`, `last_stated_on`, `meetings_since_last_statement`, `owner_change` | pass: all counts of stored observations |
+| `hop_count`, `deadline_moves`, `days_open`, `first_stated_on`, `last_stated_on`, `owner_change` | pass: all counts of stored observations |
+| `meetings_since_last_statement`, `max_meetings_not_raised` | passed this audit and FAILED the 2026-09-01 one: the count is distinct DAYS present after the last statement (`_meeting_days` is a set of dates), not meetings. `days_since_last_statement` and `max_days_not_raised` now carry the values; old keys serve until clients move |
 | `received_explicit` / `received_inferred` | pass, and the split is itself the honesty: the inferred half names its own uncertainty |
 | `unresolved`, `unmeasurable` | pass: both exist precisely to keep an unknown out of a count |
 | `object_regression` | pass by being null, and by asking about the restatement TEXTS (the conversation) rather than about the work |
+| `presence.meetings_present` (detail route) | FAILED 2026-09-01 in the same audit: it is `len(days)` while `questions.meetings_present` on the same row counts appearance rows. `presence.days_present` now carries the value; old key serves until clients move |
 | `meetings_7d`, `meetings_30d`, `cadence.meetings_observed` | FAILED 2026-09-01, found by SS from a device payload: the values are distinct DAYS present (six meetings on four days served as 4). The number is right for a rhythm; the name is not. `days_present_7d`, `days_present_30d` and `cadence.days_observed` now carry the same values; the old names keep serving until clients move, then retire |
 
 `resolved` (which was `delivered` through the naming audit, and was

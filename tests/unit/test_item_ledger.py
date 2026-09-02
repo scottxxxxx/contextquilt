@@ -119,6 +119,7 @@ class TestProductionShapedData:
         )
         assert got["mode"] == NOT_RAISED_SINCE
         assert got["meetings_since_last_statement"] == 2
+        assert got["days_since_last_statement"] == 2
 
     def test_missing_created_at_is_a_cannot_tell_not_a_zero(self):
         got = classify_item(item(created_at=None, deadline_date="2026-06-20"), TODAY)
@@ -534,6 +535,7 @@ class TestSummary:
         # up in your last 2 meetings with her", which is true whatever
         # happened offline.
         assert s["max_meetings_not_raised"] == 2
+        assert s["max_days_not_raised"] == 2
         assert items[0]["meetings_since_last_statement"] == 2
 
     def test_the_peak_is_null_not_zero_when_nothing_is_in_that_mode(self):
@@ -1070,3 +1072,18 @@ def test_no_mode_name_describes_a_person(mode):
     assert not any(
         w in mode for w in ("unreliable", "flaky", "avoid", "evasive", "lazy")
     )
+
+
+def test_since_last_statement_is_days_present_and_says_so():
+    """Two meetings on one day after the last statement are one day.
+    `meetings_since_last_statement` has always counted this; the honest
+    key rides alongside with the same value (2026-09-01 audit)."""
+    from datetime import date, datetime, timezone
+    from contextquilt.services.item_ledger import classify_item
+
+    row = {"patch_id": "p1", "patch_type": "commitment", "status": "active",
+           "created_at": datetime(2026, 8, 1, tzinfo=timezone.utc), "value": {}}
+    days = [date(2026, 8, 1), date(2026, 8, 20), date(2026, 8, 27)]
+    got = classify_item(row, date(2026, 9, 1), meeting_days=days)
+    assert got["days_since_last_statement"] == 2
+    assert got["meetings_since_last_statement"] == got["days_since_last_statement"]

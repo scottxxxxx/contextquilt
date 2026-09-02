@@ -139,7 +139,15 @@ def presence_anchor(appearances: List[dict]) -> Dict:
         # different claim from "met long ago" and must render as one.
         "first_present_at": days[0].isoformat() if days else None,
         "last_present_at": days[-1].isoformat() if days else None,
+        # DAYS, both keys. `meetings_present` here has always been
+        # len(days), which is a different unit from the
+        # `questions.meetings_present` served beside it on the same row
+        # (that one is appearance rows). Same key, two units, one
+        # surface: found 2026-09-01 in the audit SS's day-count report
+        # triggered. `days_present` is the honest name; the old key keeps
+        # serving until clients move.
         "meetings_present": len(days),
+        "days_present": len(days),
     }
 
 
@@ -243,7 +251,7 @@ def compute_person_signals(
         # implementation, so the two screens cannot disagree.
         **{
             k: v for k, v in presence_anchor(appearances).items()
-            if k != "meetings_present"
+            if k not in ("meetings_present", "days_present")
         },
         "open_between": {
             "they_owe_open": len(they_owe),

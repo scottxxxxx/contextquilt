@@ -12,6 +12,7 @@ from contextquilt.services.people_signals import (
     compute_person_signals,
     compute_question_totals,
     is_presence_grade,
+    presence_anchor,
 )
 
 TODAY = date(2026, 8, 11)
@@ -340,3 +341,15 @@ def test_null_cadence_stays_null_with_the_new_key():
     s = compute_person_signals(_apps((8, 1, 5), (8, 8, 5)), [], None, today=TODAY)
     assert s["cadence"] is None
     assert s["days_present_30d"] == 2
+
+
+def test_presence_anchor_serves_days_present_and_the_signals_block_does_not_leak_it():
+    """`presence.meetings_present` on the detail route was always
+    len(days); `questions.meetings_present` beside it counts rows. The
+    honest key rides alongside; the list's signals block carries neither."""
+    apps = _apps((8, 10, 1), (8, 10, 2), (8, 4, 3))
+    anchor = presence_anchor(apps)
+    assert anchor["days_present"] == 2
+    assert anchor["meetings_present"] == anchor["days_present"]
+    s = compute_person_signals(apps, [], None, today=TODAY)
+    assert "days_present" not in s and "meetings_present" not in s

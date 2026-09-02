@@ -688,10 +688,16 @@ def classify_item(
         "first_stated_on": first_stated.isoformat() if first_stated else None,
         "last_stated_on": last_stated.isoformat() if last_stated else None,
         "days_open": days_open,
-        # Meetings with this person since the item was last said out
-        # loud. Null means no first-statement date to count from, never
-        # zero meetings.
+        # Distinct DAYS present with this person since the item was last
+        # said out loud (_meeting_days is a set of dates, so two meetings
+        # on one day are one). Null means no first-statement date to
+        # count from, never zero. The name `meetings_since_last_statement`
+        # asserts meetings and has always been days; found 2026-09-01 in
+        # the audit SS's day-count report triggered, the third such key
+        # on the People surface. `days_since_last_statement` is the
+        # honest name; the old one keeps serving until clients move.
         "meetings_since_last_statement": meetings_since,
+        "days_since_last_statement": meetings_since,
         "owner_change": change,
         # Chases on this item, and how many of them moved it. See
         # _chases: this is the metric that carries the follow up finding,
@@ -822,6 +828,16 @@ def summarize(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         "max_meetings_not_raised": (
             max(
                 (i.get("meetings_since_last_statement") or 0)
+                for i in (items or ())
+                if i.get("mode") == NOT_RAISED_SINCE
+            )
+            if by_mode.get(NOT_RAISED_SINCE, 0) else None
+        ),
+        # Same value under its honest unit (days present, see
+        # `days_since_last_statement`); the old key serves until clients move.
+        "max_days_not_raised": (
+            max(
+                (i.get("days_since_last_statement") or 0)
                 for i in (items or ())
                 if i.get("mode") == NOT_RAISED_SINCE
             )
