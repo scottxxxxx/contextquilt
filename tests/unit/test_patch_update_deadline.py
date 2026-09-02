@@ -136,3 +136,19 @@ def test_either_spelling_actually_reaches_the_type_update():
     an extra step."""
     src = _func_source("update_patch")
     assert "update.category or update.patch_type" in src
+
+
+def test_null_is_never_the_clear_sentinel_on_this_route():
+    """Every clearable field on PATCH .../patches/{id} clears on "" and
+    treats null as "not supplied". That is not a style choice: GP's proxy
+    filters `if v is not None` on this route (one of five), so an
+    explicit null is stripped before CQ sees it, and a client that sent
+    null hoping to clear would get a 200 and no change, invisible from
+    both ends. Verified against their source 2026-09-02. The error text
+    used to say "or null", which invited exactly that."""
+    body = _func_source("update_patch")
+    assert 'update.deadline_date == ""' in body
+    assert 'new_override == ""' in body
+    assert "or null." not in MAIN
+    model = MAIN.split("class PatchUpdate(")[1].split("\nclass ")[0]
+    assert 'NOT null' in model
