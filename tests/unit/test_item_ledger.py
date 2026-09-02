@@ -118,14 +118,14 @@ class TestProductionShapedData:
                           (datetime(2026, 7, 2), datetime(2026, 7, 30))],
         )
         assert got["mode"] == NOT_RAISED_SINCE
-        assert got["meetings_since_last_statement"] == 2
+        assert got["days_since_last_statement"] == 2
         assert got["days_since_last_statement"] == 2
 
     def test_missing_created_at_is_a_cannot_tell_not_a_zero(self):
         got = classify_item(item(created_at=None, deadline_date="2026-06-20"), TODAY)
         assert got["days_open"] is None
         assert got["first_stated_on"] is None
-        assert got["meetings_since_last_statement"] is None
+        assert got["days_since_last_statement"] is None
         assert got["mode"] == OPEN
 
 
@@ -138,14 +138,14 @@ class TestDroppedVersusReDated:
             item(deadline_date="2026-06-20"), TODAY, meeting_days=self.ONE_MEETING
         )
         assert got["mode"] == OPEN
-        assert got["meetings_since_last_statement"] == 1
+        assert got["days_since_last_statement"] == 1
 
     def test_no_meetings_at_all_is_not_a_drop(self):
         # Two months of silence while they never met. Elapsed days would
         # call this abandoned; meetings say nothing has been asked yet.
         got = classify_item(item(deadline_date="2026-06-20"), TODAY, meeting_days=[])
         assert got["mode"] == OPEN
-        assert got["meetings_since_last_statement"] == 0
+        assert got["days_since_last_statement"] == 0
 
     def test_meetings_before_the_last_statement_do_not_count(self):
         # They met twice, but the item was restated after both, so it has
@@ -158,7 +158,7 @@ class TestDroppedVersusReDated:
             TODAY,
             meeting_days=self.TWO_MEETINGS,
         )
-        assert got["meetings_since_last_statement"] == 0
+        assert got["days_since_last_statement"] == 0
         assert got["mode"] == RESTATED
 
     def test_an_item_still_ahead_of_its_date_is_never_dropped(self):
@@ -443,7 +443,7 @@ class TestMeetingsAreCountedByPresence:
         got = classify_items(
             [item(deadline_date="2026-06-20")], TODAY, appearances=mentions
         )
-        assert got[0]["meetings_since_last_statement"] == 0
+        assert got[0]["days_since_last_statement"] == 0
         assert got[0]["mode"] == OPEN
 
     def test_rows_with_no_capacity_count_as_presence(self):
@@ -465,7 +465,7 @@ class TestMeetingsAreCountedByPresence:
         got = classify_items(
             [item(deadline_date="2026-06-20")], TODAY, appearances=same_day
         )
-        assert got[0]["meetings_since_last_statement"] == 1
+        assert got[0]["days_since_last_statement"] == 1
         assert got[0]["mode"] == OPEN
 
 
@@ -534,14 +534,14 @@ class TestSummary:
         # The number a client renders the sentence from: "has not come
         # up in your last 2 meetings with her", which is true whatever
         # happened offline.
-        assert s["max_meetings_not_raised"] == 2
         assert s["max_days_not_raised"] == 2
-        assert items[0]["meetings_since_last_statement"] == 2
+        assert s["max_days_not_raised"] == 2
+        assert items[0]["days_since_last_statement"] == 2
 
     def test_the_peak_is_null_not_zero_when_nothing_is_in_that_mode(self):
         s = summarize(classify_items([item()], TODAY))
         assert s["not_raised_since"] == 0
-        assert s["max_meetings_not_raised"] is None
+        assert s["max_days_not_raised"] is None
 
     def test_the_mode_never_claims_the_work_stopped(self):
         """The name is the guard. An item finished by email on the
@@ -554,7 +554,7 @@ class TestSummary:
         got = items[0]
         assert got["mode"] == "not_raised_since"
         # Everything served about it is a fact about the conversation.
-        assert got["meetings_since_last_statement"] == 2
+        assert got["days_since_last_statement"] == 2
         assert got["last_stated_on"] == "2026-06-01"
         blob = repr(got) + repr(summarize(items))
         for verdict in ("dropped", "abandoned", "ignored", "stalled", "neglect"):
@@ -1086,4 +1086,4 @@ def test_since_last_statement_is_days_present_and_says_so():
     days = [date(2026, 8, 1), date(2026, 8, 20), date(2026, 8, 27)]
     got = classify_item(row, date(2026, 9, 1), meeting_days=days)
     assert got["days_since_last_statement"] == 2
-    assert got["meetings_since_last_statement"] == got["days_since_last_statement"]
+    assert "meetings_since_last_statement" not in got   # retired 2026-09-02

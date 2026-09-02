@@ -142,11 +142,9 @@ def presence_anchor(appearances: List[dict]) -> Dict:
         # DAYS, both keys. `meetings_present` here has always been
         # len(days), which is a different unit from the
         # `questions.meetings_present` served beside it on the same row
-        # (that one is appearance rows). Same key, two units, one
-        # surface: found 2026-09-01 in the audit SS's day-count report
-        # triggered. `days_present` is the honest name; the old key keeps
-        # serving until clients move.
-        "meetings_present": len(days),
+        # counts appearance ROWS and is a different unit under the same
+        # word; that one is correct and stays. This one was retired
+        # 2026-09-02 (see the note at the return of compute_person_signals).
         "days_present": len(days),
     }
 
@@ -190,7 +188,7 @@ def compute_person_signals(
         if intervals:
             cadence = {
                 "median_interval_days": round(median(intervals)),
-                "meetings_observed": len(days),
+                "days_observed": len(days),
             }
 
     def _overdue(item) -> bool:
@@ -226,6 +224,14 @@ def compute_person_signals(
     ))
     next_item = _summ(*candidates[0]) if candidates else None
 
+# RETIRED 2026-09-02. Six served keys said "meetings" over counts of
+# distinct DAYS present. SS verified on the wire, from the raw cached
+# bytes on Scott's iPhone, that all 381 people carried the honest names
+# with identical values through GP's hop, so Scott ruled the old names
+# off the wire the same day rather than on a grace period. The honest
+# names are the only ones now: days_present_7d, days_present_30d,
+# cadence.days_observed, presence.days_present, days_since_last_statement,
+# max_days_not_raised. Doc 16 section 5.13 carries the audit.
     # THE UNIT IS DAYS. `present_days` is a set of dates, so every count
     # here is distinct calendar days on which the person was present,
     # and three meetings on one Tuesday are one Tuesday, which is the
@@ -237,11 +243,7 @@ def compute_person_signals(
     # alongside with the SAME values; the old ones keep serving unchanged
     # until every client has moved, then retire. Additive, so no decoder
     # has to guess (and GP has to forward the new keys, not drop them).
-    if cadence is not None:
-        cadence = {**cadence, "days_observed": cadence["meetings_observed"]}
     return {
-        "meetings_7d": meetings_7d,
-        "meetings_30d": meetings_30d,
         "days_present_7d": meetings_7d,
         "days_present_30d": meetings_30d,
         "turns_30d": turns_30d,
@@ -251,7 +253,7 @@ def compute_person_signals(
         # implementation, so the two screens cannot disagree.
         **{
             k: v for k, v in presence_anchor(appearances).items()
-            if k not in ("meetings_present", "days_present")
+            if k != "days_present"
         },
         "open_between": {
             "they_owe_open": len(they_owe),
