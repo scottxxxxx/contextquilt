@@ -2087,7 +2087,15 @@ class PatchUpdate(BaseModel):
     category: Optional[str] = None
     owner: Optional[str] = None
     project_id: Optional[str] = None
-    permanence_override: Optional[str] = None           # one of: permanent | decade | year | quarter | month | week | day | null
+    # One of: permanent | decade | year | quarter | month | week | day,
+    # or "" to CLEAR the override back to the type default. NOT null:
+    # null means "not supplied" here, as it does for every field on this
+    # route, and the block below is not even entered for it. Said
+    # explicitly because the wire strips a null before CQ sees it (GP's
+    # proxy filters `if v is not None` on this route among five), so a
+    # client that sent null hoping to clear would get a 200 and no
+    # change, invisibly, from both ends. Verified 2026-09-02.
+    permanence_override: Optional[str] = None
     permanence_override_source: Optional[str] = None    # 'user' or 'app'; defaults to 'user' when the API is called without explicit source
     # THE DUE DATE, EDITABLE. Until now nothing could change it after the
     # fact, so an item created with the wrong date, or with none, was
@@ -2939,8 +2947,8 @@ async def update_patch(
             update.project_id, project_name, datetime.utcnow(), patch_id
         )
 
-    # Update permanence_override if supplied.
-    # Explicit string "" or null-like value clears the override back to the type default.
+    # Update permanence_override if supplied. "" CLEARS the override back
+    # to the type default; null is "not supplied" and does not enter here.
     if update.permanence_override is not None or update.permanence_override_source is not None:
         valid_classes = {"permanent", "decade", "year", "quarter", "month", "week", "day"}
         valid_sources = {"user", "app"}
@@ -2951,14 +2959,14 @@ async def update_patch(
         if new_override is not None and new_override not in valid_classes:
             raise HTTPException(
                 status_code=400,
-                detail=f"permanence_override must be one of {sorted(valid_classes)} or null.",
+                detail=f'permanence_override must be one of {sorted(valid_classes)}, or "" to clear it. null means "not supplied" and changes nothing.',
             )
 
         new_source = update.permanence_override_source or ("user" if new_override is not None else None)
         if new_source is not None and new_source not in valid_sources:
             raise HTTPException(
                 status_code=400,
-                detail=f"permanence_override_source must be one of {sorted(valid_sources)} or null.",
+                detail=f'permanence_override_source must be one of {sorted(valid_sources)}, or "" to clear it. null means "not supplied" and changes nothing.',
             )
 
         await db_pool.execute(
