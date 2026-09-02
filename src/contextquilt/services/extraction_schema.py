@@ -1014,7 +1014,7 @@ GENDERED_PRONOUN = re.compile(
     r"\b(he|she|his|her|hers|him|himself|herself)\b", re.I)
 
 
-def count_gendered_pronouns(text: Optional[str]) -> int:
+def count_gendered_pronouns(text: "str | None") -> int:
     return len(GENDERED_PRONOUN.findall(text or ""))
 
 
