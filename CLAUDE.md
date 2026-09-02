@@ -203,7 +203,9 @@ it has cost something.
    Before passing a mechanism to a third team, name the file that would
    settle it and say whether anyone has opened it. "I think X drops it"
    and "I read the schema and X drops it" are different messages, and only
-   the second is worth another team's afternoon.
+   the second is worth another team's afternoon. Neither near miss reached
+   a user; the cost was two hours of somebody else's day, caught within the
+   hour each time, and the rule is not worth more than that.
 
 ## Documentation
 
