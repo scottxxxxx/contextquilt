@@ -206,3 +206,47 @@ def test_the_sanitizer_accepts_the_lane_output_shape():
     report = out["_behavior_observations_sanitized"]
     assert report["count"] == 1
     assert report["dropped"][0]["reason"] == "placeholder_owner"
+
+
+# --- gender is not observable ------------------------------------------
+
+def test_every_prompt_that_writes_about_people_forbids_gendered_pronouns():
+    """2026-09-02: a tile read "verify her Carta and ADP account access"
+    about conduct that was the user's own. Gender is not in a transcript;
+    a name or a voice does not state it. The rule is stated where prose
+    is made, in all three prompts, in the same words."""
+    from contextquilt.services import extraction_prompts, schema_prompt_builder
+    rule = "NEVER use a gendered pronoun for anyone"
+    assert rule in BEHAVIOR_SYSTEM
+    assert rule in extraction_prompts.MEETING_SUMMARY_SYSTEM
+    manifest = {"app_id": "x", "patch_types": [
+        {"domain_type": "commitment", "description": "A promise."}],
+        "connection_labels": [], "entity_types": []}
+    assert rule in schema_prompt_builder.build_prompt(manifest)
+
+
+def test_the_behavior_prompt_says_the_owner_is_who_did_it():
+    assert "`owner` is the person who DID the thing, never the person it concerned" in BEHAVIOR_SYSTEM
+
+
+def test_the_sanitizer_counts_gendered_pronouns_and_never_rewrites():
+    from contextquilt.services.extraction_schema import (
+        count_gendered_pronouns, sanitize_behavior_observations)
+    assert count_gendered_pronouns("Took two minutes to verify her Carta access") == 1
+    assert count_gendered_pronouns("Sheila heard the theme and shipped it") == 0
+    patches = parse_behavior_response(_resp(
+        ("Took two minutes to verify her Carta access", "Sarah Brooks"),
+        ("Asked for the cost breakdown", "Denby"),
+    ))
+    out = sanitize_behavior_observations({"patches": patches})
+    report = out["_behavior_observations_sanitized"]
+    assert report["gendered_pronouns"] == 1
+    assert report["count"] == 0
+    # Counted, not rewritten: the text is byte-identical.
+    assert out["patches"][0]["value"]["text"] == "Took two minutes to verify her Carta access"
+
+
+def test_the_lane_logs_the_pronoun_count():
+    body = WORKER.split("async def _extract_behavior_observations")[1].split(
+        "async def ")[0]
+    assert 'gendered_pronouns=bo.get("gendered_pronouns", 0)' in body

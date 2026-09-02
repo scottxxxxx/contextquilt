@@ -7369,6 +7369,7 @@ class ColdPathWorker:
                     origin=origin_id, lane="behavior_observations",
                     dropped=bo["count"], dropped_detail=bo["dropped"][:20],
                     retyped=(bo.get("retyped") or [])[:20],
+                    gendered_pronouns=bo.get("gendered_pronouns", 0),
                 )
                 if not patches and bo["count"]:
                     defects.append("all_sanitized")
