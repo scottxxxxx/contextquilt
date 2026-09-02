@@ -44,7 +44,7 @@ import json
 import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
-from contextquilt.services.insight_cards import dash_as_punctuation, opens_with_name
+from contextquilt.services.insight_cards import dash_as_punctuation, gendered_pronoun, opens_with_name
 
 LENS = "who_they_are"
 
@@ -205,7 +205,7 @@ Rules, every one enforced after you answer:
 2. Use only the facts given. No number that was not handed to you. No title, employer, seniority or affiliation that no input states. If the inputs are thin, say less.
 3. Say how it changed over time when it did: what they were first seen as, what they are now, and whether the perceptions agree with what they stated. Use the dates given, by month and year is fine.
 4. Two or three sentences for the summary. One sentence for the trajectory, or null if nothing moved.
-5. Do not open with the person's name. Do not use a dash as punctuation anywhere; use a comma, a colon, or two sentences.
+5. Do not open with the person's name. Do not use a dash as punctuation anywhere; use a comma, a colon, or two sentences. Never use a gendered pronoun for anyone (he, she, his, her, him, himself, herself). Gender is not in the inputs and a name does not state it. Use the person's name, or they, them, their.
 6. Cite every input you drew on by its id.
 
 Answer with raw JSON only, exactly this shape and nothing else:
@@ -298,6 +298,9 @@ def parse_response(
     if dash_as_punctuation(summary) or (trajectory and dash_as_punctuation(trajectory)):
         defects.append("dash_punctuation")
         return None
+    if gendered_pronoun(summary) or (trajectory and gendered_pronoun(trajectory)):
+        defects.append("gendered_pronoun")
+        return None
     allowed = allowed_numbers(facts)
     for n in _INTEGER.findall(summary + " " + (trajectory or "")):
         if n not in allowed:
@@ -358,7 +361,7 @@ def served(card_value: Mapping[str, Any]) -> Dict[str, Any]:
     }
 
 
-RETRYABLE = {"summary_too_long", "trajectory_too_long", "opens_with_name", "dash_punctuation", "stated_role_dropped", "invented_number"}
+RETRYABLE = {"summary_too_long", "trajectory_too_long", "opens_with_name", "dash_punctuation", "gendered_pronoun", "stated_role_dropped", "invented_number"}
 
 
 def retry_note(defect: str, facts: Mapping[str, Any], summary_chars: int = 0) -> Optional[str]:
@@ -381,6 +384,9 @@ def retry_note(defect: str, facts: Mapping[str, Any], summary_chars: int = 0) ->
                 "It renders under their name, so do not begin with it; begin with the role or the read.")
     if defect == "dash_punctuation":
         return "Your previous answer used a dash as punctuation. Use a comma, a colon, or two sentences."
+    if defect == "gendered_pronoun":
+        return ("Your previous answer used a gendered pronoun. Gender is not in the inputs. "
+                "Use the person's name, or they, them, their.")
     if defect == "stated_role_dropped" and facts.get("roles"):
         phrase = title_phrase(facts["roles"][0]["text"], facts.get("person") or "")
         return (f"Your previous summary did not contain the newest stated role word for word. "

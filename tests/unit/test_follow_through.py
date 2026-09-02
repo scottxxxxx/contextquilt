@@ -284,7 +284,7 @@ def test_the_lens_is_never_read_from_the_response():
     out = parse_follow_through_response({
         "skip": False, "lens": "how_they_decide",
         "text": "Commits to a date and lands most of them a week after it.",
-        "do": "Ask for the date he will actually hit, not the one he wants.",
+        "do": "Ask for the date they will actually hit, not the one they want.",
     })
     assert out["lens"] == FOLLOW_THROUGH_LENS
 
@@ -321,13 +321,13 @@ def test_a_character_verdict_declines_the_claim():
     """"Slips twice before landing" is citable. "Unreliable" is a verdict
     about a human being and is not a fact about anything."""
     assert parse_follow_through_response({
-        "skip": False, "text": "He is unreliable on dates he agrees to.",
-        "do": "Pad every date he gives you.",
+        "skip": False, "text": "They are unreliable on dates they agree to.",
+        "do": "Pad every date they give you.",
     }) is None
     assert parse_follow_through_response({
         "skip": False,
         "text": "Agrees to a date, then slips twice before landing it.",
-        "do": "Pad every date he gives you.",
+        "do": "Pad every date they give you.",
     }) is not None
 
 
@@ -621,8 +621,8 @@ def test_the_computed_facts_are_served_beside_the_claim():
 
 # --- the card the claim has to fit in ---------------------------------
 
-CLAIM = "Lands about half of what he commits to, usually a week late."
-DO = "Ask for the date he will actually hit, not the one he wants."
+CLAIM = "Lands about half of what they commit to, usually a week late."
+DO = "Ask for the date they will actually hit, not the one they want."
 
 
 def test_the_claims_that_actually_characterised_someone_still_fit():

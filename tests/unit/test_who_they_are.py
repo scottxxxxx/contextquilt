@@ -26,8 +26,8 @@ def _facts(roles=ROLES, percs=PERCS):
 
 
 def _ok_response(summary=None, trajectory="First seen as a team member in August 2026, then read as the project lead across the standups since.", sources=("R1", "P1", "P3")):
-    summary = summary or ("Scrum master on ABM project by his own account, and the meetings since August 2026 consistently show him running the standup and coordinating across teams. "
-                          "The perceptions agree with what he stated rather than contradicting it.")
+    summary = summary or ("Scrum master on ABM project by their own account, and the meetings since August 2026 consistently show them running the standup and coordinating across teams. "
+                          "The perceptions agree with what they stated rather than contradicting it.")
     return json.dumps({"summary": summary, "trajectory": trajectory, "sources": list(sources), "output_language": "en"})
 
 
@@ -81,13 +81,13 @@ def test_no_stated_role_means_no_phrase_requirement():
 def test_rejects_invented_numbers_and_dash_punctuation_and_name_opening():
     f = _facts()
     d = []
-    assert w.parse_response(_ok_response(summary="Scrum master on ABM project by his own account, across 47 meetings the standups show him coordinating teams and the picture has not moved."), f, d) is None
+    assert w.parse_response(_ok_response(summary="Scrum master on ABM project by their own account, across 47 meetings the standups show them coordinating teams and the picture has not moved."), f, d) is None
     assert d == ["invented_number:47"]
     d = []
-    assert w.parse_response(_ok_response(summary="Scrum master on ABM project by his own account — the meetings since August 2026 show him running the standup and coordinating across teams."), f, d) is None
+    assert w.parse_response(_ok_response(summary="Scrum master on ABM project by their own account — the meetings since August 2026 show them running the standup and coordinating across teams."), f, d) is None
     assert d == ["dash_punctuation"]
     d = []
-    assert w.parse_response(_ok_response(summary="Suresh is scrum master on ABM project by his own account, and the meetings since August 2026 show him running the standup and coordinating teams."), f, d) is None
+    assert w.parse_response(_ok_response(summary="Suresh is scrum master on ABM project by their own account, and the meetings since August 2026 show them running the standup and coordinating teams."), f, d) is None
     assert d == ["opens_with_name"]
 
 
@@ -98,7 +98,7 @@ def test_rejects_length_and_shape_defects():
     d = []
     assert w.parse_response(_ok_response(summary="Scrum master on ABM project."), f, d) is None and d == ["summary_too_short"]
     d = []
-    long = "Scrum master on ABM project by his own account. " + ("The standups show him coordinating across teams. " * 12)
+    long = "Scrum master on ABM project by their own account. " + ("The standups show them coordinating across teams. " * 12)
     assert w.parse_response(_ok_response(summary=long), f, d) is None and d == ["summary_too_long"]
     d = []
     assert w.parse_response(_ok_response(sources=()), f, d) is None and d == ["no_sources"]
@@ -173,3 +173,10 @@ def test_invented_number_and_trajectory_are_retryable_with_a_naming_note():
     assert "may not count" in note and "133" in note and "2026" in note
     assert "invented_number" in w.RETRYABLE and "trajectory_too_long" in w.RETRYABLE
     assert "one short sentence" in w.retry_note("trajectory_too_long", f)
+
+
+def test_a_gendered_pronoun_in_the_card_is_a_retryable_defect():
+    from contextquilt.services.who_they_are import RETRYABLE, SYSTEM, retry_note
+    assert "gendered_pronoun" in RETRYABLE
+    assert "Never use a gendered pronoun for anyone" in SYSTEM
+    assert "gendered pronoun" in retry_note("gendered_pronoun", {"person": "Vijay"})

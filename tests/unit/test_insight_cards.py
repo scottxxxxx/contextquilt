@@ -85,3 +85,19 @@ def test_a_malformed_evidence_field_does_not_crash_the_collapse():
             _card("x", "b", evidence_rows=5),
         ])
         assert [c["id"] for c in kept] == ["b"], bad
+
+
+def test_a_gendered_pronoun_is_a_card_defect_in_the_claim_or_the_do_line():
+    """2026-09-02: 113 stored behavior rows carried a pronoun a model
+    chose, and a writer copies the wording it reads. Refused where the
+    text is made, next to the dash ban and for the same reason."""
+    from contextquilt.services.insight_cards import (
+        CLAIM_HAS_GENDERED_PRONOUN, card_defect, gendered_pronoun)
+    assert gendered_pronoun("Pushed back on her estimate twice")
+    assert not gendered_pronoun("Pushed back on their estimate twice")
+    assert not gendered_pronoun("Sheila heard the theme and shipped it")
+    ok = "Pushes back on estimates before agreeing to a date, in three of four meetings"
+    do = "Bring the estimate with its assumptions"
+    assert card_defect(ok, do, "Vijay") is None
+    assert card_defect(ok.replace("agreeing", "she agrees"), do, "Vijay") == CLAIM_HAS_GENDERED_PRONOUN
+    assert card_defect(ok, "Ask him for the assumptions first", "Vijay") == CLAIM_HAS_GENDERED_PRONOUN

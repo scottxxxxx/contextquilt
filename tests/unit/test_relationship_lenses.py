@@ -283,7 +283,7 @@ def _resp(text, do, skip=False):
 def test_a_good_claim_survives():
     got = parse_stands_out_response(
         _resp("12 of 22 closed items landed after their due date.",
-              "Ask for the date she will actually hit."),
+              "Ask for the date they will actually hit."),
         allowed_numbers(FACTS), person_name="Pallavi",
     )
     assert got["lens"] == LENS
@@ -313,7 +313,7 @@ def test_a_character_verdict_voids_the_card():
     defects = []
     assert parse_stands_out_response(
         _resp("Unreliable on dates compared with everyone else.",
-              "Ask for a date she will hit."),
+              "Ask for a date they will hit."),
         allowed_numbers(FACTS), person_name="Pallavi", defects=defects,
     ) is None
     assert defects == ["character_word"]
@@ -334,7 +334,7 @@ def test_a_dash_used_as_punctuation_voids_the_card():
 
 def test_a_genuine_hyphen_is_not_a_dash():
     got = parse_stands_out_response(
-        _resp("Needs a follow-up on most items she closes.",
+        _resp("Needs a follow-up on most items they close.",
               "Ask for the on-time date, not the hoped-for one."),
         allowed_numbers(FACTS), person_name="Pallavi",
     )
@@ -491,7 +491,7 @@ def test_a_wordy_claim_with_no_digits_still_passes_the_contrast_rule():
     side, or the only shippable shape becomes unshippable."""
     got = parse_stands_out_response(
         _resp("Closes late far more often than others you work with.",
-              "Ask for the date she will actually hit."),
+              "Ask for the date they will actually hit."),
         allowed_numbers(FACTS), person_name="Pallavi", facts=FACTS,
     )
     assert got is not None and got["lens"] == LENS
@@ -816,3 +816,12 @@ def test_the_went_quiet_subject_says_days_because_the_count_is_days():
     subject = FACT_SUBJECTS["went_quiet"]
     assert "days" in subject
     assert "meetings" not in subject
+
+
+def test_the_lens_writer_and_the_consolidation_writers_forbid_gendered_pronouns():
+    from contextquilt.services import consolidation
+    from contextquilt.services.relationship_lenses import STANDS_OUT_SYSTEM
+    rule = "Never use a gendered pronoun for anyone"
+    assert rule in STANDS_OUT_SYSTEM
+    assert rule in consolidation.CONSOLIDATION_SYSTEM
+    assert rule in consolidation.PROFILE_SYSTEM

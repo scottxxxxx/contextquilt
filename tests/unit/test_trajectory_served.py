@@ -296,7 +296,7 @@ def _rate_facts(e_den=7, e_meet=8, r_den=5, r_meet=8):
 def test_counted_number_called_the_stretch_is_rejected_on_a_rate():
     from contextquilt.services.trajectory import conflates_counted_with_stretch
     f = _rate_facts()
-    assert conflates_counted_with_stretch("His turns totaled 188 across your first 7 meetings together", f)
+    assert conflates_counted_with_stretch("Their turns totaled 188 across your first 7 meetings together", f)
     assert conflates_counted_with_stretch("against 35 across the 5 meetings that followed", f)
     assert not conflates_counted_with_stretch("188 turns, counted in 7 of the 8 earlier meetings", f)
 
@@ -324,7 +324,7 @@ def test_parse_rejects_it_and_the_retry_note_names_it():
     f = _rate_facts()
     d = []
     out = parse_trajectory_response(
-        {"skip": False, "text": "His turns totaled 188 across your first 7 meetings together, against 35 across the 5 meetings that followed.",
+        {"skip": False, "text": "Their turns totaled 188 across your first 7 meetings together, against 35 across the 5 meetings that followed.",
          "narrative": "The shift is only visible in aggregate across the 16 meetings; no single meeting shows it, and the totals say what moved.",
          "do": "Check the agenda length against the ground you need to cover."},
         permitted=allowed_numbers(f), person_name="Sukumar", defects=d, facts=f,

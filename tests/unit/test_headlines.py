@@ -428,3 +428,10 @@ def test_the_partition_handles_a_json_string_value():
     free, rest = da_partition([
         {"patch_id": "a", "value": _json.dumps({"text": "Glass case"})}])
     assert free == {"a": "Glass case"} and rest == []
+
+
+def test_a_headline_with_a_gendered_pronoun_is_refused_and_the_writer_is_told():
+    from contextquilt.services.headlines import GENDERED, SYSTEM, why_invalid
+    assert why_invalid("Verified her Carta access on the call", "Verified her Carta access on the call") == GENDERED
+    assert why_invalid("Verified Carta access on the call", "Verified Carta access on the call") is None
+    assert "Never use a gendered pronoun for anyone" in SYSTEM

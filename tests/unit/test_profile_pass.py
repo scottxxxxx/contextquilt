@@ -106,7 +106,7 @@ def test_prompt_embeds_the_raw_json_shape_and_is_dash_free():
 def test_parse_accepts_a_whitelisted_lens_only():
     good = {"skip": False, "lens": "how_they_decide",
             "text": "Says yes in the room, then reopens scope async.",
-            "do": "End with him restating the deliverable."}
+            "do": "End with them restating the deliverable."}
     assert parse_profile_response(dict(good))["lens"] == "how_they_decide"
     assert parse_profile_response(dict(good) | {"lens": "charisma"}) is None
     assert parse_profile_response(dict(good) | {"skip": True}) is None

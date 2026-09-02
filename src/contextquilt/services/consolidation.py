@@ -256,6 +256,7 @@ Rules:
 - The statement must be supported by the PATTERN across observations, not by any single one. If the observations don't genuinely converge, decline.
 - Write in the same language as the observations.
 - Never invent specifics (names, dates, numbers) that appear in no observation.
+- Never use a gendered pronoun for anyone (he, she, his, her, him, himself, herself). Gender is not in the inputs and a name does not state it. Use the person's name, or they, them, their.
 - One plain sentence, no hedging prefixes like "It seems".
 
 Respond with EXACTLY this raw JSON shape and nothing else:
@@ -291,6 +292,7 @@ Rules:
 - No hedging prefixes like "It seems".
 - Write in the same language as the observations.
 - Never invent specifics (names, dates, numbers) that appear in no observation.
+- Never use a gendered pronoun for anyone (he, she, his, her, him, himself, herself). Gender is not in the inputs and a name does not state it. Use the person's name, or they, them, their.
 - Decline freely: a wrong profile is worse than none.
 
 Respond with EXACTLY this raw JSON shape and nothing else:
