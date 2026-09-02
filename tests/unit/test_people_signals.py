@@ -29,7 +29,8 @@ def test_weekly_cadence_and_recent_weights():
         _apps((7, 7, 10), (7, 14, 8), (7, 21, None), (7, 28, 12), (8, 4, 6)),
         [], None, today=TODAY,
     )
-    assert s["cadence"] == {"median_interval_days": 7, "meetings_observed": 5}
+    assert s["cadence"] == {"median_interval_days": 7, "meetings_observed": 5,
+                            "days_observed": 5}
     assert s["meetings_30d"] == 4 and s["meetings_7d"] == 0
     assert s["turns_30d"] == 26  # non-null in-window turns: 8 + 12 + 6
 
@@ -316,3 +317,26 @@ def test_somebody_elses_unobservable_item_does_not_poison_it():
     # Only the USER'S items bear on what the user owes.
     rows = [_row(), _row(owner="Steven", created_at=_BEFORE)]
     assert owed_to_instrument_has_looked(rows, _C, _self) is True
+
+
+def test_the_nd_counts_are_days_and_the_honest_names_say_so():
+    """SS read a device payload on 2026-09-01: six meetings on four days
+    served as meetings_30d == 4 under a tile reading "4 MEETINGS, 30D".
+    The count is distinct days present, which is the right measure of a
+    rhythm, and the names now on the wire say days. The old names keep
+    serving the same values until every client has moved."""
+    today = date(2026, 9, 1)
+    apps = _apps((9, 1, 3), (8, 28, 4), (8, 28, 2), (8, 28, 5), (8, 21, 1), (8, 17, 2))
+    s = compute_person_signals(apps, [], None, today=today)
+    assert len(apps) == 6
+    assert s["days_present_30d"] == 4 and s["days_present_7d"] == 2
+    assert s["meetings_30d"] == s["days_present_30d"]
+    assert s["meetings_7d"] == s["days_present_7d"]
+    assert s["cadence"]["days_observed"] == 4
+    assert s["cadence"]["meetings_observed"] == s["cadence"]["days_observed"]
+
+
+def test_null_cadence_stays_null_with_the_new_key():
+    s = compute_person_signals(_apps((8, 1, 5), (8, 8, 5)), [], None, today=TODAY)
+    assert s["cadence"] is None
+    assert s["days_present_30d"] == 2
