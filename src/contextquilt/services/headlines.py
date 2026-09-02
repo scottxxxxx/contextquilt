@@ -362,7 +362,8 @@ PENDING_SELECT = """
 
 
 def build_pending_fetch(subject_key: Optional[str] = None,
-                        origin_id: Optional[str] = None):
+                        origin_id: Optional[str] = None,
+                        patch_id: Optional[str] = None):
     """SQL and args for patches that have no headline yet.
 
     Idempotent by QUERY rather than by bookkeeping: it asks for rows
@@ -382,6 +383,14 @@ def build_pending_fetch(subject_key: Optional[str] = None,
     if origin_id is not None:
         args.append(origin_id)
         sql += f"       AND cp.origin_id = ${len(args)}\n"
+    if patch_id is not None:
+        # ONE patch: a user edit rewrote the fact and the route retired
+        # the headline that described the old wording. The worker
+        # rewrites just that line, through this same idempotent query,
+        # rather than a per-origin pass that would never fire again for
+        # a meeting already ingested.
+        args.append(patch_id)
+        sql += f"       AND cp.patch_id = ${len(args)}::uuid\n"
     sql += "     ORDER BY cp.created_at DESC\n"
     return sql, args
 

@@ -2799,8 +2799,34 @@ async def update_patch(
     if isinstance(value, str):
         value = json.loads(value)
 
+    fact_changed = False
+    headline_job = False
     if update.fact is not None:
+        fact_changed = (update.fact or "").strip() != str(value.get("text") or "").strip()
         value["text"] = update.fact
+        # THE HEADLINE DESCRIBES THE OLD WORDING. Scott edited "in the
+        # next couple of days" to "weeks" on 2026-09-02 and the tile
+        # kept reading "Travel to mother's location in days", because
+        # the headline is derived from the fact and nothing here
+        # touched it. A fact that already passes every headline rule is
+        # its own headline (free); otherwise the stale line is retired
+        # NOW, so no surface can show it, and the worker rewrites it as
+        # a cold-path job. Recomputed whenever a fact is sent, not only
+        # when it differs, so a re-save is a repair.
+        own = headlines_svc.self_headline(update.fact)
+        if own is not None:
+            value["headline"] = own
+        else:
+            value.pop("headline", None)
+            headline_job = True
+        # THE SPOKEN DEADLINE DESCRIBES THE OLD WORDING TOO. "next
+        # couple of days" served beside a fact that now says weeks is
+        # a contradiction on the wire. Only when the text actually
+        # changed and the caller did not set a date: the string moves
+        # to `prior_deadline` as the receipt of what was heard, and
+        # `deadline_date` is untouched (the caller owns that field).
+        if fact_changed and update.deadline_date is None and value.get("deadline"):
+            value["prior_deadline"] = value.pop("deadline")
     if update.owner is not None:
         value["owner"] = update.owner if update.owner else None
 
@@ -2847,6 +2873,18 @@ async def update_patch(
         """,
         json.dumps(value), new_type, datetime.utcnow(), patch_id
     )
+    if headline_job:
+        # Enqueued rather than awaited: this is a write route, not the
+        # cold path, and a model call here would hold the user's edit.
+        # Failure must not fail the edit, so it is guarded and logged.
+        try:
+            await redis_client.xadd("memory_updates", {"data": json.dumps({
+                "user_id": user_id, "app_id": app_id,
+                "task_type": "headline_patch", "patch_id": patch_id,
+            })})
+        except Exception as exc:
+            logger.warning("headline_patch_enqueue_failed", user_id=user_id,
+                           patch_id=patch_id, error=str(exc)[:200])
 
     # Update project_id if requested (move patch to a different project)
     if update.project_id is not None:
