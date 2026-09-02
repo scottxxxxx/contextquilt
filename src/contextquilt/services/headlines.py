@@ -47,6 +47,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
+from contextquilt.services.insight_cards import gendered_pronoun
 from contextquilt.services.woven_digest import patch_value
 
 MAX_HEADLINE_CHARS = 48
@@ -62,6 +63,7 @@ DROPPED_FIGURE = "concrete_figure_dropped"
 IMPERATIVE = "addresses_the_user"
 EMPTY = "empty"
 DASH = "contains_a_dash"
+GENDERED = "gendered_pronoun"
 PLACEHOLDER_NAME = "diarization_placeholder"
 
 # Reasons a BATCH produced nothing, as opposed to a single line being
@@ -171,6 +173,8 @@ def why_invalid(headline: Optional[str], fact: str) -> Optional[str]:
         return IMPERATIVE
     if _PLACEHOLDER.search(text):
         return PLACEHOLDER_NAME
+    if gendered_pronoun(text):
+        return GENDERED
 
     head_figures = _figures(text)
     fact_figures = _figures(fact or "")
@@ -203,6 +207,7 @@ SYSTEM = (
     "6. State the thing. Never address the reader, never instruct "
     "them, never begin with Remember or Ask or Check.\n"
     "7. Use no dashes of any kind. A comma or two sentences instead.\n"
+    "8. Never use a gendered pronoun for anyone (he, she, his, her, him, himself, herself). Gender is not in the inputs and a name does not state it. Use the person's name, or they, them, their.\n"
     "8. When a fact has an owner, the headline NAMES them, first name "
     "is enough. The owner did the thing, and a headline that drops "
     "them turns an observation about a person into a claim about the "

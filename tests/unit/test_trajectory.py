@@ -337,9 +337,9 @@ def test_a_neutral_measure_skips_the_instances_gate():
 
 
 @pytest.mark.parametrize("phrase", [
-    "his participation has declined",
+    "their participation has declined",
     "follow-up has deteriorated",
-    "he seems to be checked out",
+    "they seem to be checked out",
     "engagement has improved",
     "things have slipped",
 ])
@@ -348,7 +348,7 @@ def test_grading_words_are_caught(phrase):
 
 
 @pytest.mark.parametrize("phrase", [
-    "he took fewer turns across your last 8 meetings",
+    "they took fewer turns across your last 8 meetings",
     "the count moved from 214 to 96",
     "meetings are running with less back and forth",
 ])
@@ -365,7 +365,7 @@ def test_plain_movement_is_not_grading(phrase):
     "since the summer",
     "in the last three months",
     "since June",
-    "lately he has been closing later",
+    "lately they have been closing later",
     "over the last few days",
 ])
 def test_elapsed_time_is_caught(phrase):
@@ -465,7 +465,7 @@ def test_served_shape_carries_supersedes_as_a_list():
 def good_answer(**over):
     base = {
         "skip": False,
-        "text": ("Closed 8 of his last 11 dated items after the date, "
+        "text": ("Closed 8 of their last 11 dated items after the date, "
                  "against 2 of 12 in the 8 meetings before that."),
         "narrative": ("The shift shows only in aggregate: any single "
                       "meeting looks normal and the items still close. "
@@ -497,7 +497,7 @@ def test_a_claim_stating_only_the_recent_half_is_rejected():
     facts = facts_for_parse()
     defects = []
     out = parse_trajectory_response(
-        good_answer(text="Closed 8 of his last 11 dated items after the date."),
+        good_answer(text="Closed 8 of their last 11 dated items after the date."),
         allowed_numbers(facts), "Suresh", defects=defects, facts=facts)
     assert out is None
     assert "one_window_only" in defects
@@ -533,7 +533,7 @@ def test_grading_a_neutral_measure_is_rejected():
         good_answer(
             text="Took 96 turns across your last 8 meetings, against 214 before.",
             narrative="His participation has declined across the run.",
-            do="Ask what would make the meeting worth more of his time."),
+            do="Ask what would make the meeting worth more of their time."),
         allowed_numbers(facts), "Suresh", defects=defects, facts=facts)
     assert out is None
     assert "graded_a_neutral_measure" in defects
@@ -816,7 +816,7 @@ def test_do_line_preambles_are_rejected(do):
 @pytest.mark.parametrize("do", [
     "Ask which of the open items still have a date behind them that holds.",
     "Confirm the due date for the runbook handover.",
-    "Leave a beat after your update and ask her directly for the read.",
+    "Leave a beat after your update and ask them directly for the read.",
 ])
 def test_a_verb_first_do_line_passes(do):
     assert not opens_with_a_preamble(do)

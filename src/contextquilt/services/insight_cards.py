@@ -127,6 +127,21 @@ def dash_as_punctuation(text: str) -> bool:
     return bool(_DASH_PUNCTUATION.search(text or ""))
 
 
+CLAIM_HAS_GENDERED_PRONOUN = "claim_gendered_pronoun"
+
+# Gender is not in any input a writer is handed, and a name does not
+# state it. A served claim copies the wording it reads (the same reason
+# the dash ban sits here), and 113 stored behavior rows carried a
+# pronoun a model chose on 2026-09-02, so a source row can hand one to
+# every writer above it. Refused where the text is made.
+_GENDERED_PRONOUN = re.compile(r"\b(he|she|his|her|hers|him|himself|herself)\b", re.I)
+
+
+def gendered_pronoun(text: str) -> bool:
+    """True when the text refers to somebody with a gendered pronoun."""
+    return bool(_GENDERED_PRONOUN.search(text or ""))
+
+
 def card_defect(
     text: str, do: str, person_name: Optional[str] = None
 ) -> Optional[str]:
@@ -143,6 +158,8 @@ def card_defect(
         return CLAIM_OPENS_WITH_NAME
     if dash_as_punctuation(text) or dash_as_punctuation(do):
         return CLAIM_HAS_DASH
+    if gendered_pronoun(text) or gendered_pronoun(do):
+        return CLAIM_HAS_GENDERED_PRONOUN
     return None
 
 

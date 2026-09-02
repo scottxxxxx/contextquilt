@@ -354,6 +354,7 @@ Rules:
 - Do not use the words "average", "typical" or "normal" about the comparison group. It is a count across named colleagues, not a statistical population.
 - Never name a topic, project, company or person that appears in none of the listed items.
 - NEVER use a dash of any kind as punctuation. No em dash, no en dash, no hyphen standing in for a pause or an aside. Use a comma, a colon, parentheses, or two sentences. Hyphens inside genuinely hyphenated words such as "follow-up" are the only acceptable use.
+- Never use a gendered pronoun for anyone (he, she, his, her, him, himself, herself). Gender is not in the inputs and a name does not state it. Use the person's name, or they, them, their.
 """ + CARD_SHAPE_RULES + """
 - The do line STARTS WITH A VERB and is one short instruction. Never open it with a preamble such as "In your next meeting," or "When you speak with them," or "Consider". The reader already knows when they will use it, and the preamble alone spends a third of the line. Working do lines, all under 90 characters:
 
