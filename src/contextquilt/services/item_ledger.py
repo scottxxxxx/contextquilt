@@ -696,7 +696,6 @@ def classify_item(
         # the audit SS's day-count report triggered, the third such key
         # on the People surface. `days_since_last_statement` is the
         # honest name; the old one keeps serving until clients move.
-        "meetings_since_last_statement": meetings_since,
         "days_since_last_statement": meetings_since,
         "owner_change": change,
         # Chases on this item, and how many of them moved it. See
@@ -825,16 +824,11 @@ def summarize(items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
         # The peak of that per item number, so "has not come up in your
         # last 4 meetings with her" is available without walking items.
         # Null, never zero, when nothing is in this mode at all.
-        "max_meetings_not_raised": (
-            max(
-                (i.get("meetings_since_last_statement") or 0)
-                for i in (items or ())
-                if i.get("mode") == NOT_RAISED_SINCE
-            )
-            if by_mode.get(NOT_RAISED_SINCE, 0) else None
-        ),
-        # Same value under its honest unit (days present, see
-        # `days_since_last_statement`); the old key serves until clients move.
+        # The peak of the per item number, so "has not come up on your
+        # last 4 days meeting with her" is available without walking
+        # items. Null, never zero, when nothing is in this mode at all.
+        # `max_meetings_not_raised` was the same number under a name that
+        # said meetings; retired 2026-09-02.
         "max_days_not_raised": (
             max(
                 (i.get("days_since_last_statement") or 0)

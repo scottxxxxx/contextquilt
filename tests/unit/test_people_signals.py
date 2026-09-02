@@ -30,9 +30,8 @@ def test_weekly_cadence_and_recent_weights():
         _apps((7, 7, 10), (7, 14, 8), (7, 21, None), (7, 28, 12), (8, 4, 6)),
         [], None, today=TODAY,
     )
-    assert s["cadence"] == {"median_interval_days": 7, "meetings_observed": 5,
-                            "days_observed": 5}
-    assert s["meetings_30d"] == 4 and s["meetings_7d"] == 0
+    assert s["cadence"] == {"median_interval_days": 7, "days_observed": 5}
+    assert s["days_present_30d"] == 4 and s["days_present_7d"] == 0
     assert s["turns_30d"] == 26  # non-null in-window turns: 8 + 12 + 6
 
 
@@ -89,7 +88,7 @@ def test_mentions_are_not_meetings():
          "turn_count": None, "capacities": ["mention"]},
     ]
     s = compute_person_signals(apps, [], None, today=TODAY)
-    assert s["meetings_7d"] == 0 and s["meetings_30d"] == 0
+    assert s["days_present_7d"] == 0 and s["days_present_30d"] == 0
     assert s["first_present_at"] is None and s["last_present_at"] is None
 
 
@@ -103,7 +102,7 @@ def test_presence_grades_and_unknown_capacity_count_as_present():
          "turn_count": 9, "capacities": ["mention"]},  # excluded
     ]
     s = compute_person_signals(apps, [], None, today=TODAY)
-    assert s["meetings_30d"] == 2
+    assert s["days_present_30d"] == 2
     assert s["turns_30d"] == 5  # the mention-only row's turns never count
     assert s["first_present_at"] == "2026-08-04"
     assert s["last_present_at"] == "2026-08-10"
@@ -235,7 +234,7 @@ def test_presence_anchor_is_null_for_a_mention_only_person():
     anchor = presence_anchor(mention_only)
     assert anchor["first_present_at"] is None
     assert anchor["last_present_at"] is None
-    assert anchor["meetings_present"] == 0
+    assert anchor["days_present"] == 0
 
 
 def test_presence_anchor_counts_days_not_rows():
@@ -246,7 +245,7 @@ def test_presence_anchor_counts_days_not_rows():
         {"last_seen_at": datetime(2026, 8, 5, 9, tzinfo=timezone.utc), "turn_count": 4},
         {"last_seen_at": datetime(2026, 8, 5, 17, tzinfo=timezone.utc), "turn_count": 6},
     ]
-    assert presence_anchor(same_day)["meetings_present"] == 1
+    assert presence_anchor(same_day)["days_present"] == 1
 
 
 # ---------------------------------------------- you_owe honesty gate
@@ -331,10 +330,12 @@ def test_the_nd_counts_are_days_and_the_honest_names_say_so():
     s = compute_person_signals(apps, [], None, today=today)
     assert len(apps) == 6
     assert s["days_present_30d"] == 4 and s["days_present_7d"] == 2
-    assert s["meetings_30d"] == s["days_present_30d"]
-    assert s["meetings_7d"] == s["days_present_7d"]
     assert s["cadence"]["days_observed"] == 4
-    assert s["cadence"]["meetings_observed"] == s["cadence"]["days_observed"]
+    # RETIRED 2026-09-02 after SS verified identical values on the wire
+    # for all 381 people. The misnamed keys are off the wire; a client
+    # reading them now gets a KeyError rather than a wrong unit.
+    assert "meetings_30d" not in s and "meetings_7d" not in s
+    assert "meetings_observed" not in s["cadence"]
 
 
 def test_null_cadence_stays_null_with_the_new_key():
@@ -350,6 +351,6 @@ def test_presence_anchor_serves_days_present_and_the_signals_block_does_not_leak
     apps = _apps((8, 10, 1), (8, 10, 2), (8, 4, 3))
     anchor = presence_anchor(apps)
     assert anchor["days_present"] == 2
-    assert anchor["meetings_present"] == anchor["days_present"]
+    assert "meetings_present" not in anchor          # retired 2026-09-02
     s = compute_person_signals(apps, [], None, today=TODAY)
     assert "days_present" not in s and "meetings_present" not in s
