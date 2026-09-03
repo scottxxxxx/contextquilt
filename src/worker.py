@@ -6048,6 +6048,29 @@ class ColdPathWorker:
         # All three paths land at the same place: transcript with inline marker
         # by the time the LLM sees it. display_name is a legacy fallback.
         metadata = payload.get("metadata", {}) or {}
+
+        # BIND THE ORIGIN AND SCOPE NAMES HERE, NOT AT THE STORE.
+        # These five used to be read off `metadata` far below, just after
+        # the LLM call, on the assumption that nothing above needed them.
+        # Two early returns did: the extraction gate's, which still runs
+        # the behavior lane and the headlines, and doc 22's listening
+        # branch. Both read these names, so on both paths Python raised
+        # UnboundLocalError, the handler's `except Exception` swallowed it
+        # into a single `meeting_summary_failed` line, and the ingest was
+        # lost. Seventeen transcripts died that way between 2026-08-31 and
+        # 2026-09-03 before anyone read the log.
+        #
+        # `metadata` is assigned exactly once in this method and never
+        # reassigned, and `payload` is not mutated, so binding early is
+        # value-identical to binding late. Anything added above that needs
+        # a sixth name belongs here too: the cost of this bug was not one
+        # name, it was five riding one carrier.
+        timestamp = payload.get("timestamp")
+        project = metadata.get("project") if metadata else None
+        project_id = metadata.get("project_id") if metadata else None
+        origin_id = metadata.get("origin_id") if metadata else None
+        origin_type = metadata.get("origin_type") if metadata else None
+
         owner_speaker_label = metadata.get("owner_speaker_label")
         display_name = metadata.get("display_name")
 
@@ -6524,11 +6547,10 @@ class ColdPathWorker:
                     llm, response.content.get("patches") or [], meeting_date
                 )
 
-            timestamp = payload.get("timestamp")
-            project = metadata.get("project") if metadata else None
-            project_id = metadata.get("project_id") if metadata else None
-            origin_id = metadata.get("origin_id") if metadata else None
-            origin_type = metadata.get("origin_type") if metadata else None
+            # timestamp / project / project_id / origin_id / origin_type
+            # are bound at the top of this method now, above the early
+            # returns that read them. Re-reading them here would be
+            # harmless today and a second source of truth tomorrow.
 
             # HONOUR A PROJECT DECISION MADE WHILE THIS INGEST WAS STILL
             # RUNNING. An ingest is multi-phase and takes about twenty
