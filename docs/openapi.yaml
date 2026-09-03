@@ -1066,6 +1066,85 @@ paths:
               schema:
                 $ref: "#/components/schemas/CreateProjectResponse"
 
+  /v1/projects/{user_id}/{project_id}/affected-people:
+    get:
+      operationId: projectAffectedPeople
+      summary: People who appear only in this project
+      description: >
+        READ ONLY, for the project-delete confirmation. Lists people whose
+        every recorded meeting belongs to this project. It removes nothing
+        and is not the read half of a write endpoint.
+
+        Every row carries SIGNALS rather than a verdict, deliberately. A
+        bare boolean would force the client to infer the reason from an
+        absence, and measured on real data the naive rule was clean for
+        only 96 of 305 people while confidently naming the account owner.
+        `confidence` is an open vocabulary published in the response under
+        `vocabulary.confidence`, and `definition` states what "affected"
+        means so the client can render the caveat rather than invent one.
+
+        `total_affected` is computed before the cap, so a client never
+        renders a number that is quietly the page size.
+        `entities_with_this_name` warns that a name resolves to more than
+        one entity, which is common enough to mislead a reader.
+      tags: [Projects]
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: project_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Candidates listed, with the signals behind each.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project_id: { type: string }
+                  project_name: { type: string, nullable: true }
+                  total_affected: { type: integer }
+                  returned: { type: integer }
+                  truncated: { type: boolean }
+                  counts_by_confidence:
+                    type: object
+                    additionalProperties: { type: integer }
+                  duplicate_names: { type: integer }
+                  definition: { type: string }
+                  vocabulary:
+                    type: object
+                    properties:
+                      confidence:
+                        type: object
+                        additionalProperties: { type: string }
+                  people:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        entity_id: { type: string }
+                        name: { type: string }
+                        appearances_in_project: { type: integer }
+                        confidence:
+                          type: string
+                          description: >
+                            Open vocabulary; read the definitions from
+                            vocabulary.confidence rather than assuming a
+                            fixed set.
+                        signals:
+                          type: object
+                          properties:
+                            owns_patches_elsewhere: { type: integer }
+                            name_hits_elsewhere_uncertain: { type: integer }
+                            graph_edges: { type: integer }
+                        entities_with_this_name: { type: integer }
+
   /v1/projects/{user_id}/{project_id}/people:
     get:
       operationId: listProjectPeople
