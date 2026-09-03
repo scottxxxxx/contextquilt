@@ -74,6 +74,40 @@ def is_listening(metadata: Optional[Mapping[str, Any]]) -> bool:
     return from_metadata(metadata) == LISTENING
 
 
+#: What CQ knows how to resolve. Anything else is `meeting` by design,
+#: and is worth SAYING so, which is what `unrecognised_kind` is for.
+KNOWN_KINDS = (MEETING, LISTENING)
+
+
+def unrecognised_kind(metadata: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """The declared value, when one was sent and CQ does not know it.
+
+    `None` when nothing was declared, because absent is not a mistake,
+    and `None` when the value resolved. Present-and-unknown is the only
+    case worth a line, and it is worth one precisely because it is the
+    case that is INVISIBLE from the outcome: a typo and a flag that
+    never arrived both extract as a meeting.
+
+    GhostPour passes the value through untouched on purpose (their
+    request-side proof, 2026-09-03: no trim, no lowercase, no default),
+    which makes the two distinguishable ON THE WIRE. This makes them
+    distinguishable in CQ's log too, which is where the doc 22
+    acceptance test is actually read. Without it the next person to see
+    a listening recording extract as a meeting would go hunting for a
+    dropped field on a hop that forwarded it correctly.
+    """
+    if not isinstance(metadata, Mapping):
+        return None
+    raw = metadata.get("material_kind")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return repr(raw)[:80]
+    if raw.strip().lower() in KNOWN_KINDS:
+        return None
+    return raw
+
+
 def allowed_types(manifest: Optional[Mapping[str, Any]]) -> Set[str]:
     """`LISTENING_TYPES` intersected with what the manifest declares.
 
