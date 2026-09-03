@@ -345,7 +345,12 @@ def test_the_call_runs_before_the_appearance_write_not_after_it():
     """These are columns on the appearance row, and that row has exactly
     one writer with one set of re-ingest rules. A later UPDATE would be a
     second writer with rules of its own."""
-    call = WORKER.index("semantic_role_signals = await self._extract_semantic_role_signals(")
+    # Anchored on the CALL rather than on an assignment spelling: doc 22
+    # made this conditional (`None if listening else (await ...)`) so a
+    # recording gets NULL columns rather than signals about participants
+    # nobody participated with, and the ordering property is unchanged.
+    call = WORKER.index("await self._extract_semantic_role_signals(")
+    assert "semantic_role_signals = None if listening else (" in WORKER
     # The extraction lane's own write, not the structured lane's earlier
     # one, which passes no transcript signals at all and is correct to
     # leave every one of these columns NULL.

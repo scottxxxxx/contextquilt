@@ -140,6 +140,7 @@ from contextquilt.services.entity_aliasing import (
 )
 from contextquilt.services import behavior_extraction
 from contextquilt.services import behavior_classifier
+from contextquilt.services import material_kind
 from contextquilt.services import extraction_gate
 from contextquilt.services import role_semantics
 from contextquilt.services import alignment as alignment_svc
@@ -6179,6 +6180,27 @@ class ColdPathWorker:
             # the app has no registered manifest.
             resolved_prompt, resolved_schema, resolved_manifest = await self._resolve_extraction_prompt(app_id)
 
+            # Doc 22. Material the user only HEARD is extracted by a
+            # different prompt and suppresses everything that asserts
+            # participation. Declared at capture because it cannot be
+            # inferred; absent means `meeting`, which is byte for byte
+            # today's behavior for every existing caller.
+            listening = material_kind.is_listening(metadata)
+            listening_types = (
+                material_kind.allowed_types(resolved_manifest) if listening else set()
+            )
+            if listening:
+                if not listening_types:
+                    logger.info("listening_no_declared_types", user_id=user_id,
+                                origin=origin_id)
+                    return
+                resolved_prompt = material_kind.build_listening_system(listening_types)
+                resolved_schema = None
+                # Nobody in a recording owes the listener anything, so
+                # the open-commitments block would ask the model to close
+                # items on evidence that cannot exist.
+                open_commits_block = ""
+
             # Which of this app's types and labels carry People semantics
             # (doc 16 5.9), resolved once: the ownership-entity injection
             # below and the entity sink both need it, and reading it twice
@@ -6595,6 +6617,13 @@ class ColdPathWorker:
                     pass  # Table may not exist yet
 
             # Connected Quilt V2: patches with connections
+            if listening:
+                material_kind.sanitize_listening_patches(
+                    response.content, listening_types)
+                if (ls := response.content.get("_listening_sanitized")):
+                    logger.info("listening_sanitized", user_id=user_id,
+                                origin=origin_id, dropped=ls["count"],
+                                dropped_detail=ls["dropped"][:20])
             patches = response.content.get("patches", [])
             entities = response.content.get("entities", [])
             relationships = response.content.get("relationships", [])
@@ -6662,9 +6691,14 @@ class ColdPathWorker:
             # cut). Awaited HERE so they reach the appearance row through
             # the same writer the exact signals use; an empty result is a
             # NULL column, never a zero.
-            semantic_role_signals = await self._extract_semantic_role_signals(
-                user_id, effective_summary, app_id, origin_id,
-                owner_speaker_label,
+            # Who assigned a follow-up to whom, and who was waiting on
+            # somebody upstream. Both are claims about participants, and
+            # nobody in a recording is one.
+            semantic_role_signals = None if listening else (
+                await self._extract_semantic_role_signals(
+                    user_id, effective_summary, app_id, origin_id,
+                    owner_speaker_label,
+                )
             )
 
             entities_stored = await store_entities(
@@ -6778,11 +6812,12 @@ class ColdPathWorker:
             # a dedicated call with the same cheap model produced 48.
             # Runs only when the manifest declares the type, so an app
             # that never asked for it never pays for the call.
-            await self._extract_behavior_observations(
-                user_id, summary, app_id, origin_id, origin_type,
-                timestamp, project, project_id, user_label,
-                resolved_manifest,
-            )
+            if not listening:
+                await self._extract_behavior_observations(
+                    user_id, summary, app_id, origin_id, origin_type,
+                    timestamp, project, project_id, user_label,
+                    resolved_manifest,
+                )
 
             # Headlines LAST among the write lanes, because it reads
             # back what every earlier lane stored rather than producing

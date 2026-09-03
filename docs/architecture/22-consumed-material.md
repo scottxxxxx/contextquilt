@@ -1,7 +1,10 @@
 # 22. Material the user CONSUMES
 
-**Status: PROPOSAL. Nothing here is built. Scott asked for it on
-2026-09-02 after reading a meeting whose every patch was a `behavior`.**
+**Status: option C BUILT on CQ's side 2026-09-02 at Scott's direction,
+and INERT until GhostPour allows the key through. Scott asked for the
+proposal after reading a meeting whose every patch was a `behavior`,
+then ruled option C. The recommendation below stands as written; the
+implementation notes are at the end.**
 
 ## What he saw
 
@@ -138,3 +141,35 @@ sequencing constraint: GP first, then CQ, then the app.
 on a recording. Removing them is a data decision for Scott, and the
 same question the reassign-speaker cleanup got wrong once already, so
 it is deliberately not bundled with a prospective fix.
+
+## What was built (2026-09-02)
+
+`services/material_kind.py` is the single source of truth: it reads
+`metadata.material_kind`, treats absent AND unrecognised as `meeting`
+(a client sending a kind CQ does not know yet must not lose its
+meeting), intersects `takeaway`/`event`/`artifact` with the caller's
+declared types, builds the listening prompt with the output shape
+stated in the prompt rather than in a schema the client never sends,
+and sanitizes the response.
+
+In `handle_meeting_summary`, `listening` swaps the prompt, empties the
+open-commitments block, and gates three lanes: the behavior call does
+not run, the semantic role signals resolve to `None` so the appearance
+columns stay NULL rather than carrying claims about participants
+nobody participated with, and the sanitizer empties `entities`,
+`relationships` and `resolved_commitments` before the response is read.
+Emptying them inside the sanitizer rather than at the call site is
+deliberate: the suppression travels with the shape instead of depending
+on a caller remembering it.
+
+An app that declares NONE of the three listening types stores nothing
+and logs `listening_no_declared_types`, rather than falling through to
+the participation prompt, which would put commitments in a listener's
+ledger.
+
+**Still not done.** GP must add `material_kind` to
+`CAPTURE_METADATA_ALLOWLIST` and deploy before the flag can arrive, and
+SS must send it. Until then every ingest is a `meeting` and this code
+never executes. The existing polluted appearances (`Leo` 15, `Paris
+Martineau` 6) are untouched and remain Scott's data call. Option D, a
+separate entity kind for voices on recordings, is unbuilt.
