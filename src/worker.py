@@ -6209,6 +6209,26 @@ class ColdPathWorker:
             # inferred; absent means `meeting`, which is byte for byte
             # today's behavior for every existing caller.
             listening = material_kind.is_listening(metadata)
+
+            # A DECLARED KIND THAT CQ DID NOT RECOGNISE IS AUDIBLE HERE.
+            # Resolving it to `meeting` is deliberate and stays. What is
+            # not acceptable is doing it silently: from the OUTCOME, a
+            # misspelled kind and a flag that never left the client are
+            # the same meeting, and this log line is the only thing that
+            # separates them on CQ's side. GhostPour proved on
+            # 2026-09-03 that they forward the value untouched, so if
+            # this line ever fires the value in it came from the client
+            # exactly as typed, and the hop is not the suspect.
+            unrecognised = material_kind.unrecognised_kind(metadata)
+            if unrecognised is not None:
+                logger.warning(
+                    "material_kind_unrecognised",
+                    user_id=user_id,
+                    value=unrecognised[:40],
+                    resolved_as=material_kind.MEETING,
+                    origin=origin_id,
+                )
+
             listening_types = (
                 material_kind.allowed_types(resolved_manifest) if listening else set()
             )

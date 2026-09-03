@@ -24,6 +24,7 @@ shipped text, compiled by the real compiler, and the branch is really taken.
 from __future__ import annotations
 
 import ast
+import sys
 import textwrap
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +33,9 @@ from types import SimpleNamespace
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "src"))
+
+from contextquilt.services import material_kind as real_material_kind
 WORKER_SRC = (ROOT / "src" / "worker.py").read_text()
 
 GATE_FLOOR = 1200
@@ -147,8 +151,16 @@ def _build(gate_reason: str | None, listening: bool, listening_types: set[str]):
         "people_vocabulary": lambda manifest: SimpleNamespace(
             person_entity_type="person"
         ),
+        # Deliberately the real module, not a stub. Its resolution rules
+        # are what decide which branch below is taken, and stubbing them
+        # would let this file agree with a `material_kind` that does not
+        # exist. Only `is_listening` is forced, because the branch under
+        # test is chosen by the caller of `_build`, not by the metadata.
         "material_kind": SimpleNamespace(
+            MEETING=real_material_kind.MEETING,
+            LISTENING=real_material_kind.LISTENING,
             is_listening=lambda metadata: listening,
+            unrecognised_kind=real_material_kind.unrecognised_kind,
             allowed_types=lambda manifest: listening_types,
             build_listening_system=lambda types: "LISTENING SYSTEM",
         ),
