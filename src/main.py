@@ -4036,13 +4036,47 @@ async def create_patch(
                            value=str(patch.deadline_date)[:40])
 
     # Resolve project scope
+    #
+    # A `project_id` THAT RESOLVES TO NOTHING IS SAID OUT LOUD, and the
+    # item is still created. Same trade as the malformed deadline above,
+    # for the same reason: the user typed a decision and losing it
+    # because the scope was wrong is a bad trade. What is NOT acceptable
+    # is doing it silently, which is what happened until now.
+    #
+    # The row keeps the id it was sent, so the patch stores an id with a
+    # NULL name. Every consumer joins `projects` to render a scope, so it
+    # reads as unscoped everywhere while sitting in the row looking
+    # scoped, which is precisely the "dated and behaves undated" shape
+    # the deadline comment describes.
+    #
+    # The lookup is an EXACT match and `projects.project_id` is TEXT, not
+    # uuid (init-db/06_projects_and_meetings.sql), so case matters. On
+    # prod today every project carrying real data is uppercase, matching
+    # Swift's `uuidString`; the only lowercase rows are three test
+    # artifacts with zero patches, and two ids are not UUID-shaped at all
+    # ("CUE-SMOKE-PROJ-1", "smoke-test-0610"), which is why this stays a
+    # string compare rather than becoming a uuid cast that would 500 on
+    # them. A client that lowercases would silently scope to nothing, and
+    # this warning is what makes that audible on the first write instead
+    # of on the first missing rundown.
     project_name = None
     project_id = patch.project_id
+    project_warning = None
     if project_id:
         project_row = await db_pool.fetchrow(
             "SELECT name FROM projects WHERE project_id = $1", project_id
         )
         project_name = project_row["name"] if project_row else None
+        if project_row is None:
+            project_warning = (
+                f"project_id {project_id!r} did not match a known project and "
+                "no project name was resolved. The item was created; it will "
+                "read as unscoped until the id is corrected. The match is "
+                "exact and case-sensitive."
+            )
+            logger.warning("create_patch_project_unresolved",
+                           project_id=str(project_id)[:60],
+                           patch_type=patch.type)
     elif patch.type not in PROJECT_SCOPED_TYPES:
         project_id = None
 
@@ -4151,10 +4185,14 @@ async def create_patch(
     payload = {"type": "hydrate", "user_id": user_id, "timestamp": now.isoformat()}
     await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
 
+    # Every warning this route can raise, collected in one place. A list
+    # rather than a single slot because a caller can get both at once (a
+    # bad date AND an unresolvable project), and a client that reads only
+    # the first would act on half of what went wrong.
     return await _created_patch_response(
         user_id, app_id, patch_id, patch.type,
         created=True, connections=created_connections,
-        warnings=[deadline_warning] if deadline_warning else None,
+        warnings=[w for w in (deadline_warning, project_warning) if w],
     )
 
 

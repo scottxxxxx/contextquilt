@@ -279,8 +279,27 @@ def test_a_bad_date_drops_the_date_and_keeps_the_item():
 
 
 def test_a_dropped_date_is_reported_not_left_to_inference():
+    """The dropped date reaches the caller's `warnings`.
+
+    RE-ANCHORED 2026-09-03. This asserted the exact literal
+    `warnings=[deadline_warning] if deadline_warning else None`, so it
+    went red when a SECOND warning was added and the single slot became a
+    list, even though the property it names was still true and the change
+    strictly improved it. A test pinned to a spelling reports an
+    improvement as a regression, and the next person's cheapest move is
+    to update the string, which teaches them the test is scenery.
+
+    So: assert that `deadline_warning` is what reaches the `warnings`
+    argument, without dictating how it gets there. The EXECUTING proof
+    that it arrives at the caller lives in
+    `test_create_patch_project_scope.py`, which calls the function and
+    reads the response; this stays as the cheap source-level guard that
+    the wiring exists at all.
+    """
     src = _func_source("create_patch")
-    assert "warnings=[deadline_warning] if deadline_warning else None" in src
+    call = src.split("return await _created_patch_response(", -1)[-1]
+    warnings_arg = call.split("warnings=", 1)[1].split("\n", 1)[0]
+    assert "deadline_warning" in warnings_arg, warnings_arg
     body = _func_source("_created_patch_response")
     assert '"warnings": list(warnings or [])' in body
 
