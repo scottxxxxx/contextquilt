@@ -10475,6 +10475,173 @@ async def unassign_origin_from_project(
     }
 
 
+#: What "affects" means, ON THE WIRE rather than in a docstring.
+#: Doc 16 section 5.13: where inference is unavoidable, publish the
+#: definition where the client can read it, because the client is the one
+#: rendering a sentence to a human and it cannot render a caveat it was
+#: never told about.
+AFFECTED_PEOPLE_DEFINITION = (
+    "A person is listed when EVERY meeting CQ has recorded them in belongs "
+    "to this project. That is a statement about what was observed, not about "
+    "who they are: someone can be central to your work and still appear in "
+    "only one project. Nothing here is a recommendation to remove anybody."
+)
+
+#: The three states, and why a bare boolean was refused. Measured on real
+#: data 2026-09-03: of 305 people matching the naive rule, 51 provably
+#: owned memory outside the project (including the account owner, three
+#: times over, at 157 patches each) and another 145 were flagged only by
+#: a substring test that matches "Ian" inside "Brian". Collapsing that
+#: into safe/unsafe would hide the middle category, and the middle
+#: category is most of it.
+AFFECTED_PEOPLE_CONFIDENCE = {
+    "appears_only_here": (
+        "Every signal CQ has agrees: no memory owned outside this project, "
+        "no graph edges, no name match elsewhere."
+    ),
+    "uncertain": (
+        "A weak signal says they exist elsewhere. The name match is a "
+        "SUBSTRING test, so it fires on 'Ian' inside 'Brian'. Treat as "
+        "unresolved, never as clean."
+    ),
+    "appears_elsewhere": (
+        "They own active memory outside this project, matched exactly on "
+        "owner. Listing them here is CQ telling you the rule is wrong "
+        "about this person."
+    ),
+}
+
+#: Hard cap. `total_affected` is computed WITHOUT it, so a client never
+#: renders a count that is quietly the page size.
+AFFECTED_PEOPLE_LIMIT = 200
+
+
+@app.get("/v1/projects/{user_id}/{project_id}/affected-people", tags=["Projects"])
+async def project_affected_people(
+    user_id: str,
+    project_id: str,
+    app_id: str = Depends(verify_application_access),
+):
+    """READ ONLY. Who appears in this project and nowhere else.
+
+    Built for the project-delete confirmation. It answers a question and
+    removes nothing, and it is deliberately not the read half of a write
+    endpoint: if the list turns out to be wrong, the correct outcome is
+    that nothing is ever deleted, not that a confirm button is added.
+
+    Every row carries the SIGNALS rather than a verdict. A bare
+    `safe_to_remove` would force the client to infer the reason from an
+    absence, which is the failure this group keeps paying for, and here
+    the inference would be wrong most of the time: measured on prod, the
+    naive rule was clean for 96 of 305 people and its most confident
+    answer was the account owner.
+    """
+    # The person type comes from the CALLER'S manifest, never a literal.
+    # The first draft of this query hardcoded the ShoulderSurf type name
+    # in its patch_type predicate and `test_people_surface_speaks_no_
+    # literals` caught it, which is the overfit failure the People
+    # surface was cleaned of once already.
+    #
+    # That guard greps the file, so it cannot tell a predicate from a
+    # comment quoting one. This comment is therefore written WITHOUT the
+    # offending string rather than with it, because a test that has to be
+    # weakened to accommodate prose stops guarding the code.
+    vocab = await _people_vocab_cached(app_id)
+
+    rows = await db_pool.fetch(
+        """
+        WITH per_entity AS (
+            SELECT pa.entity_id,
+                   count(*)                                       AS all_appearances,
+                   count(*) FILTER (WHERE pa.project_id IS NULL)  AS unscoped_appearances,
+                   count(DISTINCT pa.project_id)                  AS distinct_projects,
+                   count(*) FILTER (WHERE pa.project_id = $2)     AS here
+            FROM person_appearances pa
+            WHERE pa.user_id = $1
+            GROUP BY pa.entity_id
+        ),
+        candidates AS (
+            SELECT pe.entity_id, pe.here, e.name
+            FROM per_entity pe
+            JOIN entities e ON e.entity_id = pe.entity_id
+            WHERE pe.distinct_projects = 1
+              AND pe.unscoped_appearances = 0
+              AND pe.here > 0
+        )
+        SELECT ca.entity_id,
+               ca.name,
+               ca.here AS appearances_in_project,
+               (SELECT count(*) FROM context_patches cp
+                 WHERE cp.status = 'active'
+                   AND cp.project_id IS DISTINCT FROM $2
+                   AND cp.value->>'owner' = ca.name)          AS owns_elsewhere,
+               (SELECT count(*) FROM context_patches cp
+                 WHERE cp.status = 'active'
+                   AND cp.project_id IS DISTINCT FROM $2
+                   AND cp.patch_type = $3
+                   AND cp.value->>'text' ILIKE '%' || ca.name || '%')
+                                                              AS name_hits_elsewhere,
+               (SELECT count(*) FROM relationships r
+                 WHERE r.user_id = $1
+                   AND (r.from_entity_id = ca.entity_id
+                        OR r.to_entity_id = ca.entity_id))    AS graph_edges,
+               (SELECT count(*) FROM entities e2
+                 WHERE e2.user_id = $1 AND e2.name = ca.name) AS entities_with_this_name
+        FROM candidates ca
+        ORDER BY ca.here DESC, ca.name ASC
+        """,
+        user_id, project_id, vocab.person_type,
+    )
+
+    project_name = await db_pool.fetchval(
+        "SELECT name FROM projects WHERE project_id = $1", project_id
+    )
+
+    people = []
+    for r in rows:
+        if r["owns_elsewhere"] > 0:
+            confidence = "appears_elsewhere"
+        elif r["name_hits_elsewhere"] > 0 or r["graph_edges"] > 0:
+            confidence = "uncertain"
+        else:
+            confidence = "appears_only_here"
+        people.append({
+            "entity_id": str(r["entity_id"]),
+            "name": r["name"],
+            "appearances_in_project": r["appearances_in_project"],
+            "confidence": confidence,
+            "signals": {
+                "owns_patches_elsewhere": r["owns_elsewhere"],
+                "name_hits_elsewhere_uncertain": r["name_hits_elsewhere"],
+                "graph_edges": r["graph_edges"],
+            },
+            # A user reading a list of nine names cannot tell that two of
+            # them are the same person twice. Alex resolves to 4 entities
+            # on prod and the account owner to 3.
+            "entities_with_this_name": r["entities_with_this_name"],
+        })
+
+    counts = {k: 0 for k in AFFECTED_PEOPLE_CONFIDENCE}
+    for p in people:
+        counts[p["confidence"]] += 1
+
+    total = len(people)
+    return {
+        "project_id": project_id,
+        "project_name": project_name,
+        # Computed before the cap, so a client never renders a number
+        # that is quietly the page size.
+        "total_affected": total,
+        "returned": min(total, AFFECTED_PEOPLE_LIMIT),
+        "truncated": total > AFFECTED_PEOPLE_LIMIT,
+        "counts_by_confidence": counts,
+        "duplicate_names": sum(1 for p in people if p["entities_with_this_name"] > 1),
+        "definition": AFFECTED_PEOPLE_DEFINITION,
+        "vocabulary": {"confidence": AFFECTED_PEOPLE_CONFIDENCE},
+        "people": people[:AFFECTED_PEOPLE_LIMIT],
+    }
+
+
 @app.post("/v1/projects/{user_id}/{project_id}/unscope", tags=["Projects"])
 async def unscope_project(
     user_id: str,
