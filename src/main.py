@@ -10507,6 +10507,35 @@ async def unscope_project(
     )
     patches_updated = int(updated.split()[-1]) if updated else 0
 
+    # PRESENCE LEAVES WITH THE FACTS, the same way it does on the
+    # single-meeting mirror `unassign-project`.
+    #
+    # This route did only the patches half until 2026-09-03, and its
+    # mirror did both, which meant deleting a project left every
+    # `person_appearances` row still stamped with it. 32 such rows were
+    # sitting on prod when this was found. Nothing read them, so nothing
+    # looked broken, and that is exactly why it survived: the two routes
+    # are documented as mirrors and only one of them was.
+    #
+    # It stops being invisible the moment anything groups presence BY
+    # PROJECT, which is what the affected-people screen does, so a list
+    # computed off these rows would name people as belonging to a project
+    # that no longer exists.
+    #
+    # No guard clause here, unlike the mirror. There, the guard exists
+    # because a stale request could strip a meeting that has since been
+    # REASSIGNED. Here the caller is deleting the project itself, so
+    # there is no later state to protect: every row carrying this
+    # project_id is meant to lose it.
+    appearances = await db_pool.execute(
+        """
+        UPDATE person_appearances SET project_id = NULL
+        WHERE user_id = $1 AND project_id = $2
+        """,
+        user_id, project_id,
+    )
+    appearances_updated = int(appearances.split()[-1]) if appearances else 0
+
     stream_key = "memory_updates"
     payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
     await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
@@ -10515,6 +10544,11 @@ async def unscope_project(
         "status": "unscoped",
         "project_id": project_id,
         "patches_updated": patches_updated,
+        # Served back rather than inferred. A caller comparing the two
+        # numbers is the only way to notice this half regressing again,
+        # and a 200 has already told this group that a write was
+        # processed while a field it sent was not stored.
+        "appearances_updated": appearances_updated,
     }
 
 
