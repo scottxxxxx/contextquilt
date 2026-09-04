@@ -38,6 +38,9 @@ WORKER_SRC = (ROOT / "src" / "worker.py").read_text()
 sys.path.insert(0, str(ROOT / "src"))
 
 from contextquilt.services import material_kind as mk  # noqa: E402
+from contextquilt.services.extraction_schema import (  # noqa: E402
+    strip_you_marker_from_transcript,
+)
 
 SECONDHAND = {"material_kind": "secondhand"}
 LISTENING = {"material_kind": "listening"}
@@ -242,3 +245,60 @@ def test_a_separator_falls_through_and_says_so(value):
     """
     assert mk.from_metadata({"material_kind": value}) == mk.MEETING
     assert mk.unrecognised_kind({"material_kind": value}) == value
+
+
+# ----------------------------------------------------------------------
+# The marker carried in the TEXT rather than in the owner label
+# ----------------------------------------------------------------------
+
+TRANSCRIPT = (
+    "[Scott (you)] Oh, nice. Did you see the numbers?\n\n"
+    "[Raj kumar] I did. Are you free Thursday?\n\n"
+    "[ Amit O (You) ] Sure, you can send it over."
+)
+
+
+def test_the_marker_is_stripped_from_speaker_labels():
+    out = strip_you_marker_from_transcript(TRANSCRIPT)
+
+    assert "(you)" not in out.lower()
+    assert "[Scott]" in out
+    assert "[Amit O]" in out
+
+
+def test_the_word_you_survives_in_what_people_said():
+    """`(you)` is a marker inside a speaker label and an ordinary word
+    everywhere else. A transcript of people talking is full of "you", and
+    stripping the bare string would edit what they said."""
+    out = strip_you_marker_from_transcript(TRANSCRIPT)
+
+    assert "Did you see the numbers?" in out
+    assert "Are you free Thursday?" in out
+    assert "you can send it over" in out
+
+
+def test_an_unmarked_transcript_is_returned_unchanged():
+    plain = "[Scott] Hello.\n\n[Raj kumar] Hi."
+    assert strip_you_marker_from_transcript(plain) == plain
+
+
+@pytest.mark.parametrize("bad", [None, 7, [], {}])
+def test_malformed_input_never_raises(bad):
+    assert strip_you_marker_from_transcript(bad) == ""
+
+
+def test_the_strip_runs_only_for_non_presence_material():
+    """A normal meeting's marker is the whole identity signal. Stripping
+    it there would remove the user from every ingest."""
+    body = _handler_source()
+    i = body.index("strip_you_marker_from_transcript(effective_summary)")
+    window = body[max(0, i - 400):i]
+    assert "claims_user_presence" in window, (
+        "the strip is not gated on presence, so it would run on real meetings"
+    )
+
+
+def test_the_strip_is_audible():
+    """A silently rewritten transcript is one nobody can audit later."""
+    body = _handler_source()
+    assert "you_marker_stripped_for_material_kind" in body
