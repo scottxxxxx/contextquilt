@@ -51,6 +51,21 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Set
 MEETING = "meeting"
 LISTENING = "listening"
 
+#: A real meeting among real people that the account owner WAS NOT IN.
+#: A colleague forwards you the meeting you missed; you import it.
+#:
+#: This is NOT `listening`, and Scott ruled the difference on 2026-09-04
+#: in one sentence: "keep the people, just don't let it claim I was
+#: there." A podcast's speakers are strangers the user will never meet,
+#: so `listening` empties the entity array. A forwarded meeting is full
+#: of the user's actual colleagues, and the useful thing about it is
+#: precisely that Vijay was in it and what he pushed back on. Emptying
+#: that would be wrong rather than merely conservative.
+#:
+#: So this kind suppresses exactly one claim, PRESENCE, and keeps
+#: everything that is about the other people.
+SECONDHAND = "secondhand"
+
 #: Types honest for material the user did not participate in.
 LISTENING_TYPES = ("takeaway", "event", "artifact")
 
@@ -67,16 +82,41 @@ def from_metadata(metadata: Optional[Mapping[str, Any]]) -> str:
     raw = metadata.get("material_kind")
     if not isinstance(raw, str):
         return MEETING
-    return LISTENING if raw.strip().lower() == LISTENING else MEETING
+    low = raw.strip().lower()
+    return low if low in KNOWN_KINDS else MEETING
 
 
 def is_listening(metadata: Optional[Mapping[str, Any]]) -> bool:
     return from_metadata(metadata) == LISTENING
 
 
+def is_secondhand(metadata: Optional[Mapping[str, Any]]) -> bool:
+    return from_metadata(metadata) == SECONDHAND
+
+
+def claims_user_presence(metadata: Optional[Mapping[str, Any]]) -> bool:
+    """False when nothing in this material may assert the user was there.
+
+    The single predicate every presence-shaped decision reads, so the two
+    non-participation kinds cannot drift apart on the one property they
+    share. `listening` and `secondhand` differ on almost everything else
+    and agree completely here.
+
+    What "presence" covers, and each item is a separate site that would
+    otherwise have to remember: the `(you)` marker rewritten into the
+    transcript, an owner label honoured from the caller, the open
+    commitments block (a meeting the user was not in cannot close the
+    user's commitment, and offering the list invites the model to try),
+    and self-disclosed types, because a trait or a preference is
+    something the user SAID about themselves and there is no user
+    speaking here.
+    """
+    return from_metadata(metadata) == MEETING
+
+
 #: What CQ knows how to resolve. Anything else is `meeting` by design,
 #: and is worth SAYING so, which is what `unrecognised_kind` is for.
-KNOWN_KINDS = (MEETING, LISTENING)
+KNOWN_KINDS = (MEETING, LISTENING, SECONDHAND)
 
 
 def unrecognised_kind(metadata: Optional[Mapping[str, Any]]) -> Optional[str]:
@@ -106,6 +146,21 @@ def unrecognised_kind(metadata: Optional[Mapping[str, Any]]) -> Optional[str]:
     if raw.strip().lower() in KNOWN_KINDS:
         return None
     return raw
+
+
+def suppressed_types(metadata: Optional[Mapping[str, Any]]) -> Set[str]:
+    """Types this material may not produce, whatever the model returns.
+
+    Empty for a normal meeting. For both non-participation kinds it is
+    the self-disclosed set: a trait, a preference or an identity claim is
+    the user describing themselves, and nobody is describing themselves
+    to the user in material the user was not part of. The model will
+    still emit them, because a transcript full of people talking about
+    how they work looks exactly like self-disclosure from the outside.
+    """
+    if claims_user_presence(metadata):
+        return set()
+    return {"trait", "preference", "identity"}
 
 
 def allowed_types(manifest: Optional[Mapping[str, Any]]) -> Set[str]:
@@ -169,6 +224,53 @@ def build_listening_system(allowed: Iterable[str]) -> str:
         '"patches": [{"type": "<one of the types above>", '
         '"value": {"text": "<the fact, one clear sentence>"}}]}'
     )
+
+
+def strip_self_disclosure(content: Any, metadata: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
+    """Drop self-disclosed types from material the user was not part of.
+
+    Scott's ruling for `secondhand`, 2026-09-04: "keep the people, just
+    don't let it claim I was there." So this drops the three types that
+    ARE the user, and touches nothing else. Entities, relationships,
+    appearances, moments about the participants, takeaways, decisions
+    and deliverables all survive, because a forwarded meeting is full of
+    the user's actual colleagues and the useful thing about it is what
+    they did.
+
+    Why the model emits these at all: a transcript of people describing
+    how they work looks exactly like self-disclosure from the outside,
+    and without a `(you)` marker there is no speaker for it to attach to,
+    so it attaches to the user by default. The prompt cannot fix that,
+    because the prompt cannot see who is not in the room.
+
+    Applied to BOTH non-participation kinds. `listening` already empties
+    far more through its own sanitizer, and this is idempotent there;
+    running it on both is cheaper than a rule that remembers which kind
+    it belongs to.
+
+    Mutates and returns content. Reports under `_self_disclosure_stripped`.
+    """
+    suppressed = suppressed_types(metadata)
+    if not suppressed or not isinstance(content, dict):
+        return content if isinstance(content, dict) else {}
+    patches = content.get("patches")
+    if not isinstance(patches, list):
+        return content
+    kept, dropped = [], []
+    for patch in patches:
+        if isinstance(patch, dict) and patch.get("type") in suppressed:
+            value = patch.get("value")
+            text = value.get("text") if isinstance(value, dict) else value
+            dropped.append({"type": patch.get("type"), "text": str(text)[:120]})
+            continue
+        kept.append(patch)
+    if dropped:
+        content["patches"] = kept
+        content["_self_disclosure_stripped"] = {
+            "dropped": dropped, "count": len(dropped),
+            "kind": from_metadata(metadata),
+        }
+    return content
 
 
 def sanitize_listening_patches(

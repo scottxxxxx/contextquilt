@@ -160,6 +160,13 @@ def _build(gate_reason: str | None, listening: bool, listening_types: set[str]):
             MEETING=real_material_kind.MEETING,
             LISTENING=real_material_kind.LISTENING,
             is_listening=lambda metadata: listening,
+            # The presence predicate and the self-disclosure strip are the
+            # REAL ones. Only `is_listening` is forced, because the branch
+            # under test is chosen by the caller of `_build`, not by the
+            # metadata; everything else must behave as shipped or this
+            # file stops being an executing test of the shipped path.
+            claims_user_presence=real_material_kind.claims_user_presence,
+            strip_self_disclosure=real_material_kind.strip_self_disclosure,
             unrecognised_kind=real_material_kind.unrecognised_kind,
             allowed_types=lambda manifest: listening_types,
             build_listening_system=lambda types: "LISTENING SYSTEM",
