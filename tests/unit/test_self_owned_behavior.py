@@ -50,7 +50,7 @@ SELF_ROWS = [
 ]
 
 
-def _content(text, owner, ptype="behavior"):
+def _content(text, owner, ptype="moment"):
     return {"patches": [{"type": ptype, "value": {"text": text, "owner": owner}}]}
 
 

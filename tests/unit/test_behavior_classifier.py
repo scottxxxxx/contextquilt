@@ -29,7 +29,7 @@ MODULE = pathlib.Path("src/contextquilt/services/behavior_classifier.py").read_t
 MANIFEST = {"patch_types": [
     {"domain_type": "commitment", "description": "A promise with a named owner."},
     {"domain_type": "person", "description": "A named human."},
-    {"domain_type": "behavior", "description": "One observed instance of conduct."},
+    {"domain_type": "moment", "description": "One observed instance of conduct."},
     {"domain_type": "preference", "description": "A lean, value, or stylistic choice."},
     {"domain_type": "decision", "description": "A call that was made."},
     {"domain_type": "project", "description": "A workstream."},
@@ -37,14 +37,14 @@ MANIFEST = {"patch_types": [
 
 
 def _patch(text, owner="Denby"):
-    return {"type": "behavior", "value": {"text": text, "owner": owner}}
+    return {"type": "moment", "value": {"text": text, "owner": owner}}
 
 
 # --- contrast ------------------------------------------------------------
 
 def test_behavior_is_offered_first_and_entities_are_not_offered():
     assert classifier_types(MANIFEST) == [
-        "behavior", "commitment", "preference", "decision"]
+        "moment", "commitment", "preference", "decision"]
 
 
 def test_the_prompt_carries_every_offered_definition_verbatim():
@@ -81,14 +81,14 @@ def test_content_numbers_items_and_shows_owner_and_fact():
 
 # --- parsing fails open ------------------------------------------------
 
-ALLOWED = ["behavior", "commitment", "preference", "decision"]
+ALLOWED = ["moment", "commitment", "preference", "decision"]
 
 
 def test_parse_happy_path_is_case_insensitive():
     got = parse_classifier_verdicts(
-        {"items": [{"item": 0, "type": "Commitment"}, {"item": 1, "type": "behavior"}]},
+        {"items": [{"item": 0, "type": "Commitment"}, {"item": 1, "type": "moment"}]},
         2, ALLOWED)
-    assert got == ["commitment", "behavior"]
+    assert got == ["commitment", "moment"]
 
 
 def test_parse_garbage_means_keep_everything():
@@ -113,7 +113,7 @@ def test_parse_refuses_out_of_range_bool_duplicate_and_unknown_type():
 
 def test_behavior_and_silence_both_keep():
     a, b = _patch("Asked for the numbers"), _patch("Read the clause out")
-    split = apply_classifier_verdicts([a, b], ["behavior", None])
+    split = apply_classifier_verdicts([a, b], ["moment", None])
     assert split["kept"] == [a, b]
     assert split["retyped"] == [] and split["dropped"] == []
 
@@ -153,7 +153,7 @@ def test_only_preference_is_convertible_and_trait_is_not():
     """trait is self_only: a character claim about a person who never
     consented is refused, never routed."""
     assert CONVERTIBLE_TYPES == frozenset({"preference"})
-    assert KEEP_TYPE == "behavior"
+    assert KEEP_TYPE == "moment"
 
 
 # --- the wiring --------------------------------------------------------

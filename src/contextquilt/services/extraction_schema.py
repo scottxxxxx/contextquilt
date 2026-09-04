@@ -1555,14 +1555,14 @@ def enforce_connection_requirements(
 # manifest threaded into the enforcer and its mirror, which is a wider
 # change than this one earns.
 PERSON_OWNED_ACTION_TYPES = frozenset(
-    {"commitment", "blocker", "decision", "goal", "behavior"}
+    {"commitment", "blocker", "decision", "goal", "moment"}
 )
 
 # Types whose text is a claim about how a named human conducted
 # themselves, and which are therefore held to guardrail 12b at capture
 # time: cite observable behavior, never character. Same hardcoded-name
 # caveat as the set above.
-BEHAVIOR_OBSERVATION_TYPES = frozenset({"behavior"})
+BEHAVIOR_OBSERVATION_TYPES = frozenset({"moment"})
 
 # A task handed off, which the behavior prompt explicitly disclaims:
 # "You are not recording what was decided, what anybody committed to".

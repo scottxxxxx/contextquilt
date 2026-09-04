@@ -158,7 +158,7 @@ def parse_behavior_response(
             continue
         seen.add(key)
         patches.append({
-            "type": "behavior",
+            "type": "moment",
             "value": {"text": text, "owner": owner},
         })
         if len(patches) >= MAX_OBSERVATIONS:

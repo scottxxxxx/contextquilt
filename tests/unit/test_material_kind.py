@@ -81,7 +81,7 @@ def _content():
                                        "owner": "Jason Snell"},
          "connects_to": [{"label": "held_by", "target_text": "Jason Snell"}]},
         {"type": "commitment", "value": {"text": "Will send the deck"}},
-        {"type": "behavior", "value": {"text": "Made a joke about the CEO",
+        {"type": "moment", "value": {"text": "Made a joke about the CEO",
                                        "owner": "Andy Ihnatko"}},
         {"type": "event", "value": "Apple announced a leadership change"},
         {"type": "artifact", "value": {"text": ""}},

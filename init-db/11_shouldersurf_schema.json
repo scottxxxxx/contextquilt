@@ -1,6 +1,6 @@
 {
   "app_id": "shouldersurf",
-  "version": 15,
+  "version": 16,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
@@ -372,10 +372,10 @@
       }
     },
     {
-      "domain_type": "behavior",
+      "domain_type": "moment",
       "facet": "Episode",
       "permanence": "quarter",
-      "display_name": "Behavior",
+      "display_name": "Moment",
       "description": "One observed CHOICE a named participant made in this meeting: something they did when something else was available to them. What they asked for before agreeing, what moved their position, how they handled a person when they could have handled them otherwise. This is the unit the profile pass reads. Every other episode type records what happened; this one records a choice somebody made while it happened. Records conduct that a reader could have watched, never a verdict about who a person is, and never a thing that merely occurred in their presence.",
       "value_shape": {
         "text": "string",
@@ -458,7 +458,7 @@
         "blocker",
         "decision",
         "goal",
-        "behavior"
+        "moment"
       ],
       "description": "Person is responsible for or author of this item. For a behavioral observation it reads as authorship rather than obligation: this is the person who was observed doing the thing. That edge is also the only route anything has to a person, which is why an observation without one is invisible to the profile pass."
     },
@@ -592,7 +592,7 @@
       "relationships_per_meeting": 15,
       "per_type_caps": {
         "takeaway": 3,
-        "behavior": 5
+        "moment": 5
       }
     },
     "exclusion_examples": [
@@ -628,7 +628,7 @@
     {
       "cluster": "person",
       "from_types": [
-        "behavior",
+        "moment",
         "commitment",
         "blocker",
         "decision",
