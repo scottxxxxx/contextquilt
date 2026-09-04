@@ -174,7 +174,19 @@ async def test_no_bare_boolean_anywhere_in_the_payload():
 async def test_duplicate_names_are_flagged_per_row_and_counted():
     """A user reading nine names cannot tell that two are one person twice.
 
-    Alex resolves to 4 entities on prod and the account owner to 3.
+    CORRECTED 2026-09-04. This docstring used to cite "Alex resolves to 4
+    entities on prod and the account owner to 3" as the motivating
+    measurement. That measurement was wrong: it came from grouping
+    candidates by name ACROSS USERS, so three different users each having
+    a colleague named Scott read as one Scott existing three times.
+    Measured properly, person entities are unique by name per user across
+    the whole population, with zero exceptions.
+
+    The test keeps its shape because the payload contract is still what it
+    was, and because the field must keep working the day a real duplicate
+    appears. What changed is the query behind it, which counted entities
+    of ANY type and so reported a person sharing a name with an artifact
+    as a duplicate identity.
     """
     fn = _build([_row("Alex", dupes=4, eid="e-a1"),
                  _row("Alex", dupes=4, eid="e-a2"),
@@ -184,6 +196,33 @@ async def test_duplicate_names_are_flagged_per_row_and_counted():
 
     assert result["duplicate_names"] == 2
     assert [p["entities_with_this_name"] for p in result["people"]] == [4, 4, 1]
+
+
+def test_the_duplicate_count_is_scoped_to_the_person_type():
+    """The bug this file did NOT catch the first time.
+
+    `entities_with_this_name` shipped counting entities of ANY type, so a
+    person sharing a name with an artifact or a company was reported as a
+    duplicate identity. On prod "Mac" is both a person and an artifact,
+    and the first GL Unlimited smoke duly reported one duplicate that was
+    not one.
+
+    A source-level assertion is the right instrument here and an executing
+    one is not, because the defect lives in a SQL predicate that the stub
+    pool never evaluates: the harness hands back whatever rows it is
+    given, so the count arrives pre-computed and correct no matter what
+    the query says. Naming that limitation is the point; a test that
+    cannot see the bug it is named for is worse than no test.
+    """
+    src = _func_source("project_affected_people")
+    block = src.split("AS entities_with_this_name", 1)[0]
+    subquery = block.rsplit("(SELECT count(*) FROM entities e2", 1)[-1]
+    assert "entity_type" in subquery, (
+        "the duplicate-name count is not scoped to the person type, so it "
+        "counts artifacts and companies as duplicate people"
+    )
+    # And the type must come from the caller's vocabulary, not a literal.
+    assert "vocab.person_entity_type" in src
 
 
 @pytest.mark.asyncio
