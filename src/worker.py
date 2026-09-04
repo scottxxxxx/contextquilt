@@ -6128,6 +6128,36 @@ class ColdPathWorker:
         ):
             owner_speaker_label = user_label
 
+        # MATERIAL THE USER WAS NOT IN GETS NO (you) MARKER, and the check
+        # has to happen HERE rather than beside the rest of the doc 22
+        # suppressions eighty lines below.
+        #
+        # #414 put every other `listening` suppression in one block after
+        # the prompt is resolved, and the marker is injected before that
+        # block runs. So a caller sending `material_kind: "listening"`
+        # WITH an owner label would have had "(you)" written into a
+        # recording the user was never in, which is the one assertion the
+        # whole doc 22 design exists to prevent. It never fired because
+        # nobody has ever sent the flag, and it was found by ShoulderSurf
+        # asking what would happen to an IMPORTED meeting, which is the
+        # same shape: material whose participants are not the account
+        # owner.
+        #
+        # ENFORCED HERE RATHER THAN TRUSTED TO THE CALLER. The honest
+        # client behaviour is to send no owner label for such material,
+        # and the client will. This makes it true even when they do not,
+        # because a same-first-name collision turns a well-meant label
+        # into the user owning somebody else's words, and this codebase
+        # has spent two fixes in one day on exactly that class.
+        if material_kind.is_listening(metadata) and owner_speaker_label:
+            logger.info(
+                "owner_label_ignored_for_material_kind",
+                user_id=user_id,
+                material_kind=material_kind.from_metadata(metadata),
+                label=str(owner_speaker_label)[:40],
+            )
+            owner_speaker_label = None
+
         effective_summary = normalize_owner_in_transcript(summary, owner_speaker_label)
         injected_marker = (
             owner_speaker_label is not None
