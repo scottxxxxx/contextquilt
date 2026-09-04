@@ -44,7 +44,10 @@ read path is untouched.
 
 4. **Provenance is mandatory.** The derived patch carries:
    - `origin_mode = 'derived'`, `source_prompt = 'consolidation'`
-   - `source_patch_ids` (lineage array)
+   - `source_patch_ids` (lineage array; a COLUMN on `context_patches`, not a
+     key inside `value`. Querying it as `value ? 'source_patch_ids'` returns
+     an empty result that is indistinguishable from a genuine no-match, which
+     cost an hour on 2026-09-04.)
    - `value.source_cue` — also the **idempotency stamp**: one
      consolidation per (user, app, produce_type, cue), enforced in the
      cluster query itself
