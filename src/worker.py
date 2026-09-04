@@ -66,6 +66,7 @@ from contextquilt.services.extraction_schema import (
     no_collapse_patch_types,
     normalize_cue_list,
     normalize_owner_in_transcript,
+    strip_you_marker_from_transcript,
     origin_scoped_patch_types,
     sanitize_behavior_observations,
     sanitize_cues,
@@ -6159,6 +6160,26 @@ class ColdPathWorker:
             owner_speaker_label = None
 
         effective_summary = normalize_owner_in_transcript(summary, owner_speaker_label)
+
+        # AND STRIP ANY MARKER THAT CAME IN THE TEXT. Refusing the owner
+        # LABEL above while honouring the same claim carried as a marker
+        # would be one rule enforced on one of two carriers, which is the
+        # shape this codebase has paid for three times this week.
+        #
+        # ShoulderSurf's sender was the source of the marker on the
+        # 2026-09-04 import and they fixed it there, so for that caller
+        # this is belt on a fixed belt. It is here because every caller
+        # is not ShoulderSurf.
+        if not material_kind.claims_user_presence(metadata):
+            demarked = strip_you_marker_from_transcript(effective_summary)
+            if demarked != effective_summary:
+                logger.info(
+                    "you_marker_stripped_for_material_kind",
+                    user_id=user_id,
+                    material_kind=material_kind.from_metadata(metadata),
+                    markers=effective_summary.count("(you)"),
+                )
+                effective_summary = demarked
         injected_marker = (
             owner_speaker_label is not None
             and "(you)" not in summary

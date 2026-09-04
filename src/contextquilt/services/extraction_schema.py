@@ -2629,6 +2629,51 @@ def cap_entities(entities: object, cap: int) -> tuple:
     return kept, dropped
 
 
+def strip_you_marker_from_transcript(transcript: object) -> str:
+    """Remove `(you)` from every SPEAKER LABEL, leaving prose untouched.
+
+    The mirror of `normalize_owner_in_transcript`, for material where the
+    account owner was not a participant. Its sibling ensures the marker
+    exists; this one ensures it does not.
+
+    ONLY INSIDE THE BRACKETS. `(you)` is a marker when it sits in a
+    speaker label and an ordinary word anywhere else, and a transcript
+    of people talking contains the word "you" constantly. Stripping on
+    the bare string would edit what people said.
+
+    WHY THIS EXISTS, stated honestly because my first reason was wrong.
+    I argued for it believing a shared transcript arrives with the
+    original capture's marker already in it. ShoulderSurf opened their
+    own stored record and falsified that: their bundle contains zero
+    `(you)`, and `OwnerMarker.apply` adds the markers at SEND time, so
+    the marker on the imported meeting of 2026-09-04 was theirs and they
+    have fixed it at the sender.
+
+    What survives that correction is smaller and still real. The marker
+    is a claim that the account owner spoke, and CQ already refuses that
+    claim when it arrives as an owner LABEL on a non-presence kind. A
+    claim carried in the TEXT is the same assertion by a different
+    carrier, and refusing one while honouring the other is the shape
+    this codebase keeps paying for. Every caller is not ShoulderSurf:
+    Tech Rehearsal exists, structured ingest exists, and a future app
+    sending pre-marked text would land here with no sender-side fix.
+
+    So this is defence in depth on a belt that is already fixed, not the
+    fix. It is cheap, it is unambiguous for material the user was not in,
+    and it means the refusal does not depend on which carrier the claim
+    chose.
+    """
+    if not isinstance(transcript, str) or "(you)" not in transcript:
+        return transcript if isinstance(transcript, str) else ""
+
+    def _clean(match: "re.Match") -> str:
+        inner = match.group(1)
+        stripped = re.sub(r"\s*\(\s*you\s*\)\s*$", "", inner, flags=re.I).strip()
+        return match.group(0).replace(inner, stripped) if stripped else match.group(0)
+
+    return SPEAKER_LABEL.sub(_clean, transcript)
+
+
 def normalize_owner_in_transcript(
     transcript: str, owner_speaker_label: str | None
 ) -> str:
