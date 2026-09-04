@@ -46,7 +46,11 @@ NEW = "moment"
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
+    ap.add_argument("--app-id", default=None,
+                    help="the ONE app whose stale registry row to remove; "
+                         "omitted means touch no registry row at all")
     args = ap.parse_args()
+    app_id = args.app_id
 
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
@@ -83,21 +87,41 @@ async def main() -> int:
             return 0
 
         if not args.apply:
-            print(f"\nDRY RUN. --apply rewrites {total} patches and "
-                  f"{sum(1 for r in registry if r['type_key'] == OLD)} registry rows, "
-                  "in one transaction.")
+            stale = [r for r in registry if r["type_key"] == OLD]
+            print(f"\nDRY RUN. --apply rewrites {total} patches.")
+            if stale:
+                print(f"  {len(stale)} registry row(s) still carry {OLD!r}:")
+                for r in stale:
+                    mine = app_id and str(r["app_id"]) == app_id
+                    print(f"    app={r['app_id']} "
+                          f"{'WOULD BE DELETED' if mine else 'left alone (not --app-id)'}")
+            if not app_id:
+                print("  no --app-id given, so no registry row will be touched.")
             return 0
 
         async with conn.transaction():
             patched = await conn.execute(
                 "UPDATE context_patches SET patch_type = $2 WHERE patch_type = $1",
                 OLD, NEW)
-            # The registry is rewritten by re-registering the manifest, so
-            # the OLD key is deleted rather than renamed: renaming would
-            # collide with the row registration has already written, and
-            # leaving it lets two keys answer for one type.
-            dropped = await conn.execute(
-                "DELETE FROM patch_type_registry WHERE type_key = $1", OLD)
+            # SCOPED TO THE APP BEING MIGRATED, and the unscoped version
+            # of this line was caught in a dry run rather than a review.
+            #
+            # Re-registering ShoulderSurf's manifest already replaced its
+            # `behavior` registry row with `moment`, so nothing of theirs
+            # remained to delete. The only row still carrying the old key
+            # belonged to GHOSTPOUR, whose own manifest still declares it
+            # and which this rename has nothing to do with. An unscoped
+            # DELETE would have quietly removed a type from another app's
+            # registry as a side effect of renaming one for this one.
+            #
+            # So: only ever the app named on the command line, and the
+            # default is to touch no registry row at all.
+            if app_id:
+                dropped = await conn.execute(
+                    "DELETE FROM patch_type_registry "
+                    "WHERE type_key = $1 AND app_id = $2::uuid", OLD, app_id)
+            else:
+                dropped = "skipped (no --app-id given)"
 
         print(f"\npatches:  {patched}")
         print(f"registry: {dropped}")
