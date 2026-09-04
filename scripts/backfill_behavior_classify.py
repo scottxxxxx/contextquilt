@@ -48,7 +48,7 @@ SELECT = """
             WHERE a.patch_id = cp.patch_id
             ORDER BY a.can_write DESC, app_id LIMIT 1) acl ON TRUE
      WHERE COALESCE(cp.status, 'active') = 'active'
-       AND cp.patch_type = 'behavior'
+       AND cp.patch_type = 'moment'
        AND COALESCE(cp.value->>'text', '') <> ''
 """
 
@@ -76,7 +76,7 @@ async def _manifests(pool) -> dict:
         m = json.loads(m) if isinstance(m, str) else m
         if isinstance(m, dict):
             m["_registry_version"] = r["version"]
-        if any(isinstance(t, dict) and t.get("domain_type") == "behavior"
+        if any(isinstance(t, dict) and t.get("domain_type") == "moment"
                for t in (m or {}).get("patch_types", [])):
             out[r["app_id"]] = m
     return out
@@ -89,7 +89,7 @@ async def judge_rows(rows, manifest, llm) -> dict:
     verdicts, cost = {}, 0.0
     for i in range(0, len(rows), bc.MAX_ITEMS):
         batch = rows[i:i + bc.MAX_ITEMS]
-        patches = [{"type": "behavior", "value": _value(r["value"])} for r in batch]
+        patches = [{"type": "moment", "value": _value(r["value"])} for r in batch]
         try:
             resp = await llm.extract(system_prompt=system,
                                      user_content=bc.build_classifier_content(patches),
@@ -130,7 +130,23 @@ async def main() -> int:
     # and across judges; without it two runs compare different rows.
     sql += "     ORDER BY cp.patch_id\n"
     rows = [dict(r) for r in await pool.fetch(sql, *params)]
-    print(f"{len(rows)} active behavior rows")
+    print(f"{len(rows)} active {bc.KEEP_TYPE} rows")
+    if not rows:
+        # NAMES ITSELF. This script matched zero rows for a day after the
+        # `behavior` -> `moment` rename, because the type literal here was
+        # missed while src/ and tests/ were updated. "Nothing to judge" and
+        # "pointed at a type name that no longer exists" produced the same
+        # cheerful output, which is the failure this codebase spent the
+        # week correcting elsewhere.
+        total = await pool.fetchval("SELECT count(*) FROM context_patches")
+        types = await pool.fetch(
+            "SELECT patch_type, count(*) AS n FROM context_patches "
+            "WHERE COALESCE(status,'active')='active' GROUP BY 1 ORDER BY 2 DESC LIMIT 8")
+        print(f"  NOTHING MATCHED. {total} patches exist overall, so this ran "
+              f"against real data and no row carries patch_type={bc.KEEP_TYPE!r}.")
+        print("  active types present: "
+              + ", ".join(f"{r['patch_type']}({r['n']})" for r in types))
+        return 0
     if args.sample:
         random.Random(args.seed).shuffle(rows)
         rows = rows[:args.sample]

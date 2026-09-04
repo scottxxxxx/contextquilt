@@ -49,7 +49,7 @@ QUERY = """
     LEFT JOIN (
         SELECT origin_id, count(*) AS n
         FROM context_patches
-        WHERE patch_type = 'behavior' AND origin_id IS NOT NULL
+        WHERE patch_type = 'moment' AND origin_id IS NOT NULL
         GROUP BY origin_id
     ) b ON b.origin_id = m.origin_id
     ORDER BY m.ingested
