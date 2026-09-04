@@ -6391,7 +6391,7 @@ class ColdPathWorker:
             # also strips edges the model emitted itself, because an
             # unresolved owns target makes the Pass-2 resolver synthesize
             # a stub carrying the same text.
-            sanitize_behavior_observations(response.content)
+            sanitize_behavior_observations(response.content, user_label)
             if (bo := response.content.get("_behavior_observations_sanitized")):
                 logger.info(
                     "behavior_observations_sanitized",
@@ -7438,7 +7438,8 @@ class ColdPathWorker:
             # was invisible from every number anybody looked at (24 rows
             # written here since, none violating, because those meetings
             # carried real names). One rule, two carriers, doc 19.11.
-            sanitized = sanitize_behavior_observations({"patches": patches})
+            sanitized = sanitize_behavior_observations(
+                {"patches": patches}, user_label)
             patches = sanitized.get("patches") or []
             if (bo := sanitized.get("_behavior_observations_sanitized")):
                 logger.info(

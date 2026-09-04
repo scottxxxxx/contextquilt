@@ -1018,7 +1018,7 @@ def count_gendered_pronouns(text: "str | None") -> int:
     return len(GENDERED_PRONOUN.findall(text or ""))
 
 
-def sanitize_behavior_observations(content: dict) -> dict:
+def sanitize_behavior_observations(content: dict, user_label: "str | None" = None) -> dict:
     """Drop behavioral observations that state character instead of conduct.
 
     Guardrail 12b says a claim cites observable behavior and never
@@ -1120,7 +1120,7 @@ def sanitize_behavior_observations(content: dict) -> dict:
         if is_placeholder_or_self_person(owner):
             reason = "placeholder_owner"
             word = str(owner)[:40]
-        elif _is_self_owner(owner):
+        elif _is_self_owner(owner, user_label):
             reason = "self_observation"
             word = str(owner)[:40]
         elif (obj := owner_named_as_object(text, owner)) is not None:
@@ -1605,12 +1605,41 @@ _SOMEONE_ELSES = re.compile(r"\b\w+'s\s+(?:\w+\s+){0,2}preference\b", re.I)
 _SELF_OWNER = re.compile(r"\(\s*you\s*\)", re.I)
 
 
-def _is_self_owner(owner: object) -> bool:
-    """True when the owner is the app user rather than a counterparty."""
+def _is_self_owner(owner: object, user_label: "str | None" = None) -> bool:
+    """True when the owner is the app user rather than a counterparty.
+
+    `user_label` is the app's name for the (you) speaker, and WITHOUT IT
+    this function only recognises the marker forms: "(you)", "you", "me".
+    A bare name walks straight through.
+
+    That gap was not theoretical. The behavior prompt says outright
+    "Never record an observation about the speaker marked (you)", and on
+    2026-09-04 production held 130 active behavior rows about the users
+    themselves, 32 of them for one user, the newest a day old. The
+    dedicated lane was clean, because `parse_behavior_response` builds
+    its own self set from `user_label` and had been passed one since it
+    shipped. The MAIN extraction chain reached this function with no
+    label at all, so it saw "Scott" and had no way to know that was the
+    person the corpus is explicitly not about.
+
+    One rule, two carriers, wired to one. The exact shape recorded in
+    CLAUDE.md for this same lane pointing the other way, where the
+    sanitizers were wired into the main chain and the lane ran without
+    them until 2026-09-01. Getting it backwards the second time is the
+    argument for the parameter rather than for another comment.
+    """
     if not isinstance(owner, str) or not owner.strip():
         return False
     low = owner.strip().lower()
-    return bool(_SELF_OWNER.search(low)) or low in _OWNER_YOU_TOKENS
+    if bool(_SELF_OWNER.search(low)) or low in _OWNER_YOU_TOKENS:
+        return True
+    # Exact match only. A substring test would drop a real colleague
+    # whose name contains the user's, and this rule DELETES rows.
+    return bool(
+        isinstance(user_label, str)
+        and user_label.strip()
+        and low == user_label.strip().lower()
+    )
 
 
 def owner_named_as_object(text: object, owner: object) -> "str | None":
