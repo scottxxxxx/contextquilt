@@ -199,3 +199,46 @@ def test_secondhand_is_in_the_known_vocabulary():
     assert "secondhand" in mk.KNOWN_KINDS
     assert mk.from_metadata(SECONDHAND) == "secondhand"
     assert mk.unrecognised_kind(SECONDHAND) is None
+
+
+# ----------------------------------------------------------------------
+# The variants ShoulderSurf's client test mirrors
+# ----------------------------------------------------------------------
+
+#: Kept as an explicit table because ShoulderSurf's `survivesResolver`
+#: test carries THIS LIST, copied from a measurement run against the
+#: deployed resolver on 2026-09-04. Their copy is a mirror; this is the
+#: original.
+#:
+#: That distinction is the reason this block exists. Their test asserts
+#: their own constant against their own list, so if the resolver here
+#: ever stopped stripping and lowercasing, their test would stay GREEN
+#: while the contract moved underneath it, and the first symptom would
+#: be a forwarded meeting extracting as a first-hand one. A mirror
+#: cannot notice the original changing. The original has to fail first,
+#: which is what these two cases are for.
+RESOLVES = ["secondhand", "Secondhand", "SECONDHAND", "  secondhand  ", "secondHand"]
+FALLS_THROUGH = ["second_hand", "second-hand", "second hand", "secondhandd"]
+
+
+@pytest.mark.parametrize("value", RESOLVES)
+def test_the_variants_shouldersurf_pinned_still_resolve(value):
+    """If this goes red, tell ShoulderSurf before shipping.
+
+    Their client test is a copy of this list and will not notice.
+    """
+    assert mk.from_metadata({"material_kind": value}) == mk.SECONDHAND
+    assert mk.claims_user_presence({"material_kind": value}) is False
+
+
+@pytest.mark.parametrize("value", FALLS_THROUGH)
+def test_a_separator_falls_through_and_says_so(value):
+    """`second_hand` is what somebody tidying up snake_case reaches for.
+
+    It resolves to `meeting`, which is the deliberate ruling, and the
+    only thing that separates it from a key that never arrived is the
+    warning. ShoulderSurf made the value a named constant on their side
+    for exactly this; the warning is the half on this side.
+    """
+    assert mk.from_metadata({"material_kind": value}) == mk.MEETING
+    assert mk.unrecognised_kind({"material_kind": value}) == value
