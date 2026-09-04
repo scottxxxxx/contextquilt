@@ -10586,11 +10586,12 @@ async def project_affected_people(
                    AND (r.from_entity_id = ca.entity_id
                         OR r.to_entity_id = ca.entity_id))    AS graph_edges,
                (SELECT count(*) FROM entities e2
-                 WHERE e2.user_id = $1 AND e2.name = ca.name) AS entities_with_this_name
+                 WHERE e2.user_id = $1 AND e2.name = ca.name
+                   AND e2.entity_type = $4)                   AS entities_with_this_name
         FROM candidates ca
         ORDER BY ca.here DESC, ca.name ASC
         """,
-        user_id, project_id, vocab.person_type,
+        user_id, project_id, vocab.person_type, vocab.person_entity_type,
     )
 
     project_name = await db_pool.fetchval(
@@ -10616,8 +10617,28 @@ async def project_affected_people(
                 "graph_edges": r["graph_edges"],
             },
             # A user reading a list of nine names cannot tell that two of
-            # them are the same person twice. Alex resolves to 4 entities
-            # on prod and the account owner to 3.
+            # them are the same person twice.
+            #
+            # CORRECTED 2026-09-04, and the correction is the useful part.
+            # This shipped counting entities of ANY type, so a person who
+            # shares a name with an artifact or a company was reported as
+            # a duplicate identity. "Mac" is a person AND an artifact on
+            # prod, and the GL Unlimited smoke duly reported one duplicate
+            # that was not one.
+            #
+            # The claim that motivated the field was also wrong. I said
+            # Alex resolved to 4 entities and the account owner to 3.
+            # That came from grouping candidates by name ACROSS USERS, so
+            # three different people each having a colleague named Scott
+            # read as one Scott existing three times. Measured properly:
+            # person entities are UNIQUE BY NAME per user, across the
+            # whole population, zero exceptions.
+            #
+            # The field stays because the shape it guards against is real
+            # and cheap to report, and because a client that has already
+            # built for it should not have the key vanish. It now counts
+            # only entities of the caller's person type, so it reports 1
+            # for every row until a genuine duplicate identity appears.
             "entities_with_this_name": r["entities_with_this_name"],
         })
 
