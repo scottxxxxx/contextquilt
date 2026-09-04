@@ -62,6 +62,10 @@ Wrong shape, and why:
 - "The team agreed to postpone" records what happened, not how anybody behaved.
 - "Seems frustrated" is an interior state you cannot see. Record what they DID that a reader would read as frustration, or record nothing.
 
+THE TEST THAT DECIDES IT. An observation is a CHOICE: something the person did when something else was available to them. Asking for the breakdown before agreeing is a choice, because agreeing was available. Moving off the date once the numbers were on screen is a choice, because holding was available. Saying the critique is about the design and not the person is a choice, because just delivering it was available.
+
+Looking something up when asked, noticing a problem, being told about a change and relaying where a task stands are NOT choices. They are things that happened while the person was in the room, and an active verb on the front does not make them conduct. "Identified a rendering bug on the homepage" is a finding. "Reported that the deployment is blocked" is a status. If you cannot name what the person could have done instead, do not record it.
+
 RULES:
 - `owner` must be a named person exactly as the transcript names them. Never a role, never a diarization label like "Speaker 2", never "the team". If you cannot attribute conduct to a named person, do not record it.
 - `owner` is the person who DID the thing, never the person it concerned. If the speaker marked "(you)" asked for two minutes to check an account, that is the user's conduct even when the account or the system belonged to somebody else, and it is not recorded.
