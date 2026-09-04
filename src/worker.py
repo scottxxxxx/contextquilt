@@ -7458,11 +7458,11 @@ class ColdPathWorker:
                 for t in (manifest or {}).get("patch_types", [])
                 if isinstance(t, dict)
             }
-            if "behavior" not in declared:
+            if "moment" not in declared:
                 return 0
             guidance = None
             for t in (manifest or {}).get("patch_types", []):
-                if isinstance(t, dict) and t.get("domain_type") == "behavior":
+                if isinstance(t, dict) and t.get("domain_type") == "moment":
                     rules = t.get("extraction_rules") or {}
                     guidance = rules.get("guidance") or t.get("description")
                     break

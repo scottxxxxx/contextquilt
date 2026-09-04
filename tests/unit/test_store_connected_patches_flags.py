@@ -34,7 +34,7 @@ from worker import store_connected_patches  # noqa: E402
 MEETING = "11111111-1111-1111-1111-111111111111"
 REGISTRY_ROWS = [
     {
-        "type_key": "behavior", "facet": "Episode",
+        "type_key": "moment", "facet": "Episode",
         "is_completable": False, "project_scoped": False,
         "default_ttl_days": 90,
     },
@@ -92,7 +92,7 @@ def _clean_runtime_cache():
 
 
 def _observation(text):
-    return {"type": "behavior", "value": {"text": text, "owner": "Denby"}}
+    return {"type": "moment", "value": {"text": text, "owner": "Denby"}}
 
 
 async def _store(db, patches, **kwargs):
@@ -115,8 +115,8 @@ class TestNoCollapse:
         stored = await _store(
             db,
             [_observation("Asked for the cost numbers before agreeing")],
-            no_collapse_types={"behavior"},
-            origin_scoped_types={"behavior"},
+            no_collapse_types={"moment"},
+            origin_scoped_types={"moment"},
         )
         assert stored == 1
         assert db.dedup_queries == 0
@@ -134,8 +134,8 @@ class TestNoCollapse:
                 _observation("Asked for the cost numbers before agreeing"),
                 _observation("Asked for the cost numbers before agreeing again"),
             ],
-            no_collapse_types={"behavior"},
-            origin_scoped_types={"behavior"},
+            no_collapse_types={"moment"},
+            origin_scoped_types={"moment"},
         )
         assert stored == 2
 
@@ -162,8 +162,8 @@ class TestNoCollapse:
                 _observation("Asked for the cost numbers before agreeing"),
                 {"type": "commitment", "value": {"text": "Ship the API by Friday"}},
             ],
-            no_collapse_types={"behavior"},
-            origin_scoped_types={"behavior"},
+            no_collapse_types={"moment"},
+            origin_scoped_types={"moment"},
         )
         # The observation inserted, the commitment collapsed.
         assert stored == 1
@@ -179,7 +179,7 @@ class TestOriginStamp:
         db = FakeDB()
         await _store(
             db, [_observation("Asked for the cost numbers before agreeing")],
-            no_collapse_types={"behavior"}, origin_scoped_types={"behavior"},
+            no_collapse_types={"moment"}, origin_scoped_types={"moment"},
         )
         args = db.inserts()[0]
         assert args[10] == MEETING
@@ -204,7 +204,7 @@ class TestOriginStamp:
         db = FakeDB()
         await _store(
             db, [{"type": "commitment", "value": {"text": "Ship the API by Friday"}}],
-            no_collapse_types={"behavior"}, origin_scoped_types={"behavior"},
+            no_collapse_types={"moment"}, origin_scoped_types={"moment"},
         )
         args = db.inserts()[0]
         assert args[8] == "Northwind"

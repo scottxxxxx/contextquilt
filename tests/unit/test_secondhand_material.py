@@ -49,7 +49,7 @@ CONTENT = {
     "patches": [
         {"type": "trait", "value": {"text": "Thinks in systems"}},
         {"type": "preference", "value": {"text": "Prefers async standups"}},
-        {"type": "behavior", "value": {"text": "Asked for the cost breakdown "
+        {"type": "moment", "value": {"text": "Asked for the cost breakdown "
                                                "before agreeing", "owner": "Vijay"}},
         {"type": "takeaway", "value": {"text": "Churn risk is real above 12%"}},
         {"type": "person", "value": {"text": "Vijay leads the platform team"}},
@@ -128,7 +128,7 @@ def test_secondhand_keeps_the_people_and_what_they_did():
     out = mk.strip_self_disclosure(copy.deepcopy(CONTENT), SECONDHAND)
     kept = [p["type"] for p in out["patches"]]
 
-    assert "behavior" in kept, "the conduct of the people in the room was dropped"
+    assert "moment" in kept, "the conduct of the people in the room was dropped"
     assert "person" in kept, "the people themselves were dropped"
     assert "takeaway" in kept
     assert "decision" in kept

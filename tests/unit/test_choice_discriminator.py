@@ -41,7 +41,7 @@ MANIFEST = json.loads((ROOT / "init-db" / "11_shouldersurf_schema.json").read_te
 
 def _behavior_type() -> dict:
     for t in MANIFEST.get("patch_types", []):
-        if t.get("domain_type") == "behavior":
+        if t.get("domain_type") == "moment":
             return t
     raise AssertionError("the behavior type is not declared in the manifest")
 

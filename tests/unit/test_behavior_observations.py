@@ -53,7 +53,7 @@ MANIFEST = json.loads(
     (Path(__file__).resolve().parents[2] / "init-db" / "11_shouldersurf_schema.json")
     .read_text(encoding="utf-8")
 )
-BEHAVIOR = "behavior"
+BEHAVIOR = "moment"
 
 
 def _observation(text: str, owner: str | None = None, **extra) -> dict:
@@ -421,7 +421,7 @@ class TestRulesTheModelIgnores:
 
     def test_a_placeholder_owner_is_dropped(self):
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Asked for the cost breakdown",
                        "owner": "Speaker 2"}}]})
         assert out["patches"] == []
@@ -430,7 +430,7 @@ class TestRulesTheModelIgnores:
 
     def test_a_real_name_survives(self):
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Asked for the cost breakdown",
                        "owner": "Pallavi"}}]})
         assert len(out["patches"]) == 1
@@ -439,7 +439,7 @@ class TestRulesTheModelIgnores:
         # "Another stage already does all of that and will do it better
         # than you" is the behavior prompt's own line about commitments.
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Committed to sharing the rollout plan",
                        "owner": "Vijay"}}]})
         assert out["patches"] == []
@@ -451,7 +451,7 @@ class TestRulesTheModelIgnores:
         # this verbatim as a right-shape observation, so a broad
         # promise-shaped rule would delete the very thing it asks for.
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Volunteered to take the escalation before "
                                "anyone assigned it", "owner": "Vijay"}}]})
         assert len(out["patches"]) == 1
@@ -460,7 +460,7 @@ class TestRulesTheModelIgnores:
         # Reporting what happened in the room, not taking on a task.
         # This is why the pattern is anchored at the start.
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Asked whether Vijay agreed to the endpoint "
                                "change", "owner": "Suresh"}}]})
         assert len(out["patches"]) == 1
@@ -475,7 +475,7 @@ class TestRulesTheModelIgnores:
 
     def test_the_character_verdict_rule_still_fires(self):
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Is defensive about code review feedback",
                        "owner": "Yardley"}}]})
         assert out["patches"] == []
@@ -491,7 +491,7 @@ class TestPreferenceAndSelfRules:
         Steven prefers to test and validate is a preference." The right
         home exists, so dropping the row loses a real memory."""
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Articulated a preference for lifestyle "
                                "business outcomes over venture scale",
                        "owner": "Steven Williams"}}]})
@@ -504,7 +504,7 @@ class TestPreferenceAndSelfRules:
         # edges in production only because the connects_to shape was
         # never stated in the prompt.
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Stated he prefers a lifestyle company",
                        "owner": "Steven Williams"}}]})
         edges = out["patches"][0]["connects_to"]
@@ -515,7 +515,7 @@ class TestPreferenceAndSelfRules:
         # held_by pointing at the (you) speaker is the case the manifest
         # says needs no edge, because ownership is already implicit.
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Specified a preference for afternoon slots",
                        "owner": "Scott (you)"}}]})
         assert out["patches"][0]["type"] == "preference"
@@ -526,7 +526,7 @@ class TestPreferenceAndSelfRules:
         # No named person means nothing to attach it to, so there is no
         # honest preference to convert into.
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Stated a preference for the granular way",
                        "owner": "Speaker 3"}}]})
         assert out["patches"] == []
@@ -536,7 +536,7 @@ class TestPreferenceAndSelfRules:
         # Steven's conduct; the preference in it belongs to Scott and is
         # merely referenced. Without this the rule destroys a good row.
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Pushed back on Scott's initial preference for "
                                "on-premise hardware by asking questions",
                        "owner": "Steven Williams"}}]})
@@ -545,14 +545,14 @@ class TestPreferenceAndSelfRules:
     def test_preferred_as_an_adjective_survives(self):
         # "her preferred doctors" is not a stated preference.
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Asked Sarah whether she had issues accessing "
                                "her preferred doctors", "owner": "Suresh"}}]})
         assert len(out["patches"]) == 1
 
     def test_values_as_a_plural_noun_survives(self):
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Reported finding null values in the results",
                        "owner": "Vijay"}}]})
         assert len(out["patches"]) == 1
@@ -562,7 +562,7 @@ class TestPreferenceAndSelfRules:
         # marked (you)." Non-preference text, because a self PREFERENCE
         # is now converted rather than dropped.
         out = sanitize_behavior_observations({"patches": [
-            {"type": "behavior",
+            {"type": "moment",
              "value": {"text": "Asked the team for the cost breakdown",
                        "owner": "Scott (you)"}}]})
         assert out["patches"] == []

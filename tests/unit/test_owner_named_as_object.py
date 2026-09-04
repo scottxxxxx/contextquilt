@@ -110,7 +110,7 @@ def test_malformed_input_is_none_never_an_exception(text, owner):
 # Through the actual sanitizer, which is what ingest calls
 # ----------------------------------------------------------------------
 
-def _content(text, owner, ptype="behavior"):
+def _content(text, owner, ptype="moment"):
     return {"patches": [{"type": ptype, "value": {"text": text, "owner": owner}}]}
 
 

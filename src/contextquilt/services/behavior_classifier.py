@@ -57,7 +57,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
-KEEP_TYPE = "behavior"
+KEEP_TYPE = "moment"
 
 # The one type a misfiled behavior is CONVERTED to rather than dropped.
 # See `extraction_schema.convert_to_preference` for the mechanics and

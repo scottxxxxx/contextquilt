@@ -33,7 +33,7 @@ def _resp(*pairs):
 def test_an_observation_becomes_a_patch_the_normal_sink_understands():
     got = parse_behavior_response(
         _resp(("Asked for the cost breakdown before agreeing", "Denby")))
-    assert got == [{"type": "behavior",
+    assert got == [{"type": "moment",
                     "value": {"text": "Asked for the cost breakdown before agreeing",
                               "owner": "Denby"}}]
 
@@ -133,7 +133,7 @@ def test_it_writes_through_the_shared_sink_not_its_own_path():
 def test_it_is_inert_unless_the_manifest_declares_the_type():
     body = WORKER.split("async def _extract_behavior_observations")[1].split(
         "async def ")[0]
-    assert 'if "behavior" not in declared:' in body
+    assert 'if "moment" not in declared:' in body
 
 
 def test_a_failure_here_cannot_lose_the_meeting():
@@ -199,7 +199,7 @@ def test_the_sanitizer_accepts_the_lane_output_shape():
     out = sanitize_behavior_observations({"patches": patches})
     kept = out["patches"]
     assert [p["value"]["owner"] for p in kept] == ["Denby", "Steven"]
-    assert kept[0]["type"] == "behavior"
+    assert kept[0]["type"] == "moment"
     assert kept[1]["type"] == "preference"
     assert any(e.get("label") == "held_by" and e.get("target_text") == "Steven"
                for e in kept[1]["connects_to"])
