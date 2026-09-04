@@ -6149,7 +6149,7 @@ class ColdPathWorker:
         # because a same-first-name collision turns a well-meant label
         # into the user owning somebody else's words, and this codebase
         # has spent two fixes in one day on exactly that class.
-        if material_kind.is_listening(metadata) and owner_speaker_label:
+        if not material_kind.claims_user_presence(metadata) and owner_speaker_label:
             logger.info(
                 "owner_label_ignored_for_material_kind",
                 user_id=user_id,
@@ -6186,8 +6186,19 @@ class ColdPathWorker:
         # for the lookback window + cap, and select_open_commitments for
         # why this meeting's project gets reserved slots rather than a
         # sort key.
-        open_commits_block = await self._build_open_commitments_block(
-            user_id, metadata.get("project_id")
+        # A MEETING THE USER WAS NOT IN CANNOT CLOSE THE USER'S
+        # COMMITMENT. `listening` emptied this block eighty lines below,
+        # after the fetch had already run; doing it here means the
+        # commitments are never fetched for material the user was not
+        # part of, and never offered to a model that would try to close
+        # them. Same predicate as the marker gate, so the two cannot
+        # drift apart on the one property they share.
+        open_commits_block = (
+            await self._build_open_commitments_block(
+                user_id, metadata.get("project_id")
+            )
+            if material_kind.claims_user_presence(metadata)
+            else ""
         )
 
         # Meeting date anchor for deadline resolution. The extraction
@@ -6696,6 +6707,16 @@ class ColdPathWorker:
                     logger.info("listening_sanitized", user_id=user_id,
                                 origin=origin_id, dropped=ls["count"],
                                 dropped_detail=ls["dropped"][:20])
+
+            # A trait or a preference is the user describing themselves,
+            # and nobody is describing themselves to the user in material
+            # the user was not part of. Applied for every non-presence
+            # kind rather than only `secondhand`, so the two cannot drift.
+            material_kind.strip_self_disclosure(response.content, metadata)
+            if (sd := response.content.get("_self_disclosure_stripped")):
+                logger.info("self_disclosure_stripped", user_id=user_id,
+                            origin=origin_id, kind=sd["kind"],
+                            dropped=sd["count"], dropped_detail=sd["dropped"][:20])
             patches = response.content.get("patches", [])
             entities = response.content.get("entities", [])
             relationships = response.content.get("relationships", [])

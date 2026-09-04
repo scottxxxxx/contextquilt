@@ -52,7 +52,7 @@ def _ordering() -> tuple[int, int]:
     """Where the kind is consulted, and where the marker is applied."""
     body = _handler_source()
     return (
-        body.index("material_kind.is_listening(metadata) and owner_speaker_label"),
+        body.index("material_kind.claims_user_presence(metadata) and owner_speaker_label"),
         body.index("effective_summary = normalize_owner_in_transcript("),
     )
 
