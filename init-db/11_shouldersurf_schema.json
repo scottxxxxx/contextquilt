@@ -1,6 +1,6 @@
 {
   "app_id": "shouldersurf",
-  "version": 14,
+  "version": 15,
   "facet_enum_version": 1,
   "display_name": "ShoulderSurf",
   "description": "Consumer meeting-capture iOS app. Turns diarized conversations from any meeting type (work, coaching, legal, creative, personal) into typed memory patches on the user's cognitive quilt. Built on ContextQuilt's universal 6-facet primitive; the schema below is SS's app-level dictionary.",
@@ -376,7 +376,7 @@
       "facet": "Episode",
       "permanence": "quarter",
       "display_name": "Behavior",
-      "description": "One observed instance of HOW a named participant conducted themselves in this meeting: what they asked for before agreeing, how they responded to a piece of framing, what moved their position. This is the unit the profile pass reads. Every other episode type records what happened; this one records how somebody behaved while it happened. Records conduct that a reader could have watched, never a verdict about who a person is.",
+      "description": "One observed CHOICE a named participant made in this meeting: something they did when something else was available to them. What they asked for before agreeing, what moved their position, how they handled a person when they could have handled them otherwise. This is the unit the profile pass reads. Every other episode type records what happened; this one records a choice somebody made while it happened. Records conduct that a reader could have watched, never a verdict about who a person is, and never a thing that merely occurred in their presence.",
       "value_shape": {
         "text": "string",
         "owner": "string?"
@@ -391,7 +391,7 @@
           "text",
           "owner"
         ],
-        "guidance": "Emit when the transcript shows HOW a named participant conducted themselves. The observation must be something a reader could have watched happen, and `owner` must be the person who did it, named exactly as the transcript names them. Right shape: 'Asked for the cost breakdown before agreeing to the vendor switch' (owner Denby); 'Moved off the launch date once the churn numbers were on screen' (owner Fenwick); 'Answered the compliance question by reading out the specific clause rather than summarizing it' (owner Lockridge). Wrong shape: 'Is defensive about code review feedback' says what kind of person someone is instead of what was observed, and gets dropped. Two more that belong to other types: 'Will send the revised deck on Thursday' is a commitment, and 'The vendor migration slipped again' is an event. One patch per distinct behavior, with an owner every time: an observation nobody is named for can never be read as being about anyone. Never emit this type for the (you) speaker; the user's own way of operating is a trait."
+        "guidance": "Emit when the transcript shows HOW a named participant conducted themselves. The observation must be something a reader could have watched happen, and `owner` must be the person who did it, named exactly as the transcript names them. Right shape: 'Asked for the cost breakdown before agreeing to the vendor switch' (owner Denby); 'Moved off the launch date once the churn numbers were on screen' (owner Fenwick); 'Answered the compliance question by reading out the specific clause rather than summarizing it' (owner Lockridge). Wrong shape: 'Is defensive about code review feedback' says what kind of person someone is instead of what was observed, and gets dropped. Two more that belong to other types: 'Will send the revised deck on Thursday' is a commitment, and 'The vendor migration slipped again' is an event. One patch per distinct behavior, with an owner every time: an observation nobody is named for can never be read as being about anyone. Never emit this type for the (you) speaker; the user's own way of operating is a trait. THE TEST THAT DECIDES IT: an observation is a CHOICE, something the person did when something else was available to them. Asking for the breakdown before agreeing is a choice because agreeing was available; moving off a date once the numbers are up is a choice because holding was available. Looking something up when asked, noticing a problem, or relaying where a task stands are not choices, they are things that happened while the person was present, and an active verb does not make them conduct. If you cannot name what the person could have done instead, do not emit this type."
       }
     },
     {
