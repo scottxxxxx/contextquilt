@@ -1123,6 +1123,24 @@ def sanitize_behavior_observations(content: dict) -> dict:
         elif _is_self_owner(owner):
             reason = "self_observation"
             word = str(owner)[:40]
+        elif (obj := owner_named_as_object(text, owner)) is not None:
+            # THE OWNER IS THE OBJECT OF THEIR OWN OBSERVATION, so the
+            # row asserts they did what was done TO them. Dropped rather
+            # than repaired for the same reason the character verdicts
+            # above are: the real actor is whoever was speaking and this
+            # row does not record that, so any owner we substituted would
+            # be a guess wearing a citation.
+            #
+            # This one is partly self-inflicted. #401 banned gendered
+            # pronouns everywhere prose is written, correctly, and the
+            # model satisfies it by repeating the NAME where a pronoun
+            # belonged: "Offered to help Steven Williams present the
+            # product to Steven Williams's mother". Banning pronouns in
+            # prose ABOUT a named third party makes subject and object
+            # indistinguishable, which nobody foresaw and which this rule
+            # now absorbs.
+            reason = "owner_is_the_object"
+            word = obj[:40]
         elif TASK_HANDOFF.search(text):
             # "Another stage already does all of that and will do it
             # better than you" is the prompt's own line about
@@ -1593,6 +1611,48 @@ def _is_self_owner(owner: object) -> bool:
         return False
     low = owner.strip().lower()
     return bool(_SELF_OWNER.search(low)) or low in _OWNER_YOU_TOKENS
+
+
+def owner_named_as_object(text: object, owner: object) -> "str | None":
+    """The owner's own name, when the text uses them as the OBJECT.
+
+    "Asked Vijay to have Arnav join the Tuesday enablement call" stamped
+    `owner="Vijay"` says Vijay asked himself. The actor is whoever was
+    speaking, which this row does not record, so the observation is real
+    and its attribution is not. It renders on Vijay's page as conduct.
+
+    Measured on prod 2026-09-03: 33 of 931 active behavior rows name
+    their own owner, and 28 of those name them mid-sentence. Every one of
+    the 28 inspected was the user's action filed as the counterparty's.
+
+    Position is the whole test, and it works because these sentences are
+    verb-initial by construction: the prompt asks for conduct, so the
+    model writes "Asked...", "Explained...", "Challenged...". A name at
+    the FRONT is the subject ("Pallavi Kandanur provided detailed
+    clarification") and is left alone. A name anywhere else is the object.
+
+    KNOWN LIMIT, stated rather than hidden: a subject-initial adverbial
+    ("After the standup, Vijay escalated it") would be read as an object
+    and dropped. No such row existed in the 33 on prod, and the trade is
+    deliberate, because the failure this catches asserts that a named
+    human did something they did not do, and the failure it risks costs
+    one row.
+
+    English word boundaries only, the same limit the character-word rules
+    in this module carry.
+    """
+    if not isinstance(text, str) or not isinstance(owner, str):
+        return None
+    body = text.strip()
+    name = owner.strip()
+    if not body or not name:
+        return None
+    # Subject position. Checked before the search so a legitimately
+    # name-initial sentence never reaches the object rule.
+    if body.lower().startswith(name.lower()):
+        return None
+    hit = re.search(rf"\b{re.escape(name)}\b", body, re.I)
+    return hit.group(0) if hit else None
 
 
 TASK_HANDOFF = re.compile(
