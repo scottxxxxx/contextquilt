@@ -34,6 +34,14 @@ USAGE (inside the prod container — needs DATABASE_URL + LLM env)
 
     python scripts/audit_semantic_dupes.py [--limit 100]
     python scripts/audit_semantic_dupes.py --apply
+
+    # Self-disclosure pass (2026-09-04): trait/preference/goal/constraint,
+    # the lower floor, same-owner pairs only, plus pairs that share a cue.
+    python scripts/audit_semantic_dupes.py --self-typed --user <user_id>
+    python scripts/audit_semantic_dupes.py --self-typed --user <user_id> --apply
+
+Every merge unions the dropped patch's cues into the survivor and stamps
+value.duplicate_of on the archived row, so the fold is traceable.
 """
 
 from __future__ import annotations
@@ -51,6 +59,8 @@ from contextquilt.services.semantic_dedup import (  # noqa: E402
     DEDUP_JUDGE_SCHEMA,
     DEDUP_JUDGE_SYSTEM,
     MAX_JUDGE_PAIRS,
+    SELF_DISCLOSURE_TYPES,
+    SELF_TYPED_DEDUP_FLOOR,
     SEMANTIC_DEDUP_FLOOR,
     build_dedup_judge_content,
     parse_dedup_verdicts,
@@ -70,19 +80,7 @@ DEDUP_TYPES = (
 PAIR_CEILING = 0.99
 
 
-async def main(apply: bool, limit: int) -> None:
-    dsn = os.environ.get("DATABASE_URL")
-    if not dsn:
-        print("DATABASE_URL is required", file=sys.stderr)
-        sys.exit(1)
-
-    from contextquilt.services.llm_client_anthropic import AnthropicLLMClient
-    llm = AnthropicLLMClient()
-
-    conn = await asyncpg.connect(dsn)
-    try:
-        pairs = await conn.fetch(
-            f"""
+PAIR_SELECT = """
             SELECT pa.subject_key,
                    a.patch_id AS a_id, a.value->>'text' AS a_text, a.created_at AS a_created,
                    a.value->>'deadline_date' AS a_dd,
@@ -100,14 +98,60 @@ async def main(apply: bool, limit: int) -> None:
              WHERE COALESCE(a.status, 'active') = 'active'
                AND COALESCE(b.status, 'active') = 'active'
                AND a.patch_type = ANY($1::text[])
-               AND SIMILARITY(LOWER(a.value->>'text'), LOWER(b.value->>'text')) > $2
-               AND SIMILARITY(LOWER(a.value->>'text'), LOWER(b.value->>'text')) < $3
+               AND ($5::text IS NULL OR pa.subject_key = $5)
+               {EXTRA}
+"""
+
+# Pairs that share at least one cue: the wording can sit anywhere below
+# the floor and still be one disposition said twice.
+CUE_PAIR_EXTRA = """
+               AND $2::float >= 0 AND $3::float <= 1
+               AND COALESCE(a.value->>'owner', '') = COALESCE(b.value->>'owner', '')
+               AND EXISTS (SELECT 1 FROM patch_cues ca JOIN patch_cues cb ON cb.cue = ca.cue
+                            WHERE ca.patch_id = a.patch_id AND cb.patch_id = b.patch_id)
              ORDER BY sim DESC
              LIMIT $4
-            """,
-            list(DEDUP_TYPES), SEMANTIC_DEDUP_FLOOR, PAIR_CEILING, limit,
-        )
-        print(f"{len(pairs)} candidate pairs (band {SEMANTIC_DEDUP_FLOOR}..{PAIR_CEILING}, capped {limit})")
+"""
+
+TRIGRAM_PAIR_EXTRA = """
+               AND SIMILARITY(LOWER(a.value->>'text'), LOWER(b.value->>'text')) > $2
+               AND SIMILARITY(LOWER(a.value->>'text'), LOWER(b.value->>'text')) < $3
+               {OWNER}
+             ORDER BY sim DESC
+             LIMIT $4
+"""
+
+OWNER_GUARD = "AND COALESCE(a.value->>'owner', '') = COALESCE(b.value->>'owner', '')"
+
+
+async def main(apply: bool, limit: int, self_typed: bool = False, user: str | None = None) -> None:
+    dsn = os.environ.get("DATABASE_URL")
+    if not dsn:
+        print("DATABASE_URL is required", file=sys.stderr)
+        sys.exit(1)
+
+    from contextquilt.services.llm_client_anthropic import AnthropicLLMClient
+    llm = AnthropicLLMClient()
+
+    types = list(SELF_DISCLOSURE_TYPES) if self_typed else list(DEDUP_TYPES)
+    floor = SELF_TYPED_DEDUP_FLOOR if self_typed else SEMANTIC_DEDUP_FLOOR
+    subject = f"user:{user}" if user else None
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        trigram_sql = PAIR_SELECT.replace(
+            "{EXTRA}", TRIGRAM_PAIR_EXTRA.replace("{OWNER}", OWNER_GUARD if self_typed else ""))
+        pairs = list(await conn.fetch(trigram_sql, types, floor, PAIR_CEILING, limit, subject))
+        if self_typed:
+            cue_sql = PAIR_SELECT.replace("{EXTRA}", CUE_PAIR_EXTRA)
+            seen_ids = {(r["a_id"], r["b_id"]) for r in pairs}
+            cue_pairs = [r for r in await conn.fetch(cue_sql, types, floor, PAIR_CEILING, limit, subject)
+                         if (r["a_id"], r["b_id"]) not in seen_ids]
+            print(f"{len(pairs)} trigram pairs in band {floor}..{PAIR_CEILING}, "
+                  f"{len(cue_pairs)} more sharing a cue below it")
+            pairs.extend(cue_pairs)
+        print(f"{len(pairs)} candidate pairs (band {floor}..{PAIR_CEILING}, capped {limit}, "
+              f"types {','.join(types)}{', user ' + user if user else ''})")
         if not pairs:
             return
 
@@ -197,10 +241,21 @@ async def main(apply: bool, limit: int) -> None:
                     """,
                     newer_created, keep_id,
                 )
+                # The dropped row's cues follow the fact, exactly as the
+                # live re-observation path unions them.
+                await conn.execute(
+                    """
+                    INSERT INTO patch_cues (patch_id, cue)
+                    SELECT $1, cue FROM patch_cues WHERE patch_id = $2
+                    ON CONFLICT DO NOTHING
+                    """,
+                    keep_id, drop_id,
+                )
                 await conn.execute(
                     "UPDATE context_patches SET status = 'archived', updated_at = NOW(), "
-                    "value = jsonb_set(value, '{archive_cause}', '\"dedup\"') WHERE patch_id = $1",
-                    drop_id,
+                    "value = jsonb_set(jsonb_set(value, '{archive_cause}', '\"dedup\"'), "
+                    "'{duplicate_of}', to_jsonb($2::text)) WHERE patch_id = $1",
+                    drop_id, str(keep_id),
                 )
             merged += 1
 
@@ -214,5 +269,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--apply", action="store_true", help="write merges (default: dry run)")
     parser.add_argument("--limit", type=int, default=100, help="max candidate pairs per run")
+    parser.add_argument("--self-typed", action="store_true",
+                        help="trait/preference/goal/constraint only: the lower floor, same-owner "
+                             "pairs, plus pairs sharing a cue")
+    parser.add_argument("--user", help="restrict to one user_id")
     args = parser.parse_args()
-    asyncio.run(main(args.apply, args.limit))
+    asyncio.run(main(args.apply, args.limit, self_typed=args.self_typed, user=args.user))
