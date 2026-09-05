@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
+
+from contextquilt.services.recall_scorer import _keywords
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
@@ -314,25 +316,24 @@ def format_flat_ranked_with_stats(
 
 
 def _near_duplicate(text: str, existing: List[str]) -> bool:
-    """Same clause said twice: at least seven in ten of the words in the
-    shorter one appear in the other. Word overlap, not trigram, because
-    the two rows are typically the same sentence with different framing
-    ("asked a probing question about why..." / "asked why...")."""
-    words = set(_words(text))
-    if not words:
+    """Same clause said twice. Content words only (the scorer's keyword
+    tokenizer, stopwords out), and BOTH an absolute floor and a ratio:
+    at least four shared content words, covering at least four in ten
+    of the shorter item. The floor is what keeps two short unrelated
+    clauses apart; the ratio is what catches the same question asked
+    twice in different framing ("asked a probing question about why the
+    providers went down" / "asked why the units went down")."""
+    words = set(_keywords(text))
+    if len(words) < 4:
         return False
     for other in existing:
-        ow = set(_words(other))
-        if not ow:
+        ow = set(_keywords(other))
+        if len(ow) < 4:
             continue
-        smaller = min(len(words), len(ow))
-        if len(words & ow) / smaller >= 0.7:
+        shared = len(words & ow)
+        if shared >= 4 and shared / min(len(words), len(ow)) >= 0.4:
             return True
     return False
-
-
-def _words(text: str) -> List[str]:
-    return [w for w in "".join(c.lower() if c.isalnum() else " " for c in text).split() if len(w) > 2]
 
 
 def _clip(text: str, limit: int) -> str:
