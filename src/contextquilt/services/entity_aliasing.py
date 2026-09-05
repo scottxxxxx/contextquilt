@@ -135,6 +135,7 @@ def is_alias_form(short: str, long: str) -> bool:
 def find_alias_candidate(
     name: str,
     existing: Sequence[Tuple[Any, str]],
+    people: bool = False,
 ) -> Optional[Tuple[Any, str, str]]:
     """Match `name` against existing same-type entities of one user.
 
@@ -153,12 +154,48 @@ def find_alias_candidate(
 
     Returns None when nothing matches or when 2+ entities match
     (ambiguous — never merge on ambiguity).
+
+    `people=True` REFUSES ANY PAIR WHOSE SHORT FORM IS A BARE FIRST NAME.
+    Scott ruled this on 2026-09-04 after two collapses in one day: "Raj"
+    absorbed a different Raj Kumar, and "Chris" absorbed a different
+    Chris Leif. Both were the `name_is_canonical` direction, so the
+    OLDER person's entity was renamed to the NEWER person's name and
+    their history was served under a stranger's name.
+
+    A single token carries almost no identifying information. Two
+    colleagues sharing a first name is not exotic, it is Tuesday, and
+    the ambiguity guard below cannot see it: with one Raj on the roster
+    there is exactly one candidate, so nothing is ambiguous by that rule.
+
+    THE COST IS REAL AND IT IS THE RIGHT TRADE. "Vijay" arriving while
+    "Vijay Rayudu" exists now creates a second entity instead of
+    attaching, so a real person can end up duplicated. That is a
+    DUPLICATE, which is visible on the page and fixable with the merge
+    the user already has. What it replaces is a WRONG MERGE, which is
+    invisible: it reads as plausible to anyone who does not know both
+    people, and the only reason either of today's was caught is that
+    Scott happened to look.
+
+    This module already argues exactly that, in
+    `is_contested_person_name`: "A wrong attribution is a claim about a
+    real colleague that reads as plausible and is invisible to anyone
+    who does not know them; a missing one is a gap the next sentence
+    fills." The same sentence decides this.
+
+    Only for people. Non-person aliasing is untouched, because "KB
+    Retrieval" folding into "KB Retrieval dynamic category updates" is
+    one artifact getting a fuller name, not two artifacts that happen to
+    share a first word.
     """
     matches: List[Tuple[Any, str, str]] = []
     for entity_id, entity_name in existing:
         if is_alias_form(name, entity_name):
+            if people and len(tokenize_name(name)) < 2:
+                continue
             matches.append((entity_id, entity_name, "name_is_alias"))
         elif is_alias_form(entity_name, name):
+            if people and len(tokenize_name(entity_name)) < 2:
+                continue
             matches.append((entity_id, entity_name, "name_is_canonical"))
     if len(matches) == 1:
         return matches[0]
