@@ -125,7 +125,8 @@ OWNER_GUARD = "AND COALESCE(a.value->>'owner', '') = COALESCE(b.value->>'owner',
 
 
 async def main(apply: bool, limit: int, self_typed: bool = False, user: str | None = None,
-               model: str | None = None, exclude: set[str] | None = None) -> None:
+               model: str | None = None, exclude: set[str] | None = None,
+               out: str | None = None, replay: str | None = None) -> None:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         print("DATABASE_URL is required", file=sys.stderr)
@@ -171,18 +172,39 @@ async def main(apply: bool, limit: int, self_typed: bool = False, user: str | No
             seen.add(r["b_id"])
             candidates.append(r)
 
+        # The judge is not deterministic across runs: pass 1 on 2026-09-05
+        # proposed 22 merges in the dry run and applied 26, so four pairs
+        # were written that nobody had read, one of them wrong. A dry run
+        # therefore writes its verdicts to --out, and an apply with --from
+        # replays exactly those verdicts by pair id and calls no judge:
+        # what the operator read is what gets written.
+        import json as _json
         verdicts: list = []
-        for i in range(0, len(candidates), MAX_JUDGE_PAIRS):
-            batch = candidates[i:i + MAX_JUDGE_PAIRS]
-            resp = await llm.extract(
-                system_prompt=DEDUP_JUDGE_SYSTEM,
-                user_content=build_dedup_judge_content(
-                    [(r["a_text"], r["b_text"]) for r in batch]
-                ),
-                json_schema=DEDUP_JUDGE_SCHEMA,
-                model=model,
-            )
-            verdicts.extend(parse_dedup_verdicts(resp.content, len(batch)))
+        if replay:
+            stored = _json.load(open(replay))
+            by_pair = {(v["a_id"], v["b_id"]): bool(v["same_fact"]) for v in stored["verdicts"]}
+            verdicts = [by_pair.get((str(r["a_id"]), str(r["b_id"])), False) for r in candidates]
+            unseen = sum(1 for r in candidates if (str(r["a_id"]), str(r["b_id"])) not in by_pair)
+            print(f"replaying {len(by_pair)} verdicts from {replay}; "
+                  f"{unseen} candidate pairs not in the file are kept")
+        else:
+            for i in range(0, len(candidates), MAX_JUDGE_PAIRS):
+                batch = candidates[i:i + MAX_JUDGE_PAIRS]
+                resp = await llm.extract(
+                    system_prompt=DEDUP_JUDGE_SYSTEM,
+                    user_content=build_dedup_judge_content(
+                        [(r["a_text"], r["b_text"]) for r in batch]
+                    ),
+                    json_schema=DEDUP_JUDGE_SCHEMA,
+                    model=model,
+                )
+                verdicts.extend(parse_dedup_verdicts(resp.content, len(batch)))
+            if out:
+                _json.dump({"model": model or llm.model, "verdicts": [
+                    {"a_id": str(r["a_id"]), "b_id": str(r["b_id"]), "same_fact": bool(v),
+                     "type": r["patch_type"], "a_text": r["a_text"][:200], "b_text": r["b_text"][:200]}
+                    for r, v in zip(candidates, verdicts)]}, open(out, "w"), indent=1)
+                print(f"wrote {out}")
 
         merged = 0
         skipped = 0
@@ -293,6 +315,10 @@ if __name__ == "__main__":
     parser.add_argument("--model", help="judge model override (use Sonnet for the self-typed pass)")
     parser.add_argument("--exclude-id", action="append", default=[],
                         help="patch id a dry run showed in a wrong merge; any pair touching it is skipped")
+    parser.add_argument("--out", help="dry run: write the judged verdicts here for a later --apply --from")
+    parser.add_argument("--from", dest="replay",
+                        help="apply exactly the verdicts a dry run wrote; no judge call")
     args = parser.parse_args()
     asyncio.run(main(args.apply, args.limit, self_typed=args.self_typed, user=args.user,
-                     model=args.model, exclude={str(x) for x in args.exclude_id}))
+                     model=args.model, exclude={str(x) for x in args.exclude_id},
+                     out=args.out, replay=args.replay))
