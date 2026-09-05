@@ -85,7 +85,13 @@ MODEL_ENV = "CQ_BEHAVIOR_CLASSIFIER_MODEL"
 # memory of the person made of them would say nothing. So the judge is
 # asked a fourth question on every item it keeps as a moment, and a
 # routine answer drops the row through the same path a commitment
-# verdict takes. `routine` is a pseudo-verdict: parse produces it only
+# verdict takes. First dry run over 595 kept rows (2026-09-04) called 219
+# routine and agreed with the hand read on the mechanics side, but it
+# also dropped an interviewer's substantive questions (how was the
+# agent built, what was the lesson learned), the exact rows the
+# with/without chat experiment had proved valuable, on the phrase 'a
+# clarifying question any listener would have asked'. Questions now
+# get their own sentence: routine only when about mechanics. `routine` is a pseudo-verdict: parse produces it only
 # from the stakes field, never from `type`, so a model that writes
 # "routine" as a type is ignored (kept), same as any unknown type.
 STAKES_ENV = "CQ_MOMENT_STAKES_GATE_ENABLED"
@@ -230,12 +236,18 @@ STAKES_RULE = (
     "working together: who is joining, checking whether somebody is on "
     "the call, sharing a screen, where a file lives and who should upload "
     "it, passing a small task to the person who was always going to do "
-    "it, a clarifying question any listener would have asked, or a "
-    "courtesy. Routine items are real conduct and still not worth "
-    "keeping, because a memory of this person made of them would say "
-    "nothing. Mark them routine. When you cannot tell, mark durable. The "
-    "stakes field is read only on items you typed as a moment; on any "
-    "other type write durable and it is ignored.\n\n"
+    "it, asking whether something is done yet, or a courtesy. A question "
+    "is routine only when it is about those mechanics. A question that "
+    "shows what the person is evaluating, probing or worried about has "
+    "stakes and is durable: an interviewer asking how a system was built "
+    "or for the lesson learned, a lead asking for the exact rule behind a "
+    "result, somebody asking how the customer will measure the outcome, "
+    "a pointed why that refuses the surface explanation. Routine items "
+    "are real conduct and still not worth keeping, because a memory of "
+    "this person made of them would say nothing. Mark them routine. When "
+    "you cannot tell, mark durable. The stakes field is read only on "
+    "items you typed as a moment; on any other type write durable and it "
+    "is ignored.\n\n"
 )
 
 
