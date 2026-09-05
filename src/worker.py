@@ -1872,7 +1872,8 @@ async def store_entities(
                 user_id, entity_type,
             )
             match = find_alias_candidate(
-                name, [(r["entity_id"], r["name"]) for r in candidate_rows]
+                name, [(r["entity_id"], r["name"]) for r in candidate_rows],
+                people=(entity_type == person_entity_type),
             )
             if match:
                 entity_id, existing_name, direction = match
