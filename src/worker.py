@@ -7666,10 +7666,12 @@ class ColdPathWorker:
                 subject_key=f"user:{user_id}", origin_id=origin_id,
                 patch_id=patch_id)
             rows = await self.db.fetch(sql, *params)
+            conduct_types = (await get_type_runtime(self.db.fetch)).conduct_types
             candidates = [
                 dict(r) for r in rows
                 if woven_digest.why_not_a_tile(
-                    dict(r), require_headline=False) is None
+                    dict(r), require_headline=False,
+                    conduct_types=conduct_types) is None
             ]
             if not candidates:
                 return 0

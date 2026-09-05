@@ -109,7 +109,13 @@ def _deadline_status(deadline_date: str, today: date) -> Optional[str]:
         return None
     delta_days = (parsed - today).days
     if delta_days < 0:
-        return "OVERDUE"
+        # "not confirmed done" is what recall actually knows: nothing
+        # auto-closes (2026-08-18 ruling), so a past due row may have been
+        # delivered and never marked. Persona test 2026-09-05: four rows
+        # rendered OVERDUE at the top of the block, three of them finished
+        # in the very transcript under discussion, and the assistant
+        # chased them.
+        return "OVERDUE, not confirmed done"
     if delta_days == 0:
         return "due today"
     if delta_days <= 7:
@@ -168,8 +174,18 @@ def format_flat_ranked_with_stats(
     max_chars: int = 1600,
     today: Optional[date] = None,
     person_entity_type: str = "person",
+    conduct_types: "frozenset" = frozenset(),
+    capsule_limit: int = 3,
 ) -> Tuple[str, int]:
     """Format patches as a flat relevance-ranked list.
+
+    Conduct rows (origin scoped, not project scoped: SS's moment) whose
+    owner is a person in the header are folded into that person's line
+    as a capsule, "how they operate: a; b; c", newest first, up to
+    `capsule_limit`, and leave the list. A conduct row about somebody
+    the query did not name stays in the list at its own rank. The
+    prompt wants one line per named person, not three rows of conduct
+    competing with commitments for slots (persona test 2026-09-05).
 
     Targets roughly 150-300 tokens in total. Includes a compact
     people/projects header (from the matched entity rows), then a
@@ -192,13 +208,41 @@ def format_flat_ranked_with_stats(
     people = [r for r in entity_rows if (r.get("entity_type") if isinstance(r, dict) else r["entity_type"]) == person_entity_type]
     projects = [r for r in entity_rows if (r.get("entity_type") if isinstance(r, dict) else r["entity_type"]) == "project"]
 
+    # Conduct rows fold into the person they are about.
+    capsules: Dict[str, List[str]] = {}
+    folded: set = set()
+    if conduct_types and people:
+        person_names = [(p["name"] if isinstance(p, dict) else p.get("name", "")) or "" for p in people]
+        for score, row in scored_patches:
+            ptype = row["patch_type"] if isinstance(row, dict) else row.get("patch_type")
+            if ptype not in conduct_types:
+                continue
+            v = _parse_value(row)
+            owner = (v.get("owner") or "").strip()
+            text = (v.get("text") or "").strip()
+            if not owner or not text:
+                continue
+            for name in person_names:
+                if _same_person(owner, name):
+                    lines = capsules.setdefault(name, [])
+                    if len(lines) < capsule_limit:
+                        lines.append(text)
+                    folded.add(id(row))
+                    break
+
     if projects or people:
         header_parts: List[str] = []
         if projects:
             names = [_entity_name_with_desc(p) for p in projects]
             header_parts.append("Projects: " + "; ".join(names))
         if people:
-            names = [_entity_name_with_desc(p) for p in people]
+            names = []
+            for p in people:
+                name = (p["name"] if isinstance(p, dict) else p.get("name", "")) or ""
+                line = _entity_name_with_desc(p)
+                if capsules.get(name):
+                    line += ". How they operate: " + "; ".join(capsules[name])
+                names.append(line)
             header_parts.append("People: " + "; ".join(names))
         sections.append("\n".join(header_parts))
 
@@ -219,6 +263,8 @@ def format_flat_ranked_with_stats(
     patch_lines: List[str] = []
     remaining = max_chars - sum(len(s) for s in sections) - 20  # small buffer
     for score, row in scored_patches:
+        if id(row) in folded:
+            continue
         line = _format_patch_line(row, today)
         if not line:
             continue
@@ -233,6 +279,17 @@ def format_flat_ranked_with_stats(
         sections.append("\n".join(patch_lines))
 
     return "\n\n".join(sections), len(patch_lines)
+
+
+def _same_person(owner: str, name: str) -> bool:
+    """The row's owner is this header person: same name, or the same
+    first token when one side is a bare first name. Never a substring."""
+    o, n = owner.strip().lower(), name.strip().lower()
+    if not o or not n:
+        return False
+    if o == n:
+        return True
+    return o.split(" ")[0] == n.split(" ")[0]
 
 
 def _entity_name_with_desc(row: Any) -> str:

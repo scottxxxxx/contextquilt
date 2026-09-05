@@ -28,6 +28,7 @@ gathered-loops lesson); serving SS's floor for one cache window is the
 correct failure.
 """
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, Optional
@@ -115,6 +116,17 @@ class TypeRuntime:
     # Constraint (universal obligation) belongs here even though decay
     # anchors it on its deadline.
     universal_recall_types: tuple
+    # Conduct types: declared `origin_scoped: true` and NOT project
+    # scoped, the unit the profile pass reads (SS: moment). They rank
+    # below the compact person rules in recall, render as a per-person
+    # capsule rather than as list rows, and never earn a Woven tile on
+    # their own. Read from the registered manifests, not the registry,
+    # because the registry never learned the flag; empty when no
+    # manifest declares one. Measured 2026-09-05 in the persona test:
+    # three moments in a 15-row block displaced the FCR takeaway, Dana's
+    # risks-as-owner-and-date preference and the trait, and the full
+    # block lost to the block without moments on every question.
+    conduct_types: frozenset = frozenset()
 
     def is_completable(self, patch_type: str) -> bool:
         return patch_type in self.completable_types
@@ -190,7 +202,40 @@ def _flag(row, key: str) -> bool:
         return False
 
 
-def build_type_runtime(rows) -> TypeRuntime:
+# Latest registered manifest per app. Doc 18 keeps vocabularies disjoint
+# across apps, so a union over apps names each type once.
+MANIFEST_QUERY = """
+    SELECT DISTINCT ON (app_id) manifest
+      FROM app_schemas
+     ORDER BY app_id, version DESC
+"""
+
+
+def conduct_types_from_manifests(manifests) -> frozenset:
+    """Types every manifest declares origin_scoped and not project_scoped."""
+    out = set()
+    for m in manifests or []:
+        # A registry-shaped row ({"manifest": ...} or an asyncpg Record)
+        # unwraps to its manifest; a manifest is the dict with patch_types.
+        if not isinstance(m, dict) or ("manifest" in m and "patch_types" not in m):
+            m = m.get("manifest") if hasattr(m, "get") else None
+        if isinstance(m, str):
+            try:
+                m = json.loads(m)
+            except ValueError:
+                continue
+        if not isinstance(m, dict):
+            continue
+        for t in m.get("patch_types") or []:
+            if not isinstance(t, dict):
+                continue
+            name = t.get("domain_type")
+            if isinstance(name, str) and t.get("origin_scoped") is True and not t.get("project_scoped"):
+                out.add(name)
+    return frozenset(out)
+
+
+def build_type_runtime(rows, manifests=None) -> TypeRuntime:
     """Fold registry rows over the fallback floor. Pure; unit-tested.
 
     A type_key may appear more than once (a global row plus app-scoped
@@ -264,6 +309,7 @@ def build_type_runtime(rows) -> TypeRuntime:
         ledger_declared_types=frozenset(ledger_declared),
         decaying_types=tuple(sorted(decaying)),
         universal_recall_types=tuple(sorted(universal)),
+        conduct_types=conduct_types_from_manifests(manifests),
     )
 
 
@@ -284,7 +330,15 @@ async def get_type_runtime(fetch: Callable, *, ttl_seconds: int = CACHE_TTL_SECO
         return _cache_snapshot
     try:
         rows = await fetch(REGISTRY_TYPES_QUERY)
-        _cache_snapshot = build_type_runtime(rows)
+        try:
+            manifests = [r["manifest"] for r in await fetch(MANIFEST_QUERY)]
+        except Exception as exc:
+            # A database without app_schemas (the MCP lane) has no
+            # manifests and therefore no conduct types; nothing else
+            # about the snapshot depends on this read.
+            logger.warning("type_runtime_manifests_unavailable", error=str(exc)[:200])
+            manifests = []
+        _cache_snapshot = build_type_runtime(rows, manifests)
     except Exception as exc:
         logger.warning("type_runtime_registry_unavailable", error=str(exc)[:200])
         if _cache_snapshot is None:
