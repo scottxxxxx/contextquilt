@@ -216,9 +216,20 @@ def conduct_types_from_manifests(manifests) -> frozenset:
     out = set()
     for m in manifests or []:
         # A registry-shaped row ({"manifest": ...} or an asyncpg Record)
-        # unwraps to its manifest; a manifest is the dict with patch_types.
-        if not isinstance(m, dict) or ("manifest" in m and "patch_types" not in m):
+        # unwraps to its manifest. Then the manifest itself may be a
+        # STRING: asyncpg hands JSONB back as text unless a codec is
+        # registered, and the first deploy of this served an empty set on
+        # prod because the string was unwrapped to None before it was
+        # parsed. Parse first, at every level.
+        if isinstance(m, str):
+            try:
+                m = json.loads(m)
+            except ValueError:
+                continue
+        if not isinstance(m, dict):
             m = m.get("manifest") if hasattr(m, "get") else None
+        elif "manifest" in m and "patch_types" not in m:
+            m = m.get("manifest")
         if isinstance(m, str):
             try:
                 m = json.loads(m)

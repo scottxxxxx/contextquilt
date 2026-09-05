@@ -72,6 +72,16 @@ def test_no_manifest_means_no_conduct_type_and_the_floor_has_none():
     assert build_type_runtime([], [SS_MANIFEST]).conduct_types == frozenset({"moment"})
 
 
+def test_a_manifest_arriving_as_a_json_string_is_read():
+    """asyncpg hands JSONB back as a STRING unless a codec is registered
+    (the same trap the woven route hit). On prod the first deploy served
+    an empty conduct set and no capsule rendered, because the unwrap step
+    turned the string into None before the parse ever ran."""
+    import json as _json
+    assert conduct_types_from_manifests([_json.dumps(SS_MANIFEST)]) == frozenset({"moment"})
+    assert conduct_types_from_manifests([{"manifest": _json.dumps(SS_MANIFEST)}]) == frozenset({"moment"})
+
+
 def test_the_runtime_reads_manifests_and_survives_their_absence():
     src = (ROOT / "src" / "contextquilt" / "services" / "facet_runtime.py").read_text()
     assert 'manifests = [r["manifest"] for r in await fetch(MANIFEST_QUERY)]' in src
