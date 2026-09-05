@@ -131,3 +131,14 @@ def test_the_audit_unions_cues_and_stamps_duplicate_of_on_merge():
     assert "INSERT INTO patch_cues (patch_id, cue)\n                    SELECT $1, cue FROM patch_cues WHERE patch_id = $2" in AUDIT
     assert "'{duplicate_of}', to_jsonb($2::text)" in AUDIT
     assert "if False" not in AUDIT
+
+
+def test_the_audit_can_replay_a_dry_runs_verdicts_without_a_judge():
+    """Pass 1 proposed 22 in the dry run and wrote 26 on apply: the judge
+    is not deterministic across runs. --out records what was read,
+    --from applies exactly that by pair id and calls no judge."""
+    assert '"--out"' in AUDIT and 'dest="replay"' in AUDIT
+    assert 'by_pair = {(v["a_id"], v["b_id"]): bool(v["same_fact"])' in AUDIT
+    assert 'by_pair.get((str(r["a_id"]), str(r["b_id"])), False)' in AUDIT
+    i = AUDIT.index("if replay:")
+    assert "llm.extract(" not in AUDIT[i:AUDIT.index("else:", i)]
