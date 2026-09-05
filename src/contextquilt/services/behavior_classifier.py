@@ -76,6 +76,22 @@ MAX_ITEMS = 24
 ENABLED_ENV = "CQ_BEHAVIOR_CLASSIFIER_ENABLED"
 MODEL_ENV = "CQ_BEHAVIOR_CLASSIFIER_MODEL"
 
+# The stakes gate (2026-09-04). Read all 46 moments Scott's account kept
+# in one week after the choice rule: 24 were choices a reader would want
+# to know about, 12 were the mechanics of holding a meeting (who is
+# joining, upload the file, check whether Tripp is on), 7 were narration
+# that slipped, 3 were noise. The choice rule cannot touch the 12,
+# because delegating a task IS a choice. What they lack is stakes: a
+# memory of the person made of them would say nothing. So the judge is
+# asked a fourth question on every item it keeps as a moment, and a
+# routine answer drops the row through the same path a commitment
+# verdict takes. `routine` is a pseudo-verdict: parse produces it only
+# from the stakes field, never from `type`, so a model that writes
+# "routine" as a type is ignored (kept), same as any unknown type.
+STAKES_ENV = "CQ_MOMENT_STAKES_GATE_ENABLED"
+ROUTINE_VERDICT = "routine"
+STAKES_VALUES = frozenset({"durable", ROUTINE_VERDICT})
+
 # Sonnet, not the app's Haiku client, and measured rather than assumed
 # (2026-09-01, 120 stored rows, same prompt, same rows): Haiku dropped
 # 26 rows Sonnet kept and every one of the 26 that was read by hand was
@@ -95,6 +111,10 @@ def enabled() -> bool:
 
 def model_override() -> Optional[str]:
     return os.getenv(MODEL_ENV) or DEFAULT_MODEL
+
+
+def stakes_gate_enabled() -> bool:
+    return os.getenv(STAKES_ENV, "true").strip().lower() not in ("0", "false", "no")
 
 
 def classifier_types(manifest: Optional[dict]) -> List[str]:
@@ -179,6 +199,7 @@ def build_classifier_system(manifest: Optional[dict]) -> str:
         "behavior. Type each "
         "item on its own merits: it is normal for every item in a batch to "
         "be a behavior, and normal for none to be.\n\n"
+        f"{STAKES_RULE if stakes_gate_enabled() else ''}"
         "Choose exactly one type per item from this list, using these "
         "definitions and no others:\n"
         f"{_definitions(manifest, names)}\n\n"
@@ -186,8 +207,36 @@ def build_classifier_system(manifest: Optional[dict]) -> str:
         "write.\n\n"
         "Respond with EXACTLY this raw JSON shape and nothing else, one "
         "entry per item, each item number used exactly once:\n"
-        '{"items": [{"item": 0, "type": "<one type name from the list>"}]}'
+        + (STAKES_SHAPE if stakes_gate_enabled() else PLAIN_SHAPE)
     )
+
+
+PLAIN_SHAPE = '{"items": [{"item": 0, "type": "<one type name from the list>"}]}'
+STAKES_SHAPE = (
+    '{"items": [{"item": 0, "type": "<one type name from the list>", '
+    '"stakes": "<durable or routine>"}]}'
+)
+
+# The fourth test. Written for the model that copies punctuation, so no
+# dash anywhere in it; the no-dash test in tests/unit scans this text.
+STAKES_RULE = (
+    "Fourth, for every item you keep as a moment, say whether it has "
+    "STAKES. An item has stakes when the choice would still tell a reader "
+    "something about how this person operates a month from now: what "
+    "they asked for before agreeing, a position they took or moved off, "
+    "something they declined, withheld or pushed back on, how they "
+    "handled a person, a judgment they made with something on the line. "
+    "An item is routine when it is the mechanics of holding a meeting or "
+    "working together: who is joining, checking whether somebody is on "
+    "the call, sharing a screen, where a file lives and who should upload "
+    "it, passing a small task to the person who was always going to do "
+    "it, a clarifying question any listener would have asked, or a "
+    "courtesy. Routine items are real conduct and still not worth "
+    "keeping, because a memory of this person made of them would say "
+    "nothing. Mark them routine. When you cannot tell, mark durable. The "
+    "stakes field is read only on items you typed as a moment; on any "
+    "other type write durable and it is ignored.\n\n"
+)
 
 
 def build_classifier_content(patches: Sequence[dict]) -> str:
@@ -232,6 +281,14 @@ def parse_classifier_verdicts(
         if t not in allowed_set:
             continue
         seen.add(idx)
+        # The stakes gate. Only a kept moment can be routine; the field
+        # is ignored on every other type, and anything but the literal
+        # "routine" (missing, misspelled, a number) leaves the row a
+        # moment, so a bad answer can only fail to drop, never drop.
+        if t == KEEP_TYPE and stakes_gate_enabled():
+            stakes = entry.get("stakes")
+            if isinstance(stakes, str) and stakes.strip().lower() == ROUTINE_VERDICT:
+                t = ROUTINE_VERDICT
         verdicts[idx] = t
     return verdicts
 
@@ -244,6 +301,9 @@ def apply_classifier_verdicts(
     Returns {"kept": [...], "retyped": [...], "dropped": [...]} where
     `kept` and `retyped` are the patches to store (retyped ones already
     converted) and `dropped` is an audit list of {text, owner, verdict}.
+    A routine moment (the stakes gate) drops through the same branch as
+    a commitment verdict, with verdict "routine" on its receipt; the
+    backfill writes it as archive_detail classified_routine.
     Making the drop audible is the point of the list: the client cannot
     build this half, so the count and the texts go in the log.
     """

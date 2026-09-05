@@ -219,3 +219,92 @@ def test_the_prompt_carries_the_owner_test_and_the_name_removal_test():
     assert "the row is about its OWNER" in sys_prompt
     assert "remove the owner's name" in sys_prompt
     assert "stay behavior" in sys_prompt
+
+
+# ----------------------------------------------------------------------
+# The stakes gate (2026-09-04): a fourth question on kept moments
+# ----------------------------------------------------------------------
+
+from contextquilt.services.behavior_classifier import (  # noqa: E402
+    ROUTINE_VERDICT,
+    STAKES_ENV,
+    STAKES_RULE,
+    STAKES_SHAPE,
+    PLAIN_SHAPE,
+    stakes_gate_enabled,
+)
+
+
+def _verdict(entry, allowed=("moment", "commitment", "preference")):
+    return parse_classifier_verdicts({"items": [dict(item=0, **entry)]}, 1, allowed)[0]
+
+
+def test_the_prompt_carries_the_stakes_test_and_the_stakes_shape(monkeypatch):
+    monkeypatch.delenv(STAKES_ENV, raising=False)
+    p = build_classifier_system(MANIFEST)
+    assert STAKES_RULE in p and p.endswith(STAKES_SHAPE)
+    assert "a month from now" in STAKES_RULE and "who is joining" in STAKES_RULE
+    assert "When you cannot tell, mark durable" in STAKES_RULE
+
+
+def test_the_kill_switch_restores_the_old_prompt_byte_for_byte(monkeypatch):
+    monkeypatch.setenv(STAKES_ENV, "false")
+    assert not stakes_gate_enabled()
+    p = build_classifier_system(MANIFEST)
+    assert STAKES_RULE not in p and "stakes" not in p.lower()
+    assert p.endswith(PLAIN_SHAPE)
+
+
+def test_a_routine_moment_becomes_the_routine_verdict(monkeypatch):
+    monkeypatch.delenv(STAKES_ENV, raising=False)
+    assert _verdict({"type": "moment", "stakes": "routine"}) == ROUTINE_VERDICT
+    assert _verdict({"type": "Moment", "stakes": " ROUTINE "}) == ROUTINE_VERDICT
+
+
+def test_stakes_is_ignored_on_every_other_type(monkeypatch):
+    """A commitment marked routine is still a commitment verdict: the drop
+    reason stays the type, and the receipt says what the judge saw."""
+    monkeypatch.delenv(STAKES_ENV, raising=False)
+    assert _verdict({"type": "commitment", "stakes": "routine"}) == "commitment"
+    assert _verdict({"type": "preference", "stakes": "routine"}) == "preference"
+
+
+def test_anything_but_the_literal_routine_keeps_the_moment(monkeypatch):
+    """Fail open: a bad answer may fail to drop, never drop."""
+    monkeypatch.delenv(STAKES_ENV, raising=False)
+    for stakes in ("durable", "", None, 0, "routin", "yes", ["routine"]):
+        assert _verdict({"type": "moment", "stakes": stakes}) == KEEP_TYPE, stakes
+    assert _verdict({"type": "moment"}) == KEEP_TYPE
+
+
+def test_routine_is_never_accepted_as_a_type(monkeypatch):
+    """The pseudo-verdict comes from the stakes field only. A model that
+    writes it as the type is an unknown type, which means keep."""
+    monkeypatch.delenv(STAKES_ENV, raising=False)
+    assert _verdict({"type": "routine"}) is None
+    assert _verdict({"type": "routine", "stakes": "routine"}) is None
+
+
+def test_the_kill_switch_ignores_the_stakes_field_entirely(monkeypatch):
+    monkeypatch.setenv(STAKES_ENV, "0")
+    assert _verdict({"type": "moment", "stakes": "routine"}) == KEEP_TYPE
+
+
+def test_a_routine_verdict_drops_with_an_audible_receipt():
+    patches = [_patch("Asked Hassan to check whether Tripp was joining", owner="Raj"),
+               _patch("Declined to give a timeframe for the prognosis", owner="Dr. Dietz")]
+    split = apply_classifier_verdicts(patches, [ROUTINE_VERDICT, KEEP_TYPE])
+    assert [p["value"]["owner"] for p in split["kept"]] == ["Dr. Dietz"]
+    assert split["retyped"] == []
+    assert split["dropped"] == [{
+        "text": "Asked Hassan to check whether Tripp was joining",
+        "owner": "Raj", "verdict": ROUTINE_VERDICT,
+    }]
+
+
+def test_the_backfill_archives_a_routine_drop_under_its_own_detail():
+    """No new writer: the script's archive branch takes any non-keep,
+    non-convertible verdict and names it classified_<verdict>."""
+    script = pathlib.Path("scripts/backfill_behavior_classify.py").read_text()
+    assert 'f"classified_{verdicts[pid]}"' in script
+    assert "verdicts.get(pid) not in bc.CONVERTIBLE_TYPES" in script
