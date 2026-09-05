@@ -10211,13 +10211,15 @@ async def update_project(
     if not row:
         raise HTTPException(status_code=404, detail="Project not found")
 
+    renamed = None
+    archived = None
     if update.name is not None:
         await db_pool.execute(
             "UPDATE projects SET name = $1, updated_at = NOW() WHERE project_id = $2",
             update.name, project_id
         )
         # Also update the text project column on patches for backward compat
-        await db_pool.execute(
+        renamed = await db_pool.execute(
             "UPDATE context_patches SET project = $1, updated_at = NOW() WHERE project_id = $2",
             update.name, project_id
         )
@@ -10245,14 +10247,36 @@ async def update_project(
             project_id
         )
         # Cascade: archive all patches belonging to this project
-        await db_pool.execute(
+        archived = await db_pool.execute(
             "UPDATE context_patches SET status = 'archived', updated_at = NOW(), "
             "value = jsonb_set(value, '{archive_cause}', '\"project_archived\"') "
             "WHERE project_id = $1 AND COALESCE(status, 'active') = 'active'",
             project_id
         )
 
-    return {"status": "updated", "project_id": project_id}
+    # The echo, READ BACK FROM THE ROW after the writes rather than copied
+    # from the request. This route returned `status` and `project_id` and
+    # nothing else until 2026-09-04, when SS's client compared the name it
+    # sent against the body and found no name to compare (rule 4: a 200
+    # says the request was processed, never that the value the caller
+    # sent is the value that landed). Copying `update.name` here would
+    # agree with the caller by construction, which is the same claim as
+    # the 200; the stored row is the only thing that can disagree.
+    stored = await db_pool.fetchrow(
+        "SELECT name, status FROM projects WHERE project_id = $1 AND user_id = $2",
+        project_id, user_id
+    )
+    return {
+        "status": "updated",
+        "project_id": project_id,
+        "name": stored["name"] if stored else None,
+        "project_status": (stored["status"] if stored else None) or "active",
+        # Same convention as unscope: numeric when the half ran, null when
+        # the request did not ask for it, so 0 stays distinguishable from
+        # "this build does not count".
+        "patches_renamed": int(renamed.split()[-1]) if renamed else None,
+        "patches_archived": int(archived.split()[-1]) if archived else None,
+    }
 
 
 class OriginProjectAssignment(BaseModel):

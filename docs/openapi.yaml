@@ -628,12 +628,37 @@ components:
 
     UpdateProjectResponse:
       type: object
+      description: >
+        The echo. `name` and `project_status` are read back from the stored
+        row after the write, never copied from the request, so a caller
+        compares what it sent against what landed rather than reading a
+        200 as agreement.
       properties:
         status:
           type: string
           example: updated
         project_id:
           type: string
+        name:
+          type: string
+          description: The stored project name after this call.
+          example: Twit2
+        project_status:
+          type: string
+          description: The stored project status after this call (active or archived).
+          example: active
+        patches_renamed:
+          type: integer
+          nullable: true
+          description: >
+            Patches whose text project column was rewritten by a rename.
+            Null when the request carried no name.
+        patches_archived:
+          type: integer
+          nullable: true
+          description: >
+            Patches archived by the cascade. Null when the request did not
+            archive.
 
     PrewarmResponse:
       type: object
