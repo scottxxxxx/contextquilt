@@ -31,14 +31,16 @@ from typing import Iterable, List
 from contextquilt.services.recall_scope import origins_cte, project_scope_clause
 
 
-def _is_word_char(ch: str) -> bool:
+def _is_word_char(ch: str, extra: str = "") -> bool:
     # Mirrors the \w class rather than str.isalnum() alone: an
     # underscore joins words in identifiers, and cues are lowercase
-    # topic phrases that should not match inside one.
-    return ch.isalnum() or ch == "_"
+    # topic phrases that should not match inside one. `extra` lets a
+    # caller widen the class: the entity matcher counts an apostrophe
+    # as part of a word so "Don" cannot answer to "don't".
+    return ch.isalnum() or ch == "_" or (bool(extra) and ch in extra)
 
 
-def cue_matches(cue: str, text_lower: str) -> bool:
+def cue_matches(cue: str, text_lower: str, extra_word_chars: str = "") -> bool:
     """True when `cue` occurs in `text_lower` on word boundaries.
 
     Checks every occurrence, not just the first: "the api rate" contains
@@ -57,9 +59,9 @@ def cue_matches(cue: str, text_lower: str) -> bool:
         i = text_lower.find(cue, start)
         if i < 0:
             return False
-        before_ok = i == 0 or not _is_word_char(text_lower[i - 1])
+        before_ok = i == 0 or not _is_word_char(text_lower[i - 1], extra_word_chars)
         j = i + m
-        after_ok = j == n or not _is_word_char(text_lower[j])
+        after_ok = j == n or not _is_word_char(text_lower[j], extra_word_chars)
         if before_ok and after_ok:
             return True
         start = i + 1
