@@ -62,7 +62,12 @@ def test_the_cue_candidate_ranks_by_shared_cues_then_similarity():
 
 def test_the_judge_prompt_names_self_disclosure_and_carries_no_dash():
     assert "trait, preference, goal or constraint" in DEDUP_JUDGE_SYSTEM
-    assert "same disposition, standing rule or aim" in DEDUP_JUDGE_SYSTEM
+    # Precision over recall, learned on the first dry run: the same
+    # disposition about the SAME object, and a theme is not a fact.
+    assert "would learn nothing from the second" in DEDUP_JUDGE_SYSTEM
+    assert "SAME object and scope" in DEDUP_JUDGE_SYSTEM
+    assert "a disposition is never the same as its opposite" in DEDUP_JUDGE_SYSTEM
+    assert "different emphasis" not in DEDUP_JUDGE_SYSTEM
     for ch in ("—", "–"):
         assert ch not in DEDUP_JUDGE_SYSTEM
     assert " - " not in DEDUP_JUDGE_SYSTEM
@@ -102,7 +107,8 @@ def test_the_owner_is_the_new_patchs_owner_or_empty_for_the_user():
 # ----------------------------------------------------------------------
 
 def test_the_audit_has_the_self_typed_preset_and_user_filter():
-    assert '"--self-typed"' in AUDIT and '"--user"' in AUDIT
+    assert '"--self-typed"' in AUDIT and '"--user"' in AUDIT and '"--model"' in AUDIT
+    assert "model=model," in AUDIT
     assert "types = list(SELF_DISCLOSURE_TYPES) if self_typed else list(DEDUP_TYPES)" in AUDIT
     assert "floor = SELF_TYPED_DEDUP_FLOOR if self_typed else SEMANTIC_DEDUP_FLOOR" in AUDIT
 

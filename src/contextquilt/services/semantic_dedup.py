@@ -106,7 +106,7 @@ DEDUP_JUDGE_SYSTEM = """You judge whether two memory statements record the SAME 
 For each numbered pair, decide same_fact:
 - TRUE when both describe the same action, commitment, decision, blocker, or observation, even if phrased differently, in different words, or in different languages ("Deploy the API by end of week" / "Ship the API before Friday").
 - TRUE when one adds or refines detail on the same item (a deadline, an owner, a qualifier): that is an update to one fact, not a second fact.
-- TRUE for a trait, preference, goal or constraint when both describe the same disposition, standing rule or aim in different words or with different emphasis ("Values security at every layer" / "Passionate about defense in depth and skeptical of single point fixes").
+- For a trait, preference, goal or constraint: TRUE only when a reader who knows the first statement would learn nothing from the second, meaning the same disposition about the SAME object and scope ("Values security at every layer" / "Passionate about defense in depth and skeptical of single point fixes"). FALSE when they name different rules, objects, systems, dates or amounts under one theme: "zero data retention with AI providers" and "anonymize everything sent to an LLM" are two rules, "prefers on premises models" and "prefers hardware level environment segregation" are two preferences, "go live on the 16th" and "go live on the 18th" are two constraints, and a disposition is never the same as its opposite.
 - FALSE when the action, object, person, or scope differs ("Ship the API" / "Ship the mobile app"), even if the wording is similar.
 - FALSE whenever you are unsure. A missed merge is recoverable; a wrong merge silently loses a memory.
 

@@ -124,7 +124,8 @@ TRIGRAM_PAIR_EXTRA = """
 OWNER_GUARD = "AND COALESCE(a.value->>'owner', '') = COALESCE(b.value->>'owner', '')"
 
 
-async def main(apply: bool, limit: int, self_typed: bool = False, user: str | None = None) -> None:
+async def main(apply: bool, limit: int, self_typed: bool = False, user: str | None = None,
+               model: str | None = None) -> None:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         print("DATABASE_URL is required", file=sys.stderr)
@@ -132,6 +133,11 @@ async def main(apply: bool, limit: int, self_typed: bool = False, user: str | No
 
     from contextquilt.services.llm_client_anthropic import AnthropicLLMClient
     llm = AnthropicLLMClient()
+    # First self-typed dry run (2026-09-05, Haiku, 110 pairs): 40 merges,
+    # about 14 of them wrong, including a disposition folded into its
+    # opposite. Same lesson as the behavior classifier: Haiku fails a
+    # cross-statement semantic call invisibly. Run this pass on Sonnet.
+    print(f"judge model: {model or llm.model}")
 
     types = list(SELF_DISCLOSURE_TYPES) if self_typed else list(DEDUP_TYPES)
     floor = SELF_TYPED_DEDUP_FLOOR if self_typed else SEMANTIC_DEDUP_FLOOR
@@ -174,6 +180,7 @@ async def main(apply: bool, limit: int, self_typed: bool = False, user: str | No
                     [(r["a_text"], r["b_text"]) for r in batch]
                 ),
                 json_schema=DEDUP_JUDGE_SCHEMA,
+                model=model,
             )
             verdicts.extend(parse_dedup_verdicts(resp.content, len(batch)))
 
@@ -273,5 +280,7 @@ if __name__ == "__main__":
                         help="trait/preference/goal/constraint only: the lower floor, same-owner "
                              "pairs, plus pairs sharing a cue")
     parser.add_argument("--user", help="restrict to one user_id")
+    parser.add_argument("--model", help="judge model override (use Sonnet for the self-typed pass)")
     args = parser.parse_args()
-    asyncio.run(main(args.apply, args.limit, self_typed=args.self_typed, user=args.user))
+    asyncio.run(main(args.apply, args.limit, self_typed=args.self_typed, user=args.user,
+                     model=args.model))
