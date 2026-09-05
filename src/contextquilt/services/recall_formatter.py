@@ -239,6 +239,14 @@ def format_flat_ranked_with_stats(
                     # entirely (prod smoke, 2026-09-05); overflow keeps its
                     # own low rank in the list instead.
                     if len(lines) < capsule_limit:
+                        if _near_duplicate(text, lines):
+                            # Conduct rows are opted out of dedup by
+                            # manifest design (two observations are a
+                            # trajectory), so the same question asked
+                            # twice in one meeting is two rows. A capsule
+                            # is a summary and must not repeat itself;
+                            # the second copy keeps its rank in the list.
+                            break
                         lines.append(_clip(text, capsule_item_chars))
                         folded.add(id(row))
                     break
@@ -303,6 +311,28 @@ def format_flat_ranked_with_stats(
         sections.append("\n".join(patch_lines))
 
     return "\n\n".join(sections), len(patch_lines)
+
+
+def _near_duplicate(text: str, existing: List[str]) -> bool:
+    """Same clause said twice: at least seven in ten of the words in the
+    shorter one appear in the other. Word overlap, not trigram, because
+    the two rows are typically the same sentence with different framing
+    ("asked a probing question about why..." / "asked why...")."""
+    words = set(_words(text))
+    if not words:
+        return False
+    for other in existing:
+        ow = set(_words(other))
+        if not ow:
+            continue
+        smaller = min(len(words), len(ow))
+        if len(words & ow) / smaller >= 0.7:
+            return True
+    return False
+
+
+def _words(text: str) -> List[str]:
+    return [w for w in "".join(c.lower() if c.isalnum() else " " for c in text).split() if len(w) > 2]
 
 
 def _clip(text: str, limit: int) -> str:
