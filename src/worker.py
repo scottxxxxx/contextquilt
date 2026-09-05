@@ -174,6 +174,10 @@ from contextquilt.services.decay_model import (
 from contextquilt.services.facet_runtime import get_type_runtime
 from contextquilt.services.llm_client import LLMClient
 from contextquilt.services.semantic_dedup import (
+    CUE_CANDIDATE_SQL,
+    SELF_TRIGRAM_CANDIDATE_SQL,
+    TRIGRAM_CANDIDATE_SQL,
+    dedup_floor_for,
     DEDUP_JUDGE_SCHEMA,
     DEDUP_JUDGE_SYSTEM,
     MAX_JUDGE_PAIRS,
@@ -1022,20 +1026,24 @@ async def store_connected_patches(
         #     to one batched LLM judge call ("Deploy API by EOW" vs "Ship API
         #     before end of week" lands here)
         #   below the floor                                → new patch
-        existing = await db.fetchrow(
-            """
-            SELECT cp.patch_id, cp.value->>'text' AS existing_text, cp.project_id,
-                   SIMILARITY(LOWER(cp.value->>'text'), LOWER($3)) AS sim
-            FROM context_patches cp
-            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
-            WHERE ps.subject_key = $1 AND cp.patch_type = $2
-              AND SIMILARITY(LOWER(cp.value->>'text'), LOWER($3)) > $4
-              AND COALESCE(cp.status, 'active') = 'active'
-            ORDER BY sim DESC
-            LIMIT 1
-            """,
-            subject_key, patch_type, text, SEMANTIC_DEDUP_FLOOR
-        )
+        # Self-disclosure types get a lower floor, an owner guard and a
+        # second candidate through shared cues; see semantic_dedup for the
+        # 2026-09-04 measurement. Everything else asks exactly as before.
+        floor = dedup_floor_for(patch_type, FRESHNESS_TRACKED_TYPES)
+        if patch_type in FRESHNESS_TRACKED_TYPES:
+            owner = str(value.get("owner") or "")
+            existing = await db.fetchrow(
+                SELF_TRIGRAM_CANDIDATE_SQL, subject_key, patch_type, text, floor, owner,
+            )
+            if existing is None and patch.get("_cues"):
+                existing = await db.fetchrow(
+                    CUE_CANDIDATE_SQL, subject_key, patch_type, text,
+                    list(patch["_cues"]), owner,
+                )
+        else:
+            existing = await db.fetchrow(
+                TRIGRAM_CANDIDATE_SQL, subject_key, patch_type, text, floor,
+            )
         if existing and existing["sim"] > TRIGRAM_DEDUP_THRESHOLD:
             await _apply_patch_dedup(
                 str(existing["patch_id"]), value, text, patch_type, "trigram",
