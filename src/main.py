@@ -120,6 +120,7 @@ from contextquilt.services.people_identity import (
     stated_roles_payload,
 )
 from contextquilt.services.cue_matching import build_cue_fetch, match_cues
+from contextquilt.services.recall_scope import build_flat_fetch, build_scoped_count
 from contextquilt.services.recall_signals import (
     build_coverage_line,
     build_signal_lines,
@@ -1125,39 +1126,18 @@ async def recall_context(
     # cp.patch_id is the secondary sort everywhere — created_at ties on
     # microsecond-equal inserts (workers batching) gave undefined order,
     # which silently drove different rendered strings for identical inputs.
-    if recall_project_id:
-        fact_rows = await db_pool.fetch(
-            """
-            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
-                   cp.created_at, cp.last_observed_at, cp.project_id
-            FROM context_patches cp
-            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
-            WHERE ps.subject_key = $1
-              AND (cp.project_id = $2 OR cp.project_id IS NULL OR cp.patch_type = ANY($3::text[]))
-              AND COALESCE(cp.status, 'active') = 'active'
-              {AGE}
-            ORDER BY cp.created_at DESC, cp.patch_id ASC
-            LIMIT 20
-            """.replace("{AGE}", AGE.format(d="$4", u="$3")),
-            subject_key, recall_project_id, universal_types, max_age_days
+    if recall_project_id or recall_project:
+        # Two windows, one round trip, and the same admission rule the cue
+        # leg uses. See services/recall_scope.py for the 2026-09-04
+        # measurement that motivated both: a bare `project_id IS NULL`
+        # clause let every origin-scoped row from every other meeting in,
+        # and one LIMIT across the lot let the newest unrelated meeting
+        # evict the project's own decisions.
+        flat_sql, flat_args = build_flat_fetch(
+            subject_key, universal_types, max_age_days, AGE.format(d="$4", u="$3"),
+            recall_project_id=recall_project_id, recall_project=recall_project,
         )
-    elif recall_project:
-        # Fallback: filter by project display name (backward compat)
-        fact_rows = await db_pool.fetch(
-            """
-            SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
-                   cp.created_at, cp.last_observed_at, cp.project
-            FROM context_patches cp
-            JOIN patch_subjects ps ON cp.patch_id = ps.patch_id
-            WHERE ps.subject_key = $1
-              AND (cp.project = $2 OR cp.project IS NULL OR cp.patch_type = ANY($3::text[]))
-              AND COALESCE(cp.status, 'active') = 'active'
-              {AGE}
-            ORDER BY cp.created_at DESC, cp.patch_id ASC
-            LIMIT 20
-            """.replace("{AGE}", AGE.format(d="$4", u="$3")),
-            subject_key, recall_project, universal_types, max_age_days
-        )
+        fact_rows = await db_pool.fetch(flat_sql, *flat_args)
     else:
         # No project context — only return universal patches (traits, preferences).
         # Project-scoped patches (commitments, blockers, decisions) from other projects
@@ -1350,28 +1330,11 @@ async def recall_context(
     scoped_total = 0
     if has_project_scope:
         try:
-            if recall_project_id:
-                scoped_total = await db_pool.fetchval(
-                    """
-                    SELECT count(*) FROM context_patches cp
-                    JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
-                    WHERE ps.subject_key = $1 AND cp.project_id = $2
-                      AND COALESCE(cp.status, 'active') = 'active'
-                      {AGE}
-                    """.replace("{AGE}", AGE.format(d="$4", u="$3")),
-                    subject_key, recall_project_id, universal_types, max_age_days,
-                ) or 0
-            elif recall_project:
-                scoped_total = await db_pool.fetchval(
-                    """
-                    SELECT count(*) FROM context_patches cp
-                    JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
-                    WHERE ps.subject_key = $1 AND cp.project = $2
-                      AND COALESCE(cp.status, 'active') = 'active'
-                      {AGE}
-                    """.replace("{AGE}", AGE.format(d="$4", u="$3")),
-                    subject_key, recall_project, universal_types, max_age_days,
-                ) or 0
+            count_sql, count_args = build_scoped_count(
+                subject_key, universal_types, max_age_days, AGE.format(d="$4", u="$3"),
+                recall_project_id=recall_project_id, recall_project=recall_project,
+            )
+            scoped_total = await db_pool.fetchval(count_sql, *count_args) or 0
         except Exception:
             scoped_total = 0
 
