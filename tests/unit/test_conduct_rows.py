@@ -238,3 +238,33 @@ def test_the_digest_route_and_the_headline_lane_pass_the_set():
     assert "conduct_types=conduct_types)" in MAIN
     assert "conduct_types = (await get_type_runtime(self.db.fetch)).conduct_types" in WORKER
     assert "require_headline=False,\n                    conduct_types=conduct_types) is None" in WORKER
+
+
+# ----------------------------------------------------------------------
+# A small budget buys rows, not chrome
+# ----------------------------------------------------------------------
+
+def test_under_a_small_budget_the_header_is_names_only_and_relations_are_dropped():
+    """GP sends 300 tokens on a draft ask. On prod the hour it went live,
+    the descriptions and the Relations line ate ~850 of 1,200 characters
+    and one row survived."""
+    long_desc = "Consumer iOS app for immigration intake and decision-making; includes iMessage extension and support for recording and transcribing psychological evaluation interviews."
+    ents = [_ent("Immigration interview app", "project", desc=long_desc),
+            _ent("Steven Williams", desc="Co-founder/partner on the immigration app project; exploring partnerships with legal service providers and law firm service companies.")]
+    rels = [{"from_name": "Venkata", "to_name": "Scott Guida", "relationship_type": "reports_to"}]
+    scored = [(90.0 - i, _row("preference", f"Prefers channel {i} for anything urgent", owner="Steven Williams", pid=f"p{i}")) for i in range(6)]
+    small, n_small = format_flat_ranked_with_stats(scored, ents, rels, max_chars=1200, today=TODAY)
+    big, n_big = format_flat_ranked_with_stats(scored, ents, rels, max_chars=2800, today=TODAY)
+    assert small.startswith("Projects: Immigration interview app\nPeople: Steven Williams\n")
+    assert "Relations:" not in small and long_desc not in small
+    assert n_small >= 4
+    assert "Relations:" in big and long_desc in big and n_big == 6
+
+
+def test_the_capsule_survives_the_compact_header():
+    ents = [_ent("Marcus Lee", desc="CTO at Northwind")]
+    scored = [(90.0, _row("moment", "Asked for per region numbers before agreeing", owner="Marcus Lee", pid="m"))]
+    out, _ = format_flat_ranked_with_stats(scored, ents, [], max_chars=1200, today=TODAY,
+                                           conduct_types=frozenset({"moment"}))
+    assert out.startswith("People: Marcus Lee. How they operate: Asked for per region numbers before agreeing")
+    assert "CTO at Northwind" not in out

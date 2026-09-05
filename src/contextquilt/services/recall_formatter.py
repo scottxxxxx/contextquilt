@@ -153,6 +153,12 @@ def _parse_value(row: Any) -> Dict[str, Any]:
 # ============================================================
 
 
+# Below this many characters (400 tokens at ~4 chars/token) the header
+# goes compact: names only, no Relations line. See the note in the
+# formatter body for the measurement.
+COMPACT_HEADER_BELOW = 1600
+
+
 def format_flat_ranked(
     scored_patches: Sequence[Tuple[float, Any]],
     entity_rows: Sequence[Any],
@@ -177,6 +183,7 @@ def format_flat_ranked_with_stats(
     conduct_types: "frozenset" = frozenset(),
     capsule_limit: int = 2,
     capsule_item_chars: int = 120,
+    compact_header_below: int = COMPACT_HEADER_BELOW,
 ) -> Tuple[str, int]:
     """Format patches as a flat relevance-ranked list.
 
@@ -236,16 +243,25 @@ def format_flat_ranked_with_stats(
                         folded.add(id(row))
                     break
 
+    # A small budget is a draft or write ask (GP sends 300 tokens for those,
+    # 2026-09-05). Measured on prod the hour it went live: the project
+    # description, the person description and the Relations line took
+    # about 850 of the 1,200 characters and ONE row survived. Under the
+    # compact threshold the header is names only and the Relations line
+    # is dropped, so the budget buys rows, which is what it was for.
+    compact = max_chars < compact_header_below
+    _name = (lambda r: (r["name"] if isinstance(r, dict) else r.get("name", "")) or "")
+
     if projects or people:
         header_parts: List[str] = []
         if projects:
-            names = [_entity_name_with_desc(p) for p in projects]
+            names = [(_name(p) if compact else _entity_name_with_desc(p)) for p in projects]
             header_parts.append("Projects: " + "; ".join(names))
         if people:
             names = []
             for p in people:
-                name = (p["name"] if isinstance(p, dict) else p.get("name", "")) or ""
-                line = _entity_name_with_desc(p)
+                name = _name(p)
+                line = name if compact else _entity_name_with_desc(p)
                 if capsules.get(name):
                     # " / " inside a capsule, because "; " already separates
                     # people on this line and the two read as one list.
@@ -255,7 +271,7 @@ def format_flat_ranked_with_stats(
         sections.append("\n".join(header_parts))
 
     # Relationships — only surface if we have any and they're short
-    if relationship_rows:
+    if relationship_rows and not compact:
         rel_lines: List[str] = []
         for r in relationship_rows[:5]:
             from_name = r["from_name"] if isinstance(r, dict) else r.get("from_name")
