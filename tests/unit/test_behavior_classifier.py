@@ -247,6 +247,15 @@ def test_the_prompt_carries_the_stakes_test_and_the_stakes_shape(monkeypatch):
     assert "When you cannot tell, mark durable" in STAKES_RULE
 
 
+def test_a_substantive_question_is_named_durable_in_the_rule():
+    """First dry run dropped an interviewer's 'how was the agent built'
+    and 'what was the lesson learned' as routine, the two rows the chat
+    experiment had proved valuable. Questions get their own sentence."""
+    assert "A question is routine only when it is about those mechanics" in STAKES_RULE
+    assert "an interviewer asking how a system was built" in STAKES_RULE
+    assert "any listener would have asked" not in STAKES_RULE
+
+
 def test_the_kill_switch_restores_the_old_prompt_byte_for_byte(monkeypatch):
     monkeypatch.setenv(STAKES_ENV, "false")
     assert not stakes_gate_enabled()
