@@ -268,3 +268,22 @@ def test_the_capsule_survives_the_compact_header():
                                            conduct_types=frozenset({"moment"}))
     assert out.startswith("People: Marcus Lee. How they operate: Asked for per region numbers before agreeing")
     assert "CTO at Northwind" not in out
+
+
+def test_a_capsule_does_not_repeat_the_same_clause():
+    """Seen on prod 2026-09-05: "Asked a probing question about why all AI
+    providers went down simultaneously, rather than accepting the surface
+    explanation" and "Asked why all AI units went down simultaneously,
+    expressing curiosity about the root cause" rendered as a capsule of two.
+    Moments are opted out of dedup on purpose; the capsule is not."""
+    a = "Asked a probing question about why all AI providers went down simultaneously, rather than accepting the surface explanation"
+    b = "Asked why all AI units went down simultaneously, expressing curiosity about the root cause"
+    c = "Offered to write the index architecture document himself"
+    scored = [(90.0, _row("moment", a, owner="Steven Williams", pid="a")),
+              (89.0, _row("moment", b, owner="Steven Williams", pid="b")),
+              (88.0, _row("moment", c, owner="Steven Williams", pid="c"))]
+    out, n = format_flat_ranked_with_stats(scored, [_ent("Steven Williams")], [], today=TODAY,
+                                           conduct_types=frozenset({"moment"}), capsule_item_chars=400)
+    head = out.split("\n")[0]
+    assert a in head and c in head and b not in head
+    assert f"[moment] {b} [owner: Steven Williams]" in out and n == 1

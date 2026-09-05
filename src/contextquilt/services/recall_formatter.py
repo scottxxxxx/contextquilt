@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 from datetime import date, datetime, timezone
+
+from contextquilt.services.recall_scorer import _keywords
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
@@ -239,6 +241,14 @@ def format_flat_ranked_with_stats(
                     # entirely (prod smoke, 2026-09-05); overflow keeps its
                     # own low rank in the list instead.
                     if len(lines) < capsule_limit:
+                        if _near_duplicate(text, lines):
+                            # Conduct rows are opted out of dedup by
+                            # manifest design (two observations are a
+                            # trajectory), so the same question asked
+                            # twice in one meeting is two rows. A capsule
+                            # is a summary and must not repeat itself;
+                            # the second copy keeps its rank in the list.
+                            break
                         lines.append(_clip(text, capsule_item_chars))
                         folded.add(id(row))
                     break
@@ -303,6 +313,27 @@ def format_flat_ranked_with_stats(
         sections.append("\n".join(patch_lines))
 
     return "\n\n".join(sections), len(patch_lines)
+
+
+def _near_duplicate(text: str, existing: List[str]) -> bool:
+    """Same clause said twice. Content words only (the scorer's keyword
+    tokenizer, stopwords out), and BOTH an absolute floor and a ratio:
+    at least four shared content words, covering at least four in ten
+    of the shorter item. The floor is what keeps two short unrelated
+    clauses apart; the ratio is what catches the same question asked
+    twice in different framing ("asked a probing question about why the
+    providers went down" / "asked why the units went down")."""
+    words = set(_keywords(text))
+    if len(words) < 4:
+        return False
+    for other in existing:
+        ow = set(_keywords(other))
+        if len(ow) < 4:
+            continue
+        shared = len(words & ow)
+        if shared >= 4 and shared / min(len(words), len(ow)) >= 0.4:
+            return True
+    return False
 
 
 def _clip(text: str, limit: int) -> str:
