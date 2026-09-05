@@ -121,6 +121,9 @@ from contextquilt.services.people_identity import (
 )
 from contextquilt.services.cue_matching import build_cue_fetch, match_cues
 from contextquilt.services.recall_scope import build_flat_fetch, build_scoped_count
+from contextquilt.services.entity_match import (
+    BARE_NAME_CANDIDATES_SQL, bare_terms, disambiguate_bare_names, match_entity_names,
+)
 from contextquilt.services.recall_signals import (
     build_coverage_line,
     build_signal_lines,
@@ -899,17 +902,12 @@ async def recall_context(
     # it was the label that produced a wrong attribution on 2026-08-27.
     timings["entity_index_ms"] = round((time.monotonic() - entity_t) * 1000, 2)
 
-    matched_names = []
-    if known_entities:
-        # Sort the SMEMBERS result before iterating — Redis sets and Python sets
-        # have undefined iteration order, so leaving this unsorted produces
-        # different matched_names ordering across calls with identical inputs.
-        # That ordering propagates into entity-row fetches, the formatter
-        # header, and the LLM prompt prefix — breaking byte-stable prompt
-        # caching downstream (GP TestFlight, May 2026).
-        for name in sorted(known_entities):
-            if name.lower() in text_lower:
-                matched_names.append(name)
+    # Word-boundary match, sorted (services/entity_match.py). The bare
+    # substring test this replaced let "RV" answer to "interview" and any
+    # two-letter name to any word containing it (2026-09-04); the sort is
+    # the byte-stable ordering prompt caching downstream depends on (GP
+    # TestFlight, May 2026).
+    matched_names = match_entity_names(known_entities or (), text_lower)
 
     # Also check metadata hints
     if request.metadata:
@@ -1056,6 +1054,29 @@ async def recall_context(
             user_id, matched_names
         )
 
+        # A bare first name is the contested form (#434 stopped the write
+        # side trusting it; this is the read side). When the recall has a
+        # project and a single-token match could mean several people, the
+        # people with presence in that project are the answer, and a
+        # namesake from another project leaves the header.
+        terms = bare_terms(matched_names)
+        if terms and recall_project_id:
+            try:
+                candidates = await db_pool.fetch(
+                    BARE_NAME_CANDIDATES_SQL, user_id, terms, recall_project_id,
+                    recall_vocab.person_entity_type,
+                )
+                if candidates:
+                    entity_rows = disambiguate_bare_names(
+                        entity_rows, matched_names, candidates,
+                        person_entity_type=recall_vocab.person_entity_type,
+                    )
+            except Exception as exc:
+                # Lagging DB or a vocabulary without a person type: the
+                # lookup's own answer stands, and the miss is audible.
+                logger.warning("bare_name_disambiguation_failed",
+                               user_id=user_id, terms=terms, error=str(exc)[:160])
+
         if entity_rows:
             entity_ids = [row["entity_id"] for row in entity_rows]
             max_hops = request.max_hops or 2
@@ -1079,13 +1100,20 @@ async def recall_context(
                                   OR r.to_entity_id = g.from_entity_id OR r.to_entity_id = g.to_entity_id)
                     WHERE r.user_id = $1 AND g.depth < $3
                 )
-                SELECT DISTINCT g.from_entity_id, g.to_entity_id, g.relationship_type, g.context,
+                SELECT g.from_entity_id, g.to_entity_id, g.relationship_type, g.context,
+                       MIN(g.depth) AS depth,
                        e1.name as from_name, e1.entity_type as from_type,
                        e2.name as to_name, e2.entity_type as to_type
                 FROM graph g
                 JOIN entities e1 ON g.from_entity_id = e1.entity_id
                 JOIN entities e2 ON g.to_entity_id = e2.entity_id
-                ORDER BY g.from_entity_id, g.to_entity_id, g.relationship_type
+                GROUP BY g.from_entity_id, g.to_entity_id, g.relationship_type, g.context,
+                         e1.name, e1.entity_type, e2.name, e2.entity_type
+                -- Nearest edges first: the formatter renders the first five,
+                -- and ordered by id a two-hop walk through a hub (the user's
+                -- own entity) served another project's reporting lines
+                -- under a chat that never mentioned them (2026-09-04).
+                ORDER BY depth, e1.name, e2.name, g.relationship_type
                 """,
                 user_id, entity_ids, max_hops
             )
