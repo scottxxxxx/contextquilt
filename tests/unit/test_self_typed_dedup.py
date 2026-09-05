@@ -109,6 +109,14 @@ def test_the_owner_is_the_new_patchs_owner_or_empty_for_the_user():
 def test_the_audit_has_the_self_typed_preset_and_user_filter():
     assert '"--self-typed"' in AUDIT and '"--user"' in AUDIT and '"--model"' in AUDIT
     assert "model=model," in AUDIT
+
+
+def test_the_audit_prints_ids_and_honours_an_exclude_list():
+    """A dry run is read by a person; the person needs the ids to name a
+    wrong pair, and a named pair must stay out of every later pass."""
+    assert '"--exclude-id"' in AUDIT and 'action="append"' in AUDIT
+    assert "ids={r['a_id']},{r['b_id']}" in AUDIT
+    assert 'str(r["a_id"]) in exclude or str(r["b_id"]) in exclude' in AUDIT
     assert "types = list(SELF_DISCLOSURE_TYPES) if self_typed else list(DEDUP_TYPES)" in AUDIT
     assert "floor = SELF_TYPED_DEDUP_FLOOR if self_typed else SEMANTIC_DEDUP_FLOOR" in AUDIT
 

@@ -125,7 +125,7 @@ OWNER_GUARD = "AND COALESCE(a.value->>'owner', '') = COALESCE(b.value->>'owner',
 
 
 async def main(apply: bool, limit: int, self_typed: bool = False, user: str | None = None,
-               model: str | None = None) -> None:
+               model: str | None = None, exclude: set[str] | None = None) -> None:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         print("DATABASE_URL is required", file=sys.stderr)
@@ -185,9 +185,18 @@ async def main(apply: bool, limit: int, self_typed: bool = False, user: str | No
             verdicts.extend(parse_dedup_verdicts(resp.content, len(batch)))
 
         merged = 0
+        skipped = 0
         for r, same in zip(candidates, verdicts):
+            # An operator read of a dry run can name a pair the judge got
+            # wrong; any pair touching an excluded id is left alone, in
+            # every later pass too, so a wrong merge never rides in on
+            # the next run's convergence.
+            if same and exclude and (str(r["a_id"]) in exclude or str(r["b_id"]) in exclude):
+                print(f"  SKIP   [{r['patch_type']}] sim={r['sim']:.2f} ids={r['a_id']},{r['b_id']} (excluded)")
+                skipped += 1
+                continue
             tag = "MERGE " if same else "keep  "
-            print(f"  {tag} [{r['patch_type']}] sim={r['sim']:.2f}")
+            print(f"  {tag} [{r['patch_type']}] sim={r['sim']:.2f} ids={r['a_id']},{r['b_id']}")
             print(f"         A: {r['a_text'][:90]}")
             print(f"         B: {r['b_text'][:90]}")
             if not (same and apply):
@@ -267,7 +276,8 @@ async def main(apply: bool, limit: int, self_typed: bool = False, user: str | No
             merged += 1
 
         mode = "APPLIED" if apply else "DRY RUN (use --apply to write)"
-        print(f"\n{mode}: {merged} same_fact of {len(candidates)} judged pairs")
+        print(f"\n{mode}: {merged} same_fact of {len(candidates)} judged pairs"
+              f"{f', {skipped} excluded' if skipped else ''}")
     finally:
         await conn.close()
 
@@ -281,6 +291,8 @@ if __name__ == "__main__":
                              "pairs, plus pairs sharing a cue")
     parser.add_argument("--user", help="restrict to one user_id")
     parser.add_argument("--model", help="judge model override (use Sonnet for the self-typed pass)")
+    parser.add_argument("--exclude-id", action="append", default=[],
+                        help="patch id a dry run showed in a wrong merge; any pair touching it is skipped")
     args = parser.parse_args()
     asyncio.run(main(args.apply, args.limit, self_typed=args.self_typed, user=args.user,
-                     model=args.model))
+                     model=args.model, exclude={str(x) for x in args.exclude_id}))
