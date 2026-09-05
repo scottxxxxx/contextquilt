@@ -145,7 +145,7 @@ def test_a_named_persons_conduct_folds_into_their_header_line_and_leaves_the_lis
     out, n = format_flat_ranked_with_stats(
         scored, [_ent("Marcus Lee", desc="CTO at Northwind")], [], today=TODAY,
         conduct_types=frozenset({"moment"}))
-    assert "People: Marcus Lee (CTO at Northwind). How they operate: Held the number back until the cause was known; Asked for per region numbers before agreeing" in out
+    assert "People: Marcus Lee (CTO at Northwind). How they operate: Held the number back until the cause was known / Asked for per region numbers before agreeing" in out
     assert "[moment]" not in out
     assert "[todo] Tom will deliver the report" in out
     assert n == 1  # the capsule is header, not list
@@ -155,8 +155,11 @@ def test_a_capsule_is_capped_and_keeps_rank_order():
     scored = [(90.0 - i, _row("moment", f"conduct {i}", owner="Dana Whitfield", pid=f"m{i}")) for i in range(5)]
     out, n = format_flat_ranked_with_stats(scored, [_ent("Dana Whitfield")], [], today=TODAY,
                                            conduct_types=frozenset({"moment"}), capsule_limit=3)
-    assert "How they operate: conduct 0; conduct 1; conduct 2" in out
-    assert "conduct 3" not in out and n == 0
+    assert "How they operate: conduct 0 / conduct 1 / conduct 2" in out
+    # Overflow stays in the list at its own rank rather than vanishing.
+    assert "[moment] conduct 3 [owner: Dana Whitfield]" in out
+    assert "[moment] conduct 4 [owner: Dana Whitfield]" in out
+    assert n == 2
 
 
 def test_conduct_about_somebody_not_in_the_header_stays_in_the_list():

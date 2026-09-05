@@ -225,9 +225,14 @@ def format_flat_ranked_with_stats(
             for name in person_names:
                 if _same_person(owner, name):
                     lines = capsules.setdefault(name, [])
+                    # Only a row that made the capsule leaves the list. The
+                    # first deploy folded every matched row and the fourth
+                    # of Raj's interview questions vanished from the block
+                    # entirely (prod smoke, 2026-09-05); overflow keeps its
+                    # own low rank in the list instead.
                     if len(lines) < capsule_limit:
                         lines.append(text)
-                    folded.add(id(row))
+                        folded.add(id(row))
                     break
 
     if projects or people:
@@ -241,7 +246,9 @@ def format_flat_ranked_with_stats(
                 name = (p["name"] if isinstance(p, dict) else p.get("name", "")) or ""
                 line = _entity_name_with_desc(p)
                 if capsules.get(name):
-                    line += ". How they operate: " + "; ".join(capsules[name])
+                    # " / " inside a capsule, because "; " already separates
+                    # people on this line and the two read as one list.
+                    line += ". How they operate: " + " / ".join(capsules[name])
                 names.append(line)
             header_parts.append("People: " + "; ".join(names))
         sections.append("\n".join(header_parts))
