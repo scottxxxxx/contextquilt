@@ -1322,6 +1322,7 @@ async def recall_context(
         freshness_types=type_runtime.freshness_tracked_types,
         deadline_types=frozenset(type_runtime.completable_types),
         completable_types=frozenset(type_runtime.completable_types),
+        conduct_types=type_runtime.conduct_types,
     )
 
     # Metamemory signals (opt-in): explicit gap lines appended below the
@@ -1485,6 +1486,7 @@ async def recall_context(
                 scored_for_output, entity_rows, rel_rows,
                 max_chars=token_budget * CHARS_PER_TOKEN - trailing_reserve,
                 person_entity_type=recall_vocab.person_entity_type,
+                conduct_types=type_runtime.conduct_types,
             )
             # Contract commitment E — truncation must be visible.
             coverage = build_coverage_line(rendered_count, scoped_total)
@@ -7699,8 +7701,12 @@ async def woven_digest(
 
     candidates = [dict(r) for r in rows]
     edge_counts = {str(r["patch_id"]): int(r["edge_count"] or 0) for r in rows}
+    # Conduct rows never tile on their own; the person card is where they
+    # live. The reason lands in `dropped` so SS can see the count move.
+    conduct_types = (await facet_runtime.get_type_runtime(db_pool.fetch)).conduct_types
     digest = woven_digest_svc.build_digest(
-        candidates, limit=limit, edge_counts=edge_counts, offset=offset)
+        candidates, limit=limit, edge_counts=edge_counts, offset=offset,
+        conduct_types=conduct_types)
 
     await _attach_woven_links(digest["patches"])
 

@@ -57,6 +57,16 @@ FACET_PRIORITY: Dict[str, int] = {
 }
 COMPLETABLE_DEFAULT_PRIORITY = 45
 
+# Conduct rows (origin scoped, not project scoped: SS's moment). Below
+# preference (10) and above takeaway (5), so the compact rules about a
+# person win the block's slots, and boosted only when the row's OWNER is
+# a person the query named, never on a text hit. Persona test 2026-09-05:
+# as Episodes at 30 they displaced the rows carrying each person's rules
+# and the full block lost to the block without them on every question;
+# alone they scored as well as the rules, so the knowledge is real and
+# the ranking was the defect.
+CONDUCT_PRIORITY = 8
+
 
 # Self-typed (you)-speaker patches that get a staleness multiplier.
 # Matches the FRESHNESS_TRACKED_TYPES set in src/worker.py:decay_loop
@@ -217,6 +227,16 @@ def _patch_owner(row: Any) -> str:
     return ""
 
 
+def _owner_matches(owner_lower: str, name_lower: str) -> bool:
+    """The owner IS this person: same name, or the same first token
+    (a bare first name matched in the query against a full owner name,
+    or the reverse). Never a substring."""
+    if owner_lower == name_lower:
+        return True
+    o, n = owner_lower.split(" ")[0], name_lower.split(" ")[0]
+    return bool(o) and o == n
+
+
 def _to_epoch(ts: Any) -> float:
     if not ts:
         return 0.0
@@ -276,6 +296,7 @@ def score_patches(
     freshness_types: "Optional[frozenset]" = None,
     deadline_types: "Optional[frozenset]" = None,
     completable_types: "Optional[frozenset]" = None,
+    conduct_types: "Optional[frozenset]" = None,
 ) -> List[Tuple[float, Any]]:
     """Score each patch against the query.
 
@@ -308,6 +329,7 @@ def score_patches(
     if deadline_types is None:
         deadline_types = DEADLINE_BOOSTED_TYPES
     completable_types = completable_types or frozenset()
+    conduct_types = conduct_types or frozenset()
 
     query_words = set(_keywords(query_text))
     entity_names_lower = [n.lower() for n in matched_entity_names if n]
@@ -337,7 +359,10 @@ def score_patches(
         text = _patch_text(row)
         text_lower = text.lower()
 
-        if patch_type in TYPE_PRIORITY:
+        is_conduct = patch_type in conduct_types
+        if is_conduct:
+            base = CONDUCT_PRIORITY
+        elif patch_type in TYPE_PRIORITY:
             base = TYPE_PRIORITY[patch_type]
         elif patch_type in completable_types:
             base = COMPLETABLE_DEFAULT_PRIORITY
@@ -345,10 +370,20 @@ def score_patches(
             base = FACET_PRIORITY.get(facet_by_type.get(patch_type, ""), 0)
         score = float(base)
 
-        # Entity-match boost
-        for name in entity_names_lower:
-            if name and name in text_lower:
-                score += 100.0
+        # Entity-match boost. A conduct row is boosted by its OWNER only:
+        # "Asked Hassan whether Tripp was joining" owned by Raj is about
+        # Raj, and a text hit on Hassan would surface it for the wrong
+        # person.
+        if is_conduct:
+            owner_lower = _patch_owner(row).lower()
+            for name in entity_names_lower:
+                if name and owner_lower and _owner_matches(owner_lower, name):
+                    score += 100.0
+                    break
+        else:
+            for name in entity_names_lower:
+                if name and name in text_lower:
+                    score += 100.0
 
         # Cue-match boost — patch was fetched because a cue attached to it
         # appeared in the query text

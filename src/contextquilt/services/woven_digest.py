@@ -95,6 +95,12 @@ DROP_RESOLVED = "already_acted_on"
 DROP_CONTESTED = "contested_identity"
 DROP_SENSITIVE = "sensitive_content"
 DROP_SHELVED = "shelved_by_user"
+# A conduct row (origin scoped, not project scoped: SS's moment) is the
+# profile pass's unit and belongs on the person, never as a tile of its
+# own: "asked Hassan whether Tripp was joining" is not a thing a reader
+# can act on, and the persona test of 2026-09-05 showed the same rows
+# displacing the person's rules wherever they compete for slots.
+DROP_CONDUCT = "conduct_belongs_to_the_person"
 
 
 def patch_value(patch: Dict[str, Any]) -> Dict[str, Any]:
@@ -132,12 +138,14 @@ def _text(patch: Dict[str, Any]) -> str:
 
 
 def why_not_a_tile(patch: Dict[str, Any],
-                   require_headline: bool = True) -> Optional[str]:
+                   require_headline: bool = True,
+                   conduct_types: "frozenset" = frozenset()) -> Optional[str]:
     """The reason this patch cannot earn a tile, or None.
 
     Section 6.2, in the order that costs least to evaluate. Returns the
     REASON so the caller can report which rule fired, on the same
-    argument as every other gate in this codebase.
+    argument as every other gate in this codebase. `conduct_types` comes
+    from the type runtime; empty means no type is treated as conduct.
     """
     text = _text(patch)
     if not text:
@@ -146,6 +154,8 @@ def why_not_a_tile(patch: Dict[str, Any],
     ptype = patch.get("patch_type")
     if ptype == "person":
         return DROP_PERSON
+    if conduct_types and ptype in conduct_types:
+        return DROP_CONDUCT
 
     value = _value(patch)
 
@@ -594,6 +604,7 @@ def build_digest(
     today: Optional[date] = None,
     edge_counts: Optional[Dict[str, int]] = None,
     offset: int = 0,
+    conduct_types: "frozenset" = frozenset(),
 ) -> Dict[str, Any]:
     """Ordered, pruned, weighted tiles plus the reasons for every drop.
 
@@ -606,7 +617,7 @@ def build_digest(
     dropped: Dict[str, int] = {}
 
     for patch in candidates:
-        reason = why_not_a_tile(patch)
+        reason = why_not_a_tile(patch, conduct_types=conduct_types)
         if reason:
             dropped[reason] = dropped.get(reason, 0) + 1
             continue

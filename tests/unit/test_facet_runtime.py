@@ -176,7 +176,10 @@ async def test_cache_serves_snapshot_without_refetch():
 
     a = await facet_runtime.get_type_runtime(fetch)
     b = await facet_runtime.get_type_runtime(fetch)
-    assert calls["n"] == 1 and a is b
+    # One load is TWO reads since 2026-09-05: the registry rows and the
+    # registered manifests (for the conduct types). The second call
+    # must add none.
+    assert calls["n"] == 2 and a is b
     facet_runtime.invalidate_type_runtime()
 
 
