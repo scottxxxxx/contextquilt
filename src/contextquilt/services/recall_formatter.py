@@ -175,7 +175,8 @@ def format_flat_ranked_with_stats(
     today: Optional[date] = None,
     person_entity_type: str = "person",
     conduct_types: "frozenset" = frozenset(),
-    capsule_limit: int = 3,
+    capsule_limit: int = 2,
+    capsule_item_chars: int = 120,
 ) -> Tuple[str, int]:
     """Format patches as a flat relevance-ranked list.
 
@@ -231,7 +232,7 @@ def format_flat_ranked_with_stats(
                     # entirely (prod smoke, 2026-09-05); overflow keeps its
                     # own low rank in the list instead.
                     if len(lines) < capsule_limit:
-                        lines.append(text)
+                        lines.append(_clip(text, capsule_item_chars))
                         folded.add(id(row))
                     break
 
@@ -286,6 +287,19 @@ def format_flat_ranked_with_stats(
         sections.append("\n".join(patch_lines))
 
     return "\n\n".join(sections), len(patch_lines)
+
+
+def _clip(text: str, limit: int) -> str:
+    """A capsule item is a clause, not the row. Two people at three
+    full-length items ate about 600 of a 700 token block's 2,700
+    characters in the persona rerun and the decisions and blockers fell
+    off the end: the displacement again, in a new form. Cut at a word
+    boundary and mark the cut."""
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rsplit(" ", 1)[0].rstrip(",;:")
+    return cut + "..."
 
 
 def _same_person(owner: str, name: str) -> bool:
