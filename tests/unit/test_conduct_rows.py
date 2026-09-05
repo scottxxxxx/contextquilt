@@ -162,6 +162,24 @@ def test_a_capsule_is_capped_and_keeps_rank_order():
     assert n == 2
 
 
+def test_the_default_capsule_is_two_items_clipped_at_a_word_boundary():
+    """Two people at three full items cost ~600 chars of a 700 token block
+    and the decisions fell off the end (persona rerun, 2026-09-05)."""
+    long = ("Held the APAC number back from the steering summary until Tom's investigation was done, "
+            "saying a number without a cause would set the wrong conversation for the committee")
+    scored = [(90.0, _row("moment", long, owner="Marcus Lee", pid="m0")),
+              (89.0, _row("moment", "Asked for per region numbers", owner="Marcus Lee", pid="m1")),
+              (88.0, _row("moment", "Wanted the date in writing", owner="Marcus Lee", pid="m2"))]
+    out, n = format_flat_ranked_with_stats(scored, [_ent("Marcus Lee")], [], today=TODAY,
+                                           conduct_types=frozenset({"moment"}))
+    head = out.split("\n")[0]
+    assert head.count(" / ") == 1                       # two items by default
+    assert "for the committee" not in head and "..." in head
+    clipped = head.split("How they operate: ")[1].split(" / ")[0]
+    assert len(clipped) <= 120 + 3 and not clipped[:-3].endswith(" ")
+    assert "[moment] Wanted the date in writing [owner: Marcus Lee]" in out and n == 1
+
+
 def test_conduct_about_somebody_not_in_the_header_stays_in_the_list():
     scored = [(60.0, _row("moment", "Relayed positive feedback", owner="Hassan Waheed", pid="h"))]
     out, n = format_flat_ranked_with_stats(scored, [_ent("Raj Kumar")], [], today=TODAY,
