@@ -28,6 +28,8 @@ distinct cues.
 
 from typing import Iterable, List
 
+from contextquilt.services.recall_scope import origins_cte, project_scope_clause
+
 
 def _is_word_char(ch: str) -> bool:
     # Mirrors the \w class rather than str.isalnum() alone: an
@@ -126,16 +128,23 @@ def build_cue_fetch(
     """
     args = [subject_key, matched_cues, universal_types, max_age_days]
     if recall_project_id:
-        scope_col = "cp.project_id"
+        scope_col = "project_id"
         args.append(recall_project_id)
     elif recall_project:
-        scope_col = "cp.project"
+        scope_col = "project"
         args.append(recall_project)
     else:
         scope_col = None
+    # The flat leg's admission rule, from the one module that defines it,
+    # so the two legs cannot drift (2026-08-30 was that drift; 2026-09-04
+    # was the rule itself being wrong on both legs at once).
     scope_sql = (
-        f"AND ({scope_col} = $5 OR {scope_col} IS NULL "
-        "OR cp.patch_type = ANY($3::text[]))"
+        f"AND {project_scope_clause(scope_col, '$5', '$3')}"
     ) if scope_col else ""
     sql = CUE_FETCH_SQL.replace("{SCOPE}", scope_sql).replace("{AGE}", age_sql)
+    if scope_col:
+        # The rule reads the `held` / `foreign_origins` CTEs, so the
+        # statement carries them; an unscoped request has no project to
+        # resolve and keeps the bare statement.
+        sql = origins_cte(scope_col, "$1", "$5") + sql
     return sql, args
