@@ -121,6 +121,7 @@ from contextquilt.services.people_identity import (
 )
 from contextquilt.services.cue_matching import build_cue_fetch, match_cues
 from contextquilt.services.recall_scope import build_flat_fetch, build_scoped_count
+from contextquilt.services import origin_project
 from contextquilt.services.entity_match import (
     BARE_NAME_CANDIDATES_SQL, bare_terms, disambiguate_bare_names, match_entity_names,
 )
@@ -1142,6 +1143,11 @@ async def recall_context(
     # rows. Day-bucketed like the scorer's clock: byte-stable within a
     # UTC day. The number is the gateway's per-tier dial; CQ never
     # defaults it. Same SQL text either way, so the planner sees one shape.
+    # Does this database carry the ingest's project record? Probed once
+    # per process; the MCP deployment can lag migrations and a leg naming
+    # a missing table would 500 the hot path (services/origin_project.py).
+    include_assignments = await origin_project.assignments_available(db_pool.fetch)
+
     max_age_days = resolve_max_age_days(request.metadata)
     universal_types = list(type_runtime.universal_recall_types)
     AGE = (
@@ -1164,6 +1170,7 @@ async def recall_context(
         flat_sql, flat_args = build_flat_fetch(
             subject_key, universal_types, max_age_days, AGE.format(d="$4", u="$3"),
             recall_project_id=recall_project_id, recall_project=recall_project,
+            include_assignments=include_assignments,
         )
         fact_rows = await db_pool.fetch(flat_sql, *flat_args)
     else:
@@ -1285,6 +1292,7 @@ async def recall_context(
             AGE.format(d="$4", u="$3"),
             recall_project_id=recall_project_id,
             recall_project=recall_project,
+            include_assignments=include_assignments,
         )
         try:
             cue_rows = await db_pool.fetch(cue_sql, *cue_args)
@@ -1362,6 +1370,7 @@ async def recall_context(
             count_sql, count_args = build_scoped_count(
                 subject_key, universal_types, max_age_days, AGE.format(d="$4", u="$3"),
                 recall_project_id=recall_project_id, recall_project=recall_project,
+                include_assignments=include_assignments,
             )
             scoped_total = await db_pool.fetchval(count_sql, *count_args) or 0
         except Exception:

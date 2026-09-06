@@ -116,6 +116,7 @@ def build_cue_fetch(
     age_sql: str,
     recall_project_id=None,
     recall_project=None,
+    include_assignments: bool = False,
 ):
     """(sql, args) for the cue leg, scoped when the caller named a project.
 
@@ -148,5 +149,5 @@ def build_cue_fetch(
         # The rule reads the `held` / `foreign_origins` CTEs, so the
         # statement carries them; an unscoped request has no project to
         # resolve and keeps the bare statement.
-        sql = origins_cte(scope_col, "$1", "$5") + sql
+        sql = origins_cte(scope_col, "$1", "$5", include_assignments) + sql
     return sql, args

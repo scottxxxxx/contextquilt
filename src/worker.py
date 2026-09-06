@@ -141,6 +141,7 @@ from contextquilt.services.entity_aliasing import (
 )
 from contextquilt.services import behavior_extraction
 from contextquilt.services import behavior_classifier
+from contextquilt.services import origin_project
 from contextquilt.services import material_kind
 from contextquilt.services import extraction_gate
 from contextquilt.services import role_semantics
@@ -6673,6 +6674,32 @@ class ColdPathWorker:
                     project = decided["project"] or project
                     logger.info("origin_project_adopted", origin_id=str(origin_id),
                                 project_id=project_id, user_id=user_id)
+
+            # AND THE OTHER HALF: record what this meeting belonged to.
+            # The read above honours the user's decision; nothing wrote
+            # the app's. A meeting whose only output is origin-scoped
+            # types (a `moment`, which is project_scoped: false by
+            # manifest design) stamps no patch with a project, so on
+            # 2026-09-05 a GL Unlimited recording left NO record anywhere
+            # of the project it came from, read as unassigned by recall,
+            # and its rows surfaced in an unrelated project's chat.
+            #
+            # ON CONFLICT DO NOTHING: an explicit assignment, and an
+            # explicit unassignment (project_id NULL, migration 43's
+            # third state), are human statements and outrank a re-ingest.
+            if origin_id and project_id:
+                try:
+                    await self.db.execute(
+                        origin_project.RECORD_INGEST_PROJECT_SQL,
+                        user_id, str(origin_id),
+                        str(origin_type) if origin_type else "meeting",
+                        project_id, project,
+                    )
+                except Exception as exc:
+                    # Never fail an ingest over the note; the patches this
+                    # payload scopes are unaffected either way.
+                    logger.warning("origin_project_not_recorded",
+                                   origin_id=str(origin_id), error=str(exc)[:140])
 
             # THE DAY THE MEETING HAPPENED, recorded rather than spent.
             #
