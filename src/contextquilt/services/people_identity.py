@@ -886,6 +886,40 @@ def owned_by_self_verdict(
 
 _ROLE_LEADS = (" is ", " was ", " serves as ", " works as ", " acts as ", ": ")
 
+# A leading article survives the name-and-copula strip and then reads
+# wrong in the one place `title` is rendered, which is under the
+# person's name. "Sarah Brooks is the VP of HR at Acme" served "the VP
+# of HR at Acme". SS found it on the first correction they designed for
+# (2026-09-06) and asked for the strip to be hardened even though they
+# are ALSO constraining their input field, because the two failures are
+# different: their field stops a user typing a sentence where a phrase
+# belongs, and this stops a paste, or text from a surface they did not
+# write. Neither team can see the other's inputs, so doing only one
+# leaves the other class open.
+#
+# English only, the same scope as the other capture-time denylists. A
+# trailing prepositional phrase is deliberately KEPT: "scrum master on
+# ABM project" is the documented behavior and the qualifier is
+# information the user chose to state.
+_LEADING_ARTICLES = ("the ", "a ", "an ")
+
+
+def _strip_leading_article(text: Optional[str]) -> Optional[str]:
+    """Drop a leading English article. Still never invents words: the
+    result is a substring of the input."""
+    if not text:
+        return text
+    low = text.lower()
+    # A text that IS an article carries no role at all. It arrives from
+    # a truncated statement ("Sarah Brooks is the") and serving "the"
+    # under somebody's name is worse than serving nothing.
+    if low.strip() in {a.strip() for a in _LEADING_ARTICLES}:
+        return None
+    for article in _LEADING_ARTICLES:
+        if low.startswith(article):
+            return text[len(article):].strip() or None
+    return text
+
 
 def title_from_stated_role(text: Optional[str], names: Sequence[str]) -> Optional[str]:
     """Strip the person's own name and the copula from a stated-role
@@ -909,12 +943,12 @@ def title_from_stated_role(text: Optional[str], names: Sequence[str]) -> Optiona
             # name plus a verb.
             if (rest_low + " ").startswith(lead):
                 out = rest[len(lead):].strip()
-                return out or None
+                return _strip_leading_article(out or None)
         # "Suresh, scrum master on ABM" / "Suresh (scrum master)"
         if rest.startswith(",") or rest.startswith(" ("):
             out = rest.lstrip(", (").rstrip(")").strip()
-            return out or None
-    return raw
+            return _strip_leading_article(out or None)
+    return _strip_leading_article(raw)
 
 
 def stated_roles_payload(rows: Sequence[Mapping[str, Any]], names: Sequence[str]) -> Dict[str, Any]:

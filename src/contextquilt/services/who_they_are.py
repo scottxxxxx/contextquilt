@@ -45,6 +45,7 @@ import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from contextquilt.services.insight_cards import dash_as_punctuation, gendered_pronoun, opens_with_name
+from contextquilt.services.people_identity import title_from_stated_role
 
 LENS = "who_they_are"
 
@@ -76,7 +77,6 @@ def _norm(text: str) -> str:
     return " ".join(_PUNCT.sub(" ", (text or "").lower()).split())
 
 
-_ROLE_LEADS = (" is ", " was ", " serves as ", " works as ", " acts as ", ": ")
 
 
 def eligible(stated_roles: Sequence[Mapping[str, Any]],
@@ -165,18 +165,23 @@ def fingerprint(facts: Mapping[str, Any]) -> str:
 
 def title_phrase(role_text: str, person_name: str) -> str:
     """The same strip the served `title` uses, so the check below asks
-    for exactly the phrase a client shows under the name."""
-    raw = (role_text or "").strip()
-    low = raw.lower()
-    for n in sorted({person_name.lower(), person_name.split(" ")[0].lower()}, key=len, reverse=True):
-        if n and low.startswith(n):
-            rest = raw[len(n):]
-            rl = rest.lower()
-            for lead in _ROLE_LEADS:
-                if (rl + " ").startswith(lead):
-                    return rest[len(lead):].strip()
-            return rest.lstrip(", (").rstrip(")").strip()
-    return raw
+    for exactly the phrase a client shows under the name.
+
+    It now DELEGATES rather than reimplementing. That sentence above was
+    true of the intent and false of the code: this was a second copy of
+    the logic, and the two had already drifted (this one lstripped ", ("
+    unconditionally as a fallback, the served one only when the text
+    actually opened that way). A drifted copy here is not cosmetic. The
+    phrase is what `stated_role_dropped` demands the summary contain
+    word for word, and what the retry hint quotes back to the model, so
+    a phrase that differs from the client's title makes the model chase
+    a string the reader will never see. Third instance of one rule on
+    two carriers in this codebase; the other two are in
+    extraction_schema.
+    """
+    return title_from_stated_role(
+        role_text, [person_name, (person_name or "").split(" ")[0]]
+    ) or ""
 
 
 def allowed_numbers(facts: Mapping[str, Any]) -> set:
