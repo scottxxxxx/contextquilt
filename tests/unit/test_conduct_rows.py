@@ -198,7 +198,9 @@ def test_the_default_capsule_is_two_items_clipped_at_a_word_boundary():
     assert "for the committee" not in head and "..." in head
     clipped = head.split("How they operate: ")[1].split(" / ")[0]
     assert len(clipped) <= 120 + 3 and not clipped[:-3].endswith(" ")
-    assert "[moment] Wanted the date in writing [owner: Marcus Lee]" in out and n == 1
+    # Capsule or nothing: the third row is his too, so it leaves the block
+    # rather than taking a list slot from a decision.
+    assert "Wanted the date in writing" not in out and n == 0
 
 
 def test_conduct_about_somebody_not_in_the_header_stays_in_the_list():
@@ -307,7 +309,10 @@ def test_a_capsule_does_not_repeat_the_same_clause():
                                            conduct_types=frozenset({"moment"}), capsule_item_chars=400)
     head = out.split("\n")[0]
     assert a in head and c in head and b not in head
-    assert f"[moment] {b} [owner: Steven Williams]" in out and n == 1
+    # The near duplicate is his conduct too, so it leaves the block
+    # entirely rather than reappearing in the list as a near copy of a
+    # line already in the capsule.
+    assert b not in out and n == 0
 
 
 # ----------------------------------------------------------------------
