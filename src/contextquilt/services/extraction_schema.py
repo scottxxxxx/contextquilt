@@ -48,6 +48,51 @@ CONNECTION_ROLES = [
     "informs",
 ]
 
+# THE LANGUAGE RULE HAS MORE THAN ONE CARRIER, so it lives in one place.
+#
+# `metadata.language` (BCP-47, e.g. "es-419") decides the language every
+# lane writes its prose in. It reached the MAIN extraction and nothing
+# else. On 2026-09-06 Scott set his phone to Spanish and recorded a
+# Spanish meeting; the only patches stored were three English sentences,
+# because the meeting yielded nothing from the main chain and the
+# behavior lane, which had never been given the rule, was the only lane
+# that wrote. The gap was invisible until a meeting existed where the
+# main chain wrote nothing, because on any normal meeting its prose is
+# in the right language and the lane's handful of rows are lost in it.
+#
+# That is the SECOND time this pair of carriers has split a rule: the
+# sanitizer chain lived on the main chain alone until 2026-09-01 and
+# this lane ran unsanitized. `sanitize_behavior_observations` is in this
+# module for that reason and this is here for the same one. A third lane
+# gets its language from here too, or it has the same bug.
+LANGUAGE_LINE_TEMPLATE = "User language: {language}"
+
+
+def memory_language(metadata: "dict | None") -> str:
+    """The language code every lane's output prose must be written in.
+
+    Empty string means the app did not declare one, and each prompt's
+    own LANGUAGE section then falls back to the dominant language of the
+    `(you)` speaker. Returning "" rather than None keeps the two callers
+    from each inventing a different falsy check.
+    """
+    if not metadata:
+        return ""
+    return str(metadata.get("language") or "").strip()
+
+
+def language_line(language: "str | None") -> str:
+    """`User language: <code>` as prompts carry it, or "" when unknown.
+
+    Both carriers render it through this, so the string the model is
+    told to key on cannot drift between them while each prompt's
+    instruction still says to look for `User language:`.
+    """
+    language = (language or "").strip()
+    if not language:
+        return ""
+    return LANGUAGE_LINE_TEMPLATE.format(language=language)
+
 ENTITY_TYPES = [
     "person",
     "project",

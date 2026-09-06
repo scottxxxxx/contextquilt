@@ -36,6 +36,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 from contextquilt.services import material_kind as real_material_kind
+from contextquilt.services.extraction_schema import (
+    language_line as real_language_line,
+    memory_language as real_memory_language,
+)
 WORKER_SRC = (ROOT / "src" / "worker.py").read_text()
 
 GATE_FLOOR = 1200
@@ -171,6 +175,13 @@ def _build(gate_reason: str | None, listening: bool, listening_types: set[str]):
             allowed_types=lambda manifest: listening_types,
             build_listening_system=lambda types: "LISTENING SYSTEM",
         ),
+        # The REAL language helpers, for the same reason material_kind
+        # above is real: the whole point of routing both lanes through
+        # one derivation is that they cannot drift, and a stub here
+        # would let this file agree with a language rule that is not
+        # the shipped one.
+        "derive_memory_language": real_memory_language,
+        "build_language_line": real_language_line,
         "extraction_gate": SimpleNamespace(
             why_not_worth_extracting=lambda text: gate_reason,
             min_transcript_chars=lambda: GATE_FLOOR,

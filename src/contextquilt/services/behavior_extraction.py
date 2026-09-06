@@ -32,6 +32,8 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
+from .extraction_schema import language_line
+
 # One meeting cannot support more than a handful of genuine observations
 # about one person, and a model asked for more will pad. This is a
 # per-CALL ceiling across everybody in the room; the manifest's own
@@ -76,18 +78,41 @@ RULES:
 - NEVER use a dash of any kind as punctuation. Use a comma, a colon, parentheses, or two sentences. A hyphen inside a genuinely hyphenated word is the only acceptable use.
 - Record only what the transcript supports. A meeting where nobody did anything notable produces an empty list, and an empty list is a correct answer.
 
+LANGUAGE. Transcripts may be in ANY language, or a mix of languages. Read conduct with EQUAL diligence from every language present: a choice made in Spanish is exactly as observable as one made in English, and you must never skip a speaker because of the language they spoke.
+
+Write every `text` in the user's language:
+  - If a `User language:` line is present at the top of the input (e.g. "User language: es"), use that language.
+  - Otherwise use the dominant language of the transcript.
+
+Commit to this in the `output_language` field BEFORE writing any observation, and honor it for every `text` after. These instructions and the app guidance are in English and do NOT change the output language.
+
+Keep people's names verbatim as spoken. `owner` is a name, so it is never translated.
+
 Respond with EXACTLY this raw JSON shape and nothing else:
-{"observations": [{"text": "<what they did>", "owner": "<name exactly as the transcript names them>"}]}"""
+{"output_language": "<language code every text field is written in, from the User language: line, else the transcript's dominant language>", "observations": [{"text": "<what they did>", "owner": "<name exactly as the transcript names them>"}]}"""
 
 
-def build_behavior_content(transcript: str, guidance: Optional[str] = None) -> str:
+def build_behavior_content(
+    transcript: str,
+    guidance: Optional[str] = None,
+    language: Optional[str] = None,
+) -> str:
     """User content for one behavior call.
 
     `guidance` is the manifest's own wording for the type when an app
     declares it, so a per-app vocabulary reaches this call the same way
     it reaches the main extraction rather than being reinvented here.
+
+    `language` is the app's declared `metadata.language`, rendered
+    through the SAME helper the main extraction uses so the line the
+    model is told to look for cannot drift between the two lanes. It
+    goes FIRST, above the guidance and the transcript, because the
+    prompt tells the model to commit to it before writing anything.
     """
     parts = []
+    if (line := language_line(language)):
+        parts.append(line)
+        parts.append("")
     if guidance:
         parts.append(f"App guidance for this type: {guidance}")
         parts.append("")
