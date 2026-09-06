@@ -16,11 +16,14 @@ def test_it_skips_every_meeting_that_already_has_a_decision_on_file():
 
 
 def test_a_stamped_patch_outranks_the_ingest_stream():
-    """A rescope is newer than the payload that first arrived."""
+    """A rescope is newer than the payload that first arrived, so the
+    stream is read only when no patch carries a project."""
     i = SCRIPT.index("for r in rows:")
-    body = SCRIPT[i:i + 500]
-    assert 'src = "patch"' in body
-    assert body.index('src = "patch"') < body.index('src = "stream"')
+    body = SCRIPT[i:i + 600]
+    assert 'r["stamped_project_id"], r["stamped_project"], "patch"' in body
+    assert "if not pid:" in body
+    assert body.index('"patch"') < body.index("stream.get(")
+    assert body.index("stream.get(") < body.index('src = "stream"')
 
 
 def test_the_dry_run_is_the_default_and_says_so():
