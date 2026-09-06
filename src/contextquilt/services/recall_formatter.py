@@ -240,17 +240,20 @@ def format_flat_ranked_with_stats(
                     # of Raj's interview questions vanished from the block
                     # entirely (prod smoke, 2026-09-05); overflow keeps its
                     # own low rank in the list instead.
-                    if len(lines) < capsule_limit:
-                        if _near_duplicate(text, lines):
-                            # Conduct rows are opted out of dedup by
-                            # manifest design (two observations are a
-                            # trajectory), so the same question asked
-                            # twice in one meeting is two rows. A capsule
-                            # is a summary and must not repeat itself;
-                            # the second copy keeps its rank in the list.
-                            break
+                    # CAPSULE OR NOTHING for a person in the header. The
+                    # row leaves the list either way, and #446's choice to
+                    # let overflow keep its rank was right when only three
+                    # or four conduct rows reached the candidate set. Once
+                    # the conduct guarantee (#453) started admitting a
+                    # person's whole history, that same rule put EIGHT of
+                    # Steven's rows in a thirteen row block on prod and
+                    # pushed out the decisions, the goals and the events:
+                    # the displacement this work exists to remove, arriving
+                    # through the door built to fix it. The capsule is the
+                    # representation; the list is for the other types.
+                    if len(lines) < capsule_limit and not _near_duplicate(text, lines):
                         lines.append(_clip(text, capsule_item_chars))
-                        folded.add(id(row))
+                    folded.add(id(row))
                     break
 
     # A small budget is a draft or write ask (GP sends 300 tokens for those,

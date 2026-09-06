@@ -151,15 +151,36 @@ def test_a_named_persons_conduct_folds_into_their_header_line_and_leaves_the_lis
     assert n == 1  # the capsule is header, not list
 
 
-def test_a_capsule_is_capped_and_keeps_rank_order():
+def test_a_capsule_is_capped_and_the_rest_of_that_persons_conduct_leaves_the_list():
+    """Capsule or nothing, for a person in the header.
+
+    #446 let overflow keep its list rank, which was right when three or
+    four conduct rows reached the candidate set. The conduct guarantee
+    (#453) admits a person's whole history, and on prod that same rule
+    put EIGHT of one person's rows in a thirteen row block and pushed out
+    the decisions, goals and events. The capsule is the representation.
+    """
     scored = [(90.0 - i, _row("moment", f"conduct {i}", owner="Dana Whitfield", pid=f"m{i}")) for i in range(5)]
     out, n = format_flat_ranked_with_stats(scored, [_ent("Dana Whitfield")], [], today=TODAY,
                                            conduct_types=frozenset({"moment"}), capsule_limit=3)
     assert "How they operate: conduct 0 / conduct 1 / conduct 2" in out
-    # Overflow stays in the list at its own rank rather than vanishing.
-    assert "[moment] conduct 3 [owner: Dana Whitfield]" in out
-    assert "[moment] conduct 4 [owner: Dana Whitfield]" in out
-    assert n == 2
+    assert "[moment] conduct 3" not in out and "[moment] conduct 4" not in out
+    assert n == 0
+
+
+def test_the_other_types_keep_their_slots_when_a_person_has_deep_history():
+    """The regression this rule exists to prevent, in one assertion."""
+    conduct = [(108.0 - i, _row("moment", f"conduct {i}", owner="Dana Whitfield", pid=f"m{i}"))
+               for i in range(8)]
+    others = [(60.0, _row("decision", "EMEA pilot starts September 8", pid="d")),
+              (58.0, _row("commitment", "Tom will deliver the report", owner="Tom", pid="c")),
+              (55.0, _row("takeaway", "The change board is the real gate", pid="t"))]
+    out, n = format_flat_ranked_with_stats(conduct + others, [_ent("Dana Whitfield")], [],
+                                           today=TODAY, conduct_types=frozenset({"moment"}))
+    assert n == 3
+    for frag in ("EMEA pilot starts", "Tom will deliver", "change board"):
+        assert frag in out
+    assert "[moment]" not in out
 
 
 def test_the_default_capsule_is_two_items_clipped_at_a_word_boundary():
