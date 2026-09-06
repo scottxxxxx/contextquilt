@@ -250,3 +250,110 @@ def test_the_lane_logs_the_pronoun_count():
     body = WORKER.split("async def _extract_behavior_observations")[1].split(
         "async def ")[0]
     assert 'gendered_pronouns=bo.get("gendered_pronouns", 0)' in body
+
+
+# --- the language rule, which this lane did not have -------------------
+#
+# 2026-09-06: Scott set his phone to Spanish and recorded a Spanish
+# meeting. `metadata.language` arrived as "es-419" and reached the main
+# extraction. The meeting yielded nothing from the main chain (no `(you)`
+# marker, consumed material), so the ONLY patches stored were three
+# English sentences written by this lane, which had never been given the
+# rule. Second time these two carriers have split one rule; the first
+# was the sanitizer chain on 2026-09-01.
+
+def test_the_declared_language_reaches_this_call():
+    """The bug: build_behavior_content could not carry a locale at all."""
+    content = build_behavior_content("a transcript", None, "es-419")
+    assert "User language: es-419" in content
+
+
+def test_the_language_line_comes_before_the_transcript():
+    """The prompt tells the model to commit to output_language BEFORE
+    writing anything, so the line has to be above the material."""
+    content = build_behavior_content("TRANSCRIPT BODY", "some guidance",
+                                     "ja")
+    assert content.index("User language: ja") < content.index("some guidance")
+    assert content.index("some guidance") < content.index("TRANSCRIPT BODY")
+
+
+def test_no_declared_language_adds_no_line():
+    """Absent stays byte-identical to the old behavior, so every app
+    that never sends a locale is unaffected."""
+    assert build_behavior_content("a transcript") == (
+        "Transcript:\na transcript")
+    assert "User language" not in build_behavior_content("t", None, "")
+    assert "User language" not in build_behavior_content("t", None, None)
+
+
+def test_both_carriers_render_the_line_through_one_helper():
+    """The anti-drift claim, executed rather than asserted in a comment:
+    the string the model is told to look for is built by the same
+    function for the main chain and for this lane."""
+    from contextquilt.services.extraction_schema import (
+        language_line, memory_language,
+    )
+    assert memory_language({"language": "es-419"}) == "es-419"
+    assert memory_language({"language": "  pt-BR  "}) == "pt-BR"
+    assert memory_language({}) == ""
+    assert memory_language(None) == ""
+    assert memory_language({"language": None}) == ""
+
+    line = language_line(memory_language({"language": "es-419"}))
+    assert line == "User language: es-419"
+    # the lane renders exactly what the main chain renders
+    assert line in build_behavior_content("t", None, "es-419")
+
+
+def test_the_main_chain_uses_the_shared_derivation():
+    """Source-reading half: the worker must not re-derive the language
+    inline, or the two carriers can drift again."""
+    body = WORKER.split("async def handle_meeting_summary")[1].split(
+        "\n    async def ")[0]
+    assert "derive_memory_language(metadata)" in body
+    assert 'str(metadata.get("language") or "").strip()' not in body
+
+
+def test_the_lane_is_handed_the_language_at_every_call_site():
+    """Executing sibling to the source read above would need a live
+    worker, so this checks the wiring the same way the sink test does:
+    every call site passes it, not just the one somebody looked at."""
+    body = WORKER.split("async def handle_meeting_summary")[1].split(
+        "\n    async def ")[0]
+    call_sites = body.count("await self._extract_behavior_observations(")
+    passing = body.count("resolved_manifest, memory_language,")
+    assert call_sites == passing, (
+        f"{call_sites} call sites but {passing} pass the language")
+
+    lane = WORKER.split("async def _extract_behavior_observations")[1].split(
+        "\n    async def ")[0]
+    assert "transcript, guidance, memory_language" in lane
+
+
+def test_the_prompt_commits_to_a_language_before_it_writes():
+    """Same mechanism the main extraction uses: the model states the
+    language in a field it emits first, then honors it."""
+    assert "output_language" in BEHAVIOR_SYSTEM
+    assert "User language:" in BEHAVIOR_SYSTEM
+    # the raw JSON shape must carry it, because the Anthropic client
+    # accepts json_schema for parity and does NOT enforce it on the wire
+    shape = BEHAVIOR_SYSTEM.split("Respond with EXACTLY this raw JSON")[1]
+    assert '"output_language"' in shape
+    assert shape.index('"output_language"') < shape.index('"observations"')
+
+
+def test_the_new_field_does_not_break_the_parser():
+    """A model answering the new shape must still parse."""
+    out = parse_behavior_response(
+        '{"output_language": "es", "observations": ['
+        '{"text": "Pidio el desglose de costes antes de aceptar", '
+        '"owner": "Jaun Paul"}]}')
+    assert len(out) == 1
+    assert out[0]["value"]["owner"] == "Jaun Paul"
+    assert out[0]["value"]["text"].startswith("Pidio el desglose")
+
+
+def test_the_prompt_still_reads_every_language_with_equal_diligence():
+    """The main prompt says never skip a speaker for their language.
+    This lane reads the same transcripts and needs the same rule."""
+    assert "EQUAL diligence" in BEHAVIOR_SYSTEM

@@ -43,6 +43,8 @@ from contextquilt.services import woven_digest
 from contextquilt.services.deadline_resolver import run_deadline_micropass
 from contextquilt.services.extraction_schema import (
     PATCH_TYPES,
+    memory_language as derive_memory_language,
+    language_line as build_language_line,
     speaker_turn_counts,
     question_attribution,
     meeting_role_signals,
@@ -6259,12 +6261,13 @@ class ColdPathWorker:
         # so extraction writes patch text in the user's language. Without
         # it, the prompt's LANGUAGE section falls back to the dominant
         # language of the (you) speaker — see extraction_prompts.py.
-        memory_language = ""
-        if metadata:
-            memory_language = str(metadata.get("language") or "").strip()
-        language_line = (
-            f"User language: {memory_language}\n\n" if memory_language else ""
-        )
+        # Derived HERE ONCE and handed to every lane that writes prose.
+        # `extraction_schema.memory_language` is the single derivation
+        # because this rule has more than one carrier; see the comment
+        # on it for what it cost to learn that twice.
+        memory_language = derive_memory_language(metadata)
+        _lang_line = build_language_line(memory_language)
+        language_line = f"{_lang_line}\n\n" if _lang_line else ""
 
         try:
             app_id = payload.get("app_id")
@@ -6369,7 +6372,7 @@ class ColdPathWorker:
                 await self._extract_behavior_observations(
                     user_id, summary, app_id, origin_id, origin_type,
                     timestamp, project, project_id, user_label,
-                    resolved_manifest,
+                    resolved_manifest, memory_language,
                 )
                 # AND THE HEADLINES FOR THEM. The behavior patches just
                 # stored can tile, so skipping this here would leave a
@@ -6966,7 +6969,7 @@ class ColdPathWorker:
                 await self._extract_behavior_observations(
                     user_id, summary, app_id, origin_id, origin_type,
                     timestamp, project, project_id, user_label,
-                    resolved_manifest,
+                    resolved_manifest, memory_language,
                 )
 
             # Headlines LAST among the write lanes, because it reads
@@ -7491,6 +7494,7 @@ class ColdPathWorker:
     async def _extract_behavior_observations(
         self, user_id: str, transcript: str, app_id, origin_id, origin_type,
         timestamp, project, project_id, user_label, manifest,
+        memory_language: str = "",
     ) -> int:
         """One dedicated call for how people conducted themselves.
 
@@ -7529,7 +7533,7 @@ class ColdPathWorker:
             response = await llm.extract(
                 system_prompt=behavior_extraction.BEHAVIOR_SYSTEM,
                 user_content=behavior_extraction.build_behavior_content(
-                    transcript, guidance
+                    transcript, guidance, memory_language
                 ),
             )
             patches = behavior_extraction.parse_behavior_response(
