@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from contextquilt.services.cue_matching import build_cue_fetch
+from contextquilt.services.origin_project import RECORD_INGEST_PROJECT_SQL
 from contextquilt.services.recall_scope import FLAT_LIMIT, build_flat_fetch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -139,6 +140,11 @@ async def _flat(conn, subject_key, **kw):
     return [r["patch_id"] for r in await conn.fetch(sql, *args)]
 
 
+async def _record(conn, user_id, origin_id, project_id, project="P"):
+    await conn.execute(RECORD_INGEST_PROJECT_SQL, user_id, origin_id, "meeting",
+                       project_id, project)
+
+
 async def _cue(conn, subject_key, **kw):
     sql, args = build_cue_fetch(subject_key, ["app"], UNIVERSAL, None, AGE, **kw)
     return {r["patch_id"] for r in await conn.fetch(sql, *args)}
@@ -243,5 +249,76 @@ async def test_the_cue_leg_applies_the_same_rule():
         assert ids["ons_moment"] not in got
         assert ids["imm_moment"] in got
         assert ids["imm_decision"] in got
+    finally:
+        await conn.close()
+
+
+# ----------------------------------------------------------------------
+# A meeting whose only output is origin-scoped rows (prod, 2026-09-05)
+# ----------------------------------------------------------------------
+
+MEETING_MOMENTS_ONLY = "98FD368A-0000-0000-0000-00000000000D"
+
+
+@pytest.mark.asyncio
+async def test_a_moment_only_meeting_resolves_through_the_ingest_record():
+    """Seven moments, no stamped sibling anywhere. Without the record the
+    meeting reads as unassigned and its rows reach every project."""
+    await _ensure_schema()
+    conn = await asyncpg.connect(TEST_DB)
+    try:
+        user = str(uuid.uuid4())
+        subject = f"user:{user}"
+        moment = await _patch(conn, subject, "raj asked whether the agent was built in house",
+                              "moment", origin_id=MEETING_MOMENTS_ONLY)
+        await _patch(conn, subject, "immigration decision", "decision",
+                     project_id=IMMIGRATION, origin_id=MEETING_IMM)
+        # Before the record: unassigned, so every project sees it.
+        assert moment in set(await _flat(conn, subject, recall_project_id=IMMIGRATION,
+                                         include_assignments=True))
+        # The ingest records what the meeting belonged to.
+        await _record(conn, user, MEETING_MOMENTS_ONLY, ONSTAK)
+        got_imm = set(await _flat(conn, subject, recall_project_id=IMMIGRATION,
+                                  include_assignments=True))
+        got_ons = set(await _flat(conn, subject, recall_project_id=ONSTAK,
+                                  include_assignments=True))
+        assert moment not in got_imm, "the leak this fix exists to close"
+        assert moment in got_ons, "and it must still reach its own project"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_without_the_flag_the_record_changes_nothing():
+    await _ensure_schema()
+    conn = await asyncpg.connect(TEST_DB)
+    try:
+        user = str(uuid.uuid4())
+        subject = f"user:{user}"
+        moment = await _patch(conn, subject, "a moment", "moment", origin_id=MEETING_MOMENTS_ONLY)
+        await _record(conn, user, MEETING_MOMENTS_ONLY, ONSTAK)
+        got = set(await _flat(conn, subject, recall_project_id=IMMIGRATION))
+        assert moment in got
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_a_re_ingest_cannot_overwrite_an_explicit_unassignment():
+    """The user unassigned the meeting; the same payload arriving again
+    must not restore the project (migration 43's third state)."""
+    await _ensure_schema()
+    conn = await asyncpg.connect(TEST_DB)
+    try:
+        user = str(uuid.uuid4())
+        await conn.execute(
+            "INSERT INTO origin_project_assignments (user_id, origin_id, origin_type, "
+            "project_id, project) VALUES ($1, $2, 'meeting', NULL, NULL)",
+            user, MEETING_MOMENTS_ONLY)
+        await _record(conn, user, MEETING_MOMENTS_ONLY, ONSTAK)
+        row = await conn.fetchrow(
+            "SELECT project_id FROM origin_project_assignments WHERE user_id = $1 AND origin_id = $2",
+            user, MEETING_MOMENTS_ONLY)
+        assert row["project_id"] is None
     finally:
         await conn.close()

@@ -45,10 +45,13 @@ from __future__ import annotations
 
 from typing import List, Optional, Tuple
 
+from contextquilt.services.origin_project import assignments_union_sql
+
 FLAT_LIMIT = 20
 
 
-def origins_cte(col: str, subject_param: str, project_param: str) -> str:
+def origins_cte(col: str, subject_param: str, project_param: str,
+                include_assignments: bool = False) -> str:
     """WITH clause resolving the subject's meetings to projects.
 
     `origins`: every (origin, project) pair any stamped row proves.
@@ -58,13 +61,18 @@ def origins_cte(col: str, subject_param: str, project_param: str) -> str:
     be NULL (a NULL inside NOT would drop the row silently).
     `col` is the bare column name, project_id or project.
     """
+    # A meeting is resolved by a stamped sibling patch OR by the ingest's
+    # own record of what it belonged to (services/origin_project.py).
+    # The second leg exists because a meeting whose only output is
+    # origin-scoped rows has no stamped sibling to resolve through.
+    assignments = assignments_union_sql(col, subject_param) if include_assignments else ""
     return (
         "WITH origins AS MATERIALIZED ("
         "SELECT DISTINCT COALESCE(cp.origin_type, '') AS origin_type, cp.origin_id, "
         f"cp.{col} AS scope "
         "FROM context_patches cp JOIN patch_subjects ps ON ps.patch_id = cp.patch_id "
         f"WHERE ps.subject_key = {subject_param} AND cp.origin_id IS NOT NULL "
-        f"AND cp.{col} IS NOT NULL), "
+        f"AND cp.{col} IS NOT NULL{assignments}), "
         f"held AS (SELECT origin_type, origin_id FROM origins WHERE scope = {project_param}), "
         "foreign_origins AS ("
         f"SELECT origin_type, origin_id FROM origins WHERE scope <> {project_param} "
@@ -133,6 +141,7 @@ def build_flat_fetch(
     age_sql: str,
     recall_project_id: Optional[str] = None,
     recall_project: Optional[str] = None,
+    include_assignments: bool = False,
 ) -> Tuple[str, list]:
     """(sql, args) for the project-scoped flat leg: two windows, one round trip.
 
@@ -157,7 +166,7 @@ def build_flat_fetch(
         f"AND (cp.patch_type = ANY($3::text[]) OR (cp.{col} IS NULL AND NOT {foreign})) "
         f"{_ORDER})"
     )
-    return f"{origins_cte(col, '$1', '$2')}{first} UNION ALL {second}", args
+    return f"{origins_cte(col, '$1', '$2', include_assignments)}{first} UNION ALL {second}", args
 
 
 def build_scoped_count(
@@ -167,6 +176,7 @@ def build_scoped_count(
     age_sql: str,
     recall_project_id: Optional[str] = None,
     recall_project: Optional[str] = None,
+    include_assignments: bool = False,
 ) -> Tuple[str, list]:
     """(sql, args) for the coverage denominator: how many active rows the
     project HOLDS, by the same rule window 1 uses, inside the tier window.
@@ -174,7 +184,7 @@ def build_scoped_count(
     col, scope_val = _scope_col(recall_project_id, recall_project)
     args = [subject_key, scope_val, universal_types, max_age_days]
     sql = (
-        f"{origins_cte(col, '$1', '$2')}"
+        f"{origins_cte(col, '$1', '$2', include_assignments)}"
         "SELECT count(*) FROM context_patches cp "
         "JOIN patch_subjects ps ON ps.patch_id = cp.patch_id "
         "WHERE ps.subject_key = $1 AND COALESCE(cp.status, 'active') = 'active' "
