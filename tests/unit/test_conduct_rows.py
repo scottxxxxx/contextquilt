@@ -369,3 +369,32 @@ def test_recall_runs_it_only_with_a_project_and_a_matched_person_and_fails_open(
     assert 'logger.warning("conduct_guarantee_failed"' in block
     # It only ADDS candidates; the merge dedupes and the scorer ranks.
     assert "list(overdue_rows) + list(conduct_rows) + list(cue_rows)" in MAIN
+
+
+def test_a_folded_row_does_not_spend_one_of_the_callers_row_slots():
+    """Applying the cap before the fold took the prod block from 14 rows
+    to 5 once a person's whole conduct history was a candidate."""
+    conduct = [(108.0 - i, _row("moment", f"conduct {i}", owner="Dana Whitfield", pid=f"m{i}"))
+               for i in range(8)]
+    others = [(60.0 - i, _row("decision", f"decision {i}", pid=f"d{i}")) for i in range(6)]
+    out, n = format_flat_ranked_with_stats(conduct + others, [_ent("Dana Whitfield")], [],
+                                           today=TODAY, conduct_types=frozenset({"moment"}),
+                                           max_chars=6000, max_rows=5)
+    assert n == 5, "five decisions should render, not zero after eight folds ate the cap"
+    for i in range(5):
+        assert f"decision {i}" in out
+    assert "decision 5" not in out and "[moment]" not in out
+
+
+def test_max_rows_is_optional_and_absent_means_unlimited():
+    rows = [(60.0 - i, _row("decision", f"decision {i}", pid=f"d{i}")) for i in range(20)]
+    _, n = format_flat_ranked_with_stats(rows, [], [], today=TODAY, max_chars=9000)
+    assert n == 20
+    _, capped = format_flat_ranked_with_stats(rows, [], [], today=TODAY, max_chars=9000, max_rows=7)
+    assert capped == 7
+
+
+def test_recall_caps_rendered_rows_instead_of_slicing_the_candidates():
+    assert "scored_for_output = scored\n" in MAIN
+    assert "scored[:flat_cap]" not in MAIN
+    assert "max_rows=flat_cap," in MAIN

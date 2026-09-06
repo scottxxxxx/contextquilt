@@ -186,6 +186,7 @@ def format_flat_ranked_with_stats(
     capsule_limit: int = 2,
     capsule_item_chars: int = 120,
     compact_header_below: int = COMPACT_HEADER_BELOW,
+    max_rows: "Optional[int]" = None,
 ) -> Tuple[str, int]:
     """Format patches as a flat relevance-ranked list.
 
@@ -300,6 +301,13 @@ def format_flat_ranked_with_stats(
     patch_lines: List[str] = []
     remaining = max_chars - sum(len(s) for s in sections) - 20  # small buffer
     for score, row in scored_patches:
+        if max_rows is not None and len(patch_lines) >= max_rows:
+            break
+        # A folded row is IN the capsule, so it must not spend a row of
+        # the caller's cap on its way out of the list. Applying the cap
+        # before the fold took the block from 14 rows to 5 on prod
+        # (2026-09-06) once a person's whole conduct history was in the
+        # candidate set.
         if id(row) in folded:
             continue
         line = _format_patch_line(row, today)

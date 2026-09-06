@@ -1482,7 +1482,13 @@ async def recall_context(
     # Cap for flat output — avoids runaway context blocks for users
     # with large quilts.
     flat_cap = request.max_patches or 15
-    scored_for_output = scored[:flat_cap] if request.output_format == "flat" else scored
+    # The cap is applied to RENDERED rows inside the formatter now, not by
+    # slicing here. A conduct row that folds into a person's capsule was
+    # taking a slot in this slice and then leaving the list, so the block
+    # shrank from 14 rows to 5 on prod (2026-09-06) the moment a person's
+    # whole conduct history reached the candidate set. Grouped output is
+    # unchanged: it always received the full set.
+    scored_for_output = scored
 
     if request.output_format == "grouped":
         locale = request.metadata.get("locale", "en") if request.metadata else "en"
@@ -1522,6 +1528,7 @@ async def recall_context(
                 max_chars=token_budget * CHARS_PER_TOKEN - trailing_reserve,
                 person_entity_type=recall_vocab.person_entity_type,
                 conduct_types=type_runtime.conduct_types,
+                max_rows=flat_cap,
             )
             # Contract commitment E — truncation must be visible.
             coverage = build_coverage_line(rendered_count, scoped_total)
