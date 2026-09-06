@@ -26,6 +26,10 @@ from __future__ import annotations
 
 import ast
 import json
+
+from contextquilt.services.people_identity import (
+    describes_target as _real_describes_target,
+)
 import sys
 import textwrap
 import uuid as uuid_module
@@ -139,17 +143,25 @@ def _build(known_projects: dict[str, str]):
             return "INSERT 0 1"
 
     async def _created(user_id, app_id, patch_id, patch_type, *,
-                       created, connections, warnings=None):
+                       created, connections, warnings=None, superseded=None):
         cap.warnings = list(warnings or [])
+        cap.superseded = list(superseded or [])
         return {
             "status": "created" if created else "exists",
             "patch_id": patch_id,
             "type": patch_type,
             "warnings": cap.warnings,
+            "superseded_patch_ids": cap.superseded,
         }
 
     async def _existing(client_id, subject_key):
         return None
+
+    async def _no_role_vocab(app_id):
+        """A vocabulary declaring no stated-role type, so create_patch
+        supersedes nothing. These tests are about project scope; the
+        supersession path has its own file."""
+        return SimpleNamespace(stated_role_type=None)
 
     class _Redis:
         async def xadd(self, key, fields):
@@ -181,6 +193,16 @@ def _build(known_projects: dict[str, str]):
         # falsify an assumption you wrote into it; the cheapest way out is
         # not to write one.
         "_valid_calendar_day": _real_valid_calendar_day(),
+        # The REAL supersession helpers, on the same argument as the
+        # validator above: a stub would let this file agree with a rule
+        # that is not the shipped one. `describes_target` decides whether
+        # a write supersedes anything at all, and the vocab accessor
+        # decides whether the type is the app's stated-role type. The
+        # default vocab here declares none, so no test below supersedes,
+        # which is correct: these tests are about project scope.
+        "describes_target": _real_describes_target,
+        "SUPERSEDE_PRIOR_STATED_ROLE_SQL": "SELECT 1",
+        "_people_vocab_cached": _no_role_vocab,
         # The signature carries `app_id: str = Depends(verify_application_access)`.
         # This calls the function directly rather than through FastAPI, so
         # both names only have to EXIST for the def to evaluate; `app_id`
