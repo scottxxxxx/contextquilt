@@ -977,3 +977,150 @@ def stated_roles_payload(rows: Sequence[Mapping[str, Any]], names: Sequence[str]
             source = {"patch_id": it["patch_id"], "origin_id": it["origin_id"], "stated_at": it["stated_at"]}
             break
     return {"title": title, "title_source": source, "items": items}
+
+
+# The precedence rule, on the RECALL side.
+#
+# `title` beating `description` shipped on the person DETAIL route and
+# nowhere else. The recall block kept rendering `entities.description`
+# verbatim, so a title a user stated would show on their page while
+# every AI surface went on repeating what a meeting inferred. SS put it
+# plainly when they designed the correction (2026-09-06): a title the
+# user typed and the memory contradicting it is worse than not offering
+# the feature at all, and they declined to ship their half against a
+# block that would contradict it. Scott authorised the hot-path spend
+# after it was measured, not estimated.
+#
+# The title REPLACES the description in the block rather than joining
+# it. Serving both is the contradiction, not a compromise: the model
+# would read "VP of HR" and "HR representative handling terminations"
+# in one parenthesis and blend them. Nothing is lost, because the
+# description series is still served in full as `described_as` on the
+# detail route, which is where a human can see how the reading changed.
+#
+# Same matching as the detail's `stated_roles` query and the same strip,
+# deliberately: the two surfaces disagreeing is the entire defect being
+# fixed, so a second rule here would just move it.
+# BOTH matching legs, because the detail route has both and a title
+# that resolves on one surface and not the other IS the defect. The
+# first cut of this query carried only the name-prefix leg, which would
+# have missed exactly the entity-id-bound shape SS chose (a role phrase
+# that deliberately does NOT begin with the person's name, reaching the
+# person through a `describes` edge). It would have shown the title on
+# the page and not in the block, reproducing the bug inside its own fix.
+STATED_TITLE_SQL = """
+SELECT DISTINCT ON (lower(m.nm))
+       m.nm AS matched_name,
+       cp.value->>'text' AS text
+FROM unnest($2::text[]) AS m(nm)
+JOIN patch_subjects ps ON ps.subject_key = $1
+JOIN context_patches cp ON cp.patch_id = ps.patch_id
+LEFT JOIN patch_connections pc
+       ON pc.from_patch_id = cp.patch_id
+      AND pc.connection_label = 'describes'
+      AND COALESCE(pc.status, 'active') = 'active'
+LEFT JOIN context_patches person_p ON person_p.patch_id = pc.to_patch_id
+WHERE cp.patch_type = $3
+  AND COALESCE(cp.status, 'active') = 'active'
+  AND (
+        lower(cp.value->>'text') LIKE lower(m.nm) || '%'
+     OR lower(person_p.value->>'text') = lower(m.nm)
+  )
+ORDER BY lower(m.nm), cp.created_at DESC
+"""
+
+
+def apply_stated_titles(
+    entity_rows: Sequence[Any],
+    title_rows: Sequence[Any],
+    person_entity_type: str = "person",
+) -> List[Dict[str, Any]]:
+    """Replace a person's inferred description with their stated title.
+
+    `title_rows` carry `matched_name` and the raw role `text`. Rows are
+    returned as dicts because asyncpg Records are immutable and the
+    formatter already accepts either.
+
+    Only PEOPLE are touched: an org or a project has no stated role and
+    a name collision must not rewrite one. A person with no stated role
+    keeps their description unchanged, which is every person today.
+    """
+    if not entity_rows:
+        return list(entity_rows or [])
+
+    by_name: Dict[str, str] = {}
+    for row in title_rows or ():
+        name = row["matched_name"] if not hasattr(row, "get") else row.get("matched_name")
+        text = row["text"] if not hasattr(row, "get") else row.get("text")
+        if not name or not text:
+            continue
+        by_name[str(name).strip().lower()] = str(text)
+
+    out: List[Dict[str, Any]] = []
+    for row in entity_rows:
+        item = dict(row)
+        if item.get("entity_type") == person_entity_type:
+            raw = by_name.get(str(item.get("name") or "").strip().lower())
+            if raw:
+                title = title_from_stated_role(raw, [item.get("name") or ""])
+                if title:
+                    item["description"] = title
+                    item["title_stated"] = True
+        out.append(item)
+    return out
+
+
+# One user-stated title at a time, superseded at write time.
+#
+# SS asked which side owns this (2026-09-06) and the answer is CQ's,
+# because their side would need a read-modify-write over three hops
+# through the gateway and a partial failure leaves either two live
+# titles or none. CQ already owns supersession for corrections.
+#
+# THE LOAD-BEARING RULE IS THE `origin_mode = 'declared'` PREDICATE, not
+# the placement: only a prior USER-STATED role is archived, NEVER an
+# extracted one. A role a meeting recorded is an observation, and a user
+# stating their own title today is not grounds to delete what was
+# observed last month. So `stated_roles.items` ends as the user's
+# current statement plus the observation history, which is what a
+# history screen wants and what doc 16 5.13 requires: shortening a list
+# by destroying receipts is the thing that document mostly forbids.
+SUPERSEDE_PRIOR_STATED_ROLE_SQL = """
+UPDATE context_patches
+   SET status = 'archived',
+       updated_at = NOW(),
+       value = jsonb_set(
+                 jsonb_set(value, '{archive_cause}', '"replaced"'),
+                 '{replaced_by}', to_jsonb($1::text))
+ WHERE patch_id IN (
+     SELECT cp.patch_id
+     FROM context_patches cp
+     JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+     JOIN patch_connections pc
+       ON pc.from_patch_id = cp.patch_id
+      AND pc.connection_label = 'describes'
+      AND COALESCE(pc.status, 'active') = 'active'
+     WHERE ps.subject_key = $2
+       AND cp.patch_type = $3
+       AND COALESCE(cp.status, 'active') = 'active'
+       AND cp.origin_mode = 'declared'
+       AND cp.patch_id <> $1::uuid
+       AND pc.to_patch_id = $4::uuid
+ )
+RETURNING patch_id
+"""
+
+
+def describes_target(connections: Sequence[Any]) -> Optional[str]:
+    """The person patch a just-written role points at, or None.
+
+    Takes the connections the route actually WROTE, not the ones it was
+    asked for, so a target that failed its ownership check cannot
+    trigger a supersession against somebody else's person.
+    """
+    for conn in connections or ():
+        label = conn.get("label") if isinstance(conn, dict) else getattr(conn, "label", None)
+        target = conn.get("to") if isinstance(conn, dict) else getattr(conn, "to", None)
+        if label == "describes" and target:
+            return str(target)
+    return None

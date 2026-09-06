@@ -98,7 +98,11 @@ from contextquilt.services import project_roster
 from contextquilt.services.entity_aliasing import person_candidates, tokenize_name
 from contextquilt.services.people_identity import (
     IdentityRequestError,
+    STATED_TITLE_SQL,
+    SUPERSEDE_PRIOR_STATED_ROLE_SQL,
+    apply_stated_titles,
     candidate_payload,
+    describes_target,
     owner_names_multiple,
     owner_is_placeholder,
     owned_by_self_verdict,
@@ -1080,6 +1084,36 @@ async def recall_context(
                 # lookup's own answer stands, and the miss is audible.
                 logger.warning("bare_name_disambiguation_failed",
                                user_id=user_id, terms=terms, error=str(exc)[:160])
+
+        # PRECEDENCE, on the read side: a role the person STATED beats
+        # the description a meeting INFERRED. This shipped on the person
+        # detail route and nowhere else, so a stated title showed on the
+        # page while the block kept repeating the inference to every AI
+        # surface. Runs AFTER disambiguation deliberately: the title
+        # belongs to whichever person that resolved to, and doing it
+        # first would title a namesake who then left the header.
+        #
+        # Measured on real data, and re-measured after the query grew
+        # its second matching leg: 7ms median at the 1 to 4 matched
+        # names a real header carries, 12ms at a pathological 12. Fails
+        # open, because a header carrying yesterday's description is a
+        # worse block and a broken recall is no block at all.
+        if entity_rows and recall_vocab.stated_role_type:
+            try:
+                title_rows = await db_pool.fetch(
+                    STATED_TITLE_SQL,
+                    f"user:{user_id}",
+                    [r["name"] for r in entity_rows if r["name"]],
+                    recall_vocab.stated_role_type,
+                )
+                if title_rows:
+                    entity_rows = apply_stated_titles(
+                        entity_rows, title_rows,
+                        person_entity_type=recall_vocab.person_entity_type,
+                    )
+            except Exception as exc:
+                logger.warning("stated_title_lookup_failed",
+                               user_id=user_id, error=str(exc)[:160])
 
         if entity_rows:
             entity_ids = [row["entity_id"] for row in entity_rows]
@@ -3932,6 +3966,7 @@ async def _existing_client_id_patch(client_id: str, subject_key: str):
 async def _created_patch_response(
     user_id: str, app_id: str, patch_id: str, patch_type: str,
     *, created: bool, connections: list, warnings: list | None = None,
+    superseded: list | None = None,
 ):
     """The create echo, rendered by the READ route rather than beside it.
 
@@ -3966,6 +4001,12 @@ async def _created_patch_response(
         # Present and empty when nothing was dropped, so a caller can
         # test the key rather than its absence.
         "warnings": list(warnings or []),
+        # Which prior USER-STATED rows this write archived. Same
+        # convention: present and empty when none, so a client tests the
+        # key. A 200 says the write was processed, never that it did
+        # what the caller meant, and "did my old title actually go away"
+        # is exactly the question a correction UI has to answer.
+        "superseded_patch_ids": list(superseded or []),
     }
     try:
         since = (datetime.utcnow() - timedelta(seconds=5)).isoformat()
@@ -4215,6 +4256,40 @@ async def create_patch(
                 "to": conn.target_patch_id, "role": conn.role, "label": conn.label
             })
 
+    # ONE user-stated title at a time. A user correcting a title twice
+    # should not leave two live roles racing on created_at, and
+    # `stated_roles.items` accumulating every attempt turns the receipt
+    # into a pile. CQ owns this rather than the client, because the
+    # client's version is a read-modify-write over three hops whose
+    # partial failure leaves two live titles or none.
+    #
+    # ONLY a prior DECLARED role is archived, never an extracted one:
+    # a role a meeting recorded is an observation, and a user stating
+    # their title today is not grounds to delete what was observed last
+    # month. The predicate is in the SQL and it is the load-bearing part.
+    superseded: list = []
+    person_patch_id = describes_target(created_connections)
+    if person_patch_id:
+        try:
+            vocab = await _people_vocab_cached(app_id)
+            if vocab.stated_role_type and patch.type == vocab.stated_role_type:
+                rows = await db_pool.fetch(
+                    SUPERSEDE_PRIOR_STATED_ROLE_SQL,
+                    patch_id, subject_key, patch.type, person_patch_id,
+                )
+                superseded = [str(r["patch_id"]) for r in rows]
+                if superseded:
+                    logger.info("stated_role_superseded", user_id=user_id,
+                                patch_id=patch_id, person_patch_id=person_patch_id,
+                                superseded=superseded)
+        except Exception as exc:
+            # The new title is already written and is the newest, so it
+            # wins on created_at regardless. A failure here leaves an
+            # extra row in `items`, which is untidy and not wrong.
+            logger.warning("stated_role_supersede_failed",
+                           user_id=user_id, patch_id=patch_id,
+                           error=str(exc)[:160])
+
     # Trigger cache refresh
     stream_key = "memory_updates"
     payload = {"type": "hydrate", "user_id": user_id, "timestamp": now.isoformat()}
@@ -4228,6 +4303,7 @@ async def create_patch(
         user_id, app_id, patch_id, patch.type,
         created=True, connections=created_connections,
         warnings=[w for w in (deadline_warning, project_warning) if w],
+        superseded=superseded,
     )
 
 
