@@ -140,3 +140,18 @@ BARE_NAME_CANDIDATES_SQL = """
       AND e.merged_into IS NULL AND e.suppressed_at IS NULL
     ORDER BY e.entity_id
 """
+
+
+def owner_tokens(matched_names: Sequence[str]) -> List[str]:
+    """Lowercased forms a conduct row's owner may take for these people:
+    each matched name whole, and its first token, so "Steven" in the
+    query reaches a row owned by "Steven Williams" and the reverse."""
+    out: List[str] = []
+    for n in matched_names or ():
+        t = (n or "").strip().lower()
+        if not t:
+            continue
+        for form in (t, t.split(" ")[0]):
+            if form and form not in out:
+                out.append(form)
+    return out

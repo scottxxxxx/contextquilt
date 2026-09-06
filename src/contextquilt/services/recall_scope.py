@@ -169,6 +169,65 @@ def build_flat_fetch(
     return f"{origins_cte(col, '$1', '$2', include_assignments)}{first} UNION ALL {second}", args
 
 
+# The conduct guarantee. $1 subject, $2 project value, $3 universal types,
+# $4 age window, $5 owner tokens (lowercased full names AND first tokens),
+# $6 conduct types, $7 limit.
+#
+# Measured 2026-09-06 on the A/B: the user has 35 conduct rows about one
+# person across six meetings, and the block rendered ONE, the shallowest,
+# because the flat leg takes the newest 20 patches and everything richer
+# was older than the last two meetings. The more history you have with
+# somebody, the less of them the capsule sees. This leg puts a named
+# person's conduct into the candidate set regardless of that window, the
+# way the overdue guarantee does for completables; the scorer still
+# decides what renders.
+CONDUCT_BY_OWNER_SQL_TMPL = """
+    SELECT cp.patch_id, cp.value, cp.patch_type, cp.source_prompt,
+           cp.created_at, cp.last_observed_at
+    FROM context_patches cp
+    JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+    WHERE ps.subject_key = $1
+      AND cp.patch_type = ANY($6::text[])
+      AND COALESCE(cp.status, 'active') = 'active'
+      AND (lower(cp.value->>'owner') = ANY($5::text[])
+           OR lower(split_part(cp.value->>'owner', ' ', 1)) = ANY($5::text[]))
+      {AGE}
+      AND {SCOPE}
+    ORDER BY cp.created_at DESC, cp.patch_id ASC
+    LIMIT $7
+"""
+
+
+def build_conduct_fetch(
+    subject_key: str,
+    conduct_types,
+    owner_tokens: List[str],
+    universal_types: List[str],
+    max_age_days: Optional[int],
+    age_sql: str,
+    recall_project_id: Optional[str] = None,
+    recall_project: Optional[str] = None,
+    include_assignments: bool = False,
+    limit: int = 12,
+) -> Tuple[str, list]:
+    """(sql, args) for a named person's conduct, outside the recency window.
+
+    Project-scoped recalls only, the same restriction the overdue
+    guarantee carries: without a project there is no scope to admit
+    against and every colleague's conduct would arrive at once.
+    """
+    col, scope_val = _scope_col(recall_project_id, recall_project)
+    sql = (
+        origins_cte(col, "$1", "$2", include_assignments)
+        + CONDUCT_BY_OWNER_SQL_TMPL
+        .replace("{AGE}", age_sql)
+        .replace("{SCOPE}", project_scope_clause(col, "$2", "$3"))
+    )
+    args = [subject_key, scope_val, universal_types, max_age_days,
+            [t.lower() for t in owner_tokens], list(conduct_types), limit]
+    return sql, args
+
+
 def build_scoped_count(
     subject_key: str,
     universal_types: List[str],
