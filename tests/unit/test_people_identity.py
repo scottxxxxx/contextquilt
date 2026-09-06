@@ -513,3 +513,79 @@ def test_vocabulary_stated_role_type_floor_and_explicit_null():
     # An explicit null is "we do not track stated roles", not the floor.
     assert people_vocabulary({"people": {"person_type": "person", "stated_role_type": None}}).stated_role_type is None
     assert people_vocabulary({"people": {"person_type": "contact", "stated_role_type": "position"}}).stated_role_type == "position"
+
+
+# --- the leading article, and the second copy of the strip -------------
+#
+# 2026-09-06. SS designed a "this isn't right" correction so a user could
+# state a title that outranks inference, and found this on the FIRST
+# example they tried: "Sarah Brooks is the VP of HR at Acme" served "the
+# VP of HR at Acme", which reads wrong in the one place `title` is
+# rendered, under the person's name. They are ALSO constraining their
+# input field. Both, deliberately: their field stops a user typing a
+# sentence where a phrase belongs, this stops a paste or text from a
+# surface they did not write, and neither team can see the other's
+# inputs.
+
+def test_a_leading_article_does_not_survive_the_strip():
+    from contextquilt.services.people_identity import title_from_stated_role
+    names = ["Sarah Brooks"]
+    assert title_from_stated_role(
+        "Sarah Brooks is the VP of HR at Acme", names) == "VP of HR at Acme"
+    assert title_from_stated_role(
+        "Sarah Brooks, the VP of HR", names) == "VP of HR"
+    assert title_from_stated_role("the VP of HR", names) == "VP of HR"
+    assert title_from_stated_role("An engineer", names) == "engineer"
+
+
+def test_a_trailing_qualifier_is_deliberately_kept():
+    """"scrum master on ABM project" is the documented behavior and the
+    qualifier is information the user chose to state. Only the article
+    goes."""
+    from contextquilt.services.people_identity import title_from_stated_role
+    assert title_from_stated_role(
+        "Suresh is scrum master on ABM project", ["Suresh"]
+    ) == "scrum master on ABM project"
+
+
+def test_a_bare_article_is_no_title_at_all():
+    """From a truncated statement. Serving "the" under somebody's name
+    is worse than serving nothing."""
+    from contextquilt.services.people_identity import title_from_stated_role
+    assert title_from_stated_role("Sarah Brooks is the", ["Sarah Brooks"]) is None
+    assert title_from_stated_role("The", ["Sarah Brooks"]) is None
+
+
+def test_the_strip_still_never_invents_words():
+    """The standing invariant: output is a substring of the input."""
+    from contextquilt.services.people_identity import title_from_stated_role
+    for text in ["Sarah Brooks is the VP of HR at Acme", "the VP of HR",
+                 "Suresh is scrum master on ABM project", "VP of HR"]:
+        out = title_from_stated_role(text, ["Sarah Brooks", "Suresh"])
+        assert out is None or out in text, (text, out)
+
+
+def test_who_they_are_uses_this_strip_rather_than_its_own_copy():
+    """The phrase `stated_role_dropped` demands the summary contain word
+    for word MUST equal the title the client shows, or the model is sent
+    chasing a string the reader never sees. It was a second copy, and the
+    two had already drifted."""
+    import pathlib
+    from contextquilt.services.people_identity import title_from_stated_role
+    from contextquilt.services.who_they_are import title_phrase
+
+    for text, person in [
+        ("Sarah Brooks is the VP of HR at Acme", "Sarah Brooks"),
+        ("Suresh is scrum master on ABM project", "Suresh Kumar"),
+        ("Sarah Brooks, the VP of HR", "Sarah Brooks"),
+        ("VP of HR", "Sarah Brooks"),
+        ("Sarah Brooks is the", "Sarah Brooks"),
+    ]:
+        served = title_from_stated_role(text, [person, person.split(" ")[0]])
+        assert title_phrase(text, person) == (served or ""), text
+
+    # and the copy must not come back
+    src = pathlib.Path("src/contextquilt/services/who_they_are.py").read_text()
+    assert "title_from_stated_role" in src
+    assert "_ROLE_LEADS" not in src, (
+        "who_they_are re-grew its own copy of the role-lead list")
