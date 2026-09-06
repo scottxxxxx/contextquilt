@@ -140,6 +140,14 @@ async def test_a_missing_table_or_a_failed_probe_reads_as_absent():
     reset_probe()
 
 
-def test_recall_probes_once_and_passes_the_answer_to_all_three_legs():
+def test_recall_probes_once_and_every_scoped_leg_gets_the_answer():
+    """Four legs read the project scope rule: the flat fetch, the coverage
+    count, the cue leg, and the conduct guarantee. A new leg that resolves
+    a meeting through this table must be added here deliberately, which is
+    what this count is for; it caught the conduct leg on 2026-09-06."""
     assert "include_assignments = await origin_project.assignments_available(db_pool.fetch)" in MAIN
-    assert MAIN.count("include_assignments=include_assignments,") == 3
+    assert MAIN.count("include_assignments=include_assignments,") == 4
+    for builder in ("build_flat_fetch(", "build_scoped_count(", "build_cue_fetch(",
+                    "build_conduct_fetch("):
+        i = MAIN.index(builder)
+        assert "include_assignments=include_assignments," in MAIN[i:i + 600], builder

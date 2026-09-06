@@ -120,10 +120,13 @@ from contextquilt.services.people_identity import (
     stated_roles_payload,
 )
 from contextquilt.services.cue_matching import build_cue_fetch, match_cues
-from contextquilt.services.recall_scope import build_flat_fetch, build_scoped_count
+from contextquilt.services.recall_scope import (
+    build_conduct_fetch, build_flat_fetch, build_scoped_count,
+)
 from contextquilt.services import origin_project
 from contextquilt.services.entity_match import (
     BARE_NAME_CANDIDATES_SQL, bare_terms, disambiguate_bare_names, match_entity_names,
+    owner_tokens,
 )
 from contextquilt.services.recall_signals import (
     build_coverage_line,
@@ -1279,6 +1282,29 @@ async def recall_context(
             universal_types, max_age_days
         )
 
+    # Conduct guarantee: a named person's conduct reaches the candidate
+    # set even when it is older than the latest-20 window. Measured on
+    # 2026-09-06: one person had 35 conduct rows across six meetings and
+    # the block rendered the shallowest one, because everything richer
+    # predated the two most recent meetings. Bounded, project-scoped, and
+    # it only ADDS candidates; the scorer and the flat cap still decide
+    # what renders, and conduct ranks below the person's own rules.
+    conduct_rows: list = []
+    if type_runtime.conduct_types and matched_names and has_project_scope:
+        try:
+            conduct_sql, conduct_args = build_conduct_fetch(
+                subject_key, type_runtime.conduct_types,
+                owner_tokens(matched_names), universal_types, max_age_days,
+                AGE.format(d="$4", u="$3"),
+                recall_project_id=recall_project_id, recall_project=recall_project,
+                include_assignments=include_assignments,
+            )
+            conduct_rows = await db_pool.fetch(conduct_sql, *conduct_args)
+        except Exception as exc:
+            # The block is still served without it, exactly as before.
+            logger.warning("conduct_guarantee_failed", user_id=user_id,
+                           error=str(exc)[:160])
+
     # Cue fetch leg: patches indexed under a matched cue surface directly,
     # outside the latest-20 window — this is the associative-recall path
     # ("the pricing model" pulls the pricing commitments even when no
@@ -1302,7 +1328,7 @@ async def recall_context(
     # Merge flat rows + connected + overdue + cue-matched, deduplicate by value text
     all_patches = list(fact_rows)
     seen_texts = {(row["value"] if isinstance(row["value"], str) else json.dumps(row["value"])) for row in fact_rows}
-    for row in list(connected_rows) + list(overdue_rows) + list(cue_rows):
+    for row in list(connected_rows) + list(overdue_rows) + list(conduct_rows) + list(cue_rows):
         key = row["value"] if isinstance(row["value"], str) else json.dumps(row["value"])
         if key not in seen_texts:
             all_patches.append(row)

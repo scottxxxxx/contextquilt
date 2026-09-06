@@ -287,3 +287,59 @@ def test_a_capsule_does_not_repeat_the_same_clause():
     head = out.split("\n")[0]
     assert a in head and c in head and b not in head
     assert f"[moment] {b} [owner: Steven Williams]" in out and n == 1
+
+
+# ----------------------------------------------------------------------
+# The conduct guarantee: history reaches the capsule (2026-09-06 A/B)
+# ----------------------------------------------------------------------
+
+from contextquilt.services.entity_match import owner_tokens  # noqa: E402
+from contextquilt.services.recall_scope import build_conduct_fetch  # noqa: E402
+
+AGE_SQL = "AND ($4::int IS NULL OR cp.patch_type = ANY($3::text[]))"
+
+
+def test_owner_tokens_carry_both_the_full_name_and_the_first_token():
+    assert owner_tokens(["Steven Williams"]) == ["steven williams", "steven"]
+    assert owner_tokens(["Raj"]) == ["raj"]
+    assert owner_tokens(["", None, " Dana Whitfield "]) == ["dana whitfield", "dana"]
+
+
+def test_the_leg_matches_an_owner_by_whole_name_or_first_token():
+    sql, args = build_conduct_fetch(
+        "user:u", frozenset({"moment"}), ["steven williams", "steven"],
+        ["trait"], None, AGE_SQL, recall_project_id="P")
+    assert "lower(cp.value->>'owner') = ANY($5::text[])" in sql
+    assert "lower(split_part(cp.value->>'owner', ' ', 1)) = ANY($5::text[])" in sql
+    assert args[4] == ["steven williams", "steven"]
+    assert args[5] == ["moment"] and args[6] == 12
+
+
+def test_the_leg_is_bounded_and_carries_the_age_window_and_the_scope_rule():
+    sql, args = build_conduct_fetch(
+        "user:u", frozenset({"moment"}), ["steven"], ["trait"], 30, AGE_SQL,
+        recall_project_id="P", limit=6)
+    assert AGE_SQL in sql                      # a tier window still bounds it
+    assert "LIMIT $7" in sql and args[6] == 6  # bounded
+    assert sql.startswith("WITH origins AS MATERIALIZED")   # same scope rule
+    assert "held AS (" in sql
+    assert args[3] == 30
+
+
+def test_the_leg_has_no_recency_window_because_that_is_the_defect():
+    """The flat leg's newest-20 is exactly what hid 34 of 35 conduct rows."""
+    sql, _ = build_conduct_fetch("user:u", frozenset({"moment"}), ["steven"],
+                                 ["trait"], None, AGE_SQL, recall_project_id="P")
+    body = sql[sql.index("SELECT cp.patch_id"):]
+    assert body.count("LIMIT") == 1            # only the explicit bound
+    assert "UNION ALL" not in body             # not the two-window flat leg
+
+
+def test_recall_runs_it_only_with_a_project_and_a_matched_person_and_fails_open():
+    i = MAIN.index("# Conduct guarantee:")
+    block = MAIN[i:i + 1400]
+    assert "if type_runtime.conduct_types and matched_names and has_project_scope:" in block
+    assert "owner_tokens(matched_names)" in block
+    assert 'logger.warning("conduct_guarantee_failed"' in block
+    # It only ADDS candidates; the merge dedupes and the scorer ranks.
+    assert "list(overdue_rows) + list(conduct_rows) + list(cue_rows)" in MAIN
