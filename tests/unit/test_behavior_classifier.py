@@ -317,3 +317,13 @@ def test_the_backfill_archives_a_routine_drop_under_its_own_detail():
     script = pathlib.Path("scripts/backfill_behavior_classify.py").read_text()
     assert 'f"classified_{verdicts[pid]}"' in script
     assert "verdicts.get(pid) not in bc.CONVERTIBLE_TYPES" in script
+
+
+def test_the_backfill_can_be_scoped_to_one_meeting():
+    """Re-judging one ingest is a different job from re-judging a corpus,
+    and it must not require judging 400 rows to reach seven."""
+    script = pathlib.Path("scripts/backfill_behavior_classify.py").read_text()
+    assert '"--origin"' in script
+    assert "AND cp.origin_id ILIKE $" in script
+    # The verdict file still exists, so an apply replays what was read.
+    assert '"--out"' in script and 'dest="from_file"' in script

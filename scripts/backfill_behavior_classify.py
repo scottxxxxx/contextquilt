@@ -109,6 +109,7 @@ async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--apply", action="store_true")
     ap.add_argument("--user", help="restrict to one user_id")
+    ap.add_argument("--origin", help="restrict to one meeting (origin_id, or its prefix)")
     ap.add_argument("--sample", type=int, default=0, help="judge N random rows")
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--out", default="/tmp/behavior_classify_verdicts.json")
@@ -126,11 +127,22 @@ async def main() -> int:
     if args.user:
         params.append(f"user:{args.user}")
         sql += f"       AND ps.subject_key = ${len(params)}\n"
+    if args.origin:
+        # One meeting, for re-judging a specific ingest rather than a
+        # corpus. Prefix match because an origin is referred to by its
+        # first eight characters everywhere a human reads one.
+        params.append(f"{args.origin}%")
+        sql += f"       AND cp.origin_id ILIKE ${len(params)}\n"
     # Deterministic order so --seed reproduces one sample across runs
     # and across judges; without it two runs compare different rows.
     sql += "     ORDER BY cp.patch_id\n"
     rows = [dict(r) for r in await pool.fetch(sql, *params)]
-    print(f"{len(rows)} active {bc.KEEP_TYPE} rows")
+    scope = []
+    if args.user:
+        scope.append(f"user {args.user}")
+    if args.origin:
+        scope.append(f"origin {args.origin}")
+    print(f"{len(rows)} active {bc.KEEP_TYPE} rows" + (f" ({', '.join(scope)})" if scope else ""))
     if not rows:
         # NAMES ITSELF. This script matched zero rows for a day after the
         # `behavior` -> `moment` rename, because the type literal here was
