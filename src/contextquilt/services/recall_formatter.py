@@ -275,7 +275,8 @@ def format_flat_ranked_with_stats(
             names = []
             for p in people:
                 name = _name(p)
-                line = name if compact else _entity_name_with_desc(p)
+                line = (_name_with_stated_title(p) if compact
+                        else _entity_name_with_desc(p))
                 if capsules.get(name):
                     # " / " inside a capsule, because "; " already separates
                     # people on this line and the two read as one list.
@@ -369,6 +370,32 @@ def _same_person(owner: str, name: str) -> bool:
     if o == n:
         return True
     return o.split(" ")[0] == n.split(" ")[0]
+
+
+def _name_with_stated_title(row: Any) -> str:
+    """Compact header form: the name, plus a STATED title if there is
+    one, and nothing else.
+
+    The compact header exists to drop inferred descriptions when the
+    budget is small (below 1600 chars, which is GhostPour's 300-token
+    draft ask). It used to drop the stated title with them, because the
+    title rides in the same field. That is the wrong thing to lose
+    first: it is the user's own assertion about who somebody is, it is
+    about 20 characters, and the conduct capsule that survives on this
+    same line is nearer 120. The observation still drops here; only the
+    assertion is kept.
+    """
+    name = row["name"] if isinstance(row, dict) else row.get("name", "")
+    title = (row.get("stated_title") if hasattr(row, "get")
+             else row["stated_title"]) if _has(row, "stated_title") else None
+    return f"{name} ({title})" if title else name
+
+
+def _has(row: Any, key: str) -> bool:
+    try:
+        return row.get(key) is not None if hasattr(row, "get") else key in row
+    except Exception:
+        return False
 
 
 def _entity_name_with_desc(row: Any) -> str:

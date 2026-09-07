@@ -38,24 +38,62 @@ def _person(name, desc, etype="person"):
 
 # --- the read side -----------------------------------------------------
 
-def test_a_stated_title_replaces_the_inferred_description():
+def test_a_stated_title_leads_and_the_observation_follows_labelled():
     """SS's actual case. Sarah reads "HR representative handling
-    terminations and offboarding" and is VP of HR."""
+    terminations and offboarding" and is VP of HR.
+
+    This test asserted REPLACEMENT for about four hours on 2026-09-06 and
+    was wrong to. Updated to the new rule with the reason rather than
+    softened: stating a title adds what the user knows, it does not
+    assert the observation was false."""
     rows = [_person("Sarah Brooks", "HR representative handling terminations")]
     out = apply_stated_titles(
         rows, [{"matched_name": "Sarah Brooks",
                 "text": "Sarah Brooks is the VP of HR at Acme"}])
-    assert out[0]["description"] == "VP of HR at Acme"
+    assert out[0]["description"] == (
+        "VP of HR at Acme; also observed: HR representative handling terminations")
     assert out[0]["title_stated"] is True
 
 
-def test_the_title_replaces_rather_than_joins():
-    """Serving both IS the contradiction. The model would read "VP of
-    HR" and "HR representative" in one parenthesis and blend them."""
+def test_the_observation_is_never_deleted_by_a_title():
+    """The reversal, pinned. Scott, on seeing SS offer to "replace" an
+    observed role: "it doesn't necessarily undo all of the other
+    observations ... we shouldn't be trying to eliminate context."
+
+    Steven being a founder is compatible with him also being the person
+    who keeps picking up project management. The old rule generalised
+    from the one case where title and description CONFLICT to every
+    case, and built deletion into the wrong mechanism: CQ already has a
+    separate path, the description dismissal, for "this claim is
+    wrong"."""
     rows = [_person("Sarah Brooks", "HR representative handling terminations")]
     out = apply_stated_titles(
         rows, [{"matched_name": "Sarah Brooks", "text": "Sarah Brooks is VP of HR"}])
-    assert "HR representative" not in out[0]["description"]
+    assert "HR representative" in out[0]["description"]
+    assert out[0]["description"].startswith("VP of HR")
+
+
+def test_the_observation_is_labelled_as_an_inference():
+    """If blending was ever the risk, labelling is the fix and deletion
+    was not. A bare separator would read as one claim in two halves."""
+    rows = [_person("Sarah Brooks", "HR representative handling terminations")]
+    out = apply_stated_titles(
+        rows, [{"matched_name": "Sarah Brooks", "text": "Sarah Brooks is VP of HR"}])
+    assert "also observed:" in out[0]["description"]
+
+
+def test_no_dangling_label_when_there_is_nothing_observed():
+    rows = [_person("Nobody Yet", "")]
+    out = apply_stated_titles(
+        rows, [{"matched_name": "Nobody Yet", "text": "Nobody Yet is CTO"}])
+    assert out[0]["description"] == "CTO"
+
+
+def test_a_description_that_merely_restates_the_title_is_not_served_twice():
+    rows = [_person("Same Person", "VP of HR")]
+    out = apply_stated_titles(
+        rows, [{"matched_name": "Same Person", "text": "Same Person is VP of HR"}])
+    assert out[0]["description"] == "VP of HR"
 
 
 def test_a_person_with_no_stated_role_is_untouched():
@@ -86,7 +124,8 @@ def test_the_read_side_uses_the_same_strip_as_the_detail_route():
     raw = "Sarah Brooks is the VP of HR at Acme"
     out = apply_stated_titles([_person("Sarah Brooks", "old")],
                               [{"matched_name": "Sarah Brooks", "text": raw}])
-    assert out[0]["description"] == title_from_stated_role(raw, ["Sarah Brooks"])
+    assert out[0]["description"].startswith(
+        title_from_stated_role(raw, ["Sarah Brooks"]))
 
 
 def test_the_lookup_matches_on_BOTH_legs_the_detail_route_uses():
@@ -193,3 +232,77 @@ def test_the_archive_is_echoed_back_not_inferred():
     assert '"superseded_patch_ids"' in body
     create = MAIN.split("async def create_patch")[1].split("\n@app.")[0]
     assert "superseded=superseded" in create
+
+
+# --- the compact header, where the budget is smallest ------------------
+
+def test_the_compact_header_keeps_the_stated_title_and_drops_the_observation():
+    """Below 1600 chars the header drops inferred descriptions. It used
+    to drop the stated title with them, because the title rides in the
+    same field. That is the wrong thing to lose first: it is the user's
+    own assertion, it is about 20 characters, and the conduct capsule
+    that survives on this same line is nearer 120."""
+    from contextquilt.services.recall_formatter import _name_with_stated_title
+    row = {"name": "Sarah Brooks", "entity_type": "person",
+           "stated_title": "VP of HR at Acme",
+           "description": "VP of HR at Acme; also observed: HR representative"}
+    assert _name_with_stated_title(row) == "Sarah Brooks (VP of HR at Acme)"
+    # the observation does NOT ride along at this budget
+    assert "also observed" not in _name_with_stated_title(row)
+
+
+def test_the_compact_header_is_unchanged_for_a_person_with_no_stated_title():
+    """Which is everyone today. The compact header must stay names-only
+    until somebody states something."""
+    from contextquilt.services.recall_formatter import _name_with_stated_title
+    assert _name_with_stated_title(
+        {"name": "Steven Williams", "description": "business founder"}
+    ) == "Steven Williams"
+
+
+def test_the_bare_title_is_carried_for_the_compact_header():
+    """The formatter must not have to parse the joined string back
+    apart to find the assertion inside it."""
+    rows = [_person("Sarah Brooks", "HR representative handling terminations")]
+    out = apply_stated_titles(
+        rows, [{"matched_name": "Sarah Brooks",
+                "text": "Sarah Brooks is the VP of HR at Acme"}])
+    assert out[0]["stated_title"] == "VP of HR at Acme"
+    assert out[0]["description"].startswith("VP of HR at Acme; also observed:")
+
+
+def test_the_formatter_ACTUALLY_serves_the_stated_title_at_a_small_budget():
+    """EXECUTING sibling to the helper tests above, and it exists
+    because removing the wiring at the call site broke nothing.
+
+    The helper tests prove `_name_with_stated_title` works. They do NOT
+    prove the formatter calls it, and a sabotage that reverted the call
+    site to `line = name` passed the entire suite. That is the "the fix
+    landed on the call site somebody looked at" shape, caught here by
+    running the real formatter rather than reading it.
+    """
+    from contextquilt.services.recall_formatter import (
+        format_flat_ranked_with_stats,
+    )
+
+    entity_rows = [{
+        "entity_id": "e1", "name": "Sarah Brooks", "entity_type": "person",
+        "stated_title": "VP of HR at Acme",
+        "description": "VP of HR at Acme; also observed: HR representative",
+    }]
+    patches = [(50.0, {
+        "patch_id": "p1", "patch_type": "commitment",
+        "value": {"text": "Send the offer letter", "owner": "Scott"},
+    })]
+
+    # Small budget: the compact header fires.
+    small, _ = format_flat_ranked_with_stats(
+        patches, entity_rows, [], max_chars=800)
+    assert "Sarah Brooks (VP of HR at Acme)" in small, small
+    assert "also observed" not in small
+
+    # Large budget: the full header carries both.
+    big, _ = format_flat_ranked_with_stats(
+        patches, entity_rows, [], max_chars=4000)
+    assert "VP of HR at Acme" in big
+    assert "also observed" in big

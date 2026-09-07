@@ -991,12 +991,34 @@ def stated_roles_payload(rows: Sequence[Mapping[str, Any]], names: Sequence[str]
 # block that would contradict it. Scott authorised the hot-path spend
 # after it was measured, not estimated.
 #
-# The title REPLACES the description in the block rather than joining
-# it. Serving both is the contradiction, not a compromise: the model
-# would read "VP of HR" and "HR representative handling terminations"
-# in one parenthesis and blend them. Nothing is lost, because the
-# description series is still served in full as `described_as` on the
-# detail route, which is where a human can see how the reading changed.
+# THE TITLE JOINS THE DESCRIPTION. IT DOES NOT REPLACE IT.
+#
+# It replaced it for about four hours on 2026-09-06 and that was wrong.
+# My argument was "serving both IS the contradiction, the model would
+# read 'VP of HR' and 'HR representative handling terminations' in one
+# parenthesis and blend them". That holds only when the description is
+# WRONG, which is the single case it was designed against. Stating a
+# title never asserted the description was false. Steven Williams being
+# a founder and go-to-market lead is entirely compatible with him also
+# being the person who keeps picking up project management, and a block
+# that can no longer say the second thing is worse at its job, not more
+# accurate. Scott, on seeing SS's sheet offer to "replace" an observed
+# role: "it doesn't necessarily undo all of the other observations ...
+# we shouldn't be trying to eliminate context."
+#
+# The tell I missed: CQ ALREADY HAS A SEPARATE PATH for "this claim is
+# wrong", the description dismissal. Two mechanisms already existed for
+# two different user intentions, and I collapsed one into the other.
+# Stating a title ADDS what the user knows; dismissing REMOVES what they
+# reject. Only the second is allowed to take something away.
+#
+# If blending were ever a real risk, the fix is LABELLING which is
+# stated and which is observed, not deleting one. Hence `also observed:`.
+#
+# The loss was also silent, which is why it survived a whole build:
+# `described_as` still serves in full on the person detail, so nothing
+# looks missing to anyone reading the page. It only shows up in what the
+# model can no longer say.
 #
 # Same matching as the detail's `stated_roles` query and the same strip,
 # deliberately: the two surfaces disagreeing is the entire defect being
@@ -1028,6 +1050,20 @@ WHERE cp.patch_type = $3
   )
 ORDER BY lower(m.nm), cp.created_at DESC
 """
+
+
+# Marks the second clause as an INFERENCE rather than the user's own
+# assertion. The block is LLM facing, so the words are deliberately
+# plain English and deliberately not a bare separator: "VP of HR at
+# Acme; HR representative handling terminations" reads as one claim in
+# two halves, which is the blending this label exists to prevent.
+OBSERVED_LABEL = "also observed:"
+
+
+def _norm_desc(text: str) -> str:
+    """Loose compare, so a description that merely restates the title is
+    not served twice in one parenthesis."""
+    return " ".join((text or "").lower().split()).rstrip(".")
 
 
 def apply_stated_titles(
@@ -1064,8 +1100,26 @@ def apply_stated_titles(
             if raw:
                 title = title_from_stated_role(raw, [item.get("name") or ""])
                 if title:
-                    item["description"] = title
+                    observed = (item.get("description") or "").strip()
+                    # The title LEADS, because it is what the user
+                    # asserted. The observation follows, labelled, so the
+                    # model can tell an assertion from an inference
+                    # without either being deleted. `title_stated` lets a
+                    # caller find the join without parsing the string.
+                    item["description"] = (
+                        f"{title}; {OBSERVED_LABEL} {observed}"
+                        if observed and _norm_desc(observed) != _norm_desc(title)
+                        else title
+                    )
                     item["title_stated"] = True
+                    # The BARE title, kept separately so the compact
+                    # header can serve it without parsing the joined
+                    # string. At small budgets the header drops
+                    # descriptions; a user's own assertion is the last
+                    # thing that should go, not the first, and it is
+                    # about 20 characters against a conduct capsule's
+                    # 120 that already survives there.
+                    item["stated_title"] = title
         out.append(item)
     return out
 
