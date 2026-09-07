@@ -138,6 +138,47 @@ block without conduct. `full` was last or tied-last among the three
 memory arms in 7 of 9 cells, which is suggestive and is inside the noise
 band. Do not cite it as a finding.
 
+## Project chat or meeting chat?
+
+Scott asked this on 2026-09-06 and the answer was not in this document,
+which is the document failing at its own job on first use. Added here.
+
+**It was never decided as a chat-type question, and CQ cannot decide it,
+because CQ does not know which chat it is serving.** There is no
+`chat_type` or `prompt_mode` anywhere in CQ's source. GhostPour knows
+(their `recall_echo` line carries `prompt_mode=ProjectChat`) and sends a
+`token_budget`, but that is a size dial, not a type flag.
+
+**What was decided instead cuts across both chats: conduct is gated on
+QUESTION SHAPE, not chat type.** A conduct row scores 8 and is boosted
+by 100 only when its OWNER matches a person named in the question, never
+on a text hit (`recall_scorer._owner_matches`). For a person named in the
+question it renders in that person's capsule or not at all (#454). So
+asking about a person surfaces their conduct in either chat, and asking
+about the project surfaces obligations and decisions instead.
+
+**The scores measured both chats and settled no difference between
+them.** `moments_only` matched or beat `no_moment` on the meeting chat in
+all three runs (9/9/9 against 9/8/10); on the project chat it is a wash
+(8/9/8 against 9/7/9). Both gaps sit inside the 3-point rerun noise, so
+neither is evidence.
+
+**The one real-data answer came from the 2026-09-06 A/B, not the
+persona.** "How should I handle Steven going into our next call" is a
+PERSON question asked inside a PROJECT chat, and the conduct capsule
+supplied the framing that the memory-off arm lacked entirely. So conduct
+earned its place in a project chat, on the shape of the question rather
+than the type of the chat.
+
+**The strongest ruling is implicit in the formatter and worth making
+explicit here.** Below 1600 characters the header goes compact: it drops
+each person's inferred description and KEEPS the conduct capsule
+(`recall_formatter`, the `compact` branch). At the smallest budget
+GhostPour sends, 300 tokens on a draft intent, the block carries the
+capsule and not the description. That is a standing judgement that
+conduct is worth more per byte than an inferred description, in both
+chats.
+
 ## What actually justified the change
 
 Not a score. **The composition of the served block**, read directly:
