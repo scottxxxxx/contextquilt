@@ -130,6 +130,7 @@ from contextquilt.services.people_identity import (
 from contextquilt.services.cue_matching import build_cue_fetch, match_cues
 from contextquilt.services.recall_scope import (
     build_conduct_fetch, build_flat_fetch, build_scoped_count,
+    in_project_clause, origins_cte,
 )
 from contextquilt.services import origin_project
 from contextquilt.services.entity_match import (
@@ -7733,7 +7734,7 @@ async def undismiss_descriptions(
 # ---------------------------------------------------------------
 
 WOVEN_CANDIDATE_SQL = """
-    SELECT cp.patch_id, cp.patch_type, cp.value, cp.origin_id,
+    {CTE}SELECT cp.patch_id, cp.patch_type, cp.value, cp.origin_id,
            cp.created_at, cp.last_observed_at, cp.completed_at,
            cp.sensitivity, cp.project_id,
            (SELECT COUNT(*) FROM patch_connections pc
@@ -7825,14 +7826,39 @@ async def woven_digest(
     # with a 200 and nothing anywhere errors. Recall already takes both
     # for the same reason, so this is the house pattern rather than a
     # new one.
+    # SCOPED THE WAY RECALL SCOPES, which is the whole of tonight's fix.
+    #
+    # This leg was `AND cp.project_id = $3`, the stamp alone, and that is
+    # not what a project holds. A meeting-bound row carries its meeting
+    # and no project of its own (a `moment` is `project_scoped: false` by
+    # manifest design), so the stamp only ever matched rows some other
+    # path had stamped. Measured on prod 2026-09-07, Scott's "Twit"
+    # project: 39 active rows resolved the way recall resolves it, 3 by
+    # the stamp. The grid served 3 with `dropped={}`, so nothing was
+    # pruned: the candidate query simply never saw the other 36. Every
+    # project on that account was short, "Austin Bike Mechanics" by 184
+    # rows and "Emids" by all 7 it has.
+    #
+    # So this now uses the SAME two functions the recall legs and the
+    # coverage denominator use (services/recall_scope.py): the origins
+    # CTE resolves each meeting to a project once, and `in_project_clause`
+    # admits a row stamped with this project OR meeting-bound to a meeting
+    # this project holds. One rule, one place, so the grid and the "of M"
+    # denominator cannot drift apart again, which is exactly how this
+    # gap survived #436/#450, where recall was fixed and the grid was not.
     project_clause = ""
+    cte = ""
     args: list = [subject_key, days]
-    if project_id:
-        project_clause = "AND cp.project_id = $3"
-        args.append(project_id)
-    elif project:
-        project_clause = "AND cp.project = $3"
-        args.append(project)
+    scope_col = "project_id" if project_id else ("project" if project else None)
+    if scope_col:
+        args.append(project_id or project)
+        # The MCP deployment runs this image against its own Postgres and
+        # can lag migrations; a leg naming a missing table would 500 a
+        # browse surface. Probed, cached per process, degrades to the
+        # stamped-sibling resolution alone.
+        include_assignments = await origin_project.assignments_available(db_pool.fetch)
+        cte = origins_cte(scope_col, "$1", "$3", include_assignments)
+        project_clause = "AND " + in_project_clause(scope_col, "$3")
 
     # AND THE REAL FIX IS NOT THE SPELLING. "no such project" and "this
     # project had a quiet week" are the same observable when a filter
@@ -7843,14 +7869,27 @@ async def woven_digest(
     # than the window: a real project with a quiet week must still read
     # as quiet.
     project_known = None
-    if project_id or project:
-        col = "project_id" if project_id else "project"
+    if scope_col:
+        # RESOLVED THE SAME WAY THE CANDIDATES ARE, and it has to be.
+        # This check answers "does this user have such a project at all",
+        # and a project whose every row is meeting-bound has none carrying
+        # the stamp, so the narrow version called a real project unknown.
+        # `false` here means "wrong project" on the wire and the client
+        # says so, which is the worst available answer for a project that
+        # exists and holds memory: "Emids" holds 7 rows, 0 of them
+        # stamped, and would have been reported as not existing.
+        #
+        # Deliberately still checked against the WHOLE quilt rather than
+        # the window, unchanged: a real project with a quiet week must
+        # keep reading as quiet rather than as unknown.
         try:
+            known_cte = origins_cte(scope_col, "$1", "$2", include_assignments)
             project_known = bool(await db_pool.fetchval(
-                f"""
+                f"""{known_cte}
                 SELECT 1 FROM context_patches cp
                   JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
-                 WHERE ps.subject_key = $1 AND cp.{col} = $2
+                 WHERE ps.subject_key = $1
+                   AND {in_project_clause(scope_col, "$2")}
                  LIMIT 1
                 """,
                 subject_key, project_id or project,
@@ -7863,7 +7902,8 @@ async def woven_digest(
 
     try:
         rows = await db_pool.fetch(
-            WOVEN_CANDIDATE_SQL.replace("{PROJECT}", project_clause), *args)
+            WOVEN_CANDIDATE_SQL.replace("{CTE}", cte)
+                               .replace("{PROJECT}", project_clause), *args)
     except Exception as exc:
         logger.warning("woven_candidates_failed", user_id=user_id,
                        error=str(exc)[:200])
