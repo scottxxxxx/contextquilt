@@ -1085,7 +1085,17 @@ LEFT JOIN context_patches person_p ON person_p.patch_id = pc.to_patch_id
 WHERE cp.patch_type = $3
   AND COALESCE(cp.status, 'active') = 'active'
   AND (
-        lower(cp.value->>'text') LIKE lower(m.nm) || '%'
+        (
+          lower(cp.value->>'text') LIKE lower(m.nm) || '%'
+          -- WORD BOUNDARY, not a bare prefix. Without this an entity
+          -- named "Anna" matches a role about "Annapurna Patcharla",
+          -- which is live on Scott's account today. Same family as the
+          -- "RV matched from the word interview" substring bug #439
+          -- fixed in the entity index; this leg never got it. An exact
+          -- match leaves substr() empty, which is not alpha, so it
+          -- passes.
+          AND substr(lower(cp.value->>'text'), length(m.nm) + 1, 1) !~ '[[:alpha:]]'
+        )
      OR lower(person_p.value->>'text') = lower(m.nm)
   )
 ORDER BY lower(m.nm), cp.created_at DESC

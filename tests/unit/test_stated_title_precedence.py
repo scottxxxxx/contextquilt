@@ -375,3 +375,63 @@ def test_the_detail_route_selects_origin_mode_and_passes_it_through():
         "the stated_roles query must select origin_mode; without it the "
         "row build KeyErrors and every row would read as `meeting`")
     assert '"origin_mode": r["origin_mode"]' in body
+
+
+# --- the name must match at a WORD BOUNDARY ---------------------------
+#
+# The prefix leg was `LIKE lower(name) || '%'`, so a SHORT name matched
+# any LONGER different name starting with it. Live on Scott's account
+# 2026-09-06, found while measuring something else: an entity named
+# "Anna" was picking up a role about "Annapurna Patcharla", "Jay" one
+# about "Jayanth", "Guna" one about "Gunashekar". Six wrong rows across
+# 72 people whose name is a strict prefix of another person's.
+#
+# Same family as the "RV matched from the word interview" substring bug
+# that #439 fixed in the ENTITY INDEX. This leg never got that fix, and
+# I copied the unfixed predicate into the recall hot path earlier the
+# same evening, so the wrong title would have reached every AI surface
+# too.
+#
+# Verified against prod before shipping: 74 matches before, 68 after,
+# and the 6 dropped were exactly the wrong ones. Annapurna, Gunashekar
+# and Jayanth all keep their OWN roles.
+
+BOUNDARY = "!~ '[[:alpha:]]'"
+
+
+def test_the_recall_query_requires_a_word_boundary_after_the_name():
+    assert BOUNDARY in STATED_TITLE_SQL, (
+        "a bare prefix makes 'Anna' match a role about 'Annapurna'")
+    # pinned to the exact fragment, not a loose substring: a loose
+    # assertion is how the origin_mode guard passed while the column it
+    # guarded was deleted, earlier tonight.
+    assert ("substr(lower(cp.value->>'text'), length(m.nm) + 1, 1) "
+            + BOUNDARY) in STATED_TITLE_SQL
+
+
+def test_the_detail_route_requires_the_same_word_boundary():
+    """Both surfaces or neither. A title that resolves on the page and
+    not in the block, or the reverse, is the defect this whole feature
+    exists to remove."""
+    body = MAIN.split("async def get_person")[1].split("\n@app.")[0]
+    assert BOUNDARY in body
+    assert "length(k.nm) + 1, 1)" in body
+
+
+def test_an_exact_name_match_still_passes_the_boundary():
+    """substr() past the end of the string returns '', which is not
+    alpha, so an exact match is kept. Worth pinning because an
+    off-by-one here would silently drop every role whose text IS just
+    the person's name."""
+    # the rule, expressed in Python the way Postgres evaluates it
+    def passes(text, name):
+        nxt = text.lower()[len(name):len(name) + 1]
+        return text.lower().startswith(name.lower()) and not nxt.isalpha()
+
+    assert passes("Anna", "Anna")                      # exact
+    assert passes("Anna is the VP of HR", "Anna")       # boundary is a space
+    assert passes("Anna: VP of HR", "Anna")             # boundary is a colon
+    assert passes("Anna, VP of HR", "Anna")             # boundary is a comma
+    assert not passes("Annapurna Patcharla leads", "Anna")   # mid-word
+    assert not passes("Jayanth manages data", "Jay")         # mid-word
+    assert not passes("Srikanth: SDK versioning", "Srikant")  # mid-word
