@@ -7157,7 +7157,7 @@ async def get_person(
                 """
                 SELECT DISTINCT ON (cp.patch_id)
                        cp.patch_id, cp.value->>'text' AS text, cp.origin_id,
-                       cp.created_at, cp.project_id,
+                       cp.created_at, cp.project_id, cp.origin_mode,
                        COALESCE(pr.name, cp.project) AS project
                 FROM context_patches cp
                 JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
@@ -7186,6 +7186,7 @@ async def get_person(
                     "patch_id": r["patch_id"], "text": r["text"],
                     "project": r["project"], "project_id": r["project_id"],
                     "origin_id": r["origin_id"],
+                    "origin_mode": r["origin_mode"],
                     "stated_at": r["created_at"].isoformat() if r["created_at"] else None,
                 }
                 for r in role_rows
