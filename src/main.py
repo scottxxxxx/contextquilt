@@ -6704,6 +6704,30 @@ async def get_person(
             "items": [_done_item(r) for r in rows[:COMPLETED_HISTORY_CAP]],
         }
 
+    # WHICH FIELDS FAILED TO COMPUTE, named on the wire.
+    #
+    # Every fetch below is wrapped so serving never fails the whole
+    # route, which is right. What was missing is that the CLIENT could
+    # not tell a swallowed error from a design state: `stated_roles`
+    # null meant BOTH "this app does not track roles" and "the query
+    # blew up", and on 2026-09-06 it meant the second for nine minutes
+    # while SS's person page confidently rendered the older INFERRED
+    # description under the caption "Drawn from your meetings". A
+    # server-side error arriving as a plausible fact rather than as an
+    # absence, which is the failure family this route spends most of its
+    # length avoiding.
+    #
+    # `described_as` had the same shape before: null for everyone from
+    # #286 until 2026-08-21, and the fix then only raised the LOG level.
+    # A log tells CQ. It does not tell the phone.
+    #
+    # Present and EMPTY when everything computed, so a client tests the
+    # key rather than its absence. The insights handler below already
+    # states the principle for its own field ("a swallowed error is CQ
+    # not knowing, not CQ knowing there are none"); this generalises it
+    # to every field on the route.
+    degraded: list = []
+
     # Profile insights (16a): derived patches from the person-keyed
     # consolidation pass, keyed by value.source_person = this person's
     # patch id. Up to one card per lens in the CQ-side lens vocabulary.
@@ -6741,6 +6765,7 @@ async def get_person(
             )
         except Exception:
             readiness = None
+            degraded.append("readiness")
     # An entity is enough. A card keyed on the entity does not need the
     # person to hold a `person` patch at all, and gating on one would
     # hide it from exactly the thin people the lens can still speak
@@ -6943,6 +6968,7 @@ async def get_person(
             # a swallowed error is CQ not knowing, not CQ knowing there
             # are none. This is now the ONLY path that serves null.
             insights = None
+            degraded.append("insights")
 
     # How this person has been DESCRIBED over time, newest first. The
     # `changed_from` field is the indicator: non-null means the
@@ -6993,6 +7019,7 @@ async def get_person(
         ])
     except Exception as exc:
         logger.warning("described_as_series_unavailable", error=str(exc)[:140])
+        degraded.append("described_as")
 
     # IS THIS PERSON MID-RECONCILIATION, and say so rather than let the
     # client infer it from an absence.
@@ -7087,6 +7114,7 @@ async def get_person(
         # Null means CQ cannot tell. Claiming "never qualified" because
         # a query failed would be inventing the quietest possible lie.
         logger.warning("trajectory_status_unavailable", error=str(exc)[:140])
+        degraded.append("trajectory")
 
     reconciling = None
     try:
@@ -7137,6 +7165,7 @@ async def get_person(
         # Null means CQ cannot tell, which is honest. Claiming a person
         # is settled because a query failed is not.
         logger.warning("reconciling_state_unavailable", error=str(exc)[:140])
+        degraded.append("reconciling")
 
     # What this person has STATED they are, as opposed to what a meeting
     # showed them doing. A stated role ("Suresh is scrum master on ABM
@@ -7203,6 +7232,7 @@ async def get_person(
             ], role_names)
         except Exception as exc:
             logger.warning("stated_roles_unavailable", error=str(exc)[:140])
+            degraded.append("stated_roles")
 
     detail = _public_person(row)
     detail.update({
@@ -7219,6 +7249,13 @@ async def get_person(
         # role with the person's own name and copula stripped; a client
         # shows it under the name and keeps `description` as "last seen
         # doing". `stated_roles.items` are the receipts.
+        # Which of the fields above could not be COMPUTED, as opposed
+        # to computing to nothing. Present and empty on a healthy
+        # response, so a client tests the key rather than its absence.
+        # Without it a null is ambiguous between "this app does not
+        # track that" and "CQ fell over", and a client that assumes the
+        # first renders a stale inference as current fact.
+        "degraded": degraded,
         "stated_roles": stated_roles,
         "title": stated_roles["title"] if stated_roles else None,
         # The synthesis across stated roles and the description series,
