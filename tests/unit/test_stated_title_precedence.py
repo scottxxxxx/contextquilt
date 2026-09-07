@@ -435,3 +435,51 @@ def test_an_exact_name_match_still_passes_the_boundary():
     assert not passes("Annapurna Patcharla leads", "Anna")   # mid-word
     assert not passes("Jayanth manages data", "Jay")         # mid-word
     assert not passes("Srikanth: SDK versioning", "Srikant")  # mid-word
+
+
+# --- a failure must not arrive as a fact ------------------------------
+#
+# During the nine-minute outage I caused on 2026-09-06, `stated_roles`
+# was null because the query would not parse. SS's person page reads
+# `title` first and falls back to the observed description, so Steven's
+# page did not say "roles unavailable". It confidently rendered the
+# older INFERRED description under the caption "Drawn from your
+# meetings", which to a user is indistinguishable from the title they
+# set an hour earlier having been lost.
+#
+# Null carried two meanings: "this app does not track roles" and "CQ
+# fell over". SS's own model comment already assumed the first, so a
+# failure was silently read as a design state.
+
+def test_the_route_names_the_fields_that_failed_to_compute():
+    body = MAIN.split("async def get_person")[1].split("\n@app.")[0]
+    assert '"degraded": degraded' in body, (
+        "a client cannot tell a swallowed error from a design state "
+        "without this")
+
+
+def test_every_swallowed_fetch_names_itself():
+    """One append per handler that can degrade a served field. A
+    handler that swallows silently is the whole defect."""
+    body = MAIN.split("async def get_person")[1].split("\n@app.")[0]
+    for field in ("described_as", "trajectory", "reconciling",
+                  "stated_roles", "readiness", "insights"):
+        assert f'degraded.append("{field}")' in body, field
+
+
+def test_degraded_is_declared_before_every_use():
+    """An append before the declaration is a NameError inside an
+    `except` block, which would turn a degraded field into a 500 on the
+    whole route: strictly worse than the bug being fixed."""
+    lines = MAIN.split("\n")
+    body_start = MAIN[:MAIN.index("async def get_person")].count("\n")
+    decl = [i for i, l in enumerate(lines)
+            if "degraded: list = []" in l and i > body_start]
+    uses = [i for i, l in enumerate(lines)
+            if "degraded.append(" in l and i > body_start]
+    served = [i for i, l in enumerate(lines)
+              if '"degraded": degraded' in l and i > body_start]
+    assert decl and uses and served
+    assert all(u > decl[0] for u in uses)
+    assert all(served[0] > u for u in uses), (
+        "the payload must be built after the last handler can append")
