@@ -7172,13 +7172,24 @@ async def get_person(
                   AND cp.patch_type = $2
                   AND COALESCE(cp.status, 'active') = 'active'
                   AND (
-                        LOWER(cp.value->>'text') LIKE ANY($3::text[])
+                        EXISTS (
+                          -- WORD BOUNDARY on the name-prefix leg. A bare
+                          -- prefix made an entity named "Anna" pick up a
+                          -- role about "Annapurna Patcharla", and "Jay"
+                          -- one about "Jayanth". Six such rows were live
+                          -- on 2026-09-06 across 72 people whose name is
+                          -- a strict prefix of another person's.
+                          SELECT 1 FROM unnest($5::text[]) AS k(nm)
+                          WHERE LOWER(cp.value->>'text') LIKE k.nm || '%'
+                            AND substr(LOWER(cp.value->>'text'),
+                                       length(k.nm) + 1, 1) !~ '[[:alpha:]]'
+                        )
                      OR LOWER(person_p.value->>'text') = ANY($4::text[])
                   )
                 ORDER BY cp.patch_id, cp.created_at DESC
                 """,
                 subject_key, vocab.stated_role_type,
-                [k + "%" for k in keys], keys,
+                [k + "%" for k in keys], keys, keys,
             )
             role_rows = sorted(role_rows, key=lambda r: r["created_at"], reverse=True)
             stated_roles = stated_roles_payload([
