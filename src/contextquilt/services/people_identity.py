@@ -951,13 +951,51 @@ def title_from_stated_role(text: Optional[str], names: Sequence[str]) -> Optiona
     return _strip_leading_article(raw)
 
 
+# WHO said it. A role the USER assigned and a role the PERSON stated in
+# a meeting are different claims and were arriving in one undifferentiated
+# list, so SS rendered both under "WHAT THEY TOLD US". Scott, 2026-09-06,
+# seeing his own assignment under that header above a genuine meeting
+# quote: "Head of sales is not what they told us, it is what I assigned."
+#
+# That is a provenance error with the arrow reversed, in the feature
+# built to correct provenance errors.
+#
+# SS asked whether `origin_id` being null could stand in for this. It
+# cannot, and I refused to confirm it: it is a discriminator by ACCIDENT
+# rather than by contract. It happens to hold today because a declared
+# row has no meeting, and nothing guarantees a declared row reaching CQ
+# by some other path could not carry one. Then a header would silently
+# label an assignment as something the person said, which is the exact
+# defect. The fact already exists as `origin_mode`, which is what the
+# supersession rule turns on, so this publishes something CQ already
+# ACTS on rather than inventing a signal.
+USER_STATED = "user"
+MEETING_STATED = "meeting"
+
+
+def role_source(origin_mode: Optional[str]) -> str:
+    """"user" when the row arrived declared through the API, "meeting"
+    when it was extracted from a transcript.
+
+    Anything unrecognised resolves to "meeting", the conservative way
+    round: mislabelling a user's own assignment as something the person
+    said is the defect being fixed, and the opposite error would put
+    words in the subject's mouth. An unknown mode is not a user
+    assertion, because a user assertion always arrives declared.
+    """
+    return USER_STATED if (origin_mode or "") == "declared" else MEETING_STATED
+
+
 def stated_roles_payload(rows: Sequence[Mapping[str, Any]], names: Sequence[str]) -> Dict[str, Any]:
     """{"title", "title_source", "items": [...]} from role rows ordered
     newest first. `title` is the newest stated role, derived by
     title_from_stated_role; `title_source` carries its patch_id and
     origin so a client can open the receipt. Items keep the raw text:
     a served name may assert only what was observed (doc 16 section
-    5.10), and the raw text IS the observation."""
+    5.10), and the raw text IS the observation.
+
+    Each item carries `source`, "user" or "meeting", so a client never
+    has to infer who made the claim from the absence of a field."""
     items = []
     for r in rows:
         items.append({
@@ -967,6 +1005,7 @@ def stated_roles_payload(rows: Sequence[Mapping[str, Any]], names: Sequence[str]
             "project_id": r.get("project_id"),
             "origin_id": r.get("origin_id"),
             "stated_at": r.get("stated_at"),
+            "source": role_source(r.get("origin_mode")),
         })
     title = None
     source = None
@@ -974,7 +1013,8 @@ def stated_roles_payload(rows: Sequence[Mapping[str, Any]], names: Sequence[str]
         t = title_from_stated_role(it["text"], names)
         if t:
             title = t
-            source = {"patch_id": it["patch_id"], "origin_id": it["origin_id"], "stated_at": it["stated_at"]}
+            source = {"patch_id": it["patch_id"], "origin_id": it["origin_id"],
+                      "stated_at": it["stated_at"], "source": it["source"]}
             break
     return {"title": title, "title_source": source, "items": items}
 

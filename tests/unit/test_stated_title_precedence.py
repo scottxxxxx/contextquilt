@@ -306,3 +306,72 @@ def test_the_formatter_ACTUALLY_serves_the_stated_title_at_a_small_budget():
         patches, entity_rows, [], max_chars=4000)
     assert "VP of HR at Acme" in big
     assert "also observed" in big
+
+
+# --- who said it ------------------------------------------------------
+#
+# A role the USER assigned and a role the PERSON stated in a meeting were
+# arriving in one undifferentiated list, so SS rendered both under "WHAT
+# THEY TOLD US". Scott, 2026-09-06, on seeing his own assignment there
+# above a genuine meeting quote: "Head of sales is not what they told us,
+# it is what I assigned." A provenance error with the arrow reversed, in
+# the feature built to correct provenance errors.
+
+def test_a_user_assigned_role_and_a_meeting_stated_one_are_distinguishable():
+    from contextquilt.services.people_identity import stated_roles_payload
+    rows = [
+        {"patch_id": "178b1d80", "text": "Head Of Sales For Camino",
+         "project": None, "project_id": None, "origin_id": None,
+         "origin_mode": "declared", "stated_at": "2026-09-07T01:00:14"},
+        {"patch_id": "392a916d",
+         "text": "Steven Williams: business founder and go-to-market lead",
+         "project": "Immigration", "project_id": "10FF", "origin_id": "E240257D",
+         "origin_mode": "inferred", "stated_at": "2026-08-28T19:06:00"},
+    ]
+    out = stated_roles_payload(rows, ["Steven Williams"])
+    assert out["items"][0]["source"] == "user"
+    assert out["items"][1]["source"] == "meeting"
+    assert out["title_source"]["source"] == "user"
+
+
+def test_an_unknown_origin_mode_is_never_called_a_user_assertion():
+    """Conservative direction. Mislabelling the user's own assignment as
+    something the person SAID is the defect; the opposite error puts
+    words in the subject's mouth. A user assertion always arrives
+    declared, so anything else is not one."""
+    from contextquilt.services.people_identity import role_source
+    assert role_source("declared") == "user"
+    for unknown in ("inferred", "derived", None, "", "weird"):
+        assert role_source(unknown) == "meeting", unknown
+
+
+def test_the_client_never_has_to_infer_provenance_from_a_missing_field():
+    """SS asked whether `origin_id` being null could stand in. It cannot:
+    it is a discriminator by ACCIDENT, true today only because a declared
+    row has no meeting, and nothing guarantees a declared row arriving by
+    another path could not carry one. Then a header would silently label
+    an assignment as something the person said."""
+    from contextquilt.services.people_identity import stated_roles_payload
+    # a declared row that DOES carry an origin_id still reads as "user"
+    rows = [{"patch_id": "x", "text": "Chief Widget Officer", "project": None,
+             "project_id": None, "origin_id": "SOME-ORIGIN",
+             "origin_mode": "declared", "stated_at": "2026-09-07T02:00:00"}]
+    out = stated_roles_payload(rows, ["Whoever"])
+    assert out["items"][0]["source"] == "user"
+    assert out["items"][0]["origin_id"] == "SOME-ORIGIN"
+
+
+def test_the_detail_route_selects_origin_mode_and_passes_it_through():
+    """The field cannot be derived without it, and a NULL origin_mode
+    would silently make every row read as `meeting`."""
+    body = MAIN.split("async def get_person")[1].split("\n@app.")[0]
+    # PIN THE EXACT SELECT, not a bare "cp.origin_mode". The loose
+    # version passed while the column was removed, because get_person
+    # holds a SECOND query using `cp.origin_mode = 'derived'` for the
+    # insight cards, and the test matched that instead. A clean-firing
+    # instrument answering a different question, in the test written to
+    # guard this very field. Found by sabotage, not by review.
+    assert "cp.created_at, cp.project_id, cp.origin_mode," in body, (
+        "the stated_roles query must select origin_mode; without it the "
+        "row build KeyErrors and every row would read as `meeting`")
+    assert '"origin_mode": r["origin_mode"]' in body

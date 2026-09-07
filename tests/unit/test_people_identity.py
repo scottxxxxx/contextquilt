@@ -498,7 +498,15 @@ def test_stated_roles_payload_newest_first_wins_title():
     ]
     out = stated_roles_payload(rows, ["Suresh"])
     assert out["title"] == "scrum master on ABM project"
-    assert out["title_source"] == {"patch_id": "p2", "origin_id": "m2", "stated_at": "2026-08-17"}
+    # `source` joined this receipt on 2026-09-06 so a client showing the
+    # title knows whether the USER assigned it or the PERSON stated it in
+    # a meeting. Updated to the new shape with the reason rather than
+    # relaxed to a subset check: title_source is a contract and an exact
+    # comparison is what makes an accidental field addition visible.
+    # These rows carry no origin_mode, which is the pre-existing shape,
+    # and resolve to "meeting" conservatively.
+    assert out["title_source"] == {"patch_id": "p2", "origin_id": "m2",
+                                   "stated_at": "2026-08-17", "source": "meeting"}
     assert [i["text"] for i in out["items"]] == [r["text"] for r in rows]  # raw text kept, never rewritten
 
 
