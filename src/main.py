@@ -43,13 +43,17 @@ from contextquilt.config import get_settings
 
 from dashboard.router import router as dashboard_router
 from contextquilt.routers.app_schemas import router as app_schemas_router
-from contextquilt.services.recall_scorer import score_patches
+from contextquilt.services.recall_scorer import (
+    FRESHNESS_TRACKED_TYPES,
+    score_patches,
+)
 from contextquilt.services import insight_cards
 from contextquilt.services import headlines as headlines_svc
 from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import people_signals
+from contextquilt.services import project_delete
 from contextquilt.services import people_i18n
 from contextquilt.services import woven_digest as woven_digest_svc
 from contextquilt.services import facet_runtime
@@ -10850,21 +10854,195 @@ async def project_affected_people(
     }
 
 
+# ONE resolution rule, used by the preview AND the delete, so the number
+# a user is warned with cannot differ from the number that is archived.
+# Two queries would be two sources of truth about one destructive act.
+#
+# Matches how RECALL resolves a project: stamped with the project_id, OR
+# belonging to one of the project's meetings. Narrow (stamped only) left
+# 35 of 37 rows on a real project.
+PROJECT_DELETE_SCOPE_SQL = """
+    SELECT cp.patch_id, cp.patch_type
+    FROM context_patches cp
+    JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
+    WHERE ps.subject_key = $1
+      AND COALESCE(cp.status, 'active') = 'active'
+      AND (cp.project_id = $2
+           OR cp.origin_id IN (
+                SELECT origin_id FROM origin_project_assignments
+                WHERE project_id = $2))
+"""
+
+
+async def _project_delete(user_id, subject_key, project_id, *, preview: bool):
+    """Preview or perform the project-deletion purge.
+
+    The carve-out and the counting both live in
+    `services/project_delete`, where they can be EXECUTED by a test. A
+    sabotage that removed the carve-out entirely passed a source-reading
+    test here, because the constant it grepped for was still sitting in
+    a comment.
+    """
+    rows = await db_pool.fetch(PROJECT_DELETE_SCOPE_SQL, subject_key, project_id)
+
+    doomed, spared = project_delete.partition_for_delete(rows)
+    by_type = project_delete.counts_by_type(doomed)
+
+    # What SURVIVES, counted and named. "No remnants" is the requirement,
+    # so the remnants this operation does not clear are reported rather
+    # than left for somebody to find later.
+    origins = [r["origin_id"] for r in await db_pool.fetch(
+        "SELECT origin_id FROM origin_project_assignments "
+        "WHERE user_id = $1 AND project_id = $2", user_id, project_id)]
+    appearances = 0
+    if origins:
+        appearances = await db_pool.fetchval(
+            "SELECT count(*) FROM person_appearances "
+            "WHERE user_id = $1 AND origin_id = ANY($2::text[])",
+            user_id, origins) or 0
+
+    survives = {
+        "self_typed_patches": len(spared),
+        "person_appearances": int(appearances),
+        "origin_records": len(origins),
+        # Named, not counted: counting would mean scanning the stream on
+        # a hot request. One per meeting is the honest shape.
+        "transcripts_on_the_ingest_stream": len(origins),
+    }
+
+    if preview:
+        return {
+            "status": "preview",
+            "project_id": project_id,
+            "would_archive": {"total": len(doomed), "by_type": by_type},
+            "would_survive": survives,
+        }
+
+    archived = 0
+    if doomed:
+        result = await db_pool.execute(
+            """
+            UPDATE context_patches
+               SET status = 'archived', updated_at = NOW(),
+                   value = jsonb_set(value, '{archive_cause}', '"project_deleted"')
+             WHERE patch_id = ANY($1::uuid[])
+               AND COALESCE(status, 'active') = 'active'
+            """,
+            [r["patch_id"] for r in doomed],
+        )
+        archived = int(result.split()[-1]) if result else 0
+
+    # Presence leaves with the facts, the same as the unscope path.
+    appearances_cleared = await db_pool.execute(
+        "UPDATE person_appearances SET project_id = NULL "
+        "WHERE user_id = $1 AND project_id = $2", user_id, project_id)
+
+    await redis_client.xadd("memory_updates", {"data": json.dumps({
+        "type": "hydrate", "user_id": user_id,
+        "timestamp": datetime.utcnow().isoformat()})})
+
+    logger.info("project_deleted_patches", user_id=user_id,
+                project_id=project_id, archived=archived,
+                spared_self_typed=len(spared), by_type=by_type)
+
+    return {
+        "status": "deleted",
+        "project_id": project_id,
+        # Echoed rather than inferred: a 200 has already told this group
+        # that a write was processed while a field it sent was not.
+        "patches_archived": archived,
+        "by_type": by_type,
+        "survives": survives,
+        "appearances_unscoped": int(appearances_cleared.split()[-1])
+        if appearances_cleared else 0,
+    }
+
+
+class ProjectUnscopeRequest(BaseModel):
+    """Body for the project-deletion form.
+
+    ABSENT OR UNRECOGNISED KEEPS TODAY'S BEHAVIOUR, deliberately. The
+    flag has to cross GhostPour, and this hop has eaten optional fields
+    before (`client_id`, `deadline_date`, `to_name`). If a future
+    middlebox eats this one, the failure must be "nothing was deleted"
+    rather than "everything was deleted", and a client that warned the
+    user will at least have warned them about something that did not
+    happen rather than the reverse.
+
+    SS read GP's handler on 2026-09-06 and confirmed the shape: the body
+    is forwarded as an UNTYPED dict, so no model can strip a key. They
+    also found that the same call site never passes `query` through, so
+    a query parameter here is silently discarded before CQ sees it.
+    That is why this is a body field and must stay one.
+    """
+    delete_patches: Optional[bool] = None
+    preview: Optional[bool] = None
+
+
 @app.post("/v1/projects/{user_id}/{project_id}/unscope", tags=["Projects"])
 async def unscope_project(
     user_id: str,
     project_id: str,
+    req: Optional[ProjectUnscopeRequest] = None,
     app_id: str = Depends(verify_application_access),
 ):
     """
-    Clear project scope from ALL of a user's patches carrying this
-    project_id (context-flow contract item 2, the project-deletion form).
-    Patches survive as unscoped memory — deleting a project container
-    must never delete what was learned in its meetings. The projects
-    registry row is left in place (harmless, and its name remains useful
-    for display-name fallback matching on historical data).
+    The project-deletion form (context-flow contract item 2).
+
+    THREE BEHAVIOURS, chosen by the body:
+
+    `{"preview": true}`      counts only, writes NOTHING. What would be
+                             archived AND what would survive, because a
+                             client cannot write an honest warning from
+                             an adjective. "This will delete your
+                             memories" and "this will delete 1,422
+                             memories including 89 things about how you
+                             work" are different products.
+    `{"delete_patches": true}`  archive what the project's meetings
+                             produced.
+    absent                   today's behaviour: unscope, patches survive.
+
+    SCOTT REVERSED THE OLD RULING ON 2026-09-06. This docstring used to
+    say "deleting a project container must never delete what was learned
+    in its meetings", and that is no longer true when the caller asks
+    for a delete. His requirement, in his words, is that deleting a
+    project should be "as if those events never occurred and we don't
+    leave any remnants".
+
+    SCOPE, and he chose it against real numbers rather than in the
+    abstract: everything the project's MEETINGS produced, resolved the
+    way recall resolves a project, EXCEPT the self-typed set (trait,
+    preference, goal, constraint). Narrow scope (only rows stamped with
+    the project_id) would have left 35 of 37 patches on his "Twit"
+    project, which is the remnant problem itself. Full scope without the
+    carve-out would have taken durable facts about HIM that merely
+    happened to be learned there, real examples being "Mixtral model
+    cannot be deployed at Florida Blue due to excessive resource
+    consumption" and a UI constraint about caption placement. Those are
+    not project facts and a delete that takes them is a delete nobody
+    expects.
+
+    ARCHIVE, NOT HARD DELETE, also his call. Same contract as the
+    single-patch delete: excluded from recall and EVERY serving path,
+    tombstoned into the delta's `deleted[]` so other devices learn, row
+    survives until account purge. A hard delete would break that sync,
+    because `deleted[]` is computed FROM archived rows.
+
+    WHAT THIS DOES NOT REMOVE, reported in the preview rather than left
+    for someone to discover: person appearance rows, the
+    origin_project_assignments record, and the transcript bodies on the
+    `memory_updates` stream. The stream is the largest remnant in the
+    system and today only an account purge clears it.
     """
     subject_key = f"user:{user_id}"
+    preview = bool(req and req.preview)
+    delete_patches = bool(req and req.delete_patches)
+
+    if preview or delete_patches:
+        return await _project_delete(
+            user_id, subject_key, project_id, preview=preview
+        )
+
     updated = await db_pool.execute(
         """
         UPDATE context_patches SET
