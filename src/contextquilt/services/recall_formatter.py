@@ -38,6 +38,9 @@ _DEFAULT_LABELS = {
     "people": "People",
     "connections": "Connections",
     "about_you": "About you",
+    # Not "About others": the section carries what SOMEONE ELSE stated,
+    # and each line names them, so the header must not imply the user.
+    "others_stated": "Stated by others",
     "decisions": "Decisions",
     "commitments": "Open commitments",
     "blockers": "Blockers",
@@ -496,6 +499,34 @@ def _format_patch_line(row: Any, today: Optional[date] = None) -> str:
 # ============================================================
 
 
+def _disclosure_owner(v: Dict[str, Any],
+                      self_names: "Optional[set]" = None) -> str:
+    """Who a self-typed row is about, or "" when it is the user.
+
+    An EMPTY owner is the user by construction: both
+    `strip_owner_on_self_typed_patches` and `convert_to_preference`
+    remove a self owner on the write path, precisely because ownership
+    is implicit on these types.
+
+    A name in `self_names` (the ego entity, `entities.self_at`) is the
+    user under their own name. Ten legacy rows on prod carry `owner:
+    "Scott"` and they belong under About you; moving them would replace
+    one false statement with another.
+
+    ANYTHING ELSE IS NOT THE USER, INCLUDING A DIARIZATION PLACEHOLDER.
+    "Speaker 2" is not evidence a preference is the user's, and the
+    whole point of this split is that a row we cannot attribute must
+    not be asserted as theirs. It renders under its raw label, which is
+    honest about what was observed.
+    """
+    owner = (v.get("owner") or "").strip()
+    if not owner:
+        return ""
+    if self_names and owner.lower() in self_names:
+        return ""
+    return owner
+
+
 def format_category_grouped(
     scored_patches: Sequence[Tuple[float, Any]],
     entity_rows: Sequence[Any],
@@ -503,6 +534,7 @@ def format_category_grouped(
     labels: Optional[Dict[str, str]] = None,
     today: Optional[date] = None,
     person_entity_type: str = "person",
+    self_names: "Optional[set]" = None,
 ) -> str:
     """Format patches in the pre-PR-4 category-grouped structure.
 
@@ -561,8 +593,48 @@ def format_category_grouped(
             + "\n".join(f"- {v.get('text', '')}" for v in items)
         )
 
-    # About you
-    render_bucket("about_you", ("trait", "preference"))
+    # "ABOUT YOU" IS A CLAIM, AND IT WAS FALSE FOR 35 ROWS.
+    #
+    # Scott fed the app a TWiT episode and its project quilt showed seven
+    # `preference` tiles: "Apple better off without Johnny Ive" sitting
+    # beside "Johnny Ive's original iMac design was excellent", reading
+    # as one person contradicting himself. They are four different
+    # podcast hosts. Every row carried the right owner in `value.owner`
+    # (Leo, Iain, Nicholas, Jason Snell) and this bucket dropped it, then
+    # printed the result under a header that says About you. The model
+    # was being told the user holds opinions he never expressed.
+    #
+    # The write path was never wrong: `convert_to_preference` keeps a
+    # counterparty's owner and adds a `held_by` edge, exactly as the
+    # manifest intends. This is a read-side defect only, and it is the
+    # one-rule-two-carriers shape again, since the FLAT formatter has
+    # rendered `[owner: X]` on these rows the whole time. The carrier
+    # that dropped the name is the one whose heading asserts ownership.
+    #
+    # Measured on prod 2026-09-08: 45 self-typed rows carry an owner, 39
+    # preferences and 6 goals. Ten of them name the user HIMSELF, which
+    # is why this cannot simply move every owner-bearing row: doing that
+    # would fix one false statement by minting another.
+    about_you: List[Dict[str, Any]] = []
+    attributed: List[Tuple[str, Dict[str, Any]]] = []
+    for v in [*buckets.get("trait", []), *buckets.get("preference", [])]:
+        who = _disclosure_owner(v, self_names)
+        if who:
+            attributed.append((who, v))
+        else:
+            about_you.append(v)
+    if about_you:
+        sections.append(
+            f"{labels['about_you']}:\n"
+            + "\n".join(f"- {v.get('text', '')}" for v in about_you)
+        )
+    if attributed:
+        # Owner-first, the same shape open commitments already use in
+        # this formatter, so a reader learns one attribution convention.
+        sections.append(
+            f"{labels['others_stated']}:\n"
+            + "\n".join(f"- {who}: {v.get('text', '')}" for who, v in attributed)
+        )
     # Goals + constraints (new facets). Goals get deadline decoration —
     # a dated goal past its date must read as stale, matching the flat
     # formatter, which renders the fragment for any type carrying one.
@@ -573,7 +645,12 @@ def format_category_grouped(
         for v in goals:
             fragment = _render_deadline(v, today)
             dl = f" ({fragment})" if fragment else ""
-            goal_lines.append(f"- {v.get('text', '')}{dl}")
+            # Six goals on prod name somebody else. "Goals:" does not
+            # assert whose the way "About you" does, so these stay in
+            # place and gain the name rather than moving sections.
+            who = _disclosure_owner(v, self_names)
+            prefix = f"{who}: " if who else ""
+            goal_lines.append(f"- {prefix}{v.get('text', '')}{dl}")
         sections.append(f"{labels['goals']}:\n" + "\n".join(goal_lines))
     render_bucket("constraints", ("constraint",))
     # Decisions
