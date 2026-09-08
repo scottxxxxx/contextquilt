@@ -2313,6 +2313,163 @@ def enforce_person_ownership(
     return content
 
 
+def enforce_role_holder(content: dict, user_label: str | None = None) -> dict:
+    """A `role` states WHOSE it is, or it is not stored.
+
+    Measured on prod 2026-09-07, on Scott's account: of 77 active `role`
+    patches, **15** had any link to a person. **62 had none at all**, by
+    `value.owner`, by `value.held_by`, or by edge, and 61 of those
+    connected only to a project. He found it the way a user does, by
+    opening a project quilt and reading a tile that said "Lead
+    developer" with no name on it, and asking who that was. The answer
+    was nobody: the whole stored value was
+    `{"text": "Lead developer", "headline": "Lead developer"}`.
+
+    THE CONTRACT ALREADY EXISTS IN TWO PLACES AND THE MODEL IGNORES
+    BOTH. The registered manifest's `belongs_to` description says in so
+    many words "Role patches require both `belongs_to -> project` AND
+    `describes -> person`", and extraction_prompts spells out the same
+    shape with an example. This is the third type to need the same
+    treatment, after person ownership and the behavior lane: a rule
+    stated to a model is a preference, a rule enforced in code is a
+    contract.
+
+    A HOLDERLESS ROLE IS NOT MERELY AN UGLY TILE. It is inert everywhere
+    else too. The stated-role and title work (#462-#465) finds a
+    person's role by a name prefix in the role text or by a `describes`
+    edge, so a row with neither can never become anybody's title, can
+    never be superseded when that person states their real role, and
+    can never be dismissed, because there is no person to hang any of it
+    on. It can only sit in a project quilt looking like a defect.
+
+    REPAIR WHERE THE INFORMATION EXISTS, DROP WHERE IT DOES NOT, AND
+    NEVER GUESS. Three sources are consulted, in order: an existing
+    `describes` edge, an explicit `value.held_by` / `value.owner`, and a
+    person patch in this same extraction whose name the role text starts
+    with (the "Annapurna Patcharla leads HDBot development" shape, which
+    the model does produce sometimes). What is deliberately NOT done is
+    attaching the role to the only person in the meeting, or to the
+    meeting's dominant speaker. That would manufacture an attribution
+    the transcript never made, and a confidently wrong "X is the lead
+    developer" is worse than the absent tile: doc 19.1, the model may
+    identify but may not count, and neither may we.
+
+    Runs AFTER enforce_person_ownership, so person patches injected
+    there are available to match against, and BEFORE
+    enforce_connection_vocabulary, so an edge injected here is validated
+    and direction-normalised with every other edge rather than bypassing
+    the check. Edges pointing AT a dropped role are stripped, the same
+    way sanitize_behavior_observations strips them, so Pass-2 cannot
+    resynthesise the row as a stub.
+
+    Audit lands in ``content["_role_holder_enforced"]``. Mutates content
+    in place; returns it. Idempotent.
+    """
+    patches = content.get("patches")
+    if not isinstance(patches, list) or not patches:
+        return content
+
+    person_names: list[str] = []
+    for p in patches:
+        if isinstance(p, dict) and p.get("type") == "person":
+            value = p.get("value")
+            name = value.get("text") if isinstance(value, dict) else None
+            if isinstance(name, str) and name.strip():
+                person_names.append(name.strip())
+    # Longest first, so "Anna Patcharla" wins over "Anna" on a text that
+    # carries both. A shorter name winning would attach the role to the
+    # wrong person while looking like a successful repair.
+    person_names.sort(key=len, reverse=True)
+
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    repaired: list[dict] = []
+    dropped_targets: set[tuple] = set()
+
+    for patch in patches:
+        if not isinstance(patch, dict) or patch.get("type") != "role":
+            kept.append(patch)
+            continue
+
+        value = patch.get("value") if isinstance(patch.get("value"), dict) else {}
+        text = value.get("text")
+        if not isinstance(text, str) or not text.strip():
+            # No text at all is a different defect and strip_prose /
+            # the schema validator own it. Left alone on purpose.
+            kept.append(patch)
+            continue
+
+        connects = patch.get("connects_to")
+        connects = connects if isinstance(connects, list) else []
+        has_describes = any(
+            isinstance(c, dict)
+            and c.get("label") == "describes"
+            and isinstance(c.get("target_text"), str)
+            and c["target_text"].strip()
+            for c in connects
+        )
+        if has_describes:
+            kept.append(patch)
+            continue
+
+        holder = None
+        source = None
+        for key in ("held_by", "owner"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and _is_real_person_owner(candidate, user_label):
+                holder, source = candidate.strip(), key
+                break
+
+        if holder is None:
+            low = text.strip().lower()
+            for name in person_names:
+                if low.startswith(name.lower()):
+                    holder, source = name, "text_prefix"
+                    break
+
+        if holder is None:
+            dropped.append({"text": text.strip()[:120]})
+            dropped_targets.add(("role", text.strip().lower()))
+            continue
+
+        patch["connects_to"] = connects + [{
+            "target_text": holder,
+            "target_type": "person",
+            "role": "informs",
+            "label": "describes",
+        }]
+        repaired.append({"text": text.strip()[:120], "holder": holder,
+                         "source": source})
+        kept.append(patch)
+
+    if not dropped and not repaired:
+        return content
+
+    content["patches"] = kept
+    if dropped_targets:
+        for patch in kept:
+            connects = patch.get("connects_to")
+            if not isinstance(connects, list):
+                continue
+            patch["connects_to"] = [
+                c for c in connects
+                if not (
+                    isinstance(c, dict)
+                    and isinstance(c.get("target_text"), str)
+                    and (c.get("target_type"), c["target_text"].strip().lower())
+                    in dropped_targets
+                )
+            ]
+
+    content["_role_holder_enforced"] = {
+        "dropped": dropped,
+        "dropped_count": len(dropped),
+        "repaired": repaired,
+        "repaired_count": len(repaired),
+    }
+    return content
+
+
 def enforce_owner_edge_agreement(
     content: dict, user_label: str | None = None
 ) -> dict:

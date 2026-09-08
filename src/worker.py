@@ -62,6 +62,7 @@ from contextquilt.services.extraction_schema import (
     enforce_owed_to_counterparty,
     enforce_owner_edge_agreement,
     enforce_person_ownership,
+    enforce_role_holder,
     speaker_labels_in,
     self_speaker_label,
     is_placeholder_or_self_person,
@@ -6496,6 +6497,31 @@ class ColdPathWorker:
                         connections_injected=len(injected_edges),
                         model=response.model,
                     )
+
+            # A role states whose it is, or it is not stored. Measured
+            # 2026-09-07: 62 of this user's 77 active `role` patches had
+            # no person on them by any route, and 61 of those connected
+            # only to a project, so a project quilt rendered "Lead
+            # developer" with nobody holding it. The manifest's own
+            # belongs_to description already says a role requires
+            # `describes -> person`; this is that rule with teeth.
+            # Placed BEFORE vocabulary enforcement so an edge injected
+            # here is validated with every other edge.
+            enforce_role_holder(response.content, user_label=user_label)
+            if (rh := response.content.get("_role_holder_enforced")):
+                logger.info(
+                    "role_holder_enforced",
+                    user_id=user_id,
+                    dropped=rh.get("dropped_count", 0),
+                    repaired=rh.get("repaired_count", 0),
+                    # Texts included deliberately, the same as the
+                    # behavior classifier's verdicts: a drop count with
+                    # no texts cannot tell a prompt regression from a
+                    # quiet meeting.
+                    dropped_detail=rh.get("dropped", []),
+                    repaired_detail=rh.get("repaired", []),
+                    model=response.model,
+                )
 
             # Connection vocabulary enforcement — the LLM regularly emits
             # reversed edges (blocker blocked_by commitment) and off-spec
