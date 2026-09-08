@@ -73,6 +73,9 @@ from contextquilt.services.recall_formatter import (
     CHARS_PER_TOKEN,
     format_category_grouped,
     format_flat_ranked_with_stats,
+    # The canonical value parser, imported rather than retyped so the
+    # owner probe below reads a value exactly the way the formatter will.
+    _parse_value as _json_value,
     resolve_max_age_days,
     resolve_token_budget,
 )
@@ -1532,10 +1535,40 @@ async def recall_context(
     if request.output_format == "grouped":
         locale = request.metadata.get("locale", "en") if request.metadata else "en"
         labels = _recall_labels(locale)
+        # The user's own names, for the About-you split below. Fetched
+        # ONLY when a self-typed row in this block actually carries an
+        # owner, which is rare (45 rows in the whole of the largest
+        # account), so an ordinary grouped recall pays nothing. One
+        # indexed lookup on `entities.self_at`, the same ego link
+        # `owned_by_self` resolves against, so the two cannot disagree
+        # about who the user is.
+        self_names: set = set()
+        if any(
+            (r["patch_type"] if isinstance(r, dict) else r.get("patch_type"))
+            in ("trait", "preference", "goal")
+            and (_json_value(r).get("owner") or "").strip()
+            for _, r in scored_for_output
+        ):
+            try:
+                self_names = {
+                    (row["name"] or "").strip().lower()
+                    for row in await db_pool.fetch(
+                        "SELECT name FROM entities "
+                        "WHERE user_id = $1 AND self_at IS NOT NULL", user_id)
+                    if (row["name"] or "").strip()
+                }
+            except Exception as exc:
+                # Empty, never fatal. An empty set attributes a row the
+                # user owns under their own name to "Scott", which reads
+                # oddly but states nothing false; failing the block would
+                # cost the whole recall.
+                logger.warning("recall_self_names_failed",
+                               user_id=user_id, error=str(exc)[:200])
         try:
             context = format_category_grouped(
                 scored_for_output, entity_rows, rel_rows, labels,
                 person_entity_type=recall_vocab.person_entity_type,
+                self_names=self_names,
             )
         except Exception as fmt_exc:  # pragma: no cover — defensive; test coverage is flat-mode
             # An empty block and a formatter that raised are the same
