@@ -157,3 +157,66 @@ def test_it_is_idempotent():
 ])
 def test_degenerate_input_never_raises(content):
     enforce_role_holder(content)
+
+
+def test_a_person_entity_supplies_the_holder_when_no_person_patch_exists():
+    """THE CASE THE BACKFILL'S DRY RUN CAUGHT. 46 of 77 stored roles name
+    their holder at the start of the text and NONE had a person patch on
+    the same meeting. Looking only at patches would drop all of them."""
+    content = {
+        "patches": [_role("Sukumar is leading endpoint development phase one")],
+        "entities": [{"name": "Sukumar Gurugubelli", "type": "person"},
+                     {"name": "Twit", "type": "project"}],
+    }
+    enforce_role_holder(content)
+    assert len(content["patches"]) == 1
+    assert content["_role_holder_enforced"]["repaired_count"] == 1
+
+
+def test_the_name_prefix_respects_a_word_boundary():
+    """#463's lesson, applied to the writer. A bare prefix made "Anna"
+    pick up a role about "Annapurna Patcharla"; the two matchers have to
+    agree or this one mints rows the server reads back differently."""
+    content = {
+        "patches": [_role("Annapurna Patcharla leads HDBot development")],
+        "entities": [{"name": "Anna", "type": "person"}],
+    }
+    enforce_role_holder(content)
+    # "Anna" must NOT claim it, so with no other candidate it is dropped.
+    assert content["patches"] == []
+    assert content["_role_holder_enforced"]["dropped_count"] == 1
+
+
+def test_a_non_person_entity_is_not_a_holder():
+    content = {
+        "patches": [_role("Twit is the podcast we are testing against")],
+        "entities": [{"name": "Twit", "type": "project"}],
+    }
+    enforce_role_holder(content)
+    assert content["patches"] == []
+
+
+def test_an_ambiguous_first_name_is_refused_rather_than_guessed():
+    """Two people in the meeting share a first token, so 'Vijay is the
+    developer' resolves to neither. The same-name fan-out on this data is
+    68 people across 29 groups; picking one is how a role about one Alex
+    lands on another Alex's card."""
+    content = {
+        "patches": [_role("Vijay is the developer building intake forms")],
+        "entities": [{"name": "Vijay Rayudu", "type": "person"},
+                     {"name": "Vijay Kumar", "type": "person"}],
+    }
+    enforce_role_holder(content)
+    assert content["patches"] == []
+    assert content["_role_holder_enforced"]["dropped_count"] == 1
+
+
+def test_an_unambiguous_first_name_resolves_to_the_full_name():
+    content = {
+        "patches": [_role("Sukumar is leading endpoint development")],
+        "entities": [{"name": "Sukumar Gurugubelli", "type": "person"},
+                     {"name": "Suresh Muchakurti", "type": "person"}],
+    }
+    enforce_role_holder(content)
+    edge = content["patches"][0]["connects_to"][0]
+    assert edge["target_text"] == "Sukumar Gurugubelli"
