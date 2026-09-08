@@ -29,7 +29,19 @@ groups sharing a first name), and attach a role to whichever Alex sorted
 first. Restricting candidates to person patches from the role's own
 meeting reproduces exactly the context the extraction had.
 
-OUTCOMES, and only these three:
+WHAT THE FIRST DRY RUN CAUGHT, recorded because it nearly cost real
+data. The first version resolved a holder only from person PATCHES on
+the role's own meeting, and reported that it would archive 60 of 77. But
+46 of those rows name their holder at the START of the text ("Sukumar is
+leading endpoint development phase one") and ZERO of them had a person
+patch on that meeting, because history does not store people that way.
+The live stated-roles query resolves those by word-boundary name prefix
+against entity names and ALIASES, so they already work on the person's
+card. Archiving them would have deleted 46 working rows to fix 16 broken
+ones. The measured split is 15 resolve by edge, 46 by name, 16 by
+nothing.
+
+OUTCOMES:
   repaired  a holder was recoverable from the row itself (held_by /
             owner) or from a person named at the start of the role text
             who was present in the same meeting. A `describes` edge is
@@ -38,7 +50,8 @@ OUTCOMES, and only these three:
             value.archive_cause='cleanup'. Never hard-deleted: the
             delta's `deleted[]` is computed FROM archived rows, so a
             hard delete would stop other devices ever learning it went.
-  skipped   already has a describes edge, or has no text.
+  skipped   already resolves: a describes edge, or a name the live
+            query matches. Working data is never touched.
 
 Dry run is the default AND is the measurement. --apply writes.
 """
@@ -61,6 +74,16 @@ from contextquilt.services.extraction_schema import enforce_role_holder  # noqa:
 # already reaches a person. The person leg is a LEFT JOIN rather than a
 # filter so the script reports what it skipped as well as what it fixed.
 ROLES_SQL = """
+    WITH names AS (
+        -- The SAME name keys the live stated-roles query is given: entity
+        -- names UNION aliases. Aliases are why "Sukumar is leading..."
+        -- resolves at all, since the entity is "Sukumar Gurugubelli".
+        SELECT DISTINCT lower(e.name) AS nm FROM entities e
+         WHERE e.user_id = $2 AND e.merged_into IS NULL AND e.name IS NOT NULL
+        UNION
+        SELECT DISTINCT lower(a.alias) FROM entity_aliases a
+         WHERE a.user_id = $2 AND a.alias IS NOT NULL
+    )
     SELECT cp.patch_id, cp.value, cp.origin_id, cp.origin_type,
            cp.project_id, ps.subject_key,
            EXISTS (
@@ -71,7 +94,19 @@ ROLES_SQL = """
              WHERE (pc.from_patch_id = cp.patch_id OR pc.to_patch_id = cp.patch_id)
                AND COALESCE(pc.status, 'active') = 'active'
                AND o.patch_type = 'person'
-           ) AS has_person_edge
+           ) AS has_person_edge,
+           -- LIFTED FROM THE LIVE QUERY IN main.py (get_person), including
+           -- its word boundary. A role whose text starts with a person's
+           -- name ALREADY resolves on that person's card, so it is working
+           -- data and must not be archived. 46 of this account's 77 roles
+           -- are in exactly that state and an earlier version of this
+           -- script would have deleted every one of them.
+           EXISTS (
+             SELECT 1 FROM names k
+              WHERE lower(cp.value->>'text') LIKE k.nm || '%'
+                AND substr(lower(cp.value->>'text'), length(k.nm) + 1, 1)
+                    !~ '[[:alpha:]]'
+           ) AS resolves_by_name
       FROM context_patches cp
       JOIN patch_subjects ps ON ps.patch_id = cp.patch_id
      WHERE cp.patch_type = 'role'
@@ -116,7 +151,8 @@ async def run(dsn: str, subject_key: str | None, apply: bool) -> int:
     repaired: list = []
     archived: list = []
     try:
-        rows = await conn.fetch(ROLES_SQL, subject_key)
+        user_id = (subject_key or "").split(":", 1)[-1]
+        rows = await conn.fetch(ROLES_SQL, subject_key, user_id)
         print(f"{len(rows)} active role patches"
               + (f" for {subject_key}" if subject_key else " (all subjects)"))
 
@@ -132,6 +168,12 @@ async def run(dsn: str, subject_key: str | None, apply: bool) -> int:
 
             if r["has_person_edge"]:
                 counts["skipped_has_person"] += 1
+                continue
+            # WORKING DATA. Leave it exactly alone: the person's card
+            # already shows it, and an edge added here would be a second
+            # assertion about the same fact rather than a repair.
+            if r["resolves_by_name"]:
+                counts["skipped_resolves_by_name"] += 1
                 continue
             if not text:
                 counts["skipped_no_text"] += 1
@@ -183,7 +225,8 @@ async def run(dsn: str, subject_key: str | None, apply: bool) -> int:
 
     print("\n--- outcome ---")
     for k in ("repaired", "archived", "unresolvable_holder",
-              "skipped_has_person", "skipped_no_text", "skipped_other"):
+              "skipped_has_person", "skipped_resolves_by_name",
+              "skipped_no_text", "skipped_other"):
         if counts[k]:
             print(f"{k:22} {counts[k]}")
 

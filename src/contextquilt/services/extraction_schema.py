@@ -2369,6 +2369,16 @@ def enforce_role_holder(content: dict, user_label: str | None = None) -> dict:
     if not isinstance(patches, list) or not patches:
         return content
 
+    # CANDIDATES COME FROM THE PATCHES *AND* THE ENTITIES ARRAY, and the
+    # second half is not belt-and-braces. Measured on prod 2026-09-07:
+    # of 77 stored roles, 46 carry the holder's name at the START of the
+    # role text ("Sukumar is leading endpoint development phase one") and
+    # ZERO of those had a person patch on the same meeting. The live
+    # stated-roles query already resolves those by word-boundary name
+    # prefix, so they work today. A version of this function that looked
+    # only at person patches would have called all 46 holderless and
+    # dropped rows that resolve perfectly well, which is precisely what
+    # the backfill's dry run caught before anything was written.
     person_names: list[str] = []
     for p in patches:
         if isinstance(p, dict) and p.get("type") == "person":
@@ -2376,10 +2386,38 @@ def enforce_role_holder(content: dict, user_label: str | None = None) -> dict:
             name = value.get("text") if isinstance(value, dict) else None
             if isinstance(name, str) and name.strip():
                 person_names.append(name.strip())
+    for e in (content.get("entities") or []):
+        if isinstance(e, dict) and e.get("type") == "person":
+            name = e.get("name")
+            if isinstance(name, str) and name.strip():
+                person_names.append(name.strip())
     # Longest first, so "Anna Patcharla" wins over "Anna" on a text that
     # carries both. A shorter name winning would attach the role to the
     # wrong person while looking like a successful repair.
     person_names.sort(key=len, reverse=True)
+
+    # FIRST TOKENS, because the role text says "Sukumar is leading..."
+    # while the entity is "Sukumar Gurugubelli". The live stated-roles
+    # query survives this only because its name keys include the
+    # person's ALIASES, which do not exist yet at extraction time.
+    #
+    # A token shared by two different people is DROPPED rather than
+    # resolved to whoever sorted first. That is the same-name fan-out
+    # already known on this data (68 people across 29 groups sharing a
+    # first name), and picking one of them is how a role about one Alex
+    # ends up on another Alex's card.
+    first_tokens: dict[str, str | None] = {}
+    for name in person_names:
+        token = name.split()[0].lower() if name.split() else ""
+        if not token or token == name.lower():
+            continue
+        if token in first_tokens and first_tokens[token] != name:
+            first_tokens[token] = None      # ambiguous, unusable
+        else:
+            first_tokens.setdefault(token, name)
+    # Full names first, then unambiguous first tokens.
+    candidates: list[tuple[str, str]] = [(n.lower(), n) for n in person_names]
+    candidates += [(t, n) for t, n in first_tokens.items() if n is not None]
 
     kept: list[dict] = []
     dropped: list[dict] = []
@@ -2422,8 +2460,15 @@ def enforce_role_holder(content: dict, user_label: str | None = None) -> dict:
 
         if holder is None:
             low = text.strip().lower()
-            for name in person_names:
-                if low.startswith(name.lower()):
+            for nm, name in candidates:
+                # WORD BOUNDARY, the same rule #463 put on the live
+                # stated-roles query after a bare prefix made an entity
+                # named "Anna" pick up a role about "Annapurna Patcharla"
+                # and "Jay" one about "Jayanth". Six such rows were live.
+                # The two matchers have to agree: this one decides what
+                # is STORED and that one decides what is SERVED, so a
+                # looser rule here mints rows that read back wrong.
+                if low.startswith(nm) and not low[len(nm):len(nm) + 1].isalpha():
                     holder, source = name, "text_prefix"
                     break
 
