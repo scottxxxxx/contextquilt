@@ -5,6 +5,15 @@
 same piece of work, and asked for a spec before any code. Every number
 below is measured on prod; the open questions at the end are his.**
 
+**Amended 2026-09-09, before any of the open questions were answered.**
+The first version called cross-type's exclusion "a real limitation"
+on the grounds that v1 addresses 2 of the 6 rows in the cluster. That
+framing was wrong in a way that could have skewed the answer: 4 of
+those 6 are not completable, so they never reach
+`commitments.they_owe`, and the surface Scott actually complained
+about is covered in full. The recommendation is unchanged; only the
+reason it is not a compromise is now stated.
+
 ## What he saw
 
 Two open commitments in Immigration Interview App, both his, both due
@@ -127,6 +136,14 @@ completables explicitly so that a non-completable can never arrive as an
 obligation, and this must not become the back door. The Portuguese
 cluster's two deliverables and two decisions stay where they are.
 
+And that is not a shortfall. `commitments.they_owe` is the action
+items list, and it admits completables only, so a deliverable or a
+decision never reaches it. What Scott reported was two open ACTION
+ITEMS for one job, and v1 addresses that completely. A decision that
+Portuguese ships this weekend, and a deliverable called Portuguese
+language support, are different objects from the obligation to do it;
+the quilt is where they belong.
+
 **CQ owns the merge, the client POSTs the tap.** A merge is a write that
 needs a receipt: a `replaces` connection, `value.archive_cause`, and the
 restatement stamps the ledger already understands
@@ -181,5 +198,7 @@ sixth call buys nothing.
    ingest with commitments regardless of yield?
 3. Does the offline precision run happen before any code, or does a
    kill-switched implementation ship and get measured live?
-4. Cross-type stays out of v1 above. Confirm, since the Portuguese
-   cluster he actually saw is 6 rows and v1 addresses 2 of them.
+4. Confirm cross-type stays out of v1. The 6 row cluster is 2
+   commitments plus 4 rows that are not completable and therefore
+   never reach `commitments.they_owe`, so v1 covers the surface he
+   complained about in full.
