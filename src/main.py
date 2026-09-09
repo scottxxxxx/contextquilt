@@ -136,6 +136,7 @@ from contextquilt.services.recall_scope import (
     in_project_clause, origins_cte,
 )
 from contextquilt.services import origin_project
+from contextquilt.services import transcript_purge
 from contextquilt.services.entity_match import (
     BARE_NAME_CANDIDATES_SQL, bare_terms, disambiguate_bare_names, match_entity_names,
     owner_tokens,
@@ -10934,6 +10935,18 @@ async def project_affected_people(
 # Matches how RECALL resolves a project: stamped with the project_id, OR
 # belonging to one of the project's meetings. Narrow (stamped only) left
 # 35 of 37 rows on a real project.
+# The honest edge of this operation, served to the caller. Measured on
+# prod 2026-09-08: 294 of one account's 1,202 stream entries carry no
+# resolvable origin and no project of their own, so no project delete and
+# no meeting delete will ever reach them. A client is entitled to know
+# that before it writes "this removes everything".
+UNREACHABLE_DEFINITION = (
+    "Recordings whose meeting was never assigned to a project, and which "
+    "carry no project of their own, are not reachable by a project "
+    "deletion and are not included in these counts. Only deleting the "
+    "account removes those."
+)
+
 PROJECT_DELETE_SCOPE_SQL = """
     SELECT cp.patch_id, cp.patch_type
     FROM context_patches cp
@@ -10974,13 +10987,43 @@ async def _project_delete(user_id, subject_key, project_id, *, preview: bool):
             "WHERE user_id = $1 AND origin_id = ANY($2::text[])",
             user_id, origins) or 0
 
+    # THE TRANSCRIPTS GO NOW, which reverses what this block used to say.
+    #
+    # Until 2026-09-07 `transcripts_on_the_ingest_stream` was reported
+    # under `survives`, and it was the largest remnant in the system:
+    # every /v1/memory POST persists on `memory_updates` WITH ITS BODY,
+    # nothing had ever been trimmed in five and a half months, and only
+    # an account purge removed one. Scott ruled that a deleted meeting
+    # takes its transcript, then that a deleted project takes its
+    # meetings' transcripts too.
+    #
+    # Counted for real rather than named. The old comment said counting
+    # would mean scanning the stream on a hot request, which was true and
+    # is now the point: the same scan that counts is the scan that
+    # deletes, so the number in the warning cannot differ from the number
+    # removed. Project deletion is a deliberate, confirmed, once-ever act
+    # on a route that already does a full patch sweep, not a hot path.
+    # THE IRREVERSIBLE HALF GOES LAST, so on the delete path this call is
+    # a COUNT and the XDEL happens after the archive has succeeded. A
+    # first cut swept with apply=not preview right here, which would have
+    # destroyed transcripts and then, if the patch UPDATE raised, left a
+    # project whose memory survived and whose recordings did not. The
+    # order of a two-store write is not a style question when one store
+    # cannot be undone.
+    # Only on the preview path. The delete path sweeps once, at the end,
+    # with apply=True; counting here as well would walk the whole stream
+    # twice for a number nothing on that path reads.
+    transcripts = {"matched": 0, "bytes": 0}
+    if preview:
+        transcripts = await transcript_purge.sweep(
+            redis_client, user_id, origin_ids=origins,
+            project_id=project_id, apply=False,
+        )
+
     survives = {
         "self_typed_patches": len(spared),
         "person_appearances": int(appearances),
         "origin_records": len(origins),
-        # Named, not counted: counting would mean scanning the stream on
-        # a hot request. One per meeting is the honest shape.
-        "transcripts_on_the_ingest_stream": len(origins),
     }
 
     if preview:
@@ -10988,7 +11031,26 @@ async def _project_delete(user_id, subject_key, project_id, *, preview: bool):
             "status": "preview",
             "project_id": project_id,
             "would_archive": {"total": len(doomed), "by_type": by_type},
+            # Named `would_clear` rather than folded into would_archive,
+            # because these are not archived. A stream XDEL is the one
+            # irreversible half of this operation: patches keep their row
+            # and tombstone into the delta, a transcript does not come
+            # back, and re-extraction of that meeting dies with it.
+            "would_clear": {
+                "transcripts": transcripts["matched"],
+                "transcript_bytes": transcripts["bytes"],
+                "irreversible": True,
+            },
             "would_survive": survives,
+            # A SENTENCE, NOT A NUMBER, AND DELIBERATELY OUTSIDE
+            # `would_survive`. Every other key in that map is an int and
+            # both downstream decoders are typed, so a string in there is
+            # the shape that makes a client throw on a field it never
+            # asked about. Published on the wire rather than left in a
+            # docstring, the same way ADVANCE_DEFINITION and
+            # CHASE_DEFINITION are, because a client writing a deletion
+            # warning cannot read our comments.
+            "limits": UNREACHABLE_DEFINITION,
         }
 
     archived = 0
@@ -11010,13 +11072,31 @@ async def _project_delete(user_id, subject_key, project_id, *, preview: bool):
         "UPDATE person_appearances SET project_id = NULL "
         "WHERE user_id = $1 AND project_id = $2", user_id, project_id)
 
+    # NOW the transcripts, after every reversible write has landed.
+    # Never allowed to fail the request: the patches are already archived
+    # and the user has been told the project is gone, so raising here
+    # would report a failure for an operation that mostly succeeded and
+    # invite a retry that re-runs the whole thing. A stranded transcript
+    # is recoverable by re-running; a 500 on a completed delete is not.
+    cleared = {"deleted": 0, "bytes": 0}
+    try:
+        cleared = await transcript_purge.sweep(
+            redis_client, user_id, origin_ids=origins,
+            project_id=project_id, apply=True)
+    except Exception as exc:
+        logger.error("project_delete_transcript_sweep_failed",
+                     user_id=user_id, project_id=project_id,
+                     error=str(exc)[:200])
+
     await redis_client.xadd("memory_updates", {"data": json.dumps({
         "type": "hydrate", "user_id": user_id,
         "timestamp": datetime.utcnow().isoformat()})})
 
     logger.info("project_deleted_patches", user_id=user_id,
                 project_id=project_id, archived=archived,
-                spared_self_typed=len(spared), by_type=by_type)
+                spared_self_typed=len(spared), by_type=by_type,
+                transcripts_cleared=cleared.get("deleted", 0),
+                transcript_bytes=cleared.get("bytes", 0))
 
     return {
         "status": "deleted",
@@ -11025,6 +11105,12 @@ async def _project_delete(user_id, subject_key, project_id, *, preview: bool):
         # that a write was processed while a field it sent was not.
         "patches_archived": archived,
         "by_type": by_type,
+        # Served back for the same reason, and separately from the
+        # archive count because it is the half that cannot be undone.
+        # A caller comparing this against the preview's `would_clear` is
+        # the only way to notice the sweep silently failing, which it is
+        # allowed to do rather than fail the delete.
+        "transcripts_cleared": cleared.get("deleted", 0),
         "survives": survives,
         "appearances_unscoped": int(appearances_cleared.split()[-1])
         if appearances_cleared else 0,
@@ -11101,11 +11187,28 @@ async def unscope_project(
     survives until account purge. A hard delete would break that sync,
     because `deleted[]` is computed FROM archived rows.
 
-    WHAT THIS DOES NOT REMOVE, reported in the preview rather than left
-    for someone to discover: person appearance rows, the
-    origin_project_assignments record, and the transcript bodies on the
-    `memory_updates` stream. The stream is the largest remnant in the
-    system and today only an account purge clears it.
+    THE TRANSCRIPTS GO TOO, as of 2026-09-07, and that reverses what this
+    docstring said a day earlier. It used to end by naming the
+    `memory_updates` stream as the largest remnant in the system that
+    only an account purge could clear. Scott ruled first that deleting a
+    meeting clears its transcript, then that deleting a project clears
+    its meetings' transcripts, against the measured numbers: 1,477
+    entries, nothing ever trimmed since 2026-03-22, and 24 entries
+    already stranded against projects that are archived and hold nothing.
+
+    THAT HALF IS IRREVERSIBLE AND IT IS THE ONLY IRREVERSIBLE HALF.
+    Patches are archived, keep their row and tombstone into the delta's
+    `deleted[]`. A transcript XDEL does not come back, and re-extraction
+    of that meeting dies with it, since every replay backfill reads this
+    stream. The preview reports it under `would_clear` with
+    `irreversible: true` rather than mixing it into the archive count,
+    and the sweep runs LAST, after every reversible write has landed.
+
+    WHAT THIS STILL DOES NOT REMOVE: person appearance rows, the
+    origin_project_assignments record, and any stream entry whose meeting
+    was never assigned and which carries no project of its own. That last
+    class is a quarter of the stream on the largest account and only an
+    account purge reaches it, so a "no remnants" claim stops there.
     """
     subject_key = f"user:{user_id}"
     preview = bool(req and req.preview)
