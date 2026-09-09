@@ -32,7 +32,11 @@ def test_by_window_is_the_age_predicate_inverted_and_skips_universal_types():
     i = b.index('excluded["by_window"]')
     q = b[b.index("if max_age_days is not None:"):i]
     assert "< ((NOW() AT TIME ZONE 'utc')::date - $4::int)" in q
-    assert "NOT (cp.patch_type = ANY($3::text[]))" in q
+    # Inverted with its ownership condition, so the count of meetings
+    # excluded by the window matches the leg that does the excluding.
+    assert "cp.patch_type = ANY($3::text[])" in q
+    assert "COALESCE(cp.value->>'owner', '') = ''" in q
+    assert "AND NOT (" in q
     assert '"oldest"' in b[i:i + 400] and '"max_age_days": max_age_days' in b[i:i + 400]
 
 

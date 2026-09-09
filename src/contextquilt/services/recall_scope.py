@@ -80,6 +80,73 @@ def origins_cte(col: str, subject_param: str, project_param: str,
     )
 
 
+def self_disclosure_leg(universal_param: str) -> str:
+    """A universal type earns its exemption only when it is the USER'S OWN.
+
+    THE EXEMPTION EXISTS FOR ONE REASON and that reason does not survive
+    a third party. `preference`, `trait` and the rest are universal
+    because they are the user's SELF-DISCLOSURE: a preference does not
+    expire on day 31 and it is true of them in every project, so those
+    types skip the recall age window and are admitted to every project
+    scope regardless of where they were learned.
+
+    None of that holds for a preference somebody else stated. Scott fed
+    the app a TWiT episode on 2026-09-07 and it stored seven, correctly
+    attributed to four podcast hosts. Every one of them was then
+    ELIGIBLE for the Immigration app's chat, the ABM chat, everything,
+    by construction rather than by ranking, and exempt from the tier
+    window while it sat there. Measured the same day: 45 self-typed rows
+    on that account carried an owner and 35 of them named somebody who
+    is not him.
+
+    OWNERLESS IS THE TEST, and it is the write path's own invariant
+    rather than a new rule: `strip_owner_on_self_typed_patches` and
+    `convert_to_preference` both REMOVE an owner naming the user,
+    precisely because ownership is implicit on these types. So an
+    absent owner means the user's own, and a present one means somebody
+    else's. The ten legacy rows that still named him were normalised by
+    `scripts/backfill_strip_self_owner.py` BEFORE this shipped, so this
+    predicate landed on data that already satisfied the invariant and
+    nothing lost reach even briefly.
+
+    ONE HELPER, FOUR CALL SITES, on purpose. This concept had four
+    copies (two scope legs here, the recall age predicate and the quilt
+    route's window in main.py), and a rule with four carriers is the
+    shape that has cost this codebase the most: the language rule, the
+    sanitizer chain, the owner on the woven tile. Changing it in three
+    of four places would leak in the fourth and nothing would look
+    wrong.
+    """
+    return (f"(cp.patch_type = ANY({universal_param}::text[]) "
+            "AND COALESCE(cp.value->>'owner', '') = '')")
+
+
+def age_predicate(days_param: str, universal_param: str) -> str:
+    """The recall age window, as one definition.
+
+    IT LIVED INLINE IN main.py AND WAS RETYPED IN THREE TEST FILES, and
+    on 2026-09-09 that cost a red CI run in the most instructive way
+    available: narrowing the universal exemption to the user's own rows
+    changed production, the tests kept their own stale copy of the old
+    predicate, and a test asserting the NEW behaviour ran against the
+    OLD rule and failed. The test was right, the fixture was stale.
+
+    A fixture you build cannot falsify an assumption you built into it,
+    so the fixture does not get to hold its own copy of the rule. Both
+    sides format the same string now, and the exemption inside it comes
+    from `self_disclosure_leg`, so there is exactly one place where "is
+    this row exempt from the window" is decided.
+
+    `days_param` and `universal_param` are the placeholders the caller
+    binds; main.py passes "{d}" and "{u}" and formats them later, tests
+    pass "$4" and "$3" directly.
+    """
+    return ("AND (" + days_param + "::int IS NULL OR "
+            + self_disclosure_leg(universal_param) + " "
+            "OR COALESCE(cp.last_observed_at, cp.created_at)::date "
+            ">= ((NOW() AT TIME ZONE 'utc')::date - " + days_param + "::int))")
+
+
 _ROW = "(COALESCE(cp.origin_type, ''), cp.origin_id)"
 
 
@@ -110,7 +177,7 @@ def project_scope_clause(col: str, project_param: str, universal_param: str) -> 
     windows below. Needs origins_cte in the same statement."""
     return (
         f"({in_project_clause(col, project_param)} "
-        f"OR cp.patch_type = ANY({universal_param}::text[]) "
+        f"OR {self_disclosure_leg(universal_param)} "
         f"OR (cp.{col} IS NULL AND NOT {foreign_clause(col)}))"
     )
 
@@ -163,7 +230,7 @@ def build_flat_fetch(
     # exists for would vanish.
     second = (
         f"({_SELECT}{age_sql} AND NOT {held} "
-        f"AND (cp.patch_type = ANY($3::text[]) OR (cp.{col} IS NULL AND NOT {foreign})) "
+        f"AND ({self_disclosure_leg('$3')} OR (cp.{col} IS NULL AND NOT {foreign})) "
         f"{_ORDER})"
     )
     return f"{origins_cte(col, '$1', '$2', include_assignments)}{first} UNION ALL {second}", args

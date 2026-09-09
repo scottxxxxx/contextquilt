@@ -20,15 +20,18 @@ from pathlib import Path
 
 import pytest
 
+from contextquilt.services.recall_scope import age_predicate
+
 from contextquilt.services.cue_matching import build_cue_fetch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INIT_DB = REPO_ROOT / "init-db"
 
 # The recall age predicate exactly as main.py formats it for this leg.
-AGE = ("AND ($4::int IS NULL OR cp.patch_type = ANY($3::text[]) "
-       "OR COALESCE(cp.last_observed_at, cp.created_at)::date "
-       ">= ((NOW() AT TIME ZONE 'utc')::date - $4::int))")
+# LIFTED, NOT RETYPED. A stale copy of this here is what turned a
+# correct test red on 2026-09-09: production narrowed the universal
+# exemption and the fixture kept the old rule.
+AGE = age_predicate("$4", "$3")
 
 UNIVERSAL = ["trait", "preference", "goal", "constraint"]
 

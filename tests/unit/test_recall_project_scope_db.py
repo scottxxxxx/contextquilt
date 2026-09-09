@@ -22,14 +22,15 @@ import pytest
 
 from contextquilt.services.cue_matching import build_cue_fetch
 from contextquilt.services.origin_project import RECORD_INGEST_PROJECT_SQL
-from contextquilt.services.recall_scope import FLAT_LIMIT, build_flat_fetch
+from contextquilt.services.recall_scope import age_predicate, FLAT_LIMIT, build_flat_fetch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INIT_DB = REPO_ROOT / "init-db"
 
-AGE = ("AND ($4::int IS NULL OR cp.patch_type = ANY($3::text[]) "
-       "OR COALESCE(cp.last_observed_at, cp.created_at)::date "
-       ">= ((NOW() AT TIME ZONE 'utc')::date - $4::int))")
+# LIFTED, NOT RETYPED. A stale copy of this here is what turned a
+# correct test red on 2026-09-09: production narrowed the universal
+# exemption and the fixture kept the old rule.
+AGE = age_predicate("$4", "$3")
 UNIVERSAL = ["trait", "preference", "goal", "constraint"]
 
 IMMIGRATION = "10FF20F9-0000-0000-0000-000000000001"
@@ -320,5 +321,77 @@ async def test_a_re_ingest_cannot_overwrite_an_explicit_unassignment():
             "SELECT project_id FROM origin_project_assignments WHERE user_id = $1 AND origin_id = $2",
             user, MEETING_MOMENTS_ONLY)
         assert row["project_id"] is None
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_another_projects_preference_is_not_admitted_everywhere():
+    """THE LEAK THIS CLOSES, executed rather than asserted about text.
+
+    Scott fed the app a TWiT episode on 2026-09-07. It stored seven
+    `preference` rows, correctly attributed to four podcast hosts, and
+    `preference` is a universal recall type, so every one of them was
+    eligible for the Immigration chat, the ABM chat and everything else
+    BY CONSTRUCTION rather than by ranking. 35 of his 45 owner-carrying
+    self-typed rows name somebody who is not him.
+
+    The exemption exists because these types are the user's own
+    self-disclosure. That reason does not survive a third party.
+    """
+    await _ensure_schema()
+    conn = await asyncpg.connect(TEST_DB)
+    try:
+        subject = f"user:{uuid.uuid4()}"
+        t0 = datetime.now(timezone.utc)
+        # A host's opinion, learned in the Onstak meeting, owned by him.
+        theirs = await _patch(
+            conn, subject, "apple was better off without johnny ive",
+            "preference", origin_id=MEETING_ONS, created_at=t0)
+        await conn.execute(
+            "UPDATE context_patches SET value = value || '{\"owner\": \"Nicholas\"}'::jsonb "
+            "WHERE patch_id = $1", theirs)
+        # The user's own, from the same meeting, ownerless by the write
+        # contract. It must keep its reach: that is the case the change
+        # has no business touching.
+        mine = await _patch(
+            conn, subject, "prefers async updates over meetings",
+            "preference", origin_id=MEETING_ONS, created_at=t0)
+        # Onstak is a DIFFERENT project from the one we recall for.
+        await _patch(conn, subject, "onstak decision", "decision",
+                     project_id=ONSTAK, origin_id=MEETING_ONS, created_at=t0)
+
+        got = set(await _flat(conn, subject, recall_project_id=IMMIGRATION))
+        assert theirs not in got, "a third party's preference reached another project"
+        assert mine in got, "the user's own preference lost its reach"
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
+async def test_a_third_partys_preference_is_not_exempt_from_the_window():
+    """The same rule on the other axis. A universal type skips the tier
+    window because a preference does not expire on day 31 for the person
+    who holds it; somebody else's stated view is not that."""
+    await _ensure_schema()
+    conn = await asyncpg.connect(TEST_DB)
+    try:
+        subject = f"user:{uuid.uuid4()}"
+        old = datetime.now(timezone.utc) - timedelta(days=400)
+        theirs = await _patch(conn, subject, "thinks the ftc is overreaching",
+                              "preference", origin_id=MEETING_IMM, created_at=old)
+        await conn.execute(
+            "UPDATE context_patches SET value = value || '{\"owner\": \"Leo\"}'::jsonb "
+            "WHERE patch_id = $1", theirs)
+        mine = await _patch(conn, subject, "prefers the diff before the summary",
+                            "preference", origin_id=MEETING_IMM, created_at=old)
+        await _patch(conn, subject, "immigration decision", "decision",
+                     project_id=IMMIGRATION, origin_id=MEETING_IMM, created_at=old)
+
+        sql, args = build_flat_fetch(subject, UNIVERSAL, 30, AGE,
+                                     recall_project_id=IMMIGRATION)
+        got = {r["patch_id"] for r in await conn.fetch(sql, *args)}
+        assert theirs not in got, "a third party's view skipped the tier window"
+        assert mine in got, "the user's own preference was windowed out"
     finally:
         await conn.close()
