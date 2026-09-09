@@ -133,7 +133,7 @@ from contextquilt.services.people_identity import (
 from contextquilt.services.cue_matching import build_cue_fetch, match_cues
 from contextquilt.services.recall_scope import (
     build_conduct_fetch, build_flat_fetch, build_scoped_count,
-    in_project_clause, origins_cte, self_disclosure_leg,
+    age_predicate, in_project_clause, origins_cte, self_disclosure_leg,
 )
 from contextquilt.services import origin_project
 from contextquilt.services import transcript_purge
@@ -1196,14 +1196,11 @@ async def recall_context(
 
     max_age_days = resolve_max_age_days(request.metadata)
     universal_types = list(type_runtime.universal_recall_types)
-    AGE = (
-        # The universal exemption is the user's OWN self-disclosure only;
-        # a preference somebody else stated is not exempt from this
-        # tier's window. One helper, shared with the scope legs.
-        "AND ({d}::int IS NULL OR " + self_disclosure_leg("{u}") + " "
-        "OR COALESCE(cp.last_observed_at, cp.created_at)::date "
-        ">= ((NOW() AT TIME ZONE 'utc')::date - {d}::int))"
-    )
+    # ONE DEFINITION, in recall_scope, shared with the tests. The
+    # universal exemption inside it is the user's OWN self-disclosure
+    # only: a preference somebody else stated is not exempt from this
+    # tier's window.
+    AGE = age_predicate("{d}", "{u}")
 
     # Step 4a: Flat patch query (works for both V1 and V2 patches)
     # cp.patch_id is the secondary sort everywhere — created_at ties on

@@ -121,6 +121,32 @@ def self_disclosure_leg(universal_param: str) -> str:
             "AND COALESCE(cp.value->>'owner', '') = '')")
 
 
+def age_predicate(days_param: str, universal_param: str) -> str:
+    """The recall age window, as one definition.
+
+    IT LIVED INLINE IN main.py AND WAS RETYPED IN THREE TEST FILES, and
+    on 2026-09-09 that cost a red CI run in the most instructive way
+    available: narrowing the universal exemption to the user's own rows
+    changed production, the tests kept their own stale copy of the old
+    predicate, and a test asserting the NEW behaviour ran against the
+    OLD rule and failed. The test was right, the fixture was stale.
+
+    A fixture you build cannot falsify an assumption you built into it,
+    so the fixture does not get to hold its own copy of the rule. Both
+    sides format the same string now, and the exemption inside it comes
+    from `self_disclosure_leg`, so there is exactly one place where "is
+    this row exempt from the window" is decided.
+
+    `days_param` and `universal_param` are the placeholders the caller
+    binds; main.py passes "{d}" and "{u}" and formats them later, tests
+    pass "$4" and "$3" directly.
+    """
+    return ("AND (" + days_param + "::int IS NULL OR "
+            + self_disclosure_leg(universal_param) + " "
+            "OR COALESCE(cp.last_observed_at, cp.created_at)::date "
+            ">= ((NOW() AT TIME ZONE 'utc')::date - " + days_param + "::int))")
+
+
 _ROW = "(COALESCE(cp.origin_type, ''), cp.origin_id)"
 
 
