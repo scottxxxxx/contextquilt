@@ -7952,6 +7952,7 @@ async def woven_digest(
         candidates, limit=limit, edge_counts=edge_counts, offset=offset,
         conduct_types=conduct_types)
 
+    await _attach_woven_owners(user_id, app_id, digest["patches"])
     await _attach_woven_links(digest["patches"])
 
     totals = await _woven_lifetime_totals(subject_key)
@@ -8059,12 +8060,101 @@ async def woven_meeting_seam(
             "patch_type": patch["patch_type"],
             "fact": (value.get("text") or "").strip(),
             "headline": value.get("headline") or None,
+            # The seam builds its own dict rather than going through
+            # build_digest, so it needs the owner keyed here too. Without
+            # it _attach_woven_owners sees every row as ownerless and the
+            # ownerless-means-self rule would hand a colleague's
+            # preference to the reader on this surface while the home
+            # quilt got it right: one rule, two carriers, again.
+            "owner": value.get("owner") or None,
             "source_meeting_id": patch.get("origin_id"),
             "occurred_at": patch.get("created_at"),
         })
 
+    await _attach_woven_owners(user_id, app_id, patches)
     await _attach_woven_links(patches)
     return {"meeting_id": origin_id, "patches": patches, "dropped": dropped}
+
+
+# Types where AN ABSENT OWNER MEANS THE USER'S OWN, which is the only
+# reason `owned_by_self` can answer True without a name to resolve.
+#
+# For a completable it is the extraction contract plus reassign-speaker's
+# to_self rule, which is what the quilt route already relies on. For a
+# self-typed row it is a different contract reaching the same place:
+# `strip_owner_on_self_typed_patches` and `convert_to_preference` both
+# REMOVE a self owner on the write path, so ownerless is affirmative
+# rather than unknown.
+#
+# Everything else abstains. An ownerless decision or takeaway is not
+# evidence of anything about the reader, and doc 16 §5.13 is explicit
+# that a served name may assert only what was observed.
+OWNERLESS_MEANS_SELF_TYPES = frozenset(
+    {"trait", "preference", "goal", "constraint"})
+
+
+async def _attach_woven_owners(user_id: str, app_id: str, patches: list) -> None:
+    """Resolve `owner_entity_id` and `owned_by_self` onto woven tiles.
+
+    The verdict is `people_identity.owned_by_self_verdict`, the SAME
+    function the quilt route's chips use, so a tile and the patch behind
+    it can never disagree about whose it is. Its three-way answer is the
+    point: True the user's, False a named other person, None a
+    diarization placeholder, which names somebody CQ cannot identify and
+    must therefore not be handed to the user by the ownerless rule.
+
+    IT IS NOT GATED ON COMPLETABILITY, and that is a deliberate
+    difference from the quilt route rather than an oversight. There the
+    question is "who owes this item", which only a completable has. Here
+    the question is "whose statement is this", and a `preference` is
+    exactly the type that needs answering: it is the type that produced
+    the defect. The gate is `OWNERLESS_MEANS_SELF_TYPES` above, which
+    says where an ABSENT owner is affirmative; a NAMED owner resolves
+    the same way for every type.
+
+    Never raises. A tile without these keys is the pre-2026-09-08 shape
+    and every client already tolerates it, so a failed lookup costs a
+    chip rather than the quilt tab.
+    """
+    if not patches:
+        return
+    try:
+        vocab = await _people_vocab_cached(app_id)
+        entity_rows = await db_pool.fetch(
+            "SELECT entity_id, name, merged_into FROM entities "
+            "WHERE user_id = $1 AND entity_type = $2",
+            user_id, vocab.person_entity_type,
+        )
+        alias_rows = await db_pool.fetch(
+            "SELECT a.alias, a.entity_id FROM entity_aliases a "
+            "JOIN entities e ON e.entity_id = a.entity_id "
+            "WHERE a.user_id = $1 AND e.entity_type = $2",
+            user_id, vocab.person_entity_type,
+        )
+        resolve_owner_entity = build_entity_resolver(
+            [dict(r) for r in entity_rows], [dict(r) for r in alias_rows]
+        )
+        self_row = await db_pool.fetchval(
+            "SELECT entity_id FROM entities "
+            "WHERE user_id = $1 AND self_at IS NOT NULL", user_id)
+        self_entity_id = str(self_row) if self_row else None
+    except Exception as exc:
+        logger.warning("woven_owners_failed", user_id=user_id,
+                       error=str(exc)[:200])
+        return
+
+    for tile in patches:
+        owner = tile.get("owner")
+        owner_entity = resolve_owner_entity(owner) if owner else None
+        tile["owner_entity_id"] = owner_entity
+        if self_entity_id is None:
+            # No ego link: every answer would be a guess, so say so.
+            tile["owned_by_self"] = None
+        elif owner or tile.get("patch_type") in OWNERLESS_MEANS_SELF_TYPES:
+            tile["owned_by_self"] = owned_by_self_verdict(
+                owner_entity, self_entity_id, owner, owner)
+        else:
+            tile["owned_by_self"] = None
 
 
 async def _attach_woven_links(patches: list) -> None:

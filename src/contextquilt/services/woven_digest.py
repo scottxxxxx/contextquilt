@@ -669,6 +669,20 @@ def build_digest(
                 # Patches stored before the lane existed are the same
                 # state until the backfill reaches them.
                 "headline": _value(patch).get("headline") or None,
+                # WHOSE THIS IS. Scott opened his Twit project on
+                # 2026-09-07 and saw seven `preference` tiles that were
+                # four TWiT hosts' opinions rendered as his, including
+                # "Apple better off without Johnny Ive" beside "Johnny
+                # Ive's original iMac design was excellent". The owner
+                # was in the row the whole time and the tile dropped it.
+                #
+                # The raw string only, because this module is pure. The
+                # route resolves it to `owner_entity_id` and
+                # `owned_by_self`, which need the entity graph. A client
+                # was joining each tile back to /v1/quilt by patch_id to
+                # get this, which fails silently for any patch outside
+                # that route's cap (SS, 2026-09-08).
+                "owner": _value(patch).get("owner") or None,
                 "weight": weight,
                 "span": span,
                 "height": height,
