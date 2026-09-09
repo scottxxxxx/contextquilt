@@ -66,7 +66,11 @@ def test_no_correlated_subquery_anywhere():
 
 def test_the_whole_rule_admits_exactly_three_kinds():
     rule = project_scope_clause("project_id", "$2", "$3")
-    assert rule.count("OR cp.patch_type = ANY($3::text[])") == 1
+    # The universal leg now carries its ownership condition: the
+    # exemption is for the user's OWN self-disclosure, so a preference
+    # somebody else stated is not admitted to every project (2026-09-09).
+    assert rule.count("cp.patch_type = ANY($3::text[])") == 1
+    assert rule.count("COALESCE(cp.value->>'owner', '') = ''") == 1
     assert "cp.project_id IS NULL AND NOT (" in rule
     assert "OR cp.project_id IS NULL OR" not in rule
 

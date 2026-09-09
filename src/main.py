@@ -133,7 +133,7 @@ from contextquilt.services.people_identity import (
 from contextquilt.services.cue_matching import build_cue_fetch, match_cues
 from contextquilt.services.recall_scope import (
     build_conduct_fetch, build_flat_fetch, build_scoped_count,
-    in_project_clause, origins_cte,
+    in_project_clause, origins_cte, self_disclosure_leg,
 )
 from contextquilt.services import origin_project
 from contextquilt.services import transcript_purge
@@ -1197,7 +1197,10 @@ async def recall_context(
     max_age_days = resolve_max_age_days(request.metadata)
     universal_types = list(type_runtime.universal_recall_types)
     AGE = (
-        "AND ({d}::int IS NULL OR cp.patch_type = ANY({u}::text[]) "
+        # The universal exemption is the user's OWN self-disclosure only;
+        # a preference somebody else stated is not exempt from this
+        # tier's window. One helper, shared with the scope legs.
+        "AND ({d}::int IS NULL OR " + self_disclosure_leg("{u}") + " "
         "OR COALESCE(cp.last_observed_at, cp.created_at)::date "
         ">= ((NOW() AT TIME ZONE 'utc')::date - {d}::int))"
     )
@@ -1475,7 +1478,8 @@ async def recall_context(
                     WHERE ps.subject_key = $1 AND cp.{scope_col} = $2
                       AND COALESCE(cp.status, 'active') = 'active'
                       AND cp.origin_id IS NOT NULL
-                      AND NOT (cp.patch_type = ANY($3::text[]))
+                      AND NOT (cp.patch_type = ANY($3::text[])
+                               AND COALESCE(cp.value->>'owner', '') = '')
                       AND COALESCE(cp.last_observed_at, cp.created_at)::date
                           < ((NOW() AT TIME ZONE 'utc')::date - $4::int)
                     """,
@@ -2516,7 +2520,10 @@ async def get_user_quilt(
     if max_age_days is not None:
         window_runtime = await facet_runtime.get_type_runtime(db_pool.fetch)
         query += (
-            f" AND (cp.patch_type = ANY(${len(params) + 1}::text[])"
+            # Same rule as recall's window. A third party's preference is
+            # not the user's self-disclosure, so it does not skip the
+            # tier window here either; `total_available` counts inside it.
+            f" AND ({self_disclosure_leg(f'${len(params) + 1}')}"
             f" OR COALESCE(cp.last_observed_at, cp.created_at)::date"
             f" >= ((NOW() AT TIME ZONE 'utc')::date - ${len(params) + 2}::int))"
         )
