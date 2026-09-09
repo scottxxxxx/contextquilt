@@ -10935,6 +10935,18 @@ async def project_affected_people(
 # Matches how RECALL resolves a project: stamped with the project_id, OR
 # belonging to one of the project's meetings. Narrow (stamped only) left
 # 35 of 37 rows on a real project.
+# The honest edge of this operation, served to the caller. Measured on
+# prod 2026-09-08: 294 of one account's 1,202 stream entries carry no
+# resolvable origin and no project of their own, so no project delete and
+# no meeting delete will ever reach them. A client is entitled to know
+# that before it writes "this removes everything".
+UNREACHABLE_DEFINITION = (
+    "Recordings whose meeting was never assigned to a project, and which "
+    "carry no project of their own, are not reachable by a project "
+    "deletion and are not included in these counts. Only deleting the "
+    "account removes those."
+)
+
 PROJECT_DELETE_SCOPE_SQL = """
     SELECT cp.patch_id, cp.patch_type
     FROM context_patches cp
@@ -11013,13 +11025,6 @@ async def _project_delete(user_id, subject_key, project_id, *, preview: bool):
         "person_appearances": int(appearances),
         "origin_records": len(origins),
     }
-    # WHAT THIS STILL CANNOT REACH, reported rather than left for someone
-    # to find. An entry whose meeting was never assigned and which
-    # carries no project of its own is invisible to this sweep; a quarter
-    # of the stream is in that state on the largest account, and only an
-    # account purge clears it. A "no remnants" claim built on this
-    # endpoint has to stop at that line.
-    survives["unattributable_stream_entries"] = "not_counted_here"
 
     if preview:
         return {
@@ -11037,6 +11042,15 @@ async def _project_delete(user_id, subject_key, project_id, *, preview: bool):
                 "irreversible": True,
             },
             "would_survive": survives,
+            # A SENTENCE, NOT A NUMBER, AND DELIBERATELY OUTSIDE
+            # `would_survive`. Every other key in that map is an int and
+            # both downstream decoders are typed, so a string in there is
+            # the shape that makes a client throw on a field it never
+            # asked about. Published on the wire rather than left in a
+            # docstring, the same way ADVANCE_DEFINITION and
+            # CHASE_DEFINITION are, because a client writing a deletion
+            # warning cannot read our comments.
+            "limits": UNREACHABLE_DEFINITION,
         }
 
     archived = 0
