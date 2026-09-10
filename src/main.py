@@ -137,6 +137,7 @@ from contextquilt.services.recall_scope import (
 )
 from contextquilt.services import origin_project
 from contextquilt.services import transcript_purge
+from contextquilt.services.ingest_markers import stamp_recovery
 from contextquilt.services.entity_match import (
     BARE_NAME_CANDIDATES_SQL, bare_terms, disambiguate_bare_names, match_entity_names,
     owner_tokens,
@@ -1848,7 +1849,8 @@ async def get_profile(
 @app.post("/v1/memory", tags=["MCP Tool"])
 async def update_memory(
     update: MemoryUpdate,
-    app_id: str = Depends(verify_application_access)
+    app_id: str = Depends(verify_application_access),
+    recovery: Optional[str] = Header(None, alias="X-CZ-Recovery"),
 ):
     """
     MCP Tool: Update Memory State.
@@ -1856,11 +1858,45 @@ async def update_memory(
     - 'tool_call': Direct fact insertion (Active Learning)
     - 'trace': Full execution trace (Passive Learning)
     - 'chat_log': Simple conversation history
+
+    `X-CZ-Recovery` marks a REPLAY rather than a first delivery.
+    ShoulderSurf writes `pending_ingests.json` at session start and
+    removes the entry only on a 2xx, so a live meeting's ingest is a
+    durable debt replayed on the next foreground with this header set.
+    An IMPORTED meeting has no such ledger; a failure there is a manual
+    retry from the meeting menu and arrives unlabelled.
+
+    CQ IGNORED IT ENTIRELY UNTIL NOW, and the cost was a question nobody
+    could answer. The stream holds 61 origins whose entries are
+    byte-identical repeats, in two bursts (86 entries in May, 33 in
+    September, three across the whole summer), and there is no way to
+    tell a replay from a deliberate re-ingest because the sender was
+    labelling them the whole time and nothing here read the label.
+
+    It also never left GhostPour: they received it on
+    `/v1/capture-transcript`, logged it, and built the outbound request
+    with auth headers only. Exactly the `to_name` shape, additive at the
+    sender and invisible at the reader, alive or dead on a middle hop
+    neither endpoint can test. Fixed on their side in GP #954 with a
+    request-side test at their own hop, which is the only place it can
+    be tested.
     """
     # Push to Redis Stream for Async Worker (Cold Path)
     stream_key = "memory_updates"
     payload = update.dict(exclude_none=True)
     payload["app_id"] = app_id
+    # The rule lives in services/ingest_markers, which imports no
+    # fastapi, so its absent-means-absent property is testable outside
+    # CI. A negative property only checkable in CI is one nobody checks.
+    marker = stamp_recovery(payload, recovery)
+    if marker:
+        meta = payload.get("metadata")
+        logger.info("ingest_recovery_replay", app_id=app_id,
+                    user_id=payload.get("user_id"),
+                    interaction_type=payload.get("interaction_type")
+                    or payload.get("type"),
+                    origin_id=meta.get("origin_id") if isinstance(meta, dict) else None,
+                    marker=marker)
     # Use provided timestamp or default to now
     if not payload.get("timestamp"):
         payload["timestamp"] = datetime.utcnow().isoformat()
