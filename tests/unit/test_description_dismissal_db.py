@@ -160,8 +160,14 @@ async def test_a_person_with_no_frozen_description_materialises_nothing():
     conn = await asyncpg.connect(TEST_DB)
     try:
         u = str(uuid.uuid4())
-        for desc in (None, "", "   "):
-            e = await _person(conn, u, "Nobody", desc)
+        # Distinct names per case: `entities` carries a unique constraint
+        # on (user_id, name, entity_type), so reusing one name made the
+        # SECOND iteration fail on the INSERT rather than on the thing
+        # under test. Worth more than the fix: it also constrains the
+        # deferred org rename, since renaming onto a name that already
+        # exists for that type collides and has to become a merge.
+        for i, desc in enumerate((None, "", "   ")):
+            e = await _person(conn, u, f"Nobody {i}", desc)
             assert await conn.fetchval(_materialise_sql(), u, str(e)) is None
     finally:
         await conn.close()
