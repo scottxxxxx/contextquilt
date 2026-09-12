@@ -1,6 +1,13 @@
 # 23. Two commitments that are one undertaking
 
-**Status: SPEC, not a decision and not built. Scott asked for it on
+**Status: the gate HAS NOW RUN and all four open questions are
+answered. Still not built. See
+`docs/experiments/2026-09-10-duplicate-undertakings.md` for the run and
+`docs/experiments/2026-09-10-commitment-normalization.md` for a finding that changes the
+merge mechanic. Amended 2026-09-12 with the result and with Scott's
+rulings from marking the output.**
+
+**The original spec, unchanged below. Scott asked for it on
 2026-09-09 after seeing two open action items on his phone that are the
 same piece of work, and asked for a spec before any code. Every number
 below is measured on prod; the open questions at the end are his.**
@@ -48,6 +55,99 @@ existing threshold fixes it. ShoulderSurf's second example is worse:
 One undertaking, almost no shared words. Lexical similarity is the wrong
 instrument for this class, and lowering the floor to reach it would
 admit an enormous number of unrelated pairs (see the sizing below).
+
+## What the gate found, 2026-09-10
+
+51 judge calls over the last 30 days, one per meeting per owner/project
+with prior open work, zero failures, RUN TWICE on identical input.
+
+| | |
+|---|---|
+| flagged, run 1 | 19 |
+| flagged, run 2 | 19 |
+| stable across both | **18 of 20 distinct pairs (90%)** |
+| known positives | both FOUND and both STABLE |
+| adversarial control | not flagged |
+
+The control is worth naming: a third Steven row, "Steven's mother will
+send over the psychological evaluation forms", shares "Steven" and
+"mother" with both halves of the Steven pair and is different work by a
+different person. A judge matching on vocabulary flags it. This one did
+not.
+
+**SELF-AGREEMENT WAS NOT A REQUIREMENT IN THIS DOCUMENT AND IS NOW THE
+ONE THAT MATTERS MOST.** A suggestion that appears on one load and not
+the next cannot be attached to a tap that closes a commitment somebody
+still owes. It was measured only because the experiments README insists
+on rerun noise on an arm the change cannot touch.
+
+**THE FIRST HARNESS MEASURED THE WRONG TASK AND SCORED 42%.** It showed
+the model a whole owner/project group at once, up to 51 commitments,
+asking which PAIRS matched: 1,275 combinations in one call. Three
+identical runs returned 18, 14 and 23 pairs. That number nearly entered
+the record as a property of the feature. Rebuilt directional, the way
+this document actually specifies, the same judge scores 90%. A harness
+that does not match the design measures something nobody proposed.
+
+## What Scott ruled, marking the output
+
+**PRECISION IS BIMODAL BY OWNER.** Eleven of the eighteen stable pairs
+are other people's items and he marked all eleven correct. The seven
+that are his read wrong. The judge is right where the item belongs to
+somebody else and wrong where it belongs to the reader.
+
+**AND OWNER IS NOT THE UNDERLYING TRUTH, IT IS TOLERANCE.** On somebody
+else's item he wants the gist, so an over-merge is cheap. On his own he
+has to act on it, so an over-merge costs him a real task. Same
+judgment, two thresholds, and the threshold depends on whether the
+reader is the one who owes the thing.
+
+**THE REAL DISCRIMINATOR IS SAME-NAMED-DELIVERABLE VERSUS
+DIFFERENT-SLICES-OF-ONE-EFFORT.** Asked what separates the two cases,
+with both rows in front of him: the Portuguese pair is one deliverable,
+the Cigna rows are separate work. Portuguese names "Portuguese language
+support" twice and the second adds a step to finishing it. The Cigna
+rows name P1 against P2 and P3, different use cases, different
+documents. Sharing a customer and a spreadsheet is not sharing an
+undertaking. That rule keeps Portuguese and rejects all four Cigna
+pairs; an owner rule does neither.
+
+**THE DESIGN IS INVERTED FOR HIS OWN ITEMS.** The merge he would
+consider is combining two Aug 17 Cigna scenario rows, `3ddab0d8` and
+`ce9ceed2`. They are from the SAME MEETING (`EED21245`). This document
+judges each new commitment against open items from OTHER meetings, so
+same-meeting pairs are structurally excluded and can never be
+suggested, while the cross-meeting ones it does offer him are the ones
+he rejects. Same-meeting pairs need their own candidate set, and
+extraction already has both items in one call.
+
+**UNRESOLVED:** that sits against his separate statement that the Cigna
+items are separate work. Recorded as a tension rather than settled.
+
+## The merge mechanic has to change, and a second experiment says how
+
+Scott's condition for merging other people's items is that the merge
+COMBINES THE DESCRIPTIONS into something more verbose, rather than
+keeping one and discarding the other. The mechanic below (keep the
+earlier, close the later) throws the later wording away, so it does not
+satisfy the condition it was written for.
+
+Combining descriptions means a model rewrites text that sits next to a
+commitment somebody still owes. The normalization experiment of
+2026-09-10 measured exactly that class of rewrite and found the safety
+property is not obtainable from a prompt: across five runs on identical
+input, changing only wording, the refusal rate went 3, 4, 0, 32 out of
+49. A rule about VERB CONJUGATION, touching nothing about refusal,
+switched refusal off entirely, and that run then invented a deadline
+("by ongoing for 4-6 weeks") and turned a constraint into a purpose.
+
+**So a combining merge must be: model proposes, CODE decides.** A
+mechanical check discards a synthesis that adds a deadline phrase the
+sources lack, drops a scope token present in either source, or changes
+who does the work. Same shape as `enforce_person_ownership`,
+`enforce_role_holder` and `sanitize_behavior_observations`. And both
+original texts stay on the row, because a combining merge is the only
+irreversible half of this operation.
 
 ## Sizing, measured on the largest account 2026-09-09
 
@@ -191,14 +291,31 @@ most flagged pairs are genuinely distinct work that merely sounds
 similar, then the affordance trains users to ignore it and the
 sixth call buys nothing.
 
-## Open, and Scott's
+## Answered, 2026-09-10
 
-1. Ship it, or spec only? (This document is the spec he asked for.)
-2. Is a sixth per-meeting call acceptable, given it fires on every
-   ingest with commitments regardless of yield?
-3. Does the offline precision run happen before any code, or does a
-   kill-switched implementation ship and get measured live?
-4. Confirm cross-type stays out of v1. The 6 row cluster is 2
-   commitments plus 4 rows that are not completable and therefore
-   never reach `commitments.they_owe`, so v1 covers the surface he
+1. **Ship it, or spec only?** Ship it, gated on question 3. "Ship it"
+   is conditional and is NOT a green light on its own.
+2. **Is a sixth per-meeting call acceptable?** Yes. Measured: 32 of his
+   last 89 meetings produced commitments, so it fires about once a day
+   rather than on every ingest.
+3. **Offline precision run before code, or kill-switched live?**
+   Offline first, before any code. In his words: "If it doesn't hold up
+   on the 3,510 pairs, I don't want the feature." The run is above.
+4. **Cross-type stays out of v1?** Confirmed. The four non-commitment
+   rows never reach `commitments.they_owe`, so v1 covers the surface he
    complained about in full.
+
+## Still open
+
+1. **Both review sheets are UNMARKED per row.** Scott's rulings above
+   were given verbally while reading; the per-pair boxes in
+   `docs/experiments/2026-09-10-duplicate-undertakings-precision.md`
+   are still empty, so there is no scored precision number.
+2. **The same-meeting candidate set is unspecified.** It is the one
+   merge he would accept and this design cannot propose it.
+3. **The mechanical checker for a combining merge is untested.** It is
+   the obvious next step and it is not evidence yet.
+4. **Direction, merge ownership and the reason string remain CQ
+   recommendations awaiting Scott.** They were never among his four
+   questions. ShoulderSurf holds them in an awaiting column, not as
+   rulings.

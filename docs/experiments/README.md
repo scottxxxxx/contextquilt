@@ -55,4 +55,5 @@ Learned the expensive way, mostly in the same week:
 | Date | Entry | Question | Where it landed |
 | --- | --- | --- | --- |
 | 2026-09-05 | [moment value](2026-09-05-moment-value.md) | Do moments (conduct rows) add value in chat, and do they belong on the Woven quilt? | Keep in recall, reranked and folded into the person's capsule. Dropped from Woven. Shipped #444 to #449, refined #453 to #455. |
+| 2026-09-10 | [duplicate undertakings](2026-09-10-duplicate-undertakings.md) | Can a judge find two commitments that are one undertaking, reliably enough to offer a merge? | 90% self-agreement, both known positives stable, control not flagged. Precision bimodal by owner. The one merge Scott would accept is structurally impossible for the design. Nothing shipped. |
 | 2026-09-10 | [commitment normalization](2026-09-10-commitment-normalization.md) | Would incorporating a controlled-language standard (ASD-STE100) into how action items are drafted help long term? | The rules are sound and cannot live in the prompt: refusal rate swung 0% to 65% on identical input with only wording changing. Model proposes, code decides. Nothing shipped. |
