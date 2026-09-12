@@ -7712,7 +7712,14 @@ async def dismiss_descriptions(
                    NOW(), NOW()
               FROM entities e
              WHERE e.user_id = $1 AND e.entity_id = $2::uuid
-               AND COALESCE(e.description, '') <> ''
+               -- btrim, not <> '', because the READ side strips before
+               -- it decides whether there is a description to suppress.
+               -- A whitespace-only value passes one guard and fails the
+               -- other, so it would be materialised as an "observation"
+               -- of nothing and then never matched. One rule, two
+               -- carriers, in code written hours after documenting that
+               -- pattern three times. The DB test caught it.
+               AND COALESCE(btrim(e.description), '') <> ''
                AND NOT EXISTS (
                    SELECT 1 FROM entity_descriptions d
                     WHERE d.entity_id = e.entity_id
