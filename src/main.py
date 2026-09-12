@@ -7314,6 +7314,42 @@ async def get_person(
             degraded.append("stated_roles")
 
     detail = _public_person(row)
+
+    # A DISMISSED DESCRIPTION MUST LEAVE THE CARD, and the card reads
+    # this field rather than the series.
+    #
+    # `description` here is `entities.description`, one meeting's frozen
+    # sentence on the entity row. Dismissal writes to
+    # `entity_descriptions`, so before 2026-09-12 a user could reject a
+    # description, watch the route report a dismissal, and see the card
+    # unchanged. Scott hit it correcting Jillian Cunningham's company
+    # name: the correction worked, the dismissal marked rows, and the
+    # sentence stayed because nothing joined the two.
+    #
+    # Matched on the exact text rather than "any dismissal exists", so a
+    # person whose OLD perception was rejected still shows a NEWER
+    # frozen sentence nobody has objected to. Guarded: failing to hide a
+    # description must never fail the person route, and the degraded
+    # list carries the miss rather than swallowing it.
+    if (detail.get("description") or "").strip():
+        try:
+            if await db_pool.fetchval(
+                """
+                SELECT 1 FROM entity_descriptions
+                 WHERE user_id = $1 AND entity_id = $2::uuid
+                   AND dismissed_at IS NOT NULL
+                   AND description = $3
+                 LIMIT 1
+                """,
+                user_id, entity_id, detail["description"],
+            ):
+                detail["description"] = None
+        except Exception as exc:
+            logger.warning("description_dismissal_check_failed",
+                           user_id=user_id, entity_id=entity_id,
+                           error=str(exc)[:140])
+            degraded.append("description")
+
     detail.update({
         # The series behind the description, so a client can show that a
         # perception changed and open the history. Null = cannot tell
@@ -7645,6 +7681,53 @@ async def dismiss_descriptions(
     """
     payload = body or DescriptionDismissal()
     try:
+        # MATERIALISE THE FROZEN SENTENCE FIRST, or this dismissal marks
+        # nothing at all.
+        #
+        # `entities.description` is one meeting's sentence stored on the
+        # entity row, and it is what the person card actually renders.
+        # The series (migration 39) was built to replace it and never
+        # took over: measured 2026-09-12, 345 of 412 person entities
+        # carry a frozen description and only 34 have ANY series row, so
+        # 312 people could be "dismissed" here with zero rows updated and
+        # nothing changing on screen. Scott found it by correcting
+        # Jillian Cunningham's company name, watching the correction
+        # work exactly as designed, and seeing the card not move.
+        #
+        # Inserted as a real observation with source `entities.description`
+        # rather than invented: the meeting did say it. Then it is
+        # dismissed with everything else, because what is wrong is
+        # treating it as true of the person, not that it was said. Same
+        # argument as `shelve` and archive-never-delete.
+        #
+        # ON CONFLICT is not available (no unique key on the text), so
+        # the insert is guarded by a NOT EXISTS on the same description,
+        # which also makes a second dismissal idempotent.
+        materialised = await db_pool.fetchval(
+            """
+            INSERT INTO entity_descriptions
+                (user_id, entity_id, description, source,
+                 first_observed_at, last_observed_at)
+            SELECT $1, e.entity_id, e.description, 'entities.description',
+                   NOW(), NOW()
+              FROM entities e
+             WHERE e.user_id = $1 AND e.entity_id = $2::uuid
+               -- btrim, not <> '', because the READ side strips before
+               -- it decides whether there is a description to suppress.
+               -- A whitespace-only value passes one guard and fails the
+               -- other, so it would be materialised as an "observation"
+               -- of nothing and then never matched. One rule, two
+               -- carriers, in code written hours after documenting that
+               -- pattern three times. The DB test caught it.
+               AND COALESCE(btrim(e.description), '') <> ''
+               AND NOT EXISTS (
+                   SELECT 1 FROM entity_descriptions d
+                    WHERE d.entity_id = e.entity_id
+                      AND d.description = e.description)
+            RETURNING description_id
+            """,
+            user_id, entity_id,
+        )
         rows = await db_pool.fetch(
             """
             UPDATE entity_descriptions
@@ -7664,7 +7747,11 @@ async def dismiss_descriptions(
 
     logger.info("descriptions_dismissed", user_id=user_id, entity_id=entity_id,
                 count=len(rows), source=(payload.source or "user_card"),
-                had_note=bool(payload.note))
+                had_note=bool(payload.note),
+                # Whether the frozen column had to be pulled into the
+                # series to make this dismissal mean anything. Expected
+                # on most people until the series covers the roster.
+                materialised_frozen=bool(materialised))
 
     # ARCHIVE THE SYNTHESES BUILT FROM THOSE ROWS, NOW, not on the next
     # worker pass.
