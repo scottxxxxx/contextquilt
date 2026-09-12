@@ -113,13 +113,103 @@ def test_both_verbs_exist_and_are_reversible():
     assert '@app.delete("/v1/people/{user_id}/{entity_id}/descriptions/dismiss"' in MAIN
 
 
-def test_undismiss_clears_every_stamp():
-    # Nothing was destroyed, so nothing needs reconstructing.
+def _undismiss_body() -> str:
     body = MAIN[MAIN.index("async def undismiss_descriptions"):]
-    body = body[:body.index("return {")]
+    return body[:body.index("return {")]
+
+
+def test_undismiss_clears_every_LIVE_stamp():
+    """The row goes live again, which is the whole point of the undo.
+
+    Unchanged by migration 48 on purpose: every reader in this file asks
+    `dismissed_at IS NULL`, and the partial index in 46 is built on that
+    predicate. If the undo stopped clearing them the served series would
+    not come back.
+    """
+    body = _undismiss_body()
     for column in ("dismissed_at = NULL", "dismissed_source = NULL",
                    "dismissed_note = NULL"):
         assert column in body, f"undismiss leaves {column} set"
+
+
+def test_undismiss_KEEPS_the_dismissal_it_undoes():
+    """"Dismissed then restored" must never read as "never dismissed".
+
+    This is migration 46's own argument applied to the inverse verb. 46
+    retains the row rather than deleting it so that "the user said this
+    was wrong" cannot collapse into "this was never observed"; an undo
+    that NULLs every stamp restores exactly that collapse, and the
+    route's docstring claimed "nothing was destroyed" directly above the
+    statement destroying it.
+
+    Receipt (2026-09-12): the account showed zero dismissals and that
+    was reported to two teams as "this path has never run in
+    production". It had run on 08-31 and been undone on 09-01. The pair
+    netted to zero, and a net zero is indistinguishable from an absence.
+    """
+    body = _undismiss_body()
+    for column in ("prior_dismissed_at = dismissed_at",
+                   "prior_dismissed_source = dismissed_source",
+                   "prior_dismissed_note = dismissed_note"):
+        assert column in body, f"undismiss discards {column}"
+    assert "undismissed_at = NOW()" in body
+
+
+def test_the_users_own_words_survive_the_undo():
+    """`dismissed_note` has no other copy on the row.
+
+    Migration 46 says the difference between "this is inaccurate" and
+    "correct this, because <reason>" is worth keeping. The undo used to
+    overwrite that text with NULL, permanently.
+    """
+    body = _undismiss_body()
+    assert "prior_dismissed_note = dismissed_note" in body
+    # And the order matters: reading the old value into prior_* has to
+    # be part of the same statement, or the write has already happened.
+    assert body.index("prior_dismissed_note = dismissed_note") < body.index("dismissed_note = NULL")
+
+
+def test_the_counter_is_monotonic_and_the_undo_never_touches_it():
+    """Count EVENTS, never net state.
+
+    prior_* alone answers "did this ever happen" but collapses
+    dismiss/restore/dismiss into one. The counter is the same instrument
+    as `value.restatement_count` on the ledger: the detail is capped,
+    the count is the truth.
+    """
+    dismiss = MAIN[MAIN.index("async def dismiss_descriptions"):
+                   MAIN.index("async def undismiss_descriptions")]
+    assert "dismissal_count = dismissal_count + 1" in dismiss
+    assert "dismissal_count" not in _undismiss_body().split("RETURNING")[0], \
+        "the undo must never decrement or reset the counter"
+
+
+def test_a_fresh_dismissal_clears_the_undo_stamp():
+    # Otherwise a live dismissal carries undismissed_at from the
+    # previous cycle and reads as restored.
+    dismiss = MAIN[MAIN.index("async def dismiss_descriptions"):
+                   MAIN.index("async def undismiss_descriptions")]
+    assert "undismissed_at = NULL" in dismiss
+
+
+def test_migration_48_is_additive_and_the_read_predicate_does_not_move():
+    """Nothing served changes; only what survives changes.
+
+    An undo that stopped clearing `dismissed_at` would silently keep the
+    rejected text out of the card forever, which is a worse bug than the
+    one being fixed.
+    """
+    m48 = (Path(__file__).resolve().parents[2]
+           / "init-db" / "48_dismissal_history.sql").read_text()
+    for column in ("prior_dismissed_at", "prior_dismissed_source",
+                   "prior_dismissed_note", "undismissed_at", "dismissal_count"):
+        assert f"ADD COLUMN IF NOT EXISTS {column}" in m48
+    upper = m48.upper()
+    assert "DROP TABLE" not in upper
+    assert "DROP COLUMN" not in upper
+    assert "DELETE FROM" not in upper
+    # 46's live-row index is the access pattern and 48 must not redefine it.
+    assert "DROP INDEX" not in upper
 
 
 def test_a_note_is_routed_to_the_existing_correction_lane():
