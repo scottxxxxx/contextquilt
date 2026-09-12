@@ -131,7 +131,10 @@ most of the roster.
    shipped in #358 and zero dismissals exist account-wide, so it is
    either built and unused or never built. Ask before assuming the app
    path exists.
-2. **Company rename**, problem 1, unbuilt.
+2. **Company rename**, problem 1, unbuilt. For whoever builds it:
+   `entities` is unique on `(user_id, name, entity_type)`, so a rename
+   onto an existing name for that type collides and has to become a
+   MERGE. Found by a test fixture tripping it.
 3. **Whether the card should eventually read the series rather than the
    frozen column**, which is the difference between a repair and a
    migration.
