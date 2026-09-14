@@ -72,7 +72,7 @@ from contextquilt.services.recall_formatter import (
     format_people_scope,
     CHARS_PER_TOKEN,
     format_category_grouped,
-    format_flat_ranked_with_stats,
+    format_flat_ranked_served,
     # The canonical value parser, imported rather than retyped so the
     # owner probe below reads a value exactly the way the formatter will.
     _parse_value as _json_value,
@@ -302,6 +302,14 @@ class RecallResponse(BaseModel):
     context: str
     matched_entities: List[str]
     matched_patch_ids: List[str] = []
+    # The rows whose text actually reached `context`, in scorer order
+    # (2026-09-13). `matched_patch_ids` above is every CANDIDATE any fetch
+    # leg pulled, ordered by a second scorer that predates the real one;
+    # it is kept byte-identical because ShoulderSurf's gated teaser reads
+    # its first five through a GP header. A client that wants "what the
+    # model saw" reads this one. Grouped output has no rendered-id
+    # channel yet and falls back to the candidate list.
+    served_patch_ids: List[str] = []
     matched_cues: List[str] = []
     patch_count: int
     communication_style: Optional[str] = None
@@ -371,6 +379,13 @@ RECALL_RENDER_CACHE_TTL = 30  # seconds
 # this threshold surfaces the tail while it is still well inside that
 # budget, so degradation is visible before it costs anything.
 RECALL_SLOW_RENDER_MS = int(os.getenv("CQ_RECALL_SLOW_MS", "150"))
+
+# Which rows a recall marks as ACCESSED (2026-09-13 audit). Served-only
+# is the corrected behaviour: the rows whose text reached the block. "0"
+# restores the pre-audit bump over every fetched candidate, which is a
+# kill switch and not a supported mode, because that list stamps rows the
+# model never saw as recalled and exempts them from decay for a full TTL.
+RECALL_ACCESS_SERVED_ONLY = os.getenv("CQ_RECALL_ACCESS_SERVED_ONLY", "1").strip().lower() not in ("0", "false", "no")
 
 # ---------------------------------------------------------------
 # Recall timings: every step key is a DELTA for the step it names, and
@@ -803,12 +818,26 @@ async def _bump_patch_access(patch_ids: List[str]) -> None:
     if not patch_ids:
         return
     try:
+        # UPSERT, not UPDATE (2026-09-13 audit). Every worker lane that
+        # inserts a patch also inserts its metrics row, and two API lanes
+        # do not: POST /v1/quilt/{u}/patches and the person create behind
+        # POST /v1/people. A patch from either had no row here, so this
+        # UPDATE matched nothing, and the decay loop's access exemption
+        # (`last_accessed_at > NOW() - ttl`) could never see it: an app
+        # created commitment that was recalled every day still archived
+        # on its TTL as if nobody had used it. The JOIN keeps the FK
+        # honest: an id that is no longer a patch (account purge) is
+        # skipped rather than failing the whole statement.
         await db_pool.execute(
             """
-            UPDATE patch_usage_metrics
-               SET access_count = access_count + 1,
+            INSERT INTO patch_usage_metrics
+                (patch_id, access_count, last_accessed_at, current_decay_score)
+            SELECT cp.patch_id, 1, NOW(), 1.0
+              FROM unnest($1::uuid[]) AS ids(patch_id)
+              JOIN context_patches cp ON cp.patch_id = ids.patch_id
+            ON CONFLICT (patch_id) DO UPDATE
+               SET access_count = patch_usage_metrics.access_count + 1,
                    last_accessed_at = NOW()
-             WHERE patch_id = ANY($1::uuid[])
             """,
             patch_ids,
         )
@@ -873,14 +902,23 @@ async def recall_context(
             _stamp_recall_total(timings, t0)
             timings["render_cache_hit"] = 1
             # A cache hit is still a recall — the patches were served to
-            # the caller, so they count as accessed.
+            # the caller, so they count as accessed. A blob written before
+            # served ids existed (inside the 30s TTL of a deploy) carries
+            # none, and falls back to the candidate list it was built with.
+            cached_served = cached.get("served_patch_ids")
+            if cached_served is None:
+                cached_served = cached.get("matched_patch_ids", [])
             asyncio.create_task(
-                _bump_patch_access(cached.get("matched_patch_ids", []))
+                _bump_patch_access(
+                    cached_served if RECALL_ACCESS_SERVED_ONLY
+                    else cached.get("matched_patch_ids", [])
+                )
             )
             return RecallResponse(
                 context=cached["context"],
                 matched_entities=cached["matched_entities"],
                 matched_patch_ids=cached.get("matched_patch_ids", []),
+                served_patch_ids=cached_served,
                 matched_cues=cached.get("matched_cues", []),
                 patch_count=cached["patch_count"],
                 communication_style=cached.get("communication_style"),
@@ -1534,6 +1572,10 @@ async def recall_context(
     # whole conduct history reached the candidate set. Grouped output is
     # unchanged: it always received the full set.
     scored_for_output = scored
+    # Filled by the flat formatter; None for grouped output and for the
+    # flat formatter's emergency fallback, both of which fall back to the
+    # candidate list below.
+    served_patch_ids: Optional[List[str]] = None
 
     if request.output_format == "grouped":
         locale = request.metadata.get("locale", "en") if request.metadata else "en"
@@ -1598,7 +1640,7 @@ async def recall_context(
             # length isn't known until after formatting; reserve a fixed
             # 64 chars whenever a scoped total exists.
             trailing_reserve = (len(signal_block) + 2 if signal_block else 0) + (64 if scoped_total else 0)
-            context, rendered_count = format_flat_ranked_with_stats(
+            context, rendered_count, served_patch_ids = format_flat_ranked_served(
                 scored_for_output, entity_rows, rel_rows,
                 max_chars=token_budget * CHARS_PER_TOKEN - trailing_reserve,
                 person_entity_type=recall_vocab.person_entity_type,
@@ -1661,6 +1703,9 @@ async def recall_context(
                         "context": context,
                         "matched_entities": matched_names,
                         "matched_patch_ids": ledger_ids,
+                        # This lane always rendered exactly what it
+                        # returned, so served and matched are one list.
+                        "served_patch_ids": ledger_ids,
                         "matched_cues": [],
                         "patch_count": ledger_total,
                         "communication_style": None,
@@ -1680,6 +1725,7 @@ async def recall_context(
             context=context,
             matched_entities=matched_names,
             matched_patch_ids=ledger_ids,
+            served_patch_ids=ledger_ids,
             excluded=excluded,
             matched_cues=[],
             patch_count=ledger_total,
@@ -1768,6 +1814,12 @@ async def recall_context(
     scored.sort(key=lambda t: (-t[0], -t[1]))
     matched_patch_ids = [pid for _, _, pid in scored]
 
+    if served_patch_ids is None:
+        # Grouped output, or the flat formatter's emergency fallback:
+        # no rendered-id channel, so the candidate list stands in and
+        # the access bump is exactly what it was before the audit.
+        served_patch_ids = matched_patch_ids
+
     patch_count = len(fact_rows) + len(rel_rows)
 
     # Best-effort write to the render cache. Skip the empty-context case
@@ -1782,6 +1834,7 @@ async def recall_context(
                     "context": context,
                     "matched_entities": matched_names,
                     "matched_patch_ids": matched_patch_ids,
+                    "served_patch_ids": served_patch_ids,
                     "matched_cues": matched_cues,
                     "patch_count": patch_count,
                     "communication_style": comm_style,
@@ -1809,13 +1862,17 @@ async def recall_context(
             timings=timings,
         )
 
-    # Off-hot-path usage bookkeeping — see _bump_patch_access.
-    asyncio.create_task(_bump_patch_access(matched_patch_ids))
+    # Off-hot-path usage bookkeeping — see _bump_patch_access. Served rows
+    # only: a candidate the budget cut was never recalled by anyone.
+    asyncio.create_task(_bump_patch_access(
+        served_patch_ids if RECALL_ACCESS_SERVED_ONLY else matched_patch_ids
+    ))
 
     return RecallResponse(
         context=context,
         matched_entities=matched_names,
         matched_patch_ids=matched_patch_ids,
+        served_patch_ids=served_patch_ids,
         matched_cues=matched_cues,
         patch_count=patch_count,
         communication_style=comm_style,

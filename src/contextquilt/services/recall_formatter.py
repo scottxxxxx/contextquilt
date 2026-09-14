@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timezone
 
+from contextquilt.services.entity_match import same_person
 from contextquilt.services.recall_scorer import _keywords
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -191,7 +192,47 @@ def format_flat_ranked_with_stats(
     compact_header_below: int = COMPACT_HEADER_BELOW,
     max_rows: "Optional[int]" = None,
 ) -> Tuple[str, int]:
-    """Format patches as a flat relevance-ranked list.
+    """Back-compat two-tuple — see format_flat_ranked_served."""
+    context, rendered_count, _ = format_flat_ranked_served(
+        scored_patches, entity_rows, relationship_rows,
+        max_chars=max_chars, today=today,
+        person_entity_type=person_entity_type, conduct_types=conduct_types,
+        capsule_limit=capsule_limit, capsule_item_chars=capsule_item_chars,
+        compact_header_below=compact_header_below, max_rows=max_rows,
+    )
+    return context, rendered_count
+
+
+def format_flat_ranked_served(
+    scored_patches: Sequence[Tuple[float, Any]],
+    entity_rows: Sequence[Any],
+    relationship_rows: Sequence[Any],
+    max_chars: int = 1600,
+    today: Optional[date] = None,
+    person_entity_type: str = "person",
+    conduct_types: "frozenset" = frozenset(),
+    capsule_limit: int = 2,
+    capsule_item_chars: int = 120,
+    compact_header_below: int = COMPACT_HEADER_BELOW,
+    max_rows: "Optional[int]" = None,
+) -> Tuple[str, int, List[str]]:
+    """Format patches as a flat relevance-ranked list, and SAY WHICH ONES.
+
+    Returns (context, rendered_patch_lines, served_patch_ids). The third
+    is every patch whose text reached the block, in scorer order: a list
+    row, or a conduct row that made a person's capsule in the header. A
+    row that was fetched, scored and then cut by the budget, the row cap,
+    or the capsule-or-nothing fold is NOT in it, because the model never
+    saw it.
+
+    WHY THIS EXISTS (2026-09-13 audit). The route's `matched_patch_ids`
+    is every CANDIDATE any fetch leg pulled, ordered by a second scorer
+    that predates this one, and the recall access bump ran on that list.
+    So a patch that lost its slot to the budget was still stamped as
+    "recalled", which exempted it from decay for a full TTL, and
+    `access_count` measured candidacy while its docstring said hits. The
+    people-scoped lane already returned rendered ids and bumped only
+    those; the full lane was the other carrier of the same rule.
 
     Conduct rows (origin scoped, not project scoped: SS's moment) whose
     owner is a person in the header are folded into that person's line
@@ -225,6 +266,10 @@ def format_flat_ranked_with_stats(
     # Conduct rows fold into the person they are about.
     capsules: Dict[str, List[str]] = {}
     folded: set = set()
+    # The subset of `folded` whose text actually made a capsule. A row
+    # over the capsule limit or dropped as a near-duplicate is folded
+    # (it leaves the list) and NOT served (it is nowhere in the block).
+    capsuled: set = set()
     if conduct_types and people:
         person_names = [(p["name"] if isinstance(p, dict) else p.get("name", "")) or "" for p in people]
         for score, row in scored_patches:
@@ -257,6 +302,7 @@ def format_flat_ranked_with_stats(
                     # representation; the list is for the other types.
                     if len(lines) < capsule_limit and not _near_duplicate(text, lines):
                         lines.append(_clip(text, capsule_item_chars))
+                        capsuled.add(id(row))
                     folded.add(id(row))
                     break
 
@@ -303,6 +349,7 @@ def format_flat_ranked_with_stats(
     # Flat list of patches — one per line, ranked
     today = today or _today_utc()
     patch_lines: List[str] = []
+    listed: set = set()
     remaining = max_chars - sum(len(s) for s in sections) - 20  # small buffer
     for score, row in scored_patches:
         if max_rows is not None and len(patch_lines) >= max_rows:
@@ -322,12 +369,23 @@ def format_flat_ranked_with_stats(
         if len(line) + 2 > remaining:
             break
         patch_lines.append(line)
+        listed.add(id(row))
         remaining -= (len(line) + 2)  # +2 for joining newlines
 
     if patch_lines:
         sections.append("\n".join(patch_lines))
 
-    return "\n\n".join(sections), len(patch_lines)
+    # Served = reached the block, in scorer order. Walk the ranked input
+    # rather than the two sets, so the order is the scorer's and not the
+    # accident of which set was built first.
+    served: List[str] = []
+    for _, row in scored_patches:
+        if id(row) in listed or id(row) in capsuled:
+            pid = row.get("patch_id") if isinstance(row, dict) else row["patch_id"]
+            if pid is not None:
+                served.append(str(pid))
+
+    return "\n\n".join(sections), len(patch_lines), served
 
 
 def _near_duplicate(text: str, existing: List[str]) -> bool:
@@ -365,14 +423,13 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _same_person(owner: str, name: str) -> bool:
-    """The row's owner is this header person: same name, or the same
-    first token when one side is a bare first name. Never a substring."""
-    o, n = owner.strip().lower(), name.strip().lower()
-    if not o or not n:
-        return False
-    if o == n:
-        return True
-    return o.split(" ")[0] == n.split(" ")[0]
+    """The row's owner is this header person. One rule with the scorer
+    (entity_match.same_person): the docstring here already said "when one
+    side is a bare first name" and the body compared first tokens
+    unconditionally, so "Steven Levy"'s conduct folded into "Steven
+    Williams"'s capsule. The comment was true of the intent and false of
+    the code (rule 7)."""
+    return same_person(owner, name)
 
 
 def _name_with_stated_title(row: Any) -> str:
