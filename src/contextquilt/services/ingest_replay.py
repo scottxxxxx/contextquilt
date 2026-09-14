@@ -18,6 +18,17 @@ ABSENT MEANS APPEND, deliberately. Without the marker CQ cannot tell a
 menu retry from a deliberate re-send, and an unmarked re-ingest is
 somebody asking for a new entry. Guessing is worse than a duplicate.
 
+AND ONE UNMARKED PRODUCER IS OURS, ON PURPOSE.
+`scripts/replay_gated_meetings.py --apply` republishes lost payloads
+verbatim to re-run an extraction that was gated away. That is a
+deliberate re-ingest, so it must NOT carry the marker: stamping it would
+make this module refuse the write and the repair would become a silent
+no-op. Measured 2026-09-14, the stream held 387 duplicate entries and
+NONE carried a marker, in monthly bursts clustering milliseconds apart,
+which is that script's signature and not a client retry. So the dedupe
+here closes the replay path the marker names; it does not, and should
+not, close deliberate re-ingest.
+
 WHAT WAS TRUE BEFORE. The handler XADDed unconditionally, with no lookup
 on origin_id, and since 2026-09-09 the stream is the only copy of a raw
 transcript. Measured in the handler's own docstring: 61 origins with
