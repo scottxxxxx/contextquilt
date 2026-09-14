@@ -7725,6 +7725,14 @@ class DescriptionDismissal(BaseModel):
         default="user_card",
         description="Which affordance said so: user_card, user_chat, correction",
     )
+    mute: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Do not ask again: stop bringing inferred descriptions back "
+            "for this person. Observations are still recorded, they "
+            "arrive already dismissed. Cleared by DELETE on this route."
+        ),
+    )
 
 
 @app.post("/v1/people/{user_id}/{entity_id}/descriptions/dismiss", tags=["People"])
@@ -7836,9 +7844,37 @@ async def dismiss_descriptions(
                        entity_id=entity_id, error=str(exc)[:200])
         raise HTTPException(status_code=500, detail="dismiss failed")
 
+    # "DO NOT ASK AGAIN" (migration 49). A dismissal marks the
+    # perceptions that exist today; the write path keeps observing, so a
+    # genuinely different sentence next week appends a fresh LIVE row and
+    # the frozen column is overwritten by any meeting that describes the
+    # person. Muting stops both AT THE WRITE PATH: new observations are
+    # inserted already dismissed with `dismissed_source = 'mute'`, and
+    # `entities.description` stops moving. No read site changes, because
+    # all five of them already filter on `dismissed_at IS NULL`.
+    #
+    # Guarded: the dismissal the user asked for has already landed, and
+    # failing the request now would invite a retry that redoes it.
+    muted = False
+    if payload.mute:
+        try:
+            await db_pool.execute(
+                """
+                UPDATE entities
+                   SET descriptions_muted_at = NOW(),
+                       descriptions_muted_source = $3
+                 WHERE user_id = $1 AND entity_id = $2::uuid
+                """,
+                user_id, entity_id, (payload.source or "user_card"),
+            )
+            muted = True
+        except Exception as exc:
+            logger.warning("description_mute_failed", user_id=user_id,
+                           entity_id=entity_id, error=str(exc)[:200])
+
     logger.info("descriptions_dismissed", user_id=user_id, entity_id=entity_id,
                 count=len(rows), source=(payload.source or "user_card"),
-                had_note=bool(payload.note),
+                had_note=bool(payload.note), muted=muted,
                 # Whether the frozen column had to be pulled into the
                 # series to make this dismissal mean anything. Expected
                 # on most people until the series covers the roster.
@@ -7947,6 +7983,10 @@ async def dismiss_descriptions(
         # that is still sitting on somebody's screen, and the previous
         # version of this response could not tell the caller which.
         "syntheses_archived": syntheses_archived,
+        # Echoed rather than assumed: the flag crosses GhostPour, and a
+        # dropped optional field has to be visible as "the mute did not
+        # take" rather than silently reading as success (rule 4).
+        "muted": muted,
     }
 
 
@@ -7986,7 +8026,25 @@ async def undismiss_descriptions(
     means live, so nothing served changes. Returns `restored` plus the
     monotonic `dismissals` so the caller can tell a first undo from a
     fourth.
+
+    THE MUTE IS CLEARED TOO (migration 49), because this route is the
+    undo for the whole act. Leaving it set would restore the rows the
+    user is asking to see while silently dismissing every one that
+    arrives afterwards, which is a state nobody asked for and nothing on
+    the card could explain.
     """
+    try:
+        await db_pool.execute(
+            """
+            UPDATE entities
+               SET descriptions_muted_at = NULL, descriptions_muted_source = NULL
+             WHERE user_id = $1 AND entity_id = $2::uuid
+            """,
+            user_id, entity_id,
+        )
+    except Exception as exc:
+        logger.warning("description_unmute_failed", user_id=user_id,
+                       entity_id=entity_id, error=str(exc)[:200])
     try:
         rows = await db_pool.fetch(
             """
