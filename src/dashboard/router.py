@@ -8,6 +8,7 @@ import json
 import logging
 import aiohttp
 from contextquilt.config import get_settings
+from contextquilt.services import entity_rename
 from contextquilt.gateway.extraction import classify_fact, extract_facts_from_response
 
 logger = logging.getLogger(__name__)
@@ -2138,5 +2139,102 @@ async def get_memory_health(days: int = 30):
             "top_recalled": [dict(r) for r in top_recalled],
             "overdue": [dict(r) for r in overdue_rows],
         }
+    finally:
+        await conn.close()
+
+
+# ---------------------------------------------------------------
+# Entity rename (doc 24 open item 2). Admin-gated on purpose: this is a
+# repair for data already on disk, not an app affordance, and a new
+# app-facing verb would be a two-sided release with GhostPour first.
+# ---------------------------------------------------------------
+
+class EntityRenameRequest(BaseModel):
+    """`apply` is false by default: the preview and the write compute the
+    same plan from the same rows, so the answer a human reads is the
+    answer that executes."""
+    new_name: str
+    apply: bool = False
+    keep_old_as_alias: bool = True
+    source: str = "admin"
+
+
+@router.post("/entities/{user_id}/{entity_id}/rename",
+             dependencies=[Depends(verify_admin_key)])
+async def rename_entity(user_id: str, entity_id: str, req: EntityRenameRequest):
+    """Rename any entity, merging into the holder when the name is taken.
+
+    `entities` is unique on (user_id, name, entity_type), so a rename
+    onto an existing name of that type is a MERGE and the caller cannot
+    know which in advance. The plan is computed from the rows and
+    reported; `{"apply": true}` performs it. See
+    services/entity_rename for the whole argument, including why the old
+    spelling is kept as an alias and why stored text is untouched.
+    """
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        subject = await conn.fetchrow(entity_rename.SUBJECT_SQL, user_id, entity_id)
+        name = entity_rename.clean_name(req.new_name)
+        target = None
+        if subject is not None and name:
+            target = await conn.fetchrow(
+                entity_rename.TARGET_SQL, user_id, subject["entity_type"],
+                name, str(subject["entity_id"]),
+            )
+        try:
+            plan = entity_rename.plan(subject, target, name)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+        if not req.apply or plan["action"] == entity_rename.NOOP:
+            return entity_rename.response(plan, applied=False)
+
+        old_name = plan["from"]
+        aliases = 0
+        rels = 0
+        async with conn.transaction():
+            if plan["action"] == entity_rename.RENAME:
+                await conn.execute(entity_rename.RENAME_SQL, user_id, entity_id, name)
+                if req.keep_old_as_alias and old_name:
+                    await conn.execute(entity_rename.ALIAS_SQL, user_id, entity_id,
+                                       old_name, req.source)
+            else:
+                survivor = plan["survivor_entity_id"]
+                if req.keep_old_as_alias and old_name:
+                    await conn.execute(entity_rename.ALIAS_SQL, user_id, survivor,
+                                       old_name, req.source)
+                moved = await conn.execute(entity_rename.ALIASES_REPOINT_SQL,
+                                           survivor, user_id, entity_id)
+                aliases = int(moved.split()[-1]) if moved else 0
+                for column in ("from_entity_id", "to_entity_id"):
+                    other = ("to_entity_id" if column == "from_entity_id"
+                             else "from_entity_id")
+                    moved = await conn.execute(
+                        entity_rename.RELATIONSHIP_REPOINT_SQL.format(
+                            column=column, other=other),
+                        survivor, user_id, entity_id)
+                    rels += int(moved.split()[-1]) if moved else 0
+                await conn.execute(entity_rename.RELATIONSHIP_CLEANUP_SQL,
+                                   user_id, entity_id)
+                await conn.execute(entity_rename.SELF_LOOP_CLEANUP_SQL, user_id, survivor)
+                await conn.execute(entity_rename.MARK_MERGED_SQL, survivor,
+                                   user_id, entity_id)
+
+        # The recall entity index holds NAMES; a stale one keeps answering
+        # to the old spelling and never to the new. Dropping the key is
+        # enough: recall rehydrates it from Postgres on the next miss,
+        # which is the self-heal that already exists for an expired index.
+        try:
+            client = aioredis.from_url(REDIS_URL, decode_responses=True)
+            try:
+                await client.delete(f"entity_index:{user_id}")
+            finally:
+                await client.aclose()
+        except Exception as exc:
+            logger.warning("entity_rename_index_not_cleared: %s", str(exc)[:140])
+
+        return entity_rename.response(plan, applied=True,
+                                      aliases_repointed=aliases,
+                                      relationships_repointed=rels)
     finally:
         await conn.close()
