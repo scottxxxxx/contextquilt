@@ -20,6 +20,13 @@ import re
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+# The read side's one name authority. The query matcher, this scorer's
+# text boost, its owner boost and the formatter's capsule fold all decide
+# "is this row about that person", and until 2026-09-13 they decided it
+# four different ways (word boundary, substring, first token, first
+# token). Same rule, four carriers, one of them holding it.
+from contextquilt.services.entity_match import name_in_text, same_person
+
 
 # Type priority — higher means "more likely to be relevant at recall time".
 # Actionable work items float above passive observations.
@@ -228,13 +235,12 @@ def _patch_owner(row: Any) -> str:
 
 
 def _owner_matches(owner_lower: str, name_lower: str) -> bool:
-    """The owner IS this person: same name, or the same first token
-    (a bare first name matched in the query against a full owner name,
-    or the reverse). Never a substring."""
-    if owner_lower == name_lower:
-        return True
-    o, n = owner_lower.split(" ")[0], name_lower.split(" ")[0]
-    return bool(o) and o == n
+    """The owner IS this person. Delegates to the read side's one name
+    rule (entity_match.same_person): equal, or a BARE first name against
+    the other side's first token. The previous body compared first tokens
+    unconditionally, so a conduct row owned by "Steven Levy" took the
+    +100 boost for a query about "Steven Williams"."""
+    return same_person(owner_lower, name_lower)
 
 
 def _to_epoch(ts: Any) -> float:
@@ -381,8 +387,12 @@ def score_patches(
                     score += 100.0
                     break
         else:
+            # Word boundary, not substring: the query side was fixed to
+            # this on 2026-09-04 ("RV" answered to "interview") and this
+            # side was not, so a legitimately matched short name boosted
+            # every row containing it inside another word.
             for name in entity_names_lower:
-                if name and name in text_lower:
+                if name and name_in_text(name, text_lower):
                     score += 100.0
 
         # Cue-match boost — patch was fetched because a cue attached to it

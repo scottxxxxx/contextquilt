@@ -50,6 +50,47 @@ def match_entity_names(known: Iterable[str], text_lower: str) -> List[str]:
     ]
 
 
+def name_in_text(name_lower: str, text_lower: str) -> bool:
+    """Does a PATCH's text mention this entity, on word boundaries.
+
+    The same test `match_entity_names` applies to the request text, on
+    the same joiner rule, because the scorer's +100 entity boost was still
+    a bare substring after the query side was fixed (2026-09-04): once
+    "Al" or "RV" was legitimately matched in the query, every candidate
+    row containing "also", "allow" or "interview" took the largest boost
+    in the scorer. One rule, one carrier, both sides of the match.
+    """
+    if not name_lower or not text_lower:
+        return False
+    return cue_matches(name_lower, text_lower, extra_word_chars=NAME_JOINERS)
+
+
+def same_person(owner: str, name: str) -> bool:
+    """The row's owner IS this person.
+
+    Equal names, or one side is a BARE first name that equals the other
+    side's first token: "Steven" in the query reaches a row owned by
+    "Steven Williams", and the reverse. Two DIFFERENT full names sharing
+    a first token are two people, and before this both the scorer's owner
+    boost and the formatter's capsule fold said "Steven Levy" was "Steven
+    Williams" because their first tokens matched. A bare first name is
+    the contested form (#434 on the write side, `bare_terms` on the read
+    side); a full name is not contested and must not be loosened to one.
+    Never a substring.
+    """
+    o, n = (owner or "").strip().lower(), (name or "").strip().lower()
+    if not o or not n:
+        return False
+    if o == n:
+        return True
+    o_bare, n_bare = " " not in o, " " not in n
+    if o_bare and not n_bare:
+        return o == n.split(" ")[0]
+    if n_bare and not o_bare:
+        return n == o.split(" ")[0]
+    return False
+
+
 def bare_terms(matched_names: Sequence[str]) -> List[str]:
     """The matched names that are a single token: the contested form."""
     out: List[str] = []
