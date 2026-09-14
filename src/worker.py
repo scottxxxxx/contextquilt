@@ -1739,6 +1739,17 @@ async def store_entities(
             meta = metadata or {}
             origin_id = meta.get("origin_id")
             try:
+                # MUTED (migration 49): the user said "do not bring these
+                # back". The observation is still recorded, because the
+                # meeting did say it, but it arrives ALREADY DISMISSED so
+                # every reader that already filters `dismissed_at IS NULL`
+                # is correct with no change. A second suppression rule
+                # across five read sites is the shape that bites here.
+                muted = await db.fetchval(
+                    "SELECT descriptions_muted_at IS NOT NULL FROM entities "
+                    "WHERE entity_id = $1",
+                    entity_id,
+                )
                 latest = await db.fetchrow(
                     """
                     SELECT description_id, description, last_origin_id
@@ -1770,12 +1781,16 @@ async def store_entities(
                     """
                     INSERT INTO entity_descriptions (
                         user_id, entity_id, description,
-                        first_origin_id, first_origin_type, last_origin_id, source
-                    ) VALUES ($1, $2, $3, $4, $5, $4, $6)
+                        first_origin_id, first_origin_type, last_origin_id, source,
+                        dismissed_at, dismissed_source
+                    ) VALUES ($1, $2, $3, $4, $5, $4, $6,
+                              CASE WHEN $7 THEN NOW() END,
+                              CASE WHEN $7 THEN 'mute' END)
                     """,
                     user_id, entity_id, description.strip(),
                     origin_id, meta.get("origin_type"),
                     meta.get("source") or "meeting_summary",
+                    bool(muted),
                 )
                 logger.info(
                     "described_as_changed",
@@ -1789,7 +1804,17 @@ async def store_entities(
             await db.execute(
                 """
                 UPDATE entities SET
-                    description = COALESCE(NULLIF($1, ''), description),
+                    -- The frozen column stops moving while the entity is
+                    -- MUTED (migration 49). Otherwise the next meeting
+                    -- overwrites it with a fresh inferred sentence and
+                    -- the card shows a new description the user never
+                    -- saw, which is exactly what "do not ask again"
+                    -- means to stop. The observation is still recorded
+                    -- in the series, dismissed, by _record_description.
+                    description = CASE
+                        WHEN descriptions_muted_at IS NOT NULL THEN description
+                        ELSE COALESCE(NULLIF($1, ''), description)
+                    END,
                     last_seen_at = NOW(),
                     mention_count = mention_count + 1,
                     metadata = metadata || $2::jsonb

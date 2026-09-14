@@ -1723,6 +1723,20 @@ paths:
                   description: >
                     Which affordance said so, open vocabulary:
                     user_card, user_chat, correction.
+                mute:
+                  type: boolean
+                  description: >
+                    "Do not ask again". A dismissal marks the perceptions
+                    that exist today and the write path keeps observing,
+                    so a genuinely different sentence next week appends a
+                    fresh live row and the frozen description is
+                    overwritten by any meeting that describes the person.
+                    A mute stops both at the write path: new observations
+                    are recorded but arrive already dismissed
+                    (dismissed_source "mute", so the cause stays
+                    distinguishable), and entities.description stops
+                    moving. The meeting is still recorded; a mute hides
+                    rather than blinds. DELETE on this route clears it.
       responses:
         "200":
           description: Count dismissed, whether a correction was enqueued.
@@ -1733,6 +1747,14 @@ paths:
                 properties:
                   dismissed: { type: integer }
                   correction_enqueued: { type: boolean }
+                  muted:
+                    type: boolean
+                    description: >
+                      Whether the mute actually took. Echoed rather than
+                      assumed, because the flag crosses a typed gateway
+                      and a dropped optional field has to be visible as
+                      "the mute did not take" rather than reading as
+                      success.
                   who_they_are: { type: string, example: regenerating }
     delete:
       operationId: undismissDescriptions
