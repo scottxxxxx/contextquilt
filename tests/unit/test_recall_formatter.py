@@ -335,3 +335,81 @@ def test_max_age_days_boolean_is_rejected():
     from contextquilt.services.recall_formatter import resolve_max_age_days
     assert resolve_max_age_days({"max_age_days": True}) is None
     assert resolve_max_age_days({"max_age_days": False}) is None
+
+
+# ============================================================
+# Served ids (doc 25 finding 1): what the model actually saw
+# ============================================================
+
+from src.contextquilt.services.recall_formatter import format_flat_ranked_served  # noqa: E402
+
+
+def test_served_ids_are_the_listed_rows_in_scorer_order():
+    scored = [
+        (100.0, _patch("a", "commitment", "FIRST ITEM")),
+        (90.0, _patch("b", "decision", "SECOND ITEM")),
+        (80.0, _patch("c", "takeaway", "THIRD ITEM")),
+    ]
+    context, count, served = format_flat_ranked_served(scored, [], [])
+    assert count == 3
+    assert served == ["a", "b", "c"]
+
+
+def test_a_row_cut_by_the_budget_is_not_served():
+    """The defect: this row was stamped as recalled and never rendered."""
+    scored = [
+        (100.0, _patch("kept", "commitment", "short")),
+        (90.0, _patch("cut", "takeaway", "x" * 400)),
+    ]
+    context, count, served = format_flat_ranked_served(scored, [], [], max_chars=120)
+    assert count == 1
+    assert served == ["kept"]
+    assert "cut" not in served
+
+
+def test_a_row_cut_by_the_row_cap_is_not_served():
+    scored = [(100.0 - i, _patch(str(i), "takeaway", f"item {i}")) for i in range(6)]
+    _, count, served = format_flat_ranked_served(scored, [], [], max_rows=2)
+    assert count == 2
+    assert served == ["0", "1"]
+
+
+def test_a_conduct_row_that_made_the_capsule_is_served():
+    """It left the list, but its text is in the header: the model saw it."""
+    scored = [
+        (95.0, _patch("conduct", "behavior", "always asks for the number first", owner="Raj Patel")),
+        (90.0, _patch("todo", "commitment", "send the deck")),
+    ]
+    context, count, served = format_flat_ranked_served(
+        scored, entity_rows=[_entity("Raj Patel", "person")], relationship_rows=[],
+        conduct_types=frozenset({"behavior"}),
+    )
+    assert "always asks for the number first" in context.split("\n\n")[0]
+    assert count == 1                      # the list holds only the commitment
+    assert served == ["conduct", "todo"]   # but both reached the block
+
+
+def test_a_conduct_row_folded_OUT_by_the_capsule_limit_is_not_served():
+    """Capsule-or-nothing: over the limit it leaves the list AND the
+    header, so it is nowhere in the block and must not be stamped."""
+    scored = [
+        (99.0, _patch("c1", "behavior", "asked about pricing before anything else", owner="Raj Patel")),
+        (98.0, _patch("c2", "behavior", "pushed the meeting to a decision quickly", owner="Raj Patel")),
+        (97.0, _patch("c3", "behavior", "brought the customer complaint up unprompted", owner="Raj Patel")),
+        (90.0, _patch("todo", "commitment", "send the deck")),
+    ]
+    _, _, served = format_flat_ranked_served(
+        scored, entity_rows=[_entity("Raj Patel", "person")], relationship_rows=[],
+        conduct_types=frozenset({"behavior"}), capsule_limit=2,
+    )
+    assert served == ["c1", "c2", "todo"]
+    assert "c3" not in served
+
+
+def test_with_stats_wrapper_is_byte_identical_to_served():
+    scored = [(100.0, _patch("a", "commitment", "Ship the feature")),
+              (50.0, _patch("b", "takeaway", "note to self"))]
+    from src.contextquilt.services.recall_formatter import format_flat_ranked_with_stats
+    c1, n1 = format_flat_ranked_with_stats(scored, [], [])
+    c2, n2, _ = format_flat_ranked_served(scored, [], [])
+    assert (c1, n1) == (c2, n2)
