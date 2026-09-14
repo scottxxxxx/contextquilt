@@ -7733,7 +7733,17 @@ async def dismiss_descriptions(
             UPDATE entity_descriptions
                SET dismissed_at = NOW(),
                    dismissed_source = $3,
-                   dismissed_note = $4
+                   dismissed_note = $4,
+                   -- Monotonic (migration 48). The undo clears the live
+                   -- stamps but never this, so "has anyone ever
+                   -- dismissed this" survives a dismiss/undo pair. It
+                   -- did not before: the pair netted to zero and read
+                   -- as never having happened.
+                   dismissal_count = dismissal_count + 1,
+                   -- A fresh dismissal ends the previous cycle, so the
+                   -- undo stamp must not linger and make a live
+                   -- dismissal look restored.
+                   undismissed_at = NULL
              WHERE user_id = $1 AND entity_id = $2::uuid
                AND dismissed_at IS NULL
             RETURNING description_id
@@ -7865,19 +7875,50 @@ async def undismiss_descriptions(
     entity_id: str,
     app_id: str = Depends(verify_application_access),
 ):
-    """Undo a dismissal. Every stamp cleared, the series comes back.
+    """Undo a dismissal. The series comes back; the dismissal is kept.
 
-    Nothing was destroyed, so there is nothing to reconstruct.
+    THE LIVE STAMPS CLEAR AND THE HISTORY DOES NOT. Until migration 48
+    this route set `dismissed_at`, `dismissed_source` and
+    `dismissed_note` back to NULL, which left a row byte-identical to
+    one nobody had ever objected to, and threw away the user's typed
+    words with no other copy. Its docstring said "nothing was destroyed,
+    so there is nothing to reconstruct" directly above the statement
+    doing the destroying.
+
+    That is the argument migration 46 makes for the dismissal itself,
+    not carried to its inverse: a dismissal is retained rather than
+    deleted precisely so "the user said this was wrong" never collapses
+    into "this was never observed", and an erasing undo restored exactly
+    that collapse. `uncomplete` had already answered the same question
+    the same way for completions -- `value.prior_completed_at` and
+    friends, "so 'completed then reopened' is never indistinguishable
+    from 'never completed'" -- so the rule existed in this file, on one
+    carrier, and this route was the other one.
+
+    It cost something real. On 2026-09-12 the account's zero dismissals
+    were read as "this path has never run in production" and repeated to
+    two teams; it had run on 08-31 and been undone on 09-01, and the
+    pair netted to zero. Counting STATE answers what is true now, never
+    what has happened.
+
+    Every read predicate is untouched: `dismissed_at IS NULL` still
+    means live, so nothing served changes. Returns `restored` plus the
+    monotonic `dismissals` so the caller can tell a first undo from a
+    fourth.
     """
     try:
         rows = await db_pool.fetch(
             """
             UPDATE entity_descriptions
-               SET dismissed_at = NULL, dismissed_source = NULL,
+               SET prior_dismissed_at = dismissed_at,
+                   prior_dismissed_source = dismissed_source,
+                   prior_dismissed_note = dismissed_note,
+                   undismissed_at = NOW(),
+                   dismissed_at = NULL, dismissed_source = NULL,
                    dismissed_note = NULL
              WHERE user_id = $1 AND entity_id = $2::uuid
                AND dismissed_at IS NOT NULL
-            RETURNING description_id
+            RETURNING description_id, dismissal_count
             """,
             user_id, entity_id,
         )
@@ -7886,8 +7927,17 @@ async def undismiss_descriptions(
                        entity_id=entity_id, error=str(exc)[:200])
         raise HTTPException(status_code=500, detail="undismiss failed")
     logger.info("descriptions_undismissed", user_id=user_id,
-                entity_id=entity_id, count=len(rows))
-    return {"restored": len(rows), "who_they_are": "regenerating"}
+                entity_id=entity_id, count=len(rows),
+                # The monotonic counter, so the LOG can answer "has this
+                # ever been dismissed" on a row that is live again. The
+                # log was the other instrument that could not see a
+                # cancelled pair.
+                dismissals=max((r["dismissal_count"] for r in rows), default=0))
+    return {
+        "restored": len(rows),
+        "dismissals": max((r["dismissal_count"] for r in rows), default=0),
+        "who_they_are": "regenerating",
+    }
 
 
 # ---------------------------------------------------------------
