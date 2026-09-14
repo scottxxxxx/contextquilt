@@ -155,6 +155,22 @@ async def main() -> int:
                   "payloads verbatim onto the stream.")
             return 0
 
+        # DELIBERATELY UNMARKED, and this is now load bearing.
+        #
+        # Since 2026-09-14 the ingest handler refuses a marked replay of
+        # an origin already on the stream (services/ingest_replay, PR
+        # #482): X-CZ-Recovery means "do not re-ingest". This script's
+        # whole purpose is the opposite, to re-ingest a transcript whose
+        # extraction was lost, so stamping the marker here would make
+        # every republish a silent no-op that still prints "republished
+        # N of N". Anyone tempted to "fix" the duplicate entries this
+        # leaves by marking them would disable the repair instead.
+        #
+        # The duplicate entry on the stream is the KNOWN COST of the
+        # repair. Measured 2026-09-14: 387 duplicate entries across the
+        # whole stream, none carrying a marker, in monthly bursts
+        # (August 208) whose timestamps cluster milliseconds apart, which
+        # is this script's signature rather than a client retry.
         print(f"\nAPPLYING: republishing {len(lost)} payloads verbatim...")
         published = 0
         for entry_id, payload, _ in lost:

@@ -166,10 +166,11 @@ async def test_a_pre_index_entry_is_found_by_the_scan_and_then_indexed():
     r = FakeRedis()
     # Written before the index existed: on the stream, not in the SET.
     await r.xadd(STREAM_KEY, {"data": json.dumps(_payload())})
-    assert not await r.sismember(origins_key("u1"), "m-1")
+    assert not await r.sismember(origins_key("u1"), "m-1::meeting_summary")
 
-    assert await already_ingested(r, "u1", "m-1") is True
-    assert await r.sismember(origins_key("u1"), "m-1"), "the scan hit was not recorded"
+    assert await already_ingested(r, "u1", "m-1", "meeting_summary") is True
+    assert await r.sismember(origins_key("u1"), "m-1::meeting_summary"), \
+        "the scan hit was not recorded"
 
     verdict = await _post(r, _payload(), marker="pending-ingest-sweep")
     assert verdict["write"] is False
@@ -181,8 +182,8 @@ async def test_the_scan_walks_past_one_batch():
     r = FakeRedis()
     for i in range(1200):
         await r.xadd(STREAM_KEY, {"data": json.dumps(_payload(origin=f"m-{i}"))})
-    assert await already_ingested(r, "u1", "m-1199") is True
-    assert await already_ingested(r, "u1", "m-never") is False
+    assert await already_ingested(r, "u1", "m-1199", "meeting_summary") is True
+    assert await already_ingested(r, "u1", "m-never", "meeting_summary") is False
 
 
 @pytest.mark.asyncio
@@ -190,7 +191,7 @@ async def test_an_unparseable_entry_never_matches():
     r = FakeRedis()
     await r.xadd(STREAM_KEY, {"data": "{not json"})
     await r.xadd(STREAM_KEY, {"data": ""})
-    assert await already_ingested(r, "u1", "m-1") is False
+    assert await already_ingested(r, "u1", "m-1", "meeting_summary") is False
 
 
 # --------------------------------------------------------------------
@@ -202,26 +203,35 @@ def _e(entry_id, user="u1", origin="m-1", text="x"):
 
 
 def test_cleanup_keeps_the_latest_and_deletes_the_rest():
+    """Identical copies, which is the only case deletion applies to.
+
+    This test used to use three DIFFERENT texts and assert that the
+    latest won. That is precisely the behaviour the safety gate now
+    refuses, and the fixture was asserting it was safe to throw away two
+    transcripts because their stream ids were older. It survives as the
+    byte-identical case.
+    """
     plan = plan_dedupe([
-        _e("1000-0", text="first"),
-        _e("2000-0", text="second"),
-        _e("3000-0", text="third"),
+        _e("1000-0", text="same"),
+        _e("2000-0", text="same"),
+        _e("3000-0", text="same"),
     ])
-    assert plan["keep"] == {("u1", "m-1"): "3000-0"}
+    assert plan["keep"] == {("u1", "m-1", "meeting_summary"): "3000-0"}
     assert sorted(plan["delete"]) == ["1000-0", "2000-0"]
+    assert plan["ambiguous"] == {}
 
 
 def test_cleanup_tie_break_is_by_sequence_within_a_millisecond():
     """Same millisecond, ids 1000-2 and 1000-10: numeric, not string order."""
     plan = plan_dedupe([_e("1000-2"), _e("1000-10")])
-    assert plan["keep"] == {("u1", "m-1"): "1000-10"}
+    assert plan["keep"] == {("u1", "m-1", "meeting_summary"): "1000-10"}
     assert plan["delete"] == ["1000-2"]
 
 
 def test_cleanup_order_of_input_does_not_matter():
     a = plan_dedupe([_e("1000-0"), _e("3000-0"), _e("2000-0")])
     b = plan_dedupe([_e("3000-0"), _e("1000-0"), _e("2000-0")])
-    assert a["keep"] == b["keep"] == {("u1", "m-1"): "3000-0"}
+    assert a["keep"] == b["keep"] == {("u1", "m-1", "meeting_summary"): "3000-0"}
     assert sorted(a["delete"]) == sorted(b["delete"]) == ["1000-0", "2000-0"]
 
 
@@ -233,7 +243,7 @@ def test_cleanup_never_touches_entries_without_an_origin():
         _e("4000-0"),
     ])
     assert plan["delete"] == []
-    assert plan["keep"] == {("u1", "m-1"): "4000-0"}
+    assert plan["keep"] == {("u1", "m-1", "meeting_summary"): "4000-0"}
 
 
 def test_cleanup_groups_by_user_and_origin_separately():
@@ -244,21 +254,23 @@ def test_cleanup_groups_by_user_and_origin_separately():
         _e("4000-0", user="u1", origin="m-1"),
     ])
     assert plan["delete"] == ["1000-0"]
-    assert plan["origins"] == {"u1": {"m-1", "m-2"}, "u2": {"m-1"}}
+    assert plan["origins"] == {
+        "u1": {"m-1::meeting_summary", "m-2::meeting_summary"},
+        "u2": {"m-1::meeting_summary"}}
 
 
 @pytest.mark.asyncio
 async def test_cleanup_plan_applied_leaves_one_entry_and_an_index():
     r = FakeRedis()
-    await r.xadd(STREAM_KEY, {"data": json.dumps(_payload(text="old"))})
-    await r.xadd(STREAM_KEY, {"data": json.dumps(_payload(text="new"))})
+    await r.xadd(STREAM_KEY, {"data": json.dumps(_payload(text="same"))})
+    await r.xadd(STREAM_KEY, {"data": json.dumps(_payload(text="same"))})
     plan = plan_dedupe([(eid, f["data"]) for eid, f in r.streams[STREAM_KEY]])
     await r.xdel(STREAM_KEY, *plan["delete"])
     for user_id, origins in plan["origins"].items():
         await r.sadd(origins_key(user_id), *origins)
     (_, fields), = r.streams[STREAM_KEY]
-    assert json.loads(fields["data"])["content"] == "new"
-    assert await r.sismember(origins_key("u1"), "m-1")
+    assert json.loads(fields["data"])["content"] == "same"
+    assert await r.sismember(origins_key("u1"), "m-1::meeting_summary")
 
 
 # --------------------------------------------------------------------
@@ -342,3 +354,112 @@ def test_the_stamp_instant_is_476s_deploy():
     from datetime import datetime, timezone
     assert MARKER_STAMPED_SINCE_MS == int(
         datetime(2026, 9, 10, 4, 17, 13, tzinfo=timezone.utc).timestamp() * 1000)
+
+
+# --------------------------------------------------------------------
+# The safety gate: only byte-identical copies are ever deleted
+# --------------------------------------------------------------------
+
+def _e_text(entry_id, text, user="u1", origin="m-1"):
+    return (entry_id, json.dumps(_payload(user, origin, text)))
+
+
+def test_a_group_whose_copies_differ_is_never_deleted_from():
+    """THE CATCH, 2026-09-14. 278 duplicate groups on prod, only 61
+    byte-identical, 217 DIFFERING, with sizes like 52,538 against 13,129
+    characters for one origin seconds apart. Latest-wins across those
+    would have deleted the longer transcript wherever the shorter one
+    arrived second, irreversibly, on the only copy."""
+    plan = plan_dedupe([
+        _e_text("1000-0", "the full forty minute transcript"),
+        _e_text("2000-0", "a short one"),
+    ])
+    assert plan["delete"] == []
+    assert list(plan["ambiguous"]) == [("u1", "m-1", "meeting_summary")]
+    assert plan["ambiguous"][("u1", "m-1", "meeting_summary")] == ["1000-0", "2000-0"]
+
+
+def test_identical_copies_are_still_collapsed():
+    plan = plan_dedupe([
+        _e_text("1000-0", "same text"),
+        _e_text("2000-0", "same text"),
+    ])
+    assert plan["delete"] == ["1000-0"]
+    assert plan["ambiguous"] == {}
+
+
+def test_one_differing_copy_protects_its_whole_group():
+    """Three copies, two identical and one not: the group is ambiguous
+    and nothing in it is touched. Deleting the 'obvious' pair would
+    still be choosing which transcript survives."""
+    plan = plan_dedupe([
+        _e_text("1000-0", "same text"),
+        _e_text("2000-0", "same text"),
+        _e_text("3000-0", "different text entirely"),
+    ])
+    assert plan["delete"] == []
+    assert len(plan["ambiguous"][("u1", "m-1", "meeting_summary")]) == 3
+
+
+def test_ambiguity_is_per_group_not_global():
+    plan = plan_dedupe([
+        _e_text("1000-0", "same", origin="clean"),
+        _e_text("2000-0", "same", origin="clean"),
+        _e_text("3000-0", "long version", origin="messy"),
+        _e_text("4000-0", "short", origin="messy"),
+    ])
+    assert plan["delete"] == ["1000-0"]
+    assert list(plan["ambiguous"]) == [("u1", "messy", "meeting_summary")]
+
+
+# --------------------------------------------------------------------
+# The TYPE belongs in the key (measured on prod, 2026-09-14)
+# --------------------------------------------------------------------
+
+def _typed(user, origin, kind, text="x"):
+    p = _payload(user, origin, text)
+    p["type"] = kind
+    return p
+
+
+@pytest.mark.asyncio
+async def test_an_analysis_does_not_block_a_transcript_for_the_same_meeting():
+    """THE BUG THE FIRST KEY HAD. 102 origins on prod carry BOTH an
+    `analysis` and a `meeting_transcript`: two different records of one
+    meeting, not two deliveries of one record. Keyed on (user, origin)
+    alone, a marked replay of the transcript was refused because the
+    analysis had already landed, and the transcript never arrived."""
+    r = FakeRedis()
+    await _post(r, _typed("u1", "m-1", "analysis"))
+    verdict = await _post(r, _typed("u1", "m-1", "meeting_transcript"),
+                          marker="pending-ingest-sweep")
+    assert verdict["write"] is True
+    assert len(r.streams[STREAM_KEY]) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_same_type_twice_is_still_deduplicated():
+    r = FakeRedis()
+    await _post(r, _typed("u1", "m-1", "meeting_transcript"))
+    verdict = await _post(r, _typed("u1", "m-1", "meeting_transcript"),
+                          marker="pending-ingest-sweep")
+    assert verdict["write"] is False
+    assert len(r.streams[STREAM_KEY]) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_index_member_keeps_the_types_apart():
+    r = FakeRedis()
+    await _post(r, _typed("u1", "m-1", "analysis"))
+    assert await r.sismember(origins_key("u1"), "m-1::analysis")
+    assert not await r.sismember(origins_key("u1"), "m-1::meeting_transcript")
+
+
+def test_cleanup_does_not_treat_two_types_as_duplicates():
+    plan = plan_dedupe([
+        ("1000-0", json.dumps(_typed("u1", "m-1", "analysis"))),
+        ("2000-0", json.dumps(_typed("u1", "m-1", "meeting_transcript"))),
+    ])
+    assert plan["delete"] == []
+    assert plan["ambiguous"] == {}
+    assert len(plan["keep"]) == 2
