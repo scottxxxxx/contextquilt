@@ -53,6 +53,7 @@ from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import ingest_replay
+from contextquilt.services import origin_delete
 from contextquilt.services import people_signals
 from contextquilt.services import project_delete
 from contextquilt.services import people_i18n
@@ -11287,6 +11288,113 @@ async def project_affected_people(
 # resolvable origin and no project of their own, so no project delete and
 # no meeting delete will ever reach them. A client is entitled to know
 # that before it writes "this removes everything".
+class OriginDeleteRequest(BaseModel):
+    """Body for the meeting-deletion form. ABSENT OR UNRECOGNISED IS A
+    PREVIEW: this route has no prior behaviour to keep, so a flag eaten
+    on the way here must produce "nothing was deleted", never the
+    reverse. GhostPour forwards this body untyped and asserts `delete`
+    arrives intact at their hop (their request-side test); this is CQ's
+    half of the same guarantee."""
+    preview: Optional[bool] = None
+    delete: Optional[bool] = None
+
+
+@app.post("/v1/origins/{user_id}/{origin_type}/{origin_id}/delete", tags=["Projects"])
+async def delete_origin(
+    user_id: str,
+    origin_type: str,
+    origin_id: str,
+    req: Optional[OriginDeleteRequest] = None,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Delete one meeting: what it produced, who it recorded as present, and
+    its transcript. Scott's ruling of 2026-09-07 ("deleting a meeting
+    clears its transcript from the memory_updates stream"), built as the
+    meeting-level form of the project delete (#466) with the same three
+    rulings inherited: everything this origin produced EXCEPT the
+    self-typed set; archive never hard-delete; the transcript XDEL last.
+    The differences and their reasons are the header of
+    `services/origin_delete`.
+
+    `{"preview": true}`   counts only, writes nothing
+    `{"delete": true}`    archive the patches, delete presence, clear the transcript
+    absent or anything else   a preview
+
+    200 always, including an unknown meeting and a repeat: a delete is a
+    sweep over a scope and an empty scope is a valid answer, so a retry
+    after a lost 2xx must not read as an error. The response echoes what
+    happened rather than what was asked, and `limits` says on the wire
+    what this route does not remove.
+    """
+    mode = origin_delete.mode_for(req.dict() if req else None)
+    return await _origin_delete(
+        user_id, f"user:{user_id}", origin_type, origin_id,
+        preview=(mode == "preview"),
+    )
+
+
+async def _origin_delete(user_id, subject_key, origin_type, origin_id, *, preview: bool):
+    rows = await db_pool.fetch(origin_delete.SCOPE_SQL, subject_key, origin_type, origin_id)
+    doomed, spared = project_delete.partition_for_delete(rows)
+    by_type = project_delete.counts_by_type(doomed)
+
+    appearances = await db_pool.fetchval(
+        origin_delete.APPEARANCES_COUNT_SQL, user_id, origin_id) or 0
+
+    if preview:
+        # The same scan that counts is the scan that deletes, so the
+        # number in the warning is the number removed. Preview only:
+        # the delete path sweeps once, at the end, with apply=True.
+        transcripts = await transcript_purge.sweep(
+            redis_client, user_id, origin_ids=[origin_id], apply=False)
+        return origin_delete.preview_body(
+            origin_id, origin_type, doomed, spared, int(appearances), transcripts)
+
+    archived = 0
+    if doomed:
+        result = await db_pool.execute(
+            origin_delete.ARCHIVE_SQL, [r["patch_id"] for r in doomed])
+        archived = int(result.split()[-1]) if result else 0
+
+    # Presence goes with the meeting (see the service header for why this
+    # is a DELETE where the project form only unscopes).
+    deleted_rows = await db_pool.execute(
+        origin_delete.APPEARANCES_DELETE_SQL, user_id, origin_id)
+    appearances_deleted = int(deleted_rows.split()[-1]) if deleted_rows else 0
+    try:
+        await db_pool.execute(
+            origin_delete.ASSIGNMENT_DELETE_SQL, user_id, origin_id, origin_type)
+    except Exception as exc:
+        logger.warning("origin_delete_assignment_not_cleared",
+                       user_id=user_id, origin_id=origin_id, error=str(exc)[:140])
+
+    # NOW the transcript, after every reversible write has landed, and
+    # never allowed to fail the request: the patches are archived and the
+    # user has been told the meeting is gone. A stranded transcript is
+    # recoverable by re-running; a 500 on a completed delete is not.
+    cleared = {"matched": 0, "bytes": 0, "deleted": 0}
+    try:
+        cleared = await transcript_purge.sweep(
+            redis_client, user_id, origin_ids=[origin_id], apply=True)
+    except Exception as exc:
+        logger.error("origin_delete_transcript_sweep_failed",
+                     user_id=user_id, origin_id=origin_id, error=str(exc)[:200])
+
+    await redis_client.xadd("memory_updates", {"data": json.dumps({
+        "type": "hydrate", "user_id": user_id,
+        "timestamp": datetime.utcnow().isoformat()})})
+
+    logger.info("origin_deleted", user_id=user_id, origin_type=origin_type,
+                origin_id=origin_id, archived=archived, by_type=by_type,
+                spared_self_typed=len(spared), appearances_deleted=appearances_deleted,
+                transcripts_cleared=cleared.get("deleted", 0))
+
+    return origin_delete.delete_body(
+        origin_id, origin_type, archived, by_type, len(spared),
+        appearances_deleted, cleared)
+
+
 UNREACHABLE_DEFINITION = (
     "Recordings whose meeting was never assigned to a project, and which "
     "carry no project of their own, are not reachable by a project "

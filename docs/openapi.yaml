@@ -1766,6 +1766,96 @@ paths:
                     description: Monotonic count of dismissals on the row, never reset by an undo.
                   who_they_are: { type: string, example: regenerating }
 
+  /v1/origins/{user_id}/{origin_type}/{origin_id}/delete:
+    post:
+      operationId: deleteOrigin
+      summary: Delete one meeting, what it produced, and its transcript
+      description: >
+        The meeting-level form of the project delete. Scott's ruling of
+        2026-09-07: deleting a meeting clears its transcript from the
+        ingest stream. Three rulings inherited from the project form:
+        everything this origin produced EXCEPT the self-typed set (trait,
+        preference, goal, constraint); archive, never hard delete, so the
+        delta's `deleted[]` tombstones it for other devices; the
+        transcript XDEL runs LAST because it is the only irreversible
+        half.
+
+
+        ABSENT OR UNRECOGNISED BODY IS A PREVIEW. This route has no prior
+        behaviour, so a flag eaten on the way here must produce "nothing
+        was deleted", never the reverse. GhostPour forwards the body
+        untyped and asserts `delete` arrives intact at their hop.
+
+
+        PRESENCE IS DELETED, not unscoped: the meeting is gone, so its
+        `person_appearances` rows (and their never-backfillable
+        per-meeting counts) go with it.
+
+
+        200 always, including an unknown meeting and a repeat. A delete
+        is a sweep over a scope and an empty scope is a valid answer; a
+        404 would make a retry after a lost 2xx read as an error.
+        Idempotent: the second call reports zeros. `limits` says on the
+        wire what is not removed (alignment events, the woven cache).
+      tags: [Projects]
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+        - { name: origin_type, in: path, required: true, schema: { type: string, example: meeting } }
+        - { name: origin_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                preview:
+                  type: boolean
+                  description: Counts only, writes nothing. Also the default.
+                delete:
+                  type: boolean
+                  description: >
+                    Archive the patches, delete presence, clear the
+                    transcript. Must be the boolean true; "true", 1 and
+                    any other key are a preview. `preview: true` wins if
+                    both are sent.
+      responses:
+        "200":
+          description: >
+            What would happen (preview) or what happened (delete), the
+            same shape either way so a caller can compare the two.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  origin_id: { type: string }
+                  origin_type: { type: string }
+                  applied: { type: boolean }
+                  patches:
+                    type: object
+                    properties:
+                      archived: { type: integer }
+                      would_archive: { type: integer }
+                      by_type:
+                        type: object
+                        additionalProperties: { type: integer }
+                      spared_self_typed: { type: integer }
+                  presence:
+                    type: object
+                    properties:
+                      appearances: { type: integer }
+                  transcripts:
+                    type: object
+                    properties:
+                      matched: { type: integer }
+                      bytes: { type: integer }
+                      deleted: { type: integer }
+                      irreversible: { type: boolean, example: true }
+                  limits:
+                    type: string
+                    description: What this route does not remove, on the wire.
+
   /v1/quilt/{user_id}/woven:
     get:
       operationId: wovenDigest
