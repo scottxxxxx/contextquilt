@@ -52,6 +52,7 @@ from contextquilt.services import headlines as headlines_svc
 from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
+from contextquilt.services import ingest_replay
 from contextquilt.services import people_signals
 from contextquilt.services import project_delete
 from contextquilt.services import people_i18n
@@ -1880,6 +1881,17 @@ async def update_memory(
     neither endpoint can test. Fixed on their side in GP #954 with a
     request-side test at their own hop, which is the only place it can
     be tested.
+
+    A MARKED REPLAY OF AN ORIGIN ALREADY ON THE STREAM WRITES NOTHING
+    (Scott's ruling, 2026-09-14, `services/ingest_replay`). It gets the
+    same 200 the first delivery got, plus `deduplicated: true` so a
+    caller comparing the echo can see what happened (rule 4). The FIRST
+    bytes stay: the marker means "do not re-ingest", never "take the
+    newer one", and a transcript that must replace an earlier upload is
+    a new explicit operation, not this path. An UNMARKED repeat still
+    appends, because without the label CQ cannot tell a retry from a
+    deliberate re-send. Until this, the handler XADDed unconditionally
+    and the stream held 61 origins twice.
     """
     # Push to Redis Stream for Async Worker (Cold Path)
     stream_key = "memory_updates"
@@ -1900,10 +1912,21 @@ async def update_memory(
     # Use provided timestamp or default to now
     if not payload.get("timestamp"):
         payload["timestamp"] = datetime.utcnow().isoformat()
-    
-    # Add to stream
+
+    verdict = await ingest_replay.admit(redis_client, payload, marker)
+    if not verdict["write"]:
+        logger.info("ingest_replay_deduplicated", app_id=app_id,
+                    user_id=payload.get("user_id"),
+                    origin_id=verdict["origin_id"], marker=marker)
+        return {"status": "queued",
+                "message": "Memory update received for async processing",
+                "deduplicated": True}
+
+    # Add to stream, then index the origin so the next marked replay is
+    # a SET hit rather than a scan.
     await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
-    
+    await ingest_replay.remember(redis_client, payload)
+
     return {"status": "queued", "message": "Memory update received for async processing"}
 
 @app.post("/v1/prewarm", tags=["Ops"])
