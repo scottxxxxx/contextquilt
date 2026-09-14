@@ -61,6 +61,7 @@ property is testable outside CI.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Dict, Optional, Tuple
 
@@ -178,9 +179,11 @@ MARKER_STAMPED_SINCE_MS = 1_789_013_833_000  # 2026-09-10T04:17:13Z
 def plan_dedupe(entries) -> Dict[str, Any]:
     """Which existing entries to delete so each (user, origin) has one.
 
-    LATEST WINS, by stream id, ties impossible (ids are unique) but the
-    comparison is the full (ms, seq) pair so a same-millisecond pair
-    resolves by sequence rather than by string order. Entries with no
+    LATEST WINS AMONG BYTE-IDENTICAL COPIES ONLY. A group whose copies
+    differ in content is left entirely alone (see the safety gate at the
+    end of this function): those are two different transcripts for one
+    meeting, not one transcript delivered twice, and no tie-break can
+    choose between them without losing text. Entries with no
     resolvable origin are never touched: a quarter of the stream on the
     largest account carries neither origin nor project, and only an
     account purge reaches those.
@@ -199,6 +202,10 @@ def plan_dedupe(entries) -> Dict[str, Any]:
     delete = []
     origins: Dict[str, set] = {}
     first_seen: Dict[Tuple[str, str], Tuple[int, int]] = {}
+    # Payload digests per (user, origin). A group whose copies are NOT
+    # byte-identical is never deleted from: see the header.
+    digests: Dict[Tuple[str, str], set] = {}
+    by_key: Dict[Tuple[str, str], list] = {}
     stats = {"repeats": 0, "repeats_marked": 0,
              "repeats_since_marker": 0, "unmarked_since_marker": 0}
     for entry_id, raw in entries:
@@ -210,6 +217,9 @@ def plan_dedupe(entries) -> Dict[str, Any]:
         if not parsed:
             continue
         origins.setdefault(parsed[0], set()).add(parsed[1])
+        digests.setdefault(parsed, set()).add(
+            hashlib.sha256((raw or "").encode("utf-8")).hexdigest())
+        by_key.setdefault(parsed, []).append(entry_id)
         key = _stream_id_key(entry_id)
         held = latest.get(parsed)
         if held is None:
@@ -230,8 +240,25 @@ def plan_dedupe(entries) -> Dict[str, Any]:
             latest[parsed] = entry_id
         else:
             delete.append(entry_id)
+    # SAFETY GATE, and it is the whole reason this function is not just
+    # "latest wins". A group whose copies differ in CONTENT is not a
+    # duplicate delivery of one transcript, it is two different
+    # transcripts for one meeting, and deleting either loses text that
+    # exists nowhere else. Measured 2026-09-14 on prod: 278 duplicate
+    # groups, only 61 byte-identical, 217 DIFFERING, with sizes like
+    # 52,538 against 13,129 characters for the same origin seconds
+    # apart. Latest-wins across those would have thrown away the longer
+    # transcript in every group where the shorter one arrived second.
+    #
+    # So deletion is restricted to groups whose every copy hashes the
+    # same. Differing groups are REPORTED and left alone; what to do
+    # with them is a judgement about content, not a tie-break rule.
+    ambiguous = {k: sorted(v) for k, v in by_key.items()
+                 if len(digests.get(k, ())) > 1}
+    ambiguous_ids = {eid for ids in ambiguous.values() for eid in ids}
+    delete = [eid for eid in delete if eid not in ambiguous_ids]
     return {"delete": delete, "keep": latest, "origins": origins,
-            "marker_stats": stats}
+            "marker_stats": stats, "ambiguous": ambiguous}
 
 
 async def load_all(redis_client):

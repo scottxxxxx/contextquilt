@@ -66,9 +66,18 @@ async def main(apply: bool) -> int:
             except Exception:
                 per_user["<unparsed>"] += 1
 
+        amb = plan.get("ambiguous") or {}
         print(f"stream entries:        {len(entries)}")
         print(f"distinct (user,origin): {len(plan['keep'])}")
-        print(f"duplicates to delete:  {len(plan['delete'])}")
+        print(f"duplicates to delete:  {len(plan['delete'])}"
+              "   (byte-identical copies only)")
+        print(f"AMBIGUOUS, left alone: {len(amb)} groups, "
+              f"{sum(len(v) for v in amb.values())} entries")
+        if amb:
+            print("  These are groups whose copies DIFFER in content: two")
+            print("  different transcripts for one meeting, not one")
+            print("  transcript delivered twice. Deleting either loses text")
+            print("  that exists nowhere else, so no tie-break is applied.")
         for user_id, n in per_user.most_common():
             print(f"  {user_id}: {n}")
         print(f"origins to index:      {sum(len(s) for s in plan['origins'].values())}"
