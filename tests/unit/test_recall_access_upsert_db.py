@@ -70,8 +70,8 @@ async def _patch(conn, user_id: str, ptype: str = "commitment") -> uuid.UUID:
     """A patch the way the API lanes make one: NO metrics row."""
     pid = uuid.uuid4()
     await conn.execute(
-        """INSERT INTO context_patches (patch_id, patch_type, value, status)
-           VALUES ($1, $2, '{"text": "app-created row"}'::jsonb, 'active')""",
+        """INSERT INTO context_patches (patch_id, patch_name, patch_type, value, status)
+           VALUES ($1, 'app-created row', $2, '{"text": "app-created row"}'::jsonb, 'active')""",
         pid, ptype)
     await conn.execute(
         "INSERT INTO patch_subjects (patch_id, subject_key) VALUES ($1, $2)",
