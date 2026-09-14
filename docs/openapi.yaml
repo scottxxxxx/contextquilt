@@ -1738,8 +1738,16 @@ paths:
       operationId: undismissDescriptions
       summary: Undo a dismissal
       description: >
-        Clears every dismissal stamp for this person and the series
-        returns. Nothing was destroyed, so nothing is reconstructed.
+        The series returns and the dismissal is KEPT. The live stamps
+        clear, so every reader's `dismissed_at IS NULL` test sees the
+        rows again, and the stamps move to `prior_dismissed_at`,
+        `prior_dismissed_source` and `prior_dismissed_note` beside an
+        `undismissed_at`; `dismissal_count` is monotonic and the undo
+        never decrements it. Until migration 48 this route NULLed every
+        stamp, which left a row byte-identical to one nobody had ever
+        objected to and threw away the user's typed note: a dismissal
+        followed by an undo netted to zero and read as never having
+        happened. The response carries `dismissals`, the count.
       tags: [People]
       parameters:
         - { name: user_id, in: path, required: true, schema: { type: string } }
@@ -1753,6 +1761,9 @@ paths:
                 type: object
                 properties:
                   restored: { type: integer }
+                  dismissals:
+                    type: integer
+                    description: Monotonic count of dismissals on the row, never reset by an undo.
                   who_they_are: { type: string, example: regenerating }
 
   /v1/quilt/{user_id}/woven:
