@@ -9,7 +9,10 @@
 one meeting carried more than one stream entry, 102 were an `analysis`
 and a `meeting_transcript` (two different records of one meeting), 61
 were byte-identical repeats, and 149 hold two genuinely DIFFERENT
-transcripts a median of 14 days apart whose producer is still unnamed.
+transcripts a median of 14 days apart. **Corrected 2026-09-15:** those
+149 are not an ongoing producer. 147 of their later copies arrived in
+one 12-minute bulk re-send on 2026-08-17 under a new app id, and who ran
+it is still unnamed.
 The cleanup's original "latest wins" rule would have irreversibly
 deleted the longer transcript in every differing group where the shorter
 one arrived second, on the only copy that exists.
@@ -79,33 +82,59 @@ disk has ever been marked.
 | SS project re-scope pass | `project_id` differs | **6 of 149** |
 | second live recording under a reused id | metadata richness | falsified by its own prediction, below |
 
-What the data says instead, first copy to last:
+What the data says instead, first copy to last. **Corrected 2026-09-15**
+(the first version of this table was wrong on two rows, see below):
 
 | | |
 | --- | --- |
-| `user_identified` True → False | 135 of 149 |
-| `language` en-US → None | 135 of 149 |
+| `metadata.user_identified` present → **key absent** | 147 of 149 (135 true, 12 false) |
+| `metadata.language` present → key absent | 146 of 149 |
+| also absent on the later copy only: `email`, `identification_source`, `user_label` | 148 / 147 / 135 |
 | later copy shorter / longer / same-length-but-different | 34 / 1 / 114 |
-| later copy **re-stamped `timestamp` to its own arrival** | **148 of 149** |
+| `interaction_type` | `meeting_transcript` on both copies, all 149 |
+| `response`, `call_type`, `prompt_mode`, recovery marker | absent on both copies, all 149 |
+| app id | **136 of 149: first `930824d3` (ghostpour), later `886a527b` (ShoulderSurf)** |
+| later copy arrived **2026-08-17 13:47:05Z to 13:59:32Z** | **147 of 149** |
 
-The later copy is systematically POORER. A second live recording would
-carry MORE metadata, not less. The fingerprint is a payload rebuilt
-from stored data by something that repopulates no client fields. Neither
-ShoulderSurf's five senders nor CQ's verbatim replay script can produce
-it. The open candidate is GhostPour calling `cq.capture()` from its own
-store; nobody has read that code yet.
+**The later copies are one bulk re-send, not a producer.** 147 of 149
+arrived in a single 12-minute window holding 164 `meeting_transcript`
+entries about 0.77s apart, all under ShoulderSurf's writing app id,
+created 08-07. Their first copies landed June to August under the
+ghostpour app id. The other two later copies arrived 2026-04-20 and
+2026-06-10. Who ran the burst is still unnamed. GhostPour's admin
+capture route fits the shape (no passthrough metadata), and GP's edge
+access logs show zero hits on it, but those logs start at 16:14Z that
+day, 2h15m AFTER the burst, and never see a localhost call from inside
+the VM. So the route is neither confirmed nor ruled out.
+
+Two rows in the first version were wrong, and both errors came from the
+same misreading of an ABSENT key:
+- "`user_identified` True → False" was an absent key read as false. The
+  ingest route writes `update.dict(exclude_none=True)` (`main.py:1966`)
+  and never defaults it.
+- "later copy re-stamped `timestamp` to its own arrival, 148 of 149" was
+  CQ's own default. The route fills a missing `timestamp` with
+  `utcnow().isoformat()` (`main.py:1981`), and BOTH copies carry that
+  shape within 5s of their own arrival in 148 of 149. The sender supplied
+  none either time, so this was never a fingerprint.
 
 ### A separate finding that fell out of it
 
-`metadata.speaker_identities` has arrived **zero times, ever**, and CQ
-has a live consumer for it (`worker._apply_speaker_identities` rewrites
-speaker labels to canonical names before extraction). ShoulderSurf sends
-it; GP's capture allowlist reportedly carries "only `material_kind`".
-A shipped feature is dead at a middle hop. Not fixed here.
+**RETRACTED 2026-09-15.** The first version said
+`metadata.speaker_identities` had arrived "zero times, ever" and called
+it a feature dead at GP's hop. Both parts were wrong. The stream holds
+**15** entries with a non-empty `metadata.speaker_identities`, the
+earliest sampled around 2026-08-23, which matches GP's allowlist date
+(GP `context_quilt.py:451`, with a request-side passthrough test).
+ShoulderSurf challenged the zero with 13 device meetings holding
+non-empty maps. It went to GP as a blocker before anyone read the
+stream, which is rule 9's shape exactly. Whether
+`worker._apply_speaker_identities` actually rewrote labels on those 15
+is NOT verified: its `speaker_identities_applied` log died with the
+worker containers.
 
-`recording_started_at` also never arrives, and that one is CORRECT: GP
-converts it into the `timestamp` CQ reads. The zero is the expected
-observation. Raised as an alarm and withdrawn within the hour.
+Also retracted: "`recording_started_at` never arrives". It is on **137**
+entries currently on the stream.
 
 ## How to re-run it
 
@@ -126,12 +155,18 @@ re-stamping) were ad-hoc reads over `ingest_replay.load_all()` plus
 - A differing group whose copies are a partial and a complete transcript
   (rather than same-length-but-different) would reopen the
   partial-then-final story the timestamps currently rule out.
-- GhostPour showing no path that re-captures from its own store would
-  remove the only remaining candidate and leave the 149 unexplained.
+- ~~GhostPour showing no path that re-captures from its own store would
+  remove the only remaining candidate.~~ Done 2026-09-15: GP read all five
+  `cq.capture()` callers and none rebuilds from its store. The candidate
+  that replaced it is the 08-17 bulk re-send above. A later copy of any
+  group arriving outside that window with no replay behind it would
+  reopen the "live producer" reading.
 
 ## What this does not settle
 
-- **The producer of the 149.** Open.
+- **Who ran the 2026-08-17 13:47Z bulk re-send.** The shape is settled
+  (one 12-minute burst, new app id, client metadata stripped); the actor
+  is not. GP's access logs for that window don't exist at the edge.
 - **Whether to delete the 71 byte-identical entries at all.** They are
   repair artifacts from `replay_gated_meetings.py`. Deleting them is
   irreversible on the only copy of those transcripts, and re-extraction
