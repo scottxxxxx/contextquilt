@@ -1574,9 +1574,10 @@ async def recall_context(
     # whole conduct history reached the candidate set. Grouped output is
     # unchanged: it always received the full set.
     scored_for_output = scored
-    # Filled by the flat formatter; None for grouped output and for the
-    # flat formatter's emergency fallback, both of which fall back to the
-    # candidate list below.
+    # Filled by the flat formatter; None for grouped output, which falls
+    # back to the candidate list below. A formatter that RAISED sets it
+    # empty instead: its block is "", so it served nothing, and the
+    # candidate fallback would name rows no block ever contained.
     served_patch_ids: Optional[List[str]] = None
 
     if request.output_format == "grouped":
@@ -1629,6 +1630,7 @@ async def recall_context(
                 patch_count=len(scored_for_output),
             )
             context = ""
+            served_patch_ids = []
     else:
         try:
             # Token budget (GP contract): metadata.token_budget, clamped,
@@ -1653,10 +1655,18 @@ async def recall_context(
             coverage = build_coverage_line(rendered_count, scoped_total)
             if coverage:
                 signal_block = f"{coverage}\n{signal_block}" if signal_block else coverage
-        except Exception:
+        except Exception as fmt_exc:
             # Emergency fallback: empty string, the endpoint still returns
             # matched entities and patch ids so callers aren't blocked.
+            # Served is empty, not the candidates: nothing reached a block,
+            # and GP forwards this list to SS as "what the model saw".
+            logger.warning(
+                "recall_flat_format_failed",
+                error=str(fmt_exc)[:200], user_id=user_id,
+                patch_count=len(scored_for_output),
+            )
             context = ""
+            served_patch_ids = []
 
     if signal_block:
         context = f"{context}\n\n{signal_block}" if context else signal_block
@@ -1817,9 +1827,9 @@ async def recall_context(
     matched_patch_ids = [pid for _, _, pid in scored]
 
     if served_patch_ids is None:
-        # Grouped output, or the flat formatter's emergency fallback:
-        # no rendered-id channel, so the candidate list stands in and
-        # the access bump is exactly what it was before the audit.
+        # Grouped output that rendered: no rendered-id channel, so the
+        # candidate list stands in and the access bump is exactly what it
+        # was before the audit. A formatter that raised never gets here.
         served_patch_ids = matched_patch_ids
 
     patch_count = len(fact_rows) + len(rel_rows)
