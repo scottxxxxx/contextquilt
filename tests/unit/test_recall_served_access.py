@@ -53,6 +53,20 @@ def test_grouped_output_falls_back_to_the_candidate_list():
     assert "served_patch_ids = matched_patch_ids" in route
 
 
+def test_a_formatter_that_raised_served_nothing():
+    """Both formatters fall back to an empty block when they raise. The
+    candidate fallback would then serve every fetched id beside a block
+    that contained none of them, and GP forwards served ids to SS as what
+    the model saw (GP #981). Each raise branch must empty the list itself."""
+    route = _recall_route()
+    g_start = route.index('"recall_grouped_format_failed"')
+    grouped = route[g_start:route.index("format_flat_ranked_served(", g_start)]
+    assert "served_patch_ids = []" in grouped, "grouped raise branch"
+    f_start = route.index('"recall_flat_format_failed"')
+    flat = route[f_start:route.index("if signal_block:", f_start)]
+    assert "served_patch_ids = []" in flat, "flat raise branch"
+
+
 def test_matched_patch_ids_is_untouched_on_the_wire():
     """ShoulderSurf's gated teaser reads its first five through a GP
     header; SS asked that it not move. The stale second scorer stays
