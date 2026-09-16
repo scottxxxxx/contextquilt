@@ -146,12 +146,24 @@ def test_the_dependency_raises_403_when_fastapi_is_present():
     class _S:
         cq_admin_key = "the-real-key"
 
+    class _Request:
+        """Only `.client.host` is read; the limiter is inert here because no
+        Redis client is bound in a unit run."""
+
+        def __init__(self, host="172.18.0.4"):
+            self.client = type("C", (), {"host": host})() if host else None
+
     saved = deps.get_settings
     deps.get_settings = lambda: _S()
     try:
         with pytest.raises(HTTPException) as exc:
-            asyncio.run(deps.verify_admin_key(x_admin_key="not-it"))
+            asyncio.run(deps.verify_admin_key(_Request(), x_admin_key="not-it"))
         assert exc.value.status_code == 403
-        assert asyncio.run(deps.verify_admin_key(x_admin_key="the-real-key")) is None
+        assert asyncio.run(
+            deps.verify_admin_key(_Request(), x_admin_key="the-real-key")) is None
+        # A request with no client (ASGI allows it) must not explode: the
+        # identity falls back to the shared bucket rather than raising.
+        assert asyncio.run(
+            deps.verify_admin_key(_Request(host=None), x_admin_key="the-real-key")) is None
     finally:
         deps.get_settings = saved

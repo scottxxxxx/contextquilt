@@ -31,6 +31,7 @@ from contextquilt.services import auth_rate_limit as arl
 from contextquilt.services.admin_auth import (
     GLOBAL_BUCKET,
     resolve_source,
+    resolve_trusted,
     trusted_proxies,
 )
 
@@ -126,6 +127,42 @@ def test_the_trusted_list_parses_and_defaults_empty():
         {"172.18.0.9", "10.0.0.2"})
 
 
+def test_an_address_literal_passes_through_without_a_lookup():
+    looked_up = []
+
+    def resolver(name):
+        looked_up.append(name)
+        return ["should not be called"]
+
+    assert resolve_trusted(frozenset({"172.18.0.9"}), resolver) == frozenset({"172.18.0.9"})
+    assert looked_up == []
+
+
+def test_a_name_expands_to_the_addresses_it_resolves_to():
+    """The proxy's docker address is assigned from the subnet pool at
+    container start (IPAM nil), so a literal is correct only until
+    something restarts in a different order."""
+    resolved = resolve_trusted(
+        frozenset({"project-bifrost-app-1"}),
+        lambda name: ["172.18.0.9", "172.18.0.11"])
+    assert resolved == frozenset({"172.18.0.9", "172.18.0.11"})
+
+
+def test_a_name_that_does_not_resolve_is_dropped_not_raised():
+    """Failing shut: an unresolvable entry means that header is not
+    believed, which is the safe direction."""
+    def angry(name):
+        raise OSError("no such host")
+
+    assert resolve_trusted(frozenset({"nope"}), angry) == frozenset()
+
+
+def test_a_mixed_set_keeps_the_literal_and_the_resolved_name():
+    resolved = resolve_trusted(
+        frozenset({"10.0.0.2", "bifrost"}), lambda name: ["172.18.0.9"])
+    assert resolved == frozenset({"10.0.0.2", "172.18.0.9"})
+
+
 # --- the buckets, executed ------------------------------------------------
 
 def test_admin_failures_do_not_consume_the_app_credential_counter():
@@ -179,7 +216,14 @@ def test_the_identity_comes_from_the_socket_peer_not_a_header_alone():
     body = DEPS[DEPS.index("async def verify_admin_key"):]
     assert "request.client.host" in body
     assert "resolve_source(peer," in body
-    assert "trusted_proxies(os.getenv(\"CQ_TRUSTED_PROXY_IPS\"))" in body
+    assert "current_trusted()" in body, "the resolved set must be the one consulted"
+
+
+def test_the_resolved_trusted_set_is_logged_so_staleness_is_visible():
+    """The proxy's address is not pinned. A stale literal does not error, it
+    stops matching, and every edge request quietly shares one bucket."""
+    assert "admin_trusted_proxies_resolved" in DEPS
+    assert "NONE (no forwarding header will be believed)" in DEPS
 
 
 def test_a_refusal_is_429_with_retry_after():

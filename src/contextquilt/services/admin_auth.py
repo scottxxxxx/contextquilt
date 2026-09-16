@@ -37,8 +37,55 @@ def trusted_proxies(raw: str | None) -> frozenset:
 
     Empty means NO forwarding header is ever believed, which is the safe
     default: every caller is then counted by the address CQ actually sees.
+
+    Entries may be addresses OR names. See `resolve_trusted`: the proxy's
+    address is assigned from the docker subnet pool at container start
+    (IPAM nil, confirmed by GhostPour 2026-09-16), so a literal is correct
+    until something on that network restarts in a different order.
     """
     return frozenset(p.strip() for p in (raw or "").split(",") if p.strip())
+
+
+def _looks_like_an_address(value: str) -> bool:
+    """IPv4 literal, or anything with a colon (IPv6). Deliberately loose:
+    the cost of guessing wrong is one pointless DNS lookup that fails."""
+    if ":" in value:
+        return True
+    parts = value.split(".")
+    return len(parts) == 4 and all(p.isdigit() and len(p) <= 3 for p in parts)
+
+
+def resolve_trusted(entries: frozenset, resolver) -> frozenset:
+    """Expand NAMES in the trusted set to the addresses they resolve to.
+
+    WHY NAMES ARE ALLOWED AT ALL. The proxy's address on the docker
+    network is not pinned: `docker inspect` shows IPAMConfig nil, so it
+    comes from the subnet pool at start time and can move if containers
+    are added, removed or restarted in a different order. A stale literal
+    does not error, it simply stops matching, and every edge request
+    quietly falls back to the shared bucket with nothing in the logs
+    saying why. That is the same silent-degradation shape as a secret
+    placed in the wrong project, and the fix is to compare against a name
+    that docker's embedded DNS resolves.
+
+    `resolver` is injected (a callable name -> iterable of addresses) so
+    this is testable without DNS and without a network in the unit venv. A
+    name that does not resolve is DROPPED rather than raising: the trusted
+    set failing shut means headers are not believed, which is the safe
+    direction, and the caller logs what resolved so a mismatch is visible.
+    """
+    out = set()
+    for entry in entries:
+        if _looks_like_an_address(entry):
+            out.add(entry)
+            continue
+        try:
+            for address in resolver(entry) or ():
+                if address:
+                    out.add(str(address))
+        except Exception:
+            continue
+    return frozenset(out)
 
 
 def resolve_source(peer: str | None, x_real_ip: str | None,

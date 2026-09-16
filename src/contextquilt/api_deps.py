@@ -39,7 +39,10 @@ surface on a cache hiccup.
 """
 from __future__ import annotations
 
+import logging
 import os
+import socket
+import time
 from typing import Optional
 
 from fastapi import Header, HTTPException, Request, status
@@ -50,12 +53,48 @@ from contextquilt.services.admin_auth import (
     GLOBAL_BUCKET,
     is_authorized,
     resolve_source,
+    resolve_trusted,
     trusted_proxies,
 )
 
+logger = logging.getLogger(__name__)
+
 ADMIN_KEY_PREFIX = "admin_fail:"
+TRUSTED_CACHE_SECONDS = 60
 
 _redis = None
+_trusted_cache: tuple = ("", frozenset(), 0.0)
+
+
+def _dns(name: str):
+    """Addresses for a name, via docker's embedded DNS in prod."""
+    return [info[4][0] for info in socket.getaddrinfo(name, None)]
+
+
+def current_trusted(resolver=_dns) -> frozenset:
+    """The trusted-peer set, re-resolved at most once per minute.
+
+    Names are resolved rather than assumed because the proxy's address on
+    the docker network is NOT pinned (IPAM nil): it comes from the subnet
+    pool at container start and moves if things restart in a different
+    order. A stale literal fails SILENTLY, degrading every edge request
+    into one shared bucket with nothing saying why, so the resolved set is
+    logged whenever it changes and a mismatch is visible rather than
+    inferred.
+    """
+    global _trusted_cache
+    raw = os.getenv("CQ_TRUSTED_PROXY_IPS", "") or ""
+    cached_raw, cached_set, cached_at = _trusted_cache
+    now = time.monotonic()
+    if raw == cached_raw and (now - cached_at) < TRUSTED_CACHE_SECONDS and cached_at:
+        return cached_set
+    resolved = resolve_trusted(trusted_proxies(raw), resolver)
+    if resolved != cached_set or raw != cached_raw:
+        logger.info(
+            "admin_trusted_proxies_resolved configured=%r resolved=%s",
+            raw, sorted(resolved) or "NONE (no forwarding header will be believed)")
+    _trusted_cache = (raw, resolved, now)
+    return resolved
 
 
 def bind_redis(client) -> None:
@@ -96,8 +135,7 @@ async def verify_admin_key(
         return
 
     peer = request.client.host if request.client else None
-    source = resolve_source(peer, x_real_ip, x_forwarded_for,
-                            trusted_proxies(os.getenv("CQ_TRUSTED_PROXY_IPS")))
+    source = resolve_source(peer, x_real_ip, x_forwarded_for, current_trusted())
     per_source_limit = _int_env("CQ_ADMIN_MAX_FAILURES", 10)
     per_source_window = _int_env("CQ_ADMIN_FAILURE_WINDOW_SECONDS", 900)
     global_limit = _int_env("CQ_ADMIN_GLOBAL_MAX_FAILURES", 50)
