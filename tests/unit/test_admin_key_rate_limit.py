@@ -223,7 +223,32 @@ def test_the_resolved_trusted_set_is_logged_so_staleness_is_visible():
     """The proxy's address is not pinned. A stale literal does not error, it
     stops matching, and every edge request quietly shares one bucket."""
     assert "admin_trusted_proxies_resolved" in DEPS
-    assert "NONE (no forwarding header will be believed)" in DEPS
+    assert "believes_headers" in DEPS
+
+
+def _code_only(text: str) -> str:
+    """Source with comment-only lines removed.
+
+    A NEGATIVE assertion against raw source matches the file's own prose:
+    api_deps explains the bug it fixed by naming `logging.getLogger`, so
+    `"logging.getLogger" not in DEPS` fails on the explanation rather than
+    on any code. This repo has hit that before, when the origin-delete
+    tests grepped for `apply=True` and matched the comment describing it.
+    """
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def test_the_log_goes_through_the_logger_this_app_configures():
+    """Shipped once with `logging.getLogger(__name__)` at INFO, which nothing
+    configures, so the line went NOWHERE on prod: a mechanism built to stop a
+    silent state being silent was itself silent. Every other module in the
+    package uses structlog, and structlog output is confirmed present in
+    prod logs while stdlib output from this module was absent."""
+    code = _code_only(DEPS)
+    assert "import structlog" in code
+    assert "structlog.get_logger()" in code
+    assert "logging.getLogger" not in code, "stdlib logging here reaches no output"
 
 
 def test_a_refusal_is_429_with_retry_after():
