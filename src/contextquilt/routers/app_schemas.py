@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel
 
 from contextquilt.config import get_settings
+from contextquilt.api_deps import verify_admin_key  # noqa: F401  (re-exported)
 from contextquilt.services.facet_runtime import invalidate_type_runtime
 from contextquilt.services.schema_validator import validate_manifest
 
@@ -29,11 +30,10 @@ from contextquilt.services.schema_validator import validate_manifest
 router = APIRouter(prefix="/v1/apps", tags=["App Schemas"])
 
 
-async def verify_admin_key(x_admin_key: str = Header(default="")) -> None:
-    """Admin-key gate. Matches the dashboard's verification pattern."""
-    admin_key = get_settings().cq_admin_key
-    if admin_key and x_admin_key != admin_key:
-        raise HTTPException(status_code=403, detail="Invalid admin key")
+# `verify_admin_key` is imported above from services/admin_auth and
+# re-exported, so every `Depends(verify_admin_key)` below is unchanged. One
+# definition: this file and the dashboard router each held their own copy
+# while main.py's registry routes had none (2026-09-16).
 
 
 async def _get_conn():

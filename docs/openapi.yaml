@@ -40,6 +40,14 @@ components:
       in: header
       name: X-App-ID
       description: Application identifier issued during registration.
+    AdminKeyHeader:
+      type: apiKey
+      in: header
+      name: X-Admin-Key
+      description: >
+        Operator key (CQ_ADMIN_KEY). Gates the dashboard, the app-schema
+        routes, and the application registry (register, list, patch).
+        Registration mints a credential, so it is not self-service.
     BearerJWT:
       type: http
       scheme: bearer
@@ -1511,7 +1519,8 @@ paths:
         Register a new application to obtain an app_id and client_secret for
         authenticating API calls.
       tags: [Authentication]
-      security: []
+      security:
+        - AdminKeyHeader: []
       requestBody:
         required: true
         content:

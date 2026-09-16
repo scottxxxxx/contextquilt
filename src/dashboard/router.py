@@ -9,6 +9,7 @@ import logging
 import aiohttp
 from contextquilt.config import get_settings
 from contextquilt.services import entity_rename
+from contextquilt.api_deps import verify_admin_key  # noqa: F401  (re-exported)
 from contextquilt.gateway.extraction import classify_fact, extract_facts_from_response
 
 logger = logging.getLogger(__name__)
@@ -23,11 +24,11 @@ DATABASE_URL = _settings.database_url
 OLLAMA_URL = _settings.ollama_url
 
 
-async def verify_admin_key(x_admin_key: str = Header(default="")):
-    """Verify the admin key. If CQ_ADMIN_KEY is not set, access is open (dev mode)."""
-    admin_key = get_settings().cq_admin_key
-    if admin_key and x_admin_key != admin_key:
-        raise HTTPException(status_code=403, detail="Invalid admin key")
+# `verify_admin_key` is imported above from services/admin_auth and
+# re-exported here so every `Depends(verify_admin_key)` below is unchanged.
+# It used to be defined here AND identically in routers/app_schemas, while
+# main.py's own registry routes used neither copy (2026-09-16).
+
 
 @router.get("/verify-key")
 async def verify_key(x_admin_key: str = Header(default="")):

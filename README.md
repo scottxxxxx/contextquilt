@@ -152,9 +152,10 @@ GET /v1/quilt/{user_id}/graph?format=svg
 ### Authentication
 
 ```bash
-# Register your app
+# Register your app — OPERATOR ONLY, requires the admin key
 POST /v1/auth/register  {"app_name": "my-app"}
-# Returns: app_id + client_secret
+  -H "X-Admin-Key: $CQ_ADMIN_KEY"
+# Returns: app_id + client_secret (the secret is shown once)
 
 # Get a JWT token
 POST /v1/auth/token  (OAuth2 password flow with app_id:client_secret)
