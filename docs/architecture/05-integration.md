@@ -80,8 +80,14 @@ Any app can integrate with CQ using this pattern:
 
 ### Step 1: Register as an app
 
+**The CQ operator does this, not the integrating app.** Registration mints
+a credential, so it requires the admin key (`CQ_ADMIN_KEY`); it is not a
+self-service endpoint. Ask for an `app_id` and `client_secret` rather than
+calling it yourself.
+
 ```
 POST /v1/auth/register
+X-Admin-Key: <CQ_ADMIN_KEY>
 {"app_name": "my-coding-assistant"}
 ```
 

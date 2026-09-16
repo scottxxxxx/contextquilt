@@ -54,6 +54,7 @@ from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import ingest_replay
 from contextquilt.services import auth_rate_limit
+from contextquilt.api_deps import verify_admin_key
 from contextquilt.services import origin_delete
 from contextquilt.services import people_signals
 from contextquilt.services import project_delete
@@ -2058,7 +2059,8 @@ async def prewarm_cache(
 async def health():
     return {"status": "healthy", "version": "3.10.0"}
 
-@app.post("/v1/auth/register", response_model=auth.ApplicationResponse, tags=["Authentication"])
+@app.post("/v1/auth/register", response_model=auth.ApplicationResponse, tags=["Authentication"],
+          dependencies=[Depends(verify_admin_key)])
 async def register_application(app_data: auth.ApplicationCreate):
     from contextquilt.services.key_encryption import encrypt_key
 
@@ -2173,7 +2175,8 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-@app.get("/v1/auth/apps", tags=["Authentication"])
+@app.get("/v1/auth/apps", tags=["Authentication"],
+         dependencies=[Depends(verify_admin_key)])
 async def list_applications():
     rows = await db_pool.fetch("SELECT app_id, app_name, enforce_auth, created_at FROM applications ORDER BY created_at DESC")
     # Convert UUIDs and Datetimes to strings for JSON serialization
@@ -11836,7 +11839,8 @@ class AppUpdate(BaseModel):
     llm_base_url: Optional[str] = None
     llm_model: Optional[str] = None
 
-@app.patch("/v1/auth/apps/{app_id}", tags=["Authentication"])
+@app.patch("/v1/auth/apps/{app_id}", tags=["Authentication"],
+           dependencies=[Depends(verify_admin_key)])
 async def update_application(app_id: str, update: AppUpdate):
     from contextquilt.services.key_encryption import encrypt_key, mask_key
 

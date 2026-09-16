@@ -22,7 +22,12 @@ PROJECTS = ["Project Apollo", "Project Gemini", "Mercury Rewrite", "Legacy Migra
 async def register_app(session):
     """Register the verifier app"""
     print(f"[*] Registering 'SynthesisVerifier' app...")
-    async with session.post(f"{API_URL}/v1/auth/register", json={"app_name": "SynthesisVerifier"}) as resp:
+    # Registration is admin-gated (2026-09-16): it mints a credential. A
+    # local stack with no CQ_ADMIN_KEY set stays open, so the empty default
+    # keeps this script working there without special-casing.
+    headers = {"X-Admin-Key": os.getenv("CQ_ADMIN_KEY", "")}
+    async with session.post(f"{API_URL}/v1/auth/register", headers=headers,
+                            json={"app_name": "SynthesisVerifier"}) as resp:
         if resp.status != 200:
             print(f"[!] Failed to register app: {await resp.text()}")
             sys.exit(1)

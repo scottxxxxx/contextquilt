@@ -8,9 +8,13 @@ All API calls require one of:
 
 ### Register an Application
 
+Admin only: this mints a credential, so it requires `X-Admin-Key`
+(`CQ_ADMIN_KEY`). Same gate as the dashboard and the schema routes.
+
 ```
 POST /v1/auth/register
 Content-Type: application/json
+X-Admin-Key: <CQ_ADMIN_KEY>
 
 {"app_name": "my-app"}
 ```
