@@ -29,6 +29,58 @@ which would ignore the header every legitimate admin caller sends.
 from __future__ import annotations
 
 
+GLOBAL_BUCKET = "__all__"
+
+
+def trusted_proxies(raw: str | None) -> frozenset:
+    """Parse `CQ_TRUSTED_PROXY_IPS` (comma separated). Empty by default.
+
+    Empty means NO forwarding header is ever believed, which is the safe
+    default: every caller is then counted by the address CQ actually sees.
+    """
+    return frozenset(p.strip() for p in (raw or "").split(",") if p.strip())
+
+
+def resolve_source(peer: str | None, x_real_ip: str | None,
+                   x_forwarded_for: str | None, trusted: frozenset) -> str:
+    """The identity a per-source failure counter keys on.
+
+    A FORWARDING HEADER IS ONLY EVIDENCE IF THE PEER IS THE PROXY
+    (GhostPour, 2026-09-16). Their nginx sets `X-Real-IP` from
+    `$remote_addr`, replacing whatever arrived, so it is trustworthy from
+    that peer. But GP itself reaches CQ container to container at
+    `http://contextquilt:8000` and never passes through the proxy, so
+    plenty of legitimate traffic carries no such header, and ANYTHING on
+    that docker network can send one saying whatever it likes.
+
+    Believing the header unconditionally would be worse than not counting
+    at all: an attacker could rotate it to evade their own counter, and
+    could POISON somebody else's by claiming the operator's address, which
+    is the dashboard lockout this design exists to avoid. So the header is
+    read only from a peer in `trusted`; everyone else is counted as the
+    address CQ actually sees.
+
+    `X-Forwarded-For` is the fallback and only its LAST entry is used,
+    because nginx APPENDS to a client-supplied value there: everything
+    before the last element is attacker-controlled even from the proxy.
+
+    Pure, and here rather than in api_deps, so it executes in the local
+    unit venv instead of only in CI.
+    """
+    peer = (peer or "").strip()
+    if peer and peer in trusted:
+        if x_real_ip and x_real_ip.strip():
+            return x_real_ip.strip()
+        if x_forwarded_for:
+            parts = [p.strip() for p in x_forwarded_for.split(",") if p.strip()]
+            if parts:
+                return parts[-1]
+        # The proxy forwarded nothing usable: count it as the proxy rather
+        # than inventing an identity.
+        return peer
+    return peer or GLOBAL_BUCKET
+
+
 def is_authorized(configured_key: str | None, presented_key: str | None) -> bool:
     """True when the caller may use an admin route.
 
