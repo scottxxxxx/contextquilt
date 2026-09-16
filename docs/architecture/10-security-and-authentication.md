@@ -87,6 +87,60 @@ rejected credentials, because a wrong secret is permanent and retrying it
 is pure cost. That is a caller compensating for a missing server limit,
 and it only protects CQ for as long as every caller has built one.
 
+### Admin Key Rate Limiting
+
+Every admin-gated route answers 403 or 200, so every one of them is an
+oracle for `CQ_ADMIN_KEY`, and that key is a SINGLE long-lived operator
+secret gating every admin surface CQ has.
+`GET /api/dashboard/verify-key` is simply the politest oracle, being
+unauthenticated by design so the dashboard login can check a typed key.
+
+Reachability, measured 2026-09-16: the edge IP-gates exactly two literal
+prefixes, `cz.shouldersurf.com/admin` and `cq.shouldersurf.com/dashboard`.
+CQ mounts the dashboard UI at `/dashboard` and its API at
+`/api/dashboard/`, which that prefix never matches, and CQ does not check
+the `Host` header anywhere, so the same routes answer on
+`contextquilt.com` too. The oracle was internet-reachable with no limit.
+
+So the counter lives in `verify_admin_key` (`contextquilt/api_deps.py`),
+the check every admin route shares. Limiting one endpoint would have
+moved the guessing to `/api/dashboard/stats`.
+
+Two buckets, because one of them can be weaponised:
+
+- **Per source**, `CQ_ADMIN_MAX_FAILURES` (10) in
+  `CQ_ADMIN_FAILURE_WINDOW_SECONDS` (900).
+- **Global**, `CQ_ADMIN_GLOBAL_MAX_FAILURES` (50) in
+  `CQ_ADMIN_GLOBAL_WINDOW_SECONDS` (3600), to catch a rotating source at
+  a threshold an operator's own typos will never reach.
+
+A correct key clears the SOURCE bucket only: one operator typing the right
+key must not reset a distributed campaign's budget.
+
+**The source identity is the delicate part.** A counter keyed on a header
+anyone can set is worse than no counter: it can be rotated to evade, and
+it can be AIMED at the operator's address to lock them out of the
+dashboard. GhostPour reaches CQ container to container at
+`http://contextquilt:8000` and never traverses the proxy, so traffic with
+no forwarding header is normal, and anything on that docker network can
+send one saying whatever it likes. Therefore a forwarding header is read
+ONLY from a peer listed in `CQ_TRUSTED_PROXY_IPS`; every other caller is
+counted as the address CQ actually sees (`request.client.host`).
+
+`CQ_TRUSTED_PROXY_IPS` is **empty by default**, which means no header is
+ever believed and all edge traffic shares the proxy's bucket. That is the
+safe direction, and it costs per-client precision until an operator sets
+it to the proxy's address on the docker network. From the proxy,
+`X-Real-IP` is preferred (nginx sets it from `$remote_addr`, replacing any
+client value); `X-Forwarded-For` is the fallback and only its LAST entry
+is used, because nginx APPENDS there and everything earlier is
+client-supplied.
+
+Fails OPEN, like the token limiter: no Redis, or none bound, means
+allowed. A limiter in front of the login check that fails closed turns a
+cache blip into "nobody can reach the dashboard", which is the same
+lockout by another route.
+
 ## Threat Model
 
 ### What CQ Protects

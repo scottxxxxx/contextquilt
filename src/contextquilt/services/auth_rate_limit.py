@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 KEY_PREFIX = "auth_fail:"
 DEFAULT_MAX_FAILURES = 10
@@ -74,16 +74,21 @@ def window_seconds() -> int:
     return _int_env("CQ_AUTH_FAILURE_WINDOW_SECONDS", DEFAULT_WINDOW_SECONDS)
 
 
-def key_for(client_id: Any) -> str:
-    """One Redis key per client_id, hashed.
+def key_for(client_id: Any, prefix: str = KEY_PREFIX) -> str:
+    """One Redis key per client_id, hashed, inside a namespace.
 
     Hashed rather than interpolated because client_id is attacker-supplied
     and lands in a key name: a raw value could carry a newline, a colon,
     or 8KB of junk. The log line keeps the readable (truncated) id, so
     nothing is lost for debugging.
+
+    `prefix` namespaces the counter. App credentials and admin-key
+    attempts must not share a bucket: they have different populations,
+    different thresholds, and one locking out the other would be a
+    surprise nobody would find quickly.
     """
     raw = "" if client_id is None else str(client_id)
-    return KEY_PREFIX + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+    return prefix + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
 
 
 def is_refused(failures: int, limit: int) -> bool:
@@ -92,21 +97,23 @@ def is_refused(failures: int, limit: int) -> bool:
     return failures >= limit
 
 
-async def check(redis_client, client_id: Any) -> Dict[str, Any]:
+async def check(redis_client, client_id: Any, *, prefix: str = KEY_PREFIX,
+                limit: Optional[int] = None,
+                window: Optional[int] = None) -> Dict[str, Any]:
     """{"refused": bool, "failures": int, "retry_after": int}. Never raises."""
     if not enabled():
         return {"refused": False, "failures": 0, "retry_after": 0}
-    limit = max_failures()
+    limit = max_failures() if limit is None else limit
     try:
-        raw = await redis_client.get(key_for(client_id))
+        raw = await redis_client.get(key_for(client_id, prefix))
         failures = int(raw) if raw is not None else 0
     except Exception:
         return {"refused": False, "failures": 0, "retry_after": 0}
     if not is_refused(failures, limit):
         return {"refused": False, "failures": failures, "retry_after": 0}
-    retry_after = window_seconds()
+    retry_after = window_seconds() if window is None else window
     try:
-        ttl = await redis_client.ttl(key_for(client_id))
+        ttl = await redis_client.ttl(key_for(client_id, prefix))
         if isinstance(ttl, int) and ttl > 0:
             retry_after = ttl
     except Exception:
@@ -114,11 +121,12 @@ async def check(redis_client, client_id: Any) -> Dict[str, Any]:
     return {"refused": True, "failures": failures, "retry_after": retry_after}
 
 
-async def record_failure(redis_client, client_id: Any) -> int:
+async def record_failure(redis_client, client_id: Any, *, prefix: str = KEY_PREFIX,
+                         window: Optional[int] = None) -> int:
     """Count one failed attempt. Returns the running count, 0 if not counted."""
     if not enabled():
         return 0
-    key = key_for(client_id)
+    key = key_for(client_id, prefix)
     try:
         count = await redis_client.incr(key)
         # Expiry on the FIRST failure only, so the window runs from the
@@ -126,15 +134,16 @@ async def record_failure(redis_client, client_id: Any) -> int:
         # Refreshing it every time would let a steady trickle hold the
         # key open forever and lock the caller out permanently.
         if count == 1:
-            await redis_client.expire(key, window_seconds())
+            await redis_client.expire(
+                key, window_seconds() if window is None else window)
         return int(count)
     except Exception:
         return 0
 
 
-async def clear(redis_client, client_id: Any) -> None:
+async def clear(redis_client, client_id: Any, *, prefix: str = KEY_PREFIX) -> None:
     """A correct credential forgets the failures. Never raises."""
     try:
-        await redis_client.delete(key_for(client_id))
+        await redis_client.delete(key_for(client_id, prefix))
     except Exception:
         pass

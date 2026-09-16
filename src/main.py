@@ -54,6 +54,7 @@ from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import ingest_replay
 from contextquilt.services import auth_rate_limit
+from contextquilt import api_deps
 from contextquilt.api_deps import verify_admin_key
 from contextquilt.services import origin_delete
 from contextquilt.services import people_signals
@@ -212,6 +213,11 @@ async def root():
 # Use the composed URL from Settings — REDIS_URL wins if set, otherwise
 # host/port/password are composed identically to the previous inline build.
 redis_client = redis.from_url(_settings.redis_url, decode_responses=True)
+# The admin-key check counts failures in Redis (see api_deps): every
+# admin-gated route answers 403 or 200 and is therefore an oracle for the
+# one long-lived operator key. Bound here so admin checks share this pool
+# rather than opening a second one, and so api_deps never imports main.
+api_deps.bind_redis(redis_client)
 
 # ============================================
 # Models
