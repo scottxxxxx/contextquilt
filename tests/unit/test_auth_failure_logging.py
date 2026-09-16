@@ -22,8 +22,18 @@ MAIN = (pathlib.Path(__file__).resolve().parents[2] / "src" / "main.py").read_te
 
 
 def _token_endpoint() -> str:
+    """Slice to the NEXT route, not to a character count.
+
+    This read `MAIN[start:start + 3200]` until 2026-09-16, when adding the
+    rate-limit guard pushed `auth_token_backend_error` and one of the two
+    401s past 3200 characters. Two tests went red for a reason that had
+    nothing to do with what they assert: a fixed-length window is a
+    boundary with no structural meaning, so every edit inside the function
+    silently changes what the tests can see. Same family as slicing a
+    source file on a delimiter that also appears somewhere else.
+    """
     start = MAIN.index('@app.post("/v1/auth/token"')
-    return MAIN[start: start + 3200]
+    return MAIN[start:MAIN.index('@app.get("/v1/auth/apps"', start)]
 
 
 def test_a_rejected_credential_is_logged():
@@ -74,9 +84,18 @@ def test_bearer_rejections_are_logged_as_well():
     assert "auth_bearer_rejected" in MAIN
 
 
-def test_logging_did_not_change_the_status_codes():
-    """This shipped hours before a credential cutover. It is observability
-    only: every path still answers 401 exactly as it did."""
+def test_the_credential_paths_still_answer_401():
+    """Originally "logging did not change the status codes": that change
+    shipped hours before a credential cutover and was observability only.
+
+    One code has been added since, on purpose: 429 when a client_id keeps
+    failing (2026-09-16, services/auth_rate_limit). That is a new REFUSAL
+    of a caller already failing, not a change to what a wrong or right
+    credential answers, so the original guarantee stands as written and is
+    kept here. A THIRD code appearing is a behaviour change on a live auth
+    path and should fail this test until somebody states why."""
     body = _token_endpoint()
     assert body.count("HTTP_401_UNAUTHORIZED") >= 2
     assert "HTTP_500" not in body
+    codes = set(re.findall(r"HTTP_(\d{3})_", body))
+    assert codes == {"401", "429"}, f"unexpected status codes on the token endpoint: {codes}"

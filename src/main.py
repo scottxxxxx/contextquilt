@@ -53,6 +53,7 @@ from contextquilt.services import alignment as alignment_svc
 from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import ingest_replay
+from contextquilt.services import auth_rate_limit
 from contextquilt.services import origin_delete
 from contextquilt.services import people_signals
 from contextquilt.services import project_delete
@@ -2091,14 +2092,35 @@ async def register_application(app_data: auth.ApplicationCreate):
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     # client_id is in form_data.username
     # client_secret is in form_data.password
-    
+
     try:
+        # Refuse a credential that keeps failing BEFORE the lookup and the
+        # pbkdf2 verify: the hash is the cost this exists to avoid, so an
+        # order swap here silently removes the feature while leaving every
+        # symptom of having it. GP built a client-side cooldown for the
+        # same reason; a limit that lives only in callers protects nobody
+        # else. See services/auth_rate_limit.
+        limit_verdict = await auth_rate_limit.check(redis_client, form_data.username)
+        if limit_verdict["refused"]:
+            logger.warning(
+                "auth_token_rate_limited",
+                client_id=str(form_data.username)[:64],
+                failures=limit_verdict["failures"],
+                retry_after=limit_verdict["retry_after"],
+            )
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many failed credential attempts. Try again later.",
+                headers={"Retry-After": str(limit_verdict["retry_after"])},
+            )
+
         row = await db_pool.fetchrow(
             "SELECT app_id, client_secret_hash FROM applications WHERE app_id = $1",
             form_data.username
         )
-        
+
         if not row or not auth.verify_password(form_data.password, row['client_secret_hash']):
+            await auth_rate_limit.record_failure(redis_client, form_data.username)
             # Logged because CQ is the ONLY place this failure is visible as
             # an auth failure. The gateway translates our 401 into a 502 at
             # its edge, deliberately, so a wrong secret reads downstream as
@@ -2119,6 +2141,10 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
                 headers={"WWW-Authenticate": "Bearer"},
             )
         
+        # A correct credential forgets the failures: the counter exists to
+        # stop a WRONG one costing a hash per attempt, not to punish a
+        # caller that fixed its config.
+        await auth_rate_limit.clear(redis_client, form_data.username)
         access_token = auth.create_access_token(
             data={"sub": str(row['app_id'])},
             expires_delta=timedelta(minutes=auth.ACCESS_TOKEN_EXPIRE_MINUTES),
