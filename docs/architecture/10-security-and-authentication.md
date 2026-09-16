@@ -54,6 +54,39 @@ Unregistered app IDs are rejected with 401.
 
 The admin dashboard at `/dashboard/` is protected by a separate `X-Admin-Key` header (set via the `CQ_ADMIN_KEY` environment variable). This is independent of app authentication.
 
+### Token Endpoint Rate Limiting
+
+`POST /v1/auth/token` verifies with pbkdf2_sha256, so a WRONG credential
+costs CQ one password hash per attempt, and a caller that retries turns
+its own request rate into hashing load on us. Until 2026-09-16 there was
+no limit of any kind.
+
+`services/auth_rate_limit` counts FAILURES per `client_id` in Redis and
+refuses with **429 + `Retry-After`** once a client passes
+`CQ_AUTH_MAX_FAILURES` (default 10) inside
+`CQ_AUTH_FAILURE_WINDOW_SECONDS` (default 900). Kill switch:
+`CQ_AUTH_RATELIMIT_ENABLED=0`.
+
+Four properties, each load bearing:
+
+- **It runs before the lookup and the verify.** A refusal that still pays
+  the hash removes the feature while keeping every symptom of having it,
+  so a unit test asserts the ORDER in `main.py`'s own source.
+- **Failures only; a success clears the counter.** Minting is never
+  throttled, so an honest caller cannot be locked out by using the API.
+- **It fails OPEN.** Redis unreachable means allowed. A closed limiter
+  converts a cache outage into a total auth outage, which is worse than
+  the load it prevents.
+- **The window starts at the first failure** and is not pushed forward by
+  later ones, so a steady trickle cannot hold a caller out indefinitely.
+  The counter lives in Redis because prod runs four uvicorn workers, and
+  four in-process counters would each carry the full budget.
+
+Found from the other side: GhostPour had built a client-side cooldown for
+rejected credentials, because a wrong secret is permanent and retrying it
+is pure cost. That is a caller compensating for a missing server limit,
+and it only protects CQ for as long as every caller has built one.
+
 ## Threat Model
 
 ### What CQ Protects
