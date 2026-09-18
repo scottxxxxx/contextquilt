@@ -30,6 +30,13 @@ INTENTIONALLY_OPEN = {
     ("GET", "/"),                # redirects to the docs
     ("GET", "/health"),          # the deploy gate and compose healthcheck poll it
     ("POST", "/v1/auth/token"),  # the credential exchange itself, rate limited
+    # The dashboard SHELL, added 2026-09-17 when the StaticFiles mount was
+    # replaced by an explicit allowlist. These serve index.html, app.js and
+    # style.css and nothing else; the login screen has to load before anyone
+    # can present a key, exactly as it did under the mount. Every dashboard
+    # API route behind them still requires the admin key.
+    ("GET", "/dashboard"),
+    ("GET", "/dashboard/{asset:path}"),
 }
 
 
@@ -62,8 +69,12 @@ def test_no_route_is_unguarded_unless_it_says_so_out_loud():
 
 def test_the_open_list_has_not_quietly_grown():
     """A route joining INTENTIONALLY_OPEN should be a visible decision in a
-    diff, not something that happens because a test was going red."""
-    assert len(INTENTIONALLY_OPEN) == 3
+    diff, not something that happens because a test was going red.
+
+    3 -> 5 on 2026-09-17: the two dashboard shell routes above. They are
+    not new public surface, they are the same surface the StaticFiles
+    mount served, narrowed to three named files."""
+    assert len(INTENTIONALLY_OPEN) == 5
 
 
 def test_every_route_was_actually_inspected():

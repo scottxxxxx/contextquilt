@@ -37,7 +37,19 @@ VERBS = ("get", "post", "put", "patch", "delete")
 # The gap as it stood when this guard was written. A RATCHET, not a
 # target: it does not demand the backlog be documented, it stops the
 # backlog growing. Lower it whenever routes get declared.
-KNOWN_UNDECLARED = 29
+#
+# 29 -> 31 on 2026-09-17, and the reason matters more than the number.
+# This counter matches `@app.<verb>(` decorators, so a MOUNT was never
+# counted at all. Replacing `app.mount("/dashboard", StaticFiles(...))`
+# with two explicit routes therefore raises this number by two while the
+# undocumented SURFACE shrank: the mount served every file in
+# src/dashboard, including router.py (the whole admin API source) and
+# test_db.py, and the routes serve three named assets and 404 everything
+# else. So 31 is not drift, and this number measures undocumented ROUTES
+# rather than undocumented surface. Both new routes are
+# include_in_schema=False deliberately: they serve UI assets, not API,
+# and declaring them in openapi.yaml would contradict that.
+KNOWN_UNDECLARED = 31
 
 
 def registered_routes():

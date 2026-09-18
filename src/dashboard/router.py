@@ -30,12 +30,27 @@ OLLAMA_URL = _settings.ollama_url
 # main.py's own registry routes used neither copy (2026-09-16).
 
 
-@router.get("/verify-key")
-async def verify_key(x_admin_key: str = Header(default="")):
-    """Endpoint for the dashboard login to verify the admin key."""
-    admin_key = get_settings().cq_admin_key
-    if admin_key and x_admin_key != admin_key:
-        raise HTTPException(status_code=403, detail="Invalid admin key")
+@router.get("/verify-key", dependencies=[Depends(verify_admin_key)])
+async def verify_key():
+    """Endpoint for the dashboard login to verify the admin key.
+
+    GOES THROUGH THE SHARED DEPENDENCY, and that is the whole point.
+    Until 2026-09-17 this route compared the header inline, so it was the
+    ONE admin surface that did not pass through `verify_admin_key` and
+    therefore the one the #490 failure counter never saw. That counter was
+    added specifically because every admin route answers 403 or 200 and is
+    an oracle for a single long-lived operator key, and the argument for
+    putting it in the shared check was that limiting one endpoint would
+    move the guessing elsewhere. The shared check did not cover THIS
+    endpoint, which is the politest oracle of the lot: unauthenticated by
+    design, named for the purpose, and called by the login screen.
+
+    Behaviour for the dashboard is unchanged: 200 with a good key, 403
+    with a bad one, and open when CQ_ADMIN_KEY is unset (dev mode). What
+    is new is 429 once a source has failed too often, which is the
+    documented trade: a throttled login check while the guarded routes
+    keep accepting the correct key.
+    """
     return {"status": "ok"}
 
 # Dependency to get DB connection

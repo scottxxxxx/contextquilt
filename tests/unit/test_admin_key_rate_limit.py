@@ -223,7 +223,58 @@ def test_the_resolved_trusted_set_is_logged_so_staleness_is_visible():
     """The proxy's address is not pinned. A stale literal does not error, it
     stops matching, and every edge request quietly shares one bucket."""
     assert "admin_trusted_proxies_resolved" in DEPS
-    assert "NONE (no forwarding header will be believed)" in DEPS
+    assert "believes_headers" in DEPS
+
+
+def _code_only(text: str) -> str:
+    """Source with comment-only lines removed.
+
+    A NEGATIVE assertion against raw source matches the file's own prose:
+    api_deps explains the bug it fixed by naming `logging.getLogger`, so
+    `"logging.getLogger" not in DEPS` fails on the explanation rather than
+    on any code. This repo has hit that before, when the origin-delete
+    tests grepped for `apply=True` and matched the comment describing it.
+    """
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+ROUTER_PATH = (Path(__file__).resolve().parents[2] / "src" / "dashboard" / "router.py")
+ROUTER = ROUTER_PATH.read_text()
+
+
+def test_verify_key_goes_through_the_shared_dependency():
+    """The login check was the one admin route that did NOT use
+    verify_admin_key: it compared the header inline, so the #490 counter
+    never saw it. It is also the politest oracle of the lot, being
+    unauthenticated by design and named for the purpose. Limiting the
+    other 41 while leaving this one open left the guessing free.
+    """
+    decorator = '@router.get("/verify-key", dependencies=[Depends(verify_admin_key)])'
+    assert decorator in ROUTER, "verify-key must carry the shared admin dependency"
+
+
+def test_verify_key_does_not_compare_the_key_itself():
+    """An inline comparison here bypasses the counter even if the
+    dependency is also attached. Comment lines are stripped so this cannot
+    pass or fail on the prose explaining it."""
+    code = _code_only(ROUTER)
+    start = code.index('@router.get("/verify-key"')
+    handler = code[start:code.index("async def get_db(", start)]
+    assert "cq_admin_key" not in handler, "verify-key compares the key itself again"
+    assert "HTTPException" not in handler, "the dependency raises, not the handler"
+
+
+def test_the_log_goes_through_the_logger_this_app_configures():
+    """Shipped once with `logging.getLogger(__name__)` at INFO, which nothing
+    configures, so the line went NOWHERE on prod: a mechanism built to stop a
+    silent state being silent was itself silent. Every other module in the
+    package uses structlog, and structlog output is confirmed present in
+    prod logs while stdlib output from this module was absent."""
+    code = _code_only(DEPS)
+    assert "import structlog" in code
+    assert "structlog.get_logger()" in code
+    assert "logging.getLogger" not in code, "stdlib logging here reaches no output"
 
 
 def test_a_refusal_is_429_with_retry_after():

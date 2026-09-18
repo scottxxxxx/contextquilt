@@ -5,8 +5,7 @@ Implements 'Zero-Latency' Context Enrichment & MCP Endpoints
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, Query, status, Body
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Optional, Dict, Any, Union
 import asyncio
@@ -193,11 +192,49 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Mount Dashboard Static Files
-# Ensure the directory exists
+# Dashboard assets, served by EXPLICIT ALLOWLIST (2026-09-17).
+#
+# This was `app.mount("/dashboard", StaticFiles(directory=..., html=True))`,
+# which served EVERY file in src/dashboard. That directory holds the
+# dashboard's own source: `router.py` (the entire admin API, 2,200 lines)
+# and `test_db.py` were readable with no credential at /dashboard/router.py
+# and /dashboard/test_db.py. The edge IP-gates /dashboard/ on one hostname
+# and CQ answers on two, so it was reachable.
+#
+# A directory mount is a block list by omission: it serves whatever happens
+# to be there and relies on nobody ever putting anything else in. That is
+# the same shape as the edge rule that forwarded /v1/auth/apps because no
+# pattern named it. This is default deny instead, so a new asset has to be
+# named here before it can be served.
 dashboard_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "dashboard")
-if os.path.exists(dashboard_path):
-    app.mount("/dashboard", StaticFiles(directory=dashboard_path, html=True), name="dashboard")
+
+DASHBOARD_ASSETS = {
+    "": ("index.html", "text/html"),
+    "index.html": ("index.html", "text/html"),
+    "app.js": ("app.js", "application/javascript"),
+    "style.css": ("style.css", "text/css"),
+}
+
+
+@app.get("/dashboard", include_in_schema=False)
+async def dashboard_root():
+    """The old mount's `html=True` redirected the bare path; keep that."""
+    return RedirectResponse(url="/dashboard/")
+
+
+@app.get("/dashboard/{asset:path}", include_in_schema=False)
+async def dashboard_asset(asset: str = ""):
+    """Serve one named asset, or 404. The path never reaches the filesystem
+    as given: it is a KEY into the allowlist above, so traversal, dotfiles
+    and source files cannot be addressed at all."""
+    entry = DASHBOARD_ASSETS.get(asset)
+    if not entry:
+        raise HTTPException(status_code=404, detail="Not found")
+    filename, media_type = entry
+    full_path = os.path.join(dashboard_path, filename)
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(full_path, media_type=media_type)
 
 # Include Dashboard Router
 app.include_router(dashboard_router)

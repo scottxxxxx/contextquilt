@@ -39,11 +39,12 @@ surface on a cache hiccup.
 """
 from __future__ import annotations
 
-import logging
 import os
 import socket
 import time
 from typing import Optional
+
+import structlog
 
 from fastapi import Header, HTTPException, Request, status
 
@@ -57,7 +58,15 @@ from contextquilt.services.admin_auth import (
     trusted_proxies,
 )
 
-logger = logging.getLogger(__name__)
+# structlog, like every other module in this package. The first version of
+# this file used `logging.getLogger(__name__)` at INFO, which nothing in
+# the app configures, so the line went NOWHERE in production: the one
+# mechanism built to stop the trusted-set being a silent state was itself
+# silent. Verified on prod 2026-09-16 with a positive control, since an
+# absent log line proves nothing on its own: structlog lines from other
+# modules were present in the same window while nothing from this module
+# appeared at all.
+logger = structlog.get_logger()
 
 ADMIN_KEY_PREFIX = "admin_fail:"
 TRUSTED_CACHE_SECONDS = 60
@@ -91,8 +100,11 @@ def current_trusted(resolver=_dns) -> frozenset:
     resolved = resolve_trusted(trusted_proxies(raw), resolver)
     if resolved != cached_set or raw != cached_raw:
         logger.info(
-            "admin_trusted_proxies_resolved configured=%r resolved=%s",
-            raw, sorted(resolved) or "NONE (no forwarding header will be believed)")
+            "admin_trusted_proxies_resolved",
+            configured=raw,
+            resolved=sorted(resolved),
+            believes_headers=bool(resolved),
+        )
     _trusted_cache = (raw, resolved, now)
     return resolved
 
