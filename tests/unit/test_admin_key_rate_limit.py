@@ -239,6 +239,32 @@ def _code_only(text: str) -> str:
         line for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 
+ROUTER_PATH = (Path(__file__).resolve().parents[2] / "src" / "dashboard" / "router.py")
+ROUTER = ROUTER_PATH.read_text()
+
+
+def test_verify_key_goes_through_the_shared_dependency():
+    """The login check was the one admin route that did NOT use
+    verify_admin_key: it compared the header inline, so the #490 counter
+    never saw it. It is also the politest oracle of the lot, being
+    unauthenticated by design and named for the purpose. Limiting the
+    other 41 while leaving this one open left the guessing free.
+    """
+    decorator = '@router.get("/verify-key", dependencies=[Depends(verify_admin_key)])'
+    assert decorator in ROUTER, "verify-key must carry the shared admin dependency"
+
+
+def test_verify_key_does_not_compare_the_key_itself():
+    """An inline comparison here bypasses the counter even if the
+    dependency is also attached. Comment lines are stripped so this cannot
+    pass or fail on the prose explaining it."""
+    code = _code_only(ROUTER)
+    start = code.index('@router.get("/verify-key"')
+    handler = code[start:code.index("async def get_db(", start)]
+    assert "cq_admin_key" not in handler, "verify-key compares the key itself again"
+    assert "HTTPException" not in handler, "the dependency raises, not the handler"
+
+
 def test_the_log_goes_through_the_logger_this_app_configures():
     """Shipped once with `logging.getLogger(__name__)` at INFO, which nothing
     configures, so the line went NOWHERE on prod: a mechanism built to stop a

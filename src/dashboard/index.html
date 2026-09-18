@@ -1115,6 +1115,22 @@
                     localStorage.setItem('cq_admin_key', cqAdminKey);
                     document.getElementById('login-gate').style.display = 'none';
                     document.getElementById('app-container').style.display = '';
+                } else if (r.status === 429) {
+                    // Throttled, which is NOT a wrong key: verify-key now goes
+                    // through the shared admin dependency, and that refuses
+                    // before it compares anything. Reporting this as "Invalid
+                    // admin key" would tell an operator holding the correct key
+                    // that the key is wrong, and the auto-login below repeats
+                    // whatever this says on every page load.
+                    // A 429 does not feed the failure counter (the limiter
+                    // raises before the comparison) and the window runs from the
+                    // FIRST failure without being refreshed, so waiting really is
+                    // all that is needed.
+                    const wait = parseInt(r.headers.get('Retry-After'), 10);
+                    const mins = Number.isFinite(wait) ? Math.ceil(wait / 60) : null;
+                    document.getElementById('login-error').textContent =
+                        'Too many failed attempts, so the key was not checked. Try again'
+                        + (mins ? ' in about ' + mins + (mins === 1 ? ' minute.' : ' minutes.') : ' later.');
                 } else {
                     document.getElementById('login-error').textContent = 'Invalid admin key';
                 }
