@@ -53,6 +53,7 @@ from contextquilt.services import item_ledger
 from contextquilt.services import decay_model
 from contextquilt.services import ingest_replay
 from contextquilt.services import auth_rate_limit
+from contextquilt.services.client_id import is_uuid_shaped
 from contextquilt import api_deps
 from contextquilt.api_deps import verify_admin_key
 from contextquilt.services import origin_delete
@@ -2157,6 +2158,32 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many failed credential attempts. Try again later.",
                 headers={"Retry-After": str(limit_verdict["retry_after"])},
+            )
+
+        # A client_id that is not UUID-shaped cannot address the uuid
+        # app_id column: asyncpg raises DataError inside the fetch and the
+        # outer arm turns it into the same 401 a wrong secret gets. The
+        # caller could not tell the difference, but verify_password was
+        # never reached, so record_failure never ran and the attempt
+        # entered NO counter. Not an amplification hole (no pbkdf2 is
+        # paid) but a silent one: a credential failure to the caller, a
+        # backend error in our logs, and counted nowhere.
+        #
+        # Treated as unknown_app here, which is what it is, so it counts
+        # like any other unknown credential and costs no DB round trip.
+        # See services/client_id for the receipts, including the smoke
+        # test of the limiter that took this path and proved nothing.
+        if not is_uuid_shaped(form_data.username):
+            await auth_rate_limit.record_failure(redis_client, form_data.username)
+            logger.warning(
+                "auth_token_rejected",
+                client_id=str(form_data.username)[:64],
+                reason="malformed_client_id",
+            )
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect client_id or client_secret",
+                headers={"WWW-Authenticate": "Bearer"},
             )
 
         row = await db_pool.fetchrow(
