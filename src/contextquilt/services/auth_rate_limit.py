@@ -36,6 +36,18 @@ Kill switch `CQ_AUTH_RATELIMIT_ENABLED=0`. Knobs
 `CQ_AUTH_MAX_FAILURES` (default 10) and
 `CQ_AUTH_FAILURE_WINDOW_SECONDS` (default 900).
 
+A CALLER DEPENDS ON THESE NUMBERS. GhostPour's client (their #1002)
+backs off on this limiter's 429 and honours `Retry-After`, and it was
+built against the contract as written here, NOT measured: a burst test
+against prod was planned and cancelled by Scott on 2026-09-18 ("we trust
+the contract"). What GP assumes: 10 failures per 900 seconds, keyed on
+client_id, a 429 on refusal, and `Retry-After` present (we send
+delta-seconds; they parse both forms). So before changing the threshold,
+the window, the key, the status code, or dropping the header, INCLUDING
+by flipping one of the env knobs above on prod, tell GP first. They
+cannot notice by observation, because a wrong credential is the only
+thing that reaches this path and theirs are all correct.
+
 Pure where it can be (the key, the decision), so both are testable with
 no Redis and no fastapi.
 """
