@@ -32,6 +32,7 @@ from contextquilt.services.admin_auth import (
     GLOBAL_BUCKET,
     resolve_source,
     resolve_trusted,
+    should_announce_trusted,
     trusted_proxies,
 )
 
@@ -217,6 +218,59 @@ def test_the_identity_comes_from_the_socket_peer_not_a_header_alone():
     assert "request.client.host" in body
     assert "resolve_source(peer," in body
     assert "current_trusted()" in body, "the resolved set must be the one consulted"
+
+
+def test_the_first_resolution_announces_even_when_nothing_is_configured():
+    """The bug this replaces: the emit was gated on the resolved set
+    DIFFERING from the cache, and the cache started as ("", frozenset()).
+    With CQ_TRUSTED_PROXY_IPS unset the first computation produced exactly
+    that, so the condition was false and the line never fired in the
+    DEFAULT state, which is the only state anyone wanted to observe. A
+    condition that cannot be true on the first call passes by
+    construction."""
+    assert should_announce_trusted(None, frozenset(), "", frozenset()) is True
+
+
+def test_an_unchanged_set_stays_quiet():
+    assert should_announce_trusted("", frozenset(), "", frozenset()) is False
+    assert should_announce_trusted(
+        "bifrost", frozenset({"172.18.0.9"}), "bifrost", frozenset({"172.18.0.9"})) is False
+
+
+def test_a_change_on_either_side_announces():
+    """Configuration changed, or the same name resolved somewhere new. The
+    second is the case that matters: the proxy's address is not pinned."""
+    assert should_announce_trusted("", frozenset(), "bifrost", frozenset({"172.18.0.9"})) is True
+    assert should_announce_trusted(
+        "bifrost", frozenset({"172.18.0.9"}), "bifrost", frozenset({"172.18.0.11"})) is True
+
+
+def test_the_sentinel_cannot_collide_with_a_real_configuration():
+    """`""` was the old sentinel and is also what an unset variable
+    produces, which is precisely how the first call became invisible."""
+    assert should_announce_trusted(None, frozenset(), "anything", frozenset()) is True
+    assert "_trusted_cache: tuple = (None," in DEPS
+
+
+def test_current_trusted_actually_ASKS_the_helper():
+    """Written because a sabotage proved the rest of this file blind to the
+    real defect. Reverting current_trusted to its old inline condition,
+    `if resolved != cached_set or raw != cached_raw`, turned NOTHING red:
+    every other test here checks that the decision is correct, and none
+    checked that anything consults it. A helper written and never called is
+    the same shape as GP's #323, where per-app identity existed, was
+    tested, and no call site passed it for seven weeks.
+
+    Comment lines are stripped: api_deps explains the old condition in
+    prose, and a source assertion that matches its own explanation is this
+    repo's other recurring trap."""
+    code = _code_only(DEPS)
+    body = code[code.index("def current_trusted("):]
+    body = body[:body.index("_trusted_cache = (raw, resolved, now)")]
+    assert "should_announce_trusted(cached_raw, cached_set, raw, resolved)" in body, (
+        "current_trusted must ASK the helper, not re-implement the condition")
+    assert "if resolved != cached_set or raw != cached_raw" not in body, (
+        "the inline condition is the bug: it cannot be true on the first call")
 
 
 def test_the_resolved_trusted_set_is_logged_so_staleness_is_visible():

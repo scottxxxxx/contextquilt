@@ -55,6 +55,32 @@ def _looks_like_an_address(value: str) -> bool:
     return len(parts) == 4 and all(p.isdigit() and len(p) <= 3 for p in parts)
 
 
+def should_announce_trusted(cached_raw, cached_set, raw: str, resolved: frozenset) -> bool:
+    """Whether the resolved trusted set is worth logging.
+
+    THE FIRST RESOLUTION ALWAYS ANNOUNCES, and that is the whole point.
+    The previous version logged only when the resolved set DIFFERED from
+    the cache, and the cache started life as `("", frozenset(), 0.0)`. With
+    `CQ_TRUSTED_PROXY_IPS` unset, the first computation produces exactly
+    that, so the condition was false and the line never fired in the
+    DEFAULT state: the one state anybody would want to observe. A check
+    that cannot be true on the first call passes by construction.
+
+    That was the third iteration of one shape in this file, each inside
+    the fix for the last: a mechanism built to make a silent state loud,
+    shipped silent; the fix wired to a logger nothing configures; and the
+    fix for that gated behind a condition the default state cannot meet.
+    So the rule is now "announce once, then on every change", rather than
+    "announce departures from a baseline nobody ever set".
+
+    `cached_raw is None` is the never-resolved sentinel. It cannot collide
+    with a real configuration value, which `""` could and did.
+    """
+    if cached_raw is None:
+        return True
+    return raw != cached_raw or resolved != cached_set
+
+
 def resolve_trusted(entries: frozenset, resolver) -> frozenset:
     """Expand NAMES in the trusted set to the addresses they resolve to.
 

@@ -55,6 +55,7 @@ from contextquilt.services.admin_auth import (
     is_authorized,
     resolve_source,
     resolve_trusted,
+    should_announce_trusted,
     trusted_proxies,
 )
 
@@ -72,7 +73,11 @@ ADMIN_KEY_PREFIX = "admin_fail:"
 TRUSTED_CACHE_SECONDS = 60
 
 _redis = None
-_trusted_cache: tuple = ("", frozenset(), 0.0)
+# `None` is the NEVER-RESOLVED sentinel, and it has to be a value no real
+# configuration can produce. This was `""`, which is exactly what an unset
+# CQ_TRUSTED_PROXY_IPS resolves to, so the first call looked identical to
+# a cache hit and the announcement never fired in the default state.
+_trusted_cache: tuple = (None, frozenset(), 0.0)
 
 
 def _dns(name: str):
@@ -98,7 +103,7 @@ def current_trusted(resolver=_dns) -> frozenset:
     if raw == cached_raw and (now - cached_at) < TRUSTED_CACHE_SECONDS and cached_at:
         return cached_set
     resolved = resolve_trusted(trusted_proxies(raw), resolver)
-    if resolved != cached_set or raw != cached_raw:
+    if should_announce_trusted(cached_raw, cached_set, raw, resolved):
         logger.info(
             "admin_trusted_proxies_resolved",
             configured=raw,
