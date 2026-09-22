@@ -55,6 +55,9 @@ _SECRET_MANAGER_MAPPINGS: Final[dict[str, str]] = {
     # dashboard Providers tab lands (Gap 3) — operators rotate either
     # one through `POST /api/dashboard/update-key`.
     "CQ_LLM_API_KEY": "openrouter-api-key",
+    # TypeSafe/Jev, the second carrier for guardrail 12b. Added the day
+    # its first consumer shipped, per the rule above.
+    "CQ_TYPESAFE_API_KEY": "typesafe-api-key",
 }
 
 
