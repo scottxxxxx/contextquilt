@@ -143,6 +143,7 @@ from contextquilt.services.entity_aliasing import (
     person_candidates,
 )
 from contextquilt.services import behavior_extraction
+from contextquilt.services import character_check
 from contextquilt.services import behavior_classifier
 from contextquilt.services import origin_project
 from contextquilt.services import material_kind
@@ -6501,6 +6502,16 @@ class ColdPathWorker:
                     dropped_detail=bo["dropped"][:20],
                     model=response.model,
                 )
+            # SECOND CARRIER for guardrail 12b, and this one reads meaning
+            # rather than matching words. The denylist above is 29 English
+            # adjectives, so it is blind to every other language we ingest
+            # and to any phrasing nobody added to it. Duplication here is
+            # deliberate: the list cannot see an unlisted word, this can be
+            # unreachable, and neither covers the other's gap. Fails open,
+            # so an outage leaves exactly what the list already passed.
+            await character_check.apply(
+                response.content, user_id=user_id,
+                origin=str(origin_id or ""), lane="meeting_summary")
 
             # Person-ownership safety net. The prompt requires a person
             # patch + owns connection for every named action-item owner,
@@ -7603,6 +7614,24 @@ class ColdPathWorker:
             # carried real names). One rule, two carriers, doc 19.11.
             sanitized = sanitize_behavior_observations(
                 {"patches": patches}, user_label)
+            # The same second carrier the main chain got. Wired in BOTH
+            # places on the same day, because the last time one rule had two
+            # carriers and only one was wired, this lane wrote 93% of the
+            # corpus with no rule applied for weeks and every number anybody
+            # looked at was clean (doc 19.11).
+            await character_check.apply(
+                sanitized, user_id=user_id, origin=str(origin_id or ""),
+                lane="behavior_observations")
+            # The same second carrier the main chain got. Wired in BOTH
+            # places on the same day, because the last time one rule had two
+            # carriers and only one was wired, this lane wrote 93% of the
+            # corpus with no rule applied for weeks and every number anybody
+            # looked at was clean (doc 19.11).
+            # The same second carrier the main chain got. Wired in BOTH
+            # places on the same day, because the last time one rule had two
+            # carriers and only one was wired, this lane wrote 93% of the
+            # corpus with no rule applied for weeks and every number anybody
+            # looked at was clean (doc 19.11).
             patches = sanitized.get("patches") or []
             if (bo := sanitized.get("_behavior_observations_sanitized")):
                 logger.info(

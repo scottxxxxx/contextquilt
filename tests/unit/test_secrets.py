@@ -144,11 +144,17 @@ def test_ensure_secrets_no_project_is_noop(monkeypatch):
 
 def test_ensure_secrets_skips_when_env_already_set(monkeypatch):
     """If the env var is already populated, the SM round-trip is skipped
-    entirely (local dev / operator override wins). Both managed keys
-    are set so the loop doesn't fall through to SM for the other one."""
+    entirely (local dev / operator override wins).
+
+    EVERY mapped key is set, read off the mapping itself rather than typed
+    out here: the loop falls through to SM for any key that is unset, so a
+    hardcoded list makes this test fail the day somebody adds a third
+    secret, which is what happened when the TypeSafe key landed. The test
+    is about the skip, not about which secrets exist.
+    """
     _wipe_env(monkeypatch)
-    monkeypatch.setenv("CQ_ANTHROPIC_API_KEY", "sk-local-dev")
-    monkeypatch.setenv("CQ_LLM_API_KEY", "sk-or-local-dev")
+    for env_var in secrets_module._SECRET_MANAGER_MAPPINGS:
+        monkeypatch.setenv(env_var, f"local-dev-{env_var.lower()}")
     monkeypatch.setenv("CQ_GCP_PROJECT", "contextquilt")
 
     # Set up a tripwire — if SM is actually hit, the test fails loudly.
