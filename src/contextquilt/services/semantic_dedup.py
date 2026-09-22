@@ -18,6 +18,9 @@ cleanup.
 
 from __future__ import annotations
 
+import asyncio
+import os
+
 from typing import Any, List, Sequence, Tuple
 
 # Trigram bands. Above the threshold → same fact, no LLM needed (the
@@ -168,3 +171,110 @@ def parse_dedup_verdicts(content: Any, n_pairs: int) -> List[bool]:
         if isinstance(pair, int) and 0 <= pair < n_pairs and isinstance(same, bool):
             verdicts[pair] = same
     return verdicts
+
+
+# ---------------------------------------------------------------------------
+# The cheap first pass (2026-09-22). Most gray-zone pairs are not close calls.
+# ---------------------------------------------------------------------------
+#
+# WHY A CASCADE AND NOT A SWAP. Measured over the 16 pair fixture, three
+# repeats each (docs/experiments/2026-09-22-jev-second-scorer.md): every pair
+# that is NOT the same fact scored between 0.01 and 0.15, and seven of the
+# eight that ARE scored 0.71 or higher. The eighth sat at 0.50 to 0.55 across
+# all three runs, which is the tool saying it does not know, and it is the
+# judge prompt's own worked example ("Deploy the API by end of week" against
+# "Ship the API before Friday"). A single 0.5 threshold would decide that pair
+# by coin flip, so the band between the two floors escalates to the LLM judge
+# that already exists rather than being guessed.
+#
+# THE FLOORS ARE ASYMMETRIC ON PURPOSE, because the errors are. A missed merge
+# leaves two rows that a later re-observation can still collapse. A wrong merge
+# silently destroys a memory and its origin. So merging needs 0.70 with the
+# nearest negative at 0.15, a margin of 0.55, while anything above 0.30 is
+# never insert-by-default; it escalates.
+#
+# WHEN JEV IS OFF OR UNREACHABLE every pair escalates, which is exactly
+# today's behavior: one batched LLM call, and a judge failure inserts.
+
+DEDUP_MERGE_FLOOR = 0.70
+DEDUP_INSERT_CEILING = 0.30
+
+DEDUP_QUESTION: dict = {
+    "same_fact": {
+        "type": "noul",
+        "instructions": (
+            "Do statement_a and statement_b record the SAME underlying fact, "
+            "so that a reader who already knows the first learns nothing new "
+            "from the second? Different wording, or a different language, "
+            "does not make two facts. A different object, person, date, "
+            "amount or scope does."
+        ),
+        "criteria": {
+            "true": (
+                "Both name the same action on the same object, or one merely "
+                "adds detail to the other such as a deadline or an owner."
+            ),
+            "false": (
+                "They name different objects, people, dates, amounts, rules "
+                "or scopes, however similar the wording. A disposition is "
+                "never the same as its opposite."
+            ),
+        },
+    }
+}
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+    return value if 0.0 < value < 1.0 else default
+
+
+def merge_floor() -> float:
+    return _float_env("CQ_DEDUP_MERGE_FLOOR", DEDUP_MERGE_FLOOR)
+
+
+def insert_ceiling() -> float:
+    return _float_env("CQ_DEDUP_INSERT_CEILING", DEDUP_INSERT_CEILING)
+
+
+def triage(noul) -> "bool | None":
+    """True merge, False insert, None escalate to the LLM judge.
+
+    None for a missing answer too: silence is not a verdict, and the pair
+    still deserves the judge it would have had before this pass existed.
+    """
+    if noul is None:
+        return None
+    if noul >= merge_floor():
+        return True
+    if noul <= insert_ceiling():
+        return False
+    return None
+
+
+async def prescreen(pairs: "Sequence[Tuple[str, str]]") -> "List[bool | None]":
+    """One typed judgment per pair, concurrently. Never raises.
+
+    Returns one entry per pair in order: True merge, False insert, None means
+    the caller must escalate that pair. An all-None result is the disabled
+    path and costs nothing.
+    """
+    from contextquilt.services import jev_client  # local: keeps this module
+    # importable with no httpx present, as the pure tests rely on.
+
+    if not pairs or not jev_client.enabled() or not jev_client.api_key():
+        return [None] * len(pairs)
+
+    async def one(a: str, b: str):
+        answers = await jev_client.ask(
+            {"statement_a": a, "statement_b": b}, DEDUP_QUESTION)
+        return triage(jev_client.noul_of(answers, "same_fact"))
+
+    results = await asyncio.gather(
+        *(one(a, b) for a, b in pairs), return_exceptions=True)
+    # An exception object is not a verdict. It escalates, like a missing
+    # answer, rather than reading as truthy and merging.
+    return [r if isinstance(r, bool) else None for r in results]

@@ -190,6 +190,7 @@ from contextquilt.services.semantic_dedup import (
     TRIGRAM_DEDUP_THRESHOLD,
     build_dedup_judge_content,
     parse_dedup_verdicts,
+    prescreen as prescreen_dedup_pairs,
 )
 from contextquilt.services.llm_client_anthropic import AnthropicLLMClient
 from contextquilt.services.llm_client_fallback import (
@@ -1080,21 +1081,38 @@ async def store_connected_patches(
     # FALSE or any judge failure → insert as new (today's behavior — a
     # broken judge must never lose a memory).
     if gray_pending:
-        verdicts = [False] * len(gray_pending)
-        try:
-            response = await llm.extract(
-                system_prompt=DEDUP_JUDGE_SYSTEM,
-                user_content=build_dedup_judge_content(
-                    [(g[3], g[5]) for g in gray_pending]
-                ),
-                json_schema=DEDUP_JUDGE_SCHEMA,
-            )
-            verdicts = parse_dedup_verdicts(response.content, len(gray_pending))
-        except Exception as exc:
-            logger.warning(
-                "semantic_dedup_judge_failed",
-                user_id=user_id, pairs=len(gray_pending), reason=str(exc)[:200],
-            )
+        pairs = [(g[3], g[5]) for g in gray_pending]
+        # Cheap typed pass first. It answers the pairs that are not close
+        # calls, which measured as 15 of 16, and hands back None for the
+        # ones that are. None also covers Jev being off, unkeyed or down,
+        # so with nothing configured every pair escalates and this block
+        # behaves exactly as it did before.
+        prescreened = await prescreen_dedup_pairs(pairs)
+        verdicts = [v is True for v in prescreened]
+        escalate = [i for i, v in enumerate(prescreened) if v is None]
+        if escalate:
+            try:
+                response = await llm.extract(
+                    system_prompt=DEDUP_JUDGE_SYSTEM,
+                    user_content=build_dedup_judge_content(
+                        [pairs[i] for i in escalate]
+                    ),
+                    json_schema=DEDUP_JUDGE_SCHEMA,
+                )
+                escalated_verdicts = parse_dedup_verdicts(
+                    response.content, len(escalate))
+                for slot, index in enumerate(escalate):
+                    verdicts[index] = escalated_verdicts[slot]
+            except Exception as exc:
+                logger.warning(
+                    "semantic_dedup_judge_failed",
+                    user_id=user_id, pairs=len(escalate), reason=str(exc)[:200],
+                )
+        logger.info(
+            "semantic_dedup_prescreened",
+            user_id=user_id, pairs=len(pairs), escalated=len(escalate),
+            resolved=len(pairs) - len(escalate),
+        )
         merged = 0
         for (patch, patch_type, value, text, existing_id, existing_text), same in zip(
             gray_pending, verdicts
