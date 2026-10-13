@@ -58,7 +58,9 @@ def test_ingest_writes_the_row_from_the_PARSED_date():
     assert "INSERT INTO meeting_origins" in body
     assert "if origin_id and meeting_date:" in body
     assert "str(timestamp)[:10]" not in body, "the string slice is the bug this avoids"
-    parse = body.index("meeting_date = datetime.fromisoformat")
+    # The parse lives in services/meeting_date.py since 2026-10-13
+    # (recording_started_at first); test_meeting_date.py executes it.
+    parse = body.index("meeting_date = resolve_meeting_date(payload)")
     write = body.index("INSERT INTO meeting_origins")
     assert parse < write, "the parse must run before the write that uses it"
 

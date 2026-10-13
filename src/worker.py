@@ -38,6 +38,7 @@ from contextquilt.services.extraction_prompts import (
     select_open_commitments,
 )
 from contextquilt.services.closure_evidence import BELIEVED, classify_closure
+from contextquilt.services.meeting_date import resolve_meeting_date
 from contextquilt.services import headlines
 from contextquilt.services import woven_digest
 from contextquilt.services.deadline_resolver import run_deadline_micropass
@@ -6263,17 +6264,11 @@ class ColdPathWorker:
         # Meeting date anchor for deadline resolution. The extraction
         # prompt asks the model to resolve relative deadlines ("tomorrow",
         # "end of week") into value.deadline_date, which is only possible
-        # if the model knows when the meeting happened. payload.timestamp
-        # is set at enqueue time, or by the app for backdated imports.
-        meeting_date = None
-        raw_ts = payload.get("timestamp")
-        if raw_ts:
-            try:
-                meeting_date = datetime.fromisoformat(
-                    str(raw_ts).replace("Z", "+00:00")
-                ).date()
-            except ValueError:
-                meeting_date = None
+        # if the model knows when the meeting happened. The meeting's own
+        # clock (metadata.recording_started_at) wins over payload.timestamp,
+        # which is usually the enqueue clock; see services/meeting_date.py
+        # for why the date is read there and never copied into timestamp.
+        meeting_date = resolve_meeting_date(payload)
         # Weekday included: the coverage eval (2026-07-30) caught the
         # model resolving "by Friday" off by one day from a bare ISO
         # date — models are unreliable at date→weekday math, and every
