@@ -3323,12 +3323,37 @@ async def update_patch(
     payload = {"type": "hydrate", "user_id": user_id, "timestamp": datetime.utcnow().isoformat()}
     await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
 
+    # THE ECHO IS READ BACK FROM THE ROW, not from `value` in memory.
+    # Rule 4: a 200 says the request was processed, never that it did
+    # what the caller meant. Echoing the dict this handler just built
+    # would echo the caller's own request back at them and prove nothing
+    # about what was stored; up to three UPDATEs ran above, and only the
+    # row knows what they left. SS asked for this 2026-10-21: their
+    # updatePatch compared field by field and could only log "echo
+    # absent" for fact, patch_type and owner.
+    stored = await db_pool.fetchrow(
+        """
+        SELECT value->>'text' AS fact, patch_type, value->>'owner' AS owner,
+               value->>'deadline_date' AS deadline_date,
+               project_id, permanence_override
+        FROM context_patches WHERE patch_id = $1
+        """,
+        patch_id,
+    )
+    stored = dict(stored) if stored else {}
     return {
         "status": "updated",
         "patch_id": patch_id,
         # Echoed so the caller compares rather than assumes, and so a
         # cleared date is distinguishable from an untouched one.
-        "deadline_date": value.get("deadline_date"),
+        "deadline_date": stored.get("deadline_date"),
+        "fact": stored.get("fact"),
+        "patch_type": stored.get("patch_type"),
+        "owner": stored.get("owner"),
+        "project_id": (
+            str(stored["project_id"]) if stored.get("project_id") else None
+        ),
+        "permanence_override": stored.get("permanence_override"),
     }
 
 

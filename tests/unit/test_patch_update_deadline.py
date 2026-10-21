@@ -112,7 +112,7 @@ def test_the_new_date_is_echoed_back():
     """So a caller compares rather than assumes, and so a cleared date is
     distinguishable from an untouched one."""
     src = _func_source("update_patch")
-    assert '"deadline_date": value.get("deadline_date")' in src
+    assert '"deadline_date": stored.get("deadline_date")' in src
 
 
 # --- the three-way name mismatch GP's audit surfaced -------------------
