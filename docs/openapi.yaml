@@ -1818,6 +1818,91 @@ paths:
                     description: Monotonic count of dismissals on the row, never reset by an undo.
                   who_they_are: { type: string, example: regenerating }
 
+  /v1/origins/{user_id}/{origin_type}/{origin_id}/replace-term:
+    post:
+      operationId: replaceTermInOrigin
+      summary: Fix a misheard word in what one meeting produced
+      description: >
+        ShoulderSurf's "fix a misheard word once, everywhere it landed"
+        (2026-10-29). Whole-word match using the client's exact rule: the
+        term is split on whitespace, each piece escaped and joined with
+        whitespace, bounded by a non-letter, non-digit on each side.
+        Case-insensitive unless `match_case`. The replacement is literal.
+
+
+        Rewrites this meeting's stored facts in every status (text,
+        owner, owed_to, spoken deadline, restatements), recomputes their
+        headlines, and rewrites matching cues. Renames an entity only when
+        every recorded appearance is this meeting; others are listed in
+        `entities_skipped` with a reason. Insight cards and summaries that
+        quote the old wording are counted in `derived_referencing`, not
+        edited.
+
+
+        200 always, idempotent: an unknown meeting or a repeat reports
+        zeros. Undo is the same call with `from` and `to` swapped. The
+        corrected transcript itself arrives on POST /v1/memory with
+        `X-CZ-Recovery: word-correction`, which replaces the stored
+        transcript and is not re-extracted.
+      tags: [Projects]
+      parameters:
+        - { name: user_id, in: path, required: true, schema: { type: string } }
+        - { name: origin_type, in: path, required: true, schema: { type: string, example: meeting } }
+        - { name: origin_id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to]
+              properties:
+                from: { type: string, example: Cora }
+                to: { type: string, example: Kore.ai }
+                match_case: { type: boolean, default: false }
+      responses:
+        "200":
+          description: What was changed, read from the writes this call made.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  origin_id: { type: string }
+                  origin_type: { type: string }
+                  from: { type: string }
+                  to: { type: string }
+                  match_case: { type: boolean }
+                  matches: { type: integer, description: Number of occurrences replaced. }
+                  patches_changed: { type: integer }
+                  patch_ids: { type: array, items: { type: string } }
+                  cues_changed: { type: integer }
+                  entities_renamed:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        entity_id: { type: string }
+                        name: { type: string }
+                        new_name: { type: string }
+                        entity_type: { type: string }
+                  entities_skipped:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        entity_id: { type: string }
+                        name: { type: string }
+                        entity_type: { type: string }
+                        reason:
+                          type: string
+                          description: Open vocabulary. appears_in_other_meetings, no_meeting_record, target_name_exists.
+                  entities_skipped_shared: { type: integer, description: Count of entities_skipped. }
+                  derived_referencing: { type: integer }
+                  limits: { type: string }
+        "422":
+          description: "`from` or `to` empty or not a string, or `match_case` not a boolean."
+
   /v1/origins/{user_id}/{origin_type}/{origin_id}/delete:
     post:
       operationId: deleteOrigin

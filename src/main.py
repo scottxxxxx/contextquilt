@@ -57,6 +57,7 @@ from contextquilt.services.client_id import is_uuid_shaped
 from contextquilt import api_deps
 from contextquilt.api_deps import verify_admin_key
 from contextquilt.services import origin_delete
+from contextquilt.services import term_replace
 from contextquilt.services import people_signals
 from contextquilt.services import project_delete
 from contextquilt.services import people_i18n
@@ -142,7 +143,7 @@ from contextquilt.services.recall_scope import (
 )
 from contextquilt.services import origin_project
 from contextquilt.services import transcript_purge
-from contextquilt.services.ingest_markers import stamp_recovery
+from contextquilt.services.ingest_markers import REPLACE_MARKER, stamp_recovery
 from contextquilt.services.entity_match import (
     BARE_NAME_CANDIDATES_SQL, bare_terms, disambiguate_bare_names, match_entity_names,
     owner_tokens,
@@ -2006,6 +2007,12 @@ async def update_memory(
     appends, because without the label CQ cannot tell a retry from a
     deliberate re-send. Until this, the handler XADDed unconditionally
     and the stream held 61 origins twice.
+
+    THAT EXPLICIT OPERATION IS `X-CZ-Recovery: word-correction`
+    (2026-10-31, ShoulderSurf's misheard-word fix). It writes the
+    corrected transcript and removes the entries it supersedes, echoes
+    `replaced`, and the worker does NOT re-extract an entry that replaced
+    something: stored facts are corrected by the replace-term route.
     """
     # Push to Redis Stream for Async Worker (Cold Path)
     stream_key = "memory_updates"
@@ -2037,11 +2044,17 @@ async def update_memory(
                 "deduplicated": True}
 
     # Add to stream, then index the origin so the next marked replay is
-    # a SET hit rather than a scan.
-    await redis_client.xadd(stream_key, {"data": json.dumps(payload)})
-    await ingest_replay.remember(redis_client, payload)
+    # a SET hit rather than a scan. A `word-correction` delivery also
+    # retires the entries it replaces, AFTER the new one lands
+    # (ingest_replay.write), and the count is echoed so the caller can
+    # see the replace happened (rule 4): 0 means this was the meeting's
+    # first delivery and it will extract like any other.
+    written = await ingest_replay.write(redis_client, payload, verdict)
 
-    return {"status": "queued", "message": "Memory update received for async processing"}
+    body = {"status": "queued", "message": "Memory update received for async processing"}
+    if marker == REPLACE_MARKER:
+        body["replaced"] = written["replaced"]
+    return body
 
 @app.post("/v1/prewarm", tags=["Ops"])
 async def prewarm_cache(
@@ -11480,6 +11493,97 @@ async def project_affected_people(
 # resolvable origin and no project of their own, so no project delete and
 # no meeting delete will ever reach them. A client is entitled to know
 # that before it writes "this removes everything".
+class TermReplaceRequest(BaseModel):
+    """Body of POST .../replace-term. Typed loosely on purpose: every
+    field is validated by `term_replace.validate_body`, which answers a
+    422 the client can read, rather than a pydantic error shape that
+    differs by field."""
+    from_term: Optional[Any] = Field(None, alias="from")
+    to: Optional[Any] = None
+    match_case: Optional[Any] = None
+
+
+@app.post("/v1/origins/{user_id}/{origin_type}/{origin_id}/replace-term",
+          tags=["Projects"])
+async def replace_term_in_origin(
+    user_id: str,
+    origin_type: str,
+    origin_id: str,
+    req: TermReplaceRequest,
+    app_id: str = Depends(verify_application_access),
+):
+    """
+    Fix a misheard word in what ONE meeting produced: `{"from": "Cora",
+    "to": "Kore.ai", "match_case": false}`. ShoulderSurf's "fix it once,
+    everywhere it landed" (2026-10-29); the design and its limits are the
+    header of `services/term_replace`.
+
+    Whole-word, the client's exact rule, literal replacement. Rewrites
+    the meeting's facts (text, owner, owed_to, spoken deadline,
+    restatements) in every status, recomputes a headline the same way a
+    PATCH fact edit does, and rewrites matching cues. Renames an entity
+    only when every recorded appearance is this meeting; everything else
+    is listed in `entities_skipped` with its reason. Derived prose that
+    quotes the old wording is counted, never edited.
+
+    `updated_at` moves on a changed patch so other devices receive the
+    corrected text through the delta; `last_observed_at` does not, since
+    nobody said anything again. `origin_mode` is NOT flipped to declared:
+    the fact is still what the meeting said, spelled right.
+
+    200 always, idempotent: an unknown meeting or a repeat reports
+    zeros. Undo is the same call with `from` and `to` swapped.
+    """
+    body = {"from": req.from_term, "to": req.to, "match_case": req.match_case}
+    problem = term_replace.validate_body(body)
+    if problem:
+        raise HTTPException(status_code=422, detail=problem)
+    match_case = bool(req.match_case)
+    pattern = term_replace.compile_term(req.from_term, match_case)
+    to = req.to
+
+    async with db_pool.acquire() as conn:
+        async with conn.transaction():
+            result = await term_replace.apply(
+                conn, user_id, origin_type, origin_id, pattern, to,
+                term=req.from_term)
+
+    # After the commit, never inside it: a queue write must not hold the
+    # transaction, and a failure here must not undo the user's fix.
+    try:
+        for pid in result["headline_jobs"]:
+            await redis_client.xadd("memory_updates", {"data": json.dumps({
+                "user_id": user_id, "app_id": app_id,
+                "interaction_type": "headline_patch",
+                "task_type": "headline_patch", "patch_id": pid,
+            })})
+        if result["patch_ids"] or result["entities_renamed"] or result["cues_changed"]:
+            await redis_client.xadd("memory_updates", {"data": json.dumps({
+                "type": "hydrate", "user_id": user_id,
+                "timestamp": datetime.utcnow().isoformat()})})
+    except Exception as exc:
+        logger.warning("replace_term_enqueue_failed", user_id=user_id,
+                       origin_id=origin_id, error=str(exc)[:200])
+
+    logger.info("origin_term_replaced", user_id=user_id,
+                origin_type=origin_type, origin_id=origin_id,
+                matches=result["matches"],
+                patches_changed=len(result["patch_ids"]),
+                cues_changed=result["cues_changed"],
+                entities_renamed=len(result["entities_renamed"]),
+                entities_skipped=len(result["entities_skipped"]),
+                derived_referencing=result["derived_referencing"])
+
+    return term_replace.response_body(
+        origin_id, origin_type, from_term=req.from_term, to_term=to,
+        match_case=match_case, matches=result["matches"],
+        patch_ids=result["patch_ids"], cues_changed=result["cues_changed"],
+        entities_renamed=result["entities_renamed"],
+        entities_skipped=result["entities_skipped"],
+        derived_referencing=result["derived_referencing"],
+    )
+
+
 class OriginDeleteRequest(BaseModel):
     """Body for the meeting-deletion form. ABSENT OR UNRECOGNISED IS A
     PREVIEW: this route has no prior behaviour to keep, so a flag eaten

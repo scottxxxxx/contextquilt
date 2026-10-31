@@ -37,6 +37,25 @@ from typing import Any, Dict, Optional
 
 RECOVERY_HEADER = "X-CZ-Recovery"
 
+# THE ONE MARKER THAT REPLACES INSTEAD OF REPLAYING. Every other value
+# means "do not re-ingest" and a repeat writes nothing (ingest_replay).
+# This one is ShoulderSurf's "fix a misheard word once, everywhere"
+# (2026-10-29): the client re-sends the meeting's transcript with the
+# user's correction applied, and the stored transcript must BECOME the
+# corrected one, or a later replay would resurrect the misheard word.
+# The 09-14 ruling anticipated exactly this ("a re-rendered transcript
+# that must REPLACE an old one is a new explicit operation, a different
+# marker value"), so this is that value, matched exactly.
+#
+# It does NOT re-extract. A re-extraction cannot fix stored facts (the
+# dedup merge keeps the existing text by design) and can add duplicates
+# beside them, so the stored patches are corrected by
+# POST /v1/origins/{u}/{ot}/{oid}/replace-term instead, and the worker
+# skips extraction for an entry that replaced something
+# (`skips_extraction`). An entry that replaced NOTHING is the first
+# delivery of that meeting and extracts like any other.
+REPLACE_MARKER = "word-correction"
+
 # An unvalidated client string that lands in a payload the worker parses
 # and that persists on the stream for months. No legitimate marker needs
 # more than this, and a cap is cheaper than trusting the sender.
@@ -77,3 +96,22 @@ def stamp_recovery(payload: Dict[str, Any], header: object) -> Optional[str]:
         return None
     payload["recovery"] = marker
     return marker
+
+
+def skips_extraction(payload: object) -> bool:
+    """True for a word-correction entry that replaced an earlier one.
+
+    Both halves are required. The marker alone is not enough: when no
+    earlier entry existed, the corrected transcript IS the meeting's first
+    delivery and skipping it would mean the meeting never lands at all.
+    `replaced_entries` is stamped by the ingest route only when it found
+    and replaced something.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("recovery") != REPLACE_MARKER:
+        return False
+    try:
+        return int(payload.get("replaced_entries") or 0) > 0
+    except (TypeError, ValueError):
+        return False

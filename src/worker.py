@@ -39,6 +39,7 @@ from contextquilt.services.extraction_prompts import (
 )
 from contextquilt.services.closure_evidence import BELIEVED, classify_closure
 from contextquilt.services.meeting_date import resolve_meeting_date
+from contextquilt.services.ingest_markers import skips_extraction
 from contextquilt.services import headlines
 from contextquilt.services import woven_digest
 from contextquilt.services.deadline_resolver import run_deadline_micropass
@@ -4946,6 +4947,16 @@ class ColdPathWorker:
             return
         if task_type == "tool_call":
             await self.handle_active_learning(payload)
+            return
+        # A word correction that REPLACED an earlier transcript is stored,
+        # not re-extracted (services/ingest_markers.skips_extraction). A
+        # re-extraction cannot fix the stored facts, because the dedup
+        # merge keeps the existing text, and it can add duplicates beside
+        # them; the replace-term route corrects the facts instead.
+        if skips_extraction(payload):
+            logger.info("word_correction_stored_not_extracted",
+                        user_id=user_id, origin_id=origin_id,
+                        replaced_entries=payload.get("replaced_entries"))
             return
         # Ingest-mode gate (transformer contract): when the app's manifest
         # explicitly declares ingest_mode, its payloads may only reach the
