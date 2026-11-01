@@ -11532,7 +11532,11 @@ async def replace_term_in_origin(
     the fact is still what the meeting said, spelled right.
 
     200 always, idempotent: an unknown meeting or a repeat reports
-    zeros. Undo is the same call with `from` and `to` swapped.
+    zeros, including a repeat of a rule whose new term contains the old
+    one ("Kore" to "Kore AI"): an old term already inside an occurrence
+    of the new term is not matched again (term_replace.already_applied_guard,
+    the service derives it from `to`, no caller has to remember). Undo is
+    the same call with `from` and `to` swapped.
     """
     body = {"from": req.from_term, "to": req.to, "match_case": req.match_case}
     problem = term_replace.validate_body(body)

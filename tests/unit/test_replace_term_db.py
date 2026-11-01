@@ -151,6 +151,39 @@ async def test_a_repeat_changes_nothing():
 
 
 @pytest.mark.asyncio
+async def test_a_repeat_changes_nothing_when_to_contains_from():
+    """The stateless-route hazard a dev build hit on 2026-10-31: "Kore"
+    to "Kore AI" repeated must not produce "Kore AI AI". Executed through
+    `apply`, which derives the guard itself, across a fact, a cue and a
+    derived card, so the second call's numbers are all zero."""
+    await _ensure_schema()
+    conn = await asyncpg.connect(TEST_DB)
+    try:
+        u, m = str(uuid.uuid4()), f"m-{uuid.uuid4().hex[:8]}"
+        pid = await _patch(conn, u, m, {"text": "Kore owns the Kore rollout"})
+        await conn.execute("INSERT INTO patch_cues (patch_id, cue) VALUES ($1, 'kore pricing')", pid)
+        await _patch(conn, u, None, {"text": "Mentions Kore often"},
+                     ptype="insight", origin_mode="derived", sources=[str(pid)])
+        # Already says the new term: under the guard it does NOT reference
+        # the old wording, so the count is 1, not 2.
+        await _patch(conn, u, None, {"text": "Owns the Kore AI roadmap"},
+                     ptype="insight", origin_mode="derived", sources=[str(pid)])
+        first = await _apply(conn, u, m, term="Kore", to="Kore AI")
+        assert first["matches"] == 2 and first["cues_changed"] == 1
+        assert first["derived_referencing"] == 1
+        assert (await _value(conn, pid))["text"] == "Kore AI owns the Kore AI rollout"
+        again = await _apply(conn, u, m, term="Kore", to="Kore AI")
+        assert again["matches"] == 0 and again["patch_ids"] == []
+        assert again["cues_changed"] == 0
+        assert (await _value(conn, pid))["text"] == "Kore AI owns the Kore AI rollout"
+        cues = [r["cue"] for r in await conn.fetch(
+            "SELECT cue FROM patch_cues WHERE patch_id = $1", pid)]
+        assert cues == ["kore ai pricing"]
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio
 async def test_cues_are_rewritten():
     await _ensure_schema()
     conn = await asyncpg.connect(TEST_DB)

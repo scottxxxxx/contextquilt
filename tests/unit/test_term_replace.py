@@ -115,6 +115,87 @@ def test_a_second_application_changes_nothing():
     assert twice == once
 
 
+def test_a_second_application_changes_nothing_when_to_contains_from():
+    """The rule the 2026-10-31 dev build repeated within hours of the
+    ship. The route is stateless, so without the guard "Kore" to "Kore
+    AI" finds "Kore" inside its own replacement and gives "Kore AI AI".
+    The service derives the guard from `to`; the caller passes nothing.
+    """
+    p = tr.compile_term("Kore")
+    g = tr.already_applied_guard(p, "Kore AI")
+    once, n1, _ = tr.replace_in_value({"text": "Kore and kore again"}, p, "Kore AI", g)
+    twice, n2, keys = tr.replace_in_value(once, p, "Kore AI", g)
+    assert once == {"text": "Kore AI and Kore AI again"} and n1 == 2
+    assert (twice, n2, keys) == (once, 0, [])
+
+
+@pytest.mark.parametrize("to", ["AI Kore", "Kore Kore", "Kore.ai", "Jon Kore Smith"])
+def test_the_guard_is_symmetric(to):
+    """Prefix, suffix, both ends and the middle: the old term is skipped
+    wherever it sits inside an occurrence of the new term, and the
+    occurrence is recognised by the client's own whole-word rule."""
+    p = tr.compile_term("Kore")
+    g = tr.already_applied_guard(p, to)
+    once, n1 = tr.replace_text("Kore today, Kore tomorrow", p, to, g)
+    twice, n2 = tr.replace_text(once, p, to, g)
+    assert n1 == 2 and once == f"{to} today, {to} tomorrow"
+    assert (twice, n2) == (once, 0)
+
+
+def test_the_guard_leaves_a_standalone_old_term_alone():
+    """Guarding is not forgiving: an old term NOT inside the new term is
+    still a miss to fix, so a partial first pass (one field written,
+    another not) completes on the repeat rather than stalling."""
+    p = tr.compile_term("Kore")
+    g = tr.already_applied_guard(p, "Kore AI")
+    assert tr.replace_text("Kore AI met Kore", p, "Kore AI", g) == ("Kore AI met Kore AI", 1)
+    assert tr.term_occurs("Kore AI met Kore", p, g) is True
+    assert tr.term_occurs("Kore AI met them", p, g) is False
+
+
+def test_no_guard_when_to_does_not_contain_from():
+    """The common rule is untouched: identical to the single pass, so
+    the client's count comparison is unaffected."""
+    p = tr.compile_term("Cora")
+    assert tr.already_applied_guard(p, "Kore.ai") is None
+    # "Jon" to "Jonathan" needs none either: whole-word, so Jon is not
+    # found inside Jonathan in the first place.
+    assert tr.already_applied_guard(tr.compile_term("Jon"), "Jonathan") is None
+    assert tr.replace_text("Jonathan met Jon", tr.compile_term("Jon"), "Jonathan") == (
+        "Jonathan met Jonathan", 1)
+
+
+def test_the_guard_carries_the_case_flag():
+    p_ci = tr.compile_term("kore")
+    p_cs = tr.compile_term("kore", match_case=True)
+    assert tr.already_applied_guard(p_ci, "Kore AI") is not None       # kore in Kore AI, folded
+    assert tr.already_applied_guard(p_cs, "Kore AI") is None           # not with case
+    g = tr.already_applied_guard(p_ci, "Kore AI")
+    assert g.flags & tr.re.IGNORECASE
+    assert tr.replace_text("KORE AI and kore", p_ci, "Kore AI", g) == ("KORE AI and Kore AI", 1)
+
+
+def test_cues_and_entities_use_the_same_guard():
+    p = tr.compile_term("Kore")
+    g = tr.already_applied_guard(p, "Kore AI")
+    assert tr.replace_cue("kore ai pricing", p, "Kore AI", g) is None
+    assert tr.replace_cue("kore pricing", p, "Kore AI", g) == "kore ai pricing"
+
+
+def test_the_database_half_derives_the_guard_itself():
+    """No caller can forget it: `apply` builds the guard from `to` and
+    passes it to every rewrite and to the derived count. Source-read
+    here; executed by test_replace_term_db."""
+    src = (ROOT / "src" / "contextquilt" / "services" / "term_replace.py").read_text()
+    body = src.split("async def apply(", 1)[1]
+    assert "guard = already_applied_guard(pattern, to)" in body
+    assert "replace_in_value(value or {}, pattern, to, guard)" in body
+    assert 'replace_cue(c["cue"], pattern, to, guard)' in body
+    assert 'replace_text(e["name"], pattern, to, guard)' in body
+    assert 'term_occurs(d["body"] or "", pattern, guard)' in body
+    assert "pattern.search(" not in body
+
+
 def test_undo_is_the_swap():
     p = tr.compile_term("Cora")
     fixed, _, _ = tr.replace_in_value({"text": "Cora said"}, p, "Kore.ai")

@@ -74,7 +74,9 @@ LIMITS_DEFINITION = (
     "quote the old wording are counted in derived_referencing, not "
     "edited. Undo by swapping from and to: an occurrence of the new term "
     "that was already there before the fix is indistinguishable and "
-    "would be swapped too."
+    "would be swapped too. Repeating the same rule is a no-op, including "
+    "when the new term contains the old one as a whole word: an old term "
+    "that already sits inside an occurrence of the new term is left alone."
 )
 
 
@@ -91,17 +93,77 @@ def compile_term(term: Any, match_case: bool = False) -> Optional[Pattern[str]]:
     return re.compile(rf"(?<![^\W_]){body}(?![^\W_])", flags)
 
 
-def replace_text(text: Any, pattern: Pattern[str], to: str) -> Tuple[Any, int]:
+def already_applied_guard(pattern: Pattern[str], to: Any) -> Optional[Pattern[str]]:
+    """The pattern that recognises an occurrence of `to` in stored text,
+    or None when the rule needs no guard.
+
+    THE ROUTE IS STATELESS, so a rule whose new term CONTAINS the old
+    one as a whole word ("Kore" to "Kore AI", "Jon" to "Jon Smith",
+    "Kore" to "Kore.ai") would, on a second identical call, find the old
+    term inside its own replacement and apply again: "Kore AI AI".
+    Every retry path converges on this route (a client's verification
+    call, a retry after a gateway 504, a user tapping twice), and the
+    first client to repeat such a rule was a dev build within hours of
+    the ship (2026-10-31). So an old term that already sits inside an
+    occurrence of the new term is treated as already corrected.
+
+    The guard is the SAME whole-word rule compiled on `to`, with the
+    same case flag, so what counts as "an occurrence of the new term"
+    is decided the way the client decides it. When `to` does not contain
+    the old term there is nothing to protect and behaviour is exactly
+    the single-pass replacement.
+    """
+    if not isinstance(to, str) or pattern.search(to) is None:
+        return None
+    return compile_term(to, match_case=not (pattern.flags & re.IGNORECASE))
+
+
+def _protected_spans(text: str, guard: Optional[Pattern[str]]) -> List[Tuple[int, int]]:
+    if guard is None:
+        return []
+    return [m.span() for m in guard.finditer(text)]
+
+
+def _inside(span: Tuple[int, int], spans: List[Tuple[int, int]]) -> bool:
+    start, end = span
+    return any(s <= start and end <= e for s, e in spans)
+
+
+def replace_text(text: Any, pattern: Pattern[str], to: str,
+                 guard: Optional[Pattern[str]] = None) -> Tuple[Any, int]:
     """(new_text, matches). Literal replacement: a backslash or `\\1` in
-    `to` is inserted as typed, never expanded."""
+    `to` is inserted as typed, never expanded. With a `guard`, a match
+    lying inside an occurrence of the new term is neither replaced nor
+    counted (see already_applied_guard)."""
     if not isinstance(text, str) or not text:
         return text, 0
-    new, n = pattern.subn(lambda _m: to, text)
-    return new, n
+    spans = _protected_spans(text, guard)
+    count = 0
+
+    def repl(m: "re.Match[str]") -> str:
+        nonlocal count
+        if spans and _inside(m.span(), spans):
+            return m.group(0)
+        count += 1
+        return to
+
+    new = pattern.sub(repl, text)
+    return new, count
+
+
+def term_occurs(text: Any, pattern: Pattern[str],
+                guard: Optional[Pattern[str]] = None) -> bool:
+    """Whether the old term still occurs, under the same guard as the
+    rewrite, so a count and a rewrite never disagree about one text."""
+    if not isinstance(text, str) or not text:
+        return False
+    spans = _protected_spans(text, guard)
+    return any(not (spans and _inside(m.span(), spans)) for m in pattern.finditer(text))
 
 
 def replace_in_value(value: Mapping[str, Any], pattern: Pattern[str],
-                     to: str) -> Tuple[Dict[str, Any], int, List[str]]:
+                     to: str, guard: Optional[Pattern[str]] = None,
+                     ) -> Tuple[Dict[str, Any], int, List[str]]:
     """A patch value with the term replaced in every word-bearing field.
 
     Returns (new_value, matches, changed_keys). `new_value` is a copy;
@@ -114,7 +176,7 @@ def replace_in_value(value: Mapping[str, Any], pattern: Pattern[str],
     matches = 0
     changed: List[str] = []
     for key in TEXT_KEYS:
-        new, n = replace_text(out.get(key), pattern, to)
+        new, n = replace_text(out.get(key), pattern, to, guard)
         if n:
             out[key] = new
             matches += n
@@ -125,7 +187,7 @@ def replace_in_value(value: Mapping[str, Any], pattern: Pattern[str],
         rest_n = 0
         for item in rest:
             if isinstance(item, dict):
-                new, n = replace_text(item.get("text"), pattern, to)
+                new, n = replace_text(item.get("text"), pattern, to, guard)
                 if n:
                     item = {**item, "text": new}
                     rest_n += n
@@ -137,10 +199,11 @@ def replace_in_value(value: Mapping[str, Any], pattern: Pattern[str],
     return out, matches, changed
 
 
-def replace_cue(cue: Any, pattern: Pattern[str], to: str) -> Optional[str]:
+def replace_cue(cue: Any, pattern: Pattern[str], to: str,
+                guard: Optional[Pattern[str]] = None) -> Optional[str]:
     """The corrected cue, or None when it does not match. Cues are stored
     lowercase (sanitize_cues), so the result is lowercased too."""
-    new, n = replace_text(cue, pattern, to)
+    new, n = replace_text(cue, pattern, to, guard)
     if not n:
         return None
     return " ".join(new.lower().split())
@@ -276,6 +339,9 @@ async def apply(conn, user_id: str, origin_type: str, origin_id: str,
     matches = 0
     changed_ids: List[str] = []
     headline_jobs: List[str] = []
+    # One guard for every text this call touches, so a repeat of a rule
+    # whose new term contains the old one is a no-op on all of them.
+    guard = already_applied_guard(pattern, to)
 
     rows = await conn.fetch(SCOPE_SQL, subject_key, origin_type, origin_id)
     scope_ids = [str(r["patch_id"]) for r in rows]
@@ -283,7 +349,7 @@ async def apply(conn, user_id: str, origin_type: str, origin_id: str,
         value = r["value"]
         if isinstance(value, str):
             value = json.loads(value)
-        new_value, n, keys = replace_in_value(value or {}, pattern, to)
+        new_value, n, keys = replace_in_value(value or {}, pattern, to, guard)
         if not n:
             continue
         if "text" in keys:
@@ -300,7 +366,7 @@ async def apply(conn, user_id: str, origin_type: str, origin_id: str,
     cues_changed = 0
     if scope_ids:
         for c in await conn.fetch(CUES_SQL, scope_ids):
-            new_cue = replace_cue(c["cue"], pattern, to)
+            new_cue = replace_cue(c["cue"], pattern, to, guard)
             if not new_cue or new_cue == c["cue"]:
                 continue
             await conn.execute(CUE_INSERT_SQL, c["patch_id"], new_cue)
@@ -311,7 +377,7 @@ async def apply(conn, user_id: str, origin_type: str, origin_id: str,
     skipped: List[Dict[str, Any]] = []
     longest = max(str(term).split(), key=len)
     for e in await conn.fetch(ENTITY_CANDIDATES_SQL, user_id, like_escape(longest)):
-        new_name, n = replace_text(e["name"], pattern, to)
+        new_name, n = replace_text(e["name"], pattern, to, guard)
         if not n:
             continue
         origins = [a["origin_id"] for a in
@@ -331,7 +397,7 @@ async def apply(conn, user_id: str, origin_type: str, origin_id: str,
     if scope_ids:
         derived_referencing = sum(
             1 for d in await conn.fetch(DERIVED_SQL, subject_key, scope_ids)
-            if pattern.search(d["body"] or ""))
+            if term_occurs(d["body"] or "", pattern, guard))
 
     return {"matches": matches, "patch_ids": changed_ids,
             "headline_jobs": headline_jobs, "cues_changed": cues_changed,
