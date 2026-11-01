@@ -84,3 +84,29 @@ def test_stamping_twice_is_idempotent():
     stamp_recovery(payload, "replay")
     stamp_recovery(payload, "replay")
     assert payload == {"recovery": "replay"}
+
+
+# --- word-correction (2026-10-31) ----------------------------------------
+
+from contextquilt.services.ingest_markers import REPLACE_MARKER, skips_extraction  # noqa: E402
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ({"recovery": "word-correction", "replaced_entries": 1}, True),
+    ({"recovery": "word-correction", "replaced_entries": 3}, True),
+    # nothing replaced: the meeting's first delivery, it must extract
+    ({"recovery": "word-correction", "replaced_entries": 0}, False),
+    ({"recovery": "word-correction"}, False),
+    # every other marker extracts as before
+    ({"recovery": "report-404-replay", "replaced_entries": 1}, False),
+    ({"recovery": "Word-Correction", "replaced_entries": 1}, False),
+    ({"replaced_entries": 1}, False),
+    ({"recovery": "word-correction", "replaced_entries": "x"}, False),
+    (None, False),
+])
+def test_only_a_correction_that_replaced_something_skips(payload, expected):
+    assert skips_extraction(payload) is expected
+
+
+def test_the_marker_value_is_the_one_shouldersurf_sends():
+    assert REPLACE_MARKER == "word-correction"

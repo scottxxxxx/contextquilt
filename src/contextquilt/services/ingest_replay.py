@@ -63,7 +63,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
+
+from contextquilt.services.ingest_markers import REPLACE_MARKER
 
 STREAM_KEY = "memory_updates"
 STREAM_SCAN_BATCH = 500
@@ -182,10 +184,64 @@ async def admit(redis_client, payload: Any, marker: Optional[str]) -> Dict[str, 
     parsed = payload_origin(payload)
     origin_id = parsed[1] if parsed else None
     if not marker or not parsed:
-        return {"write": True, "deduplicated": False, "origin_id": origin_id}
+        return {"write": True, "deduplicated": False, "origin_id": origin_id,
+                "replace": []}
+    if marker == REPLACE_MARKER:
+        # The one marker that REPLACES (ingest_markers.REPLACE_MARKER).
+        # Always writes; `replace` names the entries it supersedes, which
+        # `write` removes only after the new one has landed.
+        ids = await origin_entry_ids(redis_client, parsed[0], parsed[1], parsed[2])
+        return {"write": True, "deduplicated": False, "origin_id": origin_id,
+                "replace": ids}
     if await already_ingested(redis_client, parsed[0], parsed[1], parsed[2]):
-        return {"write": False, "deduplicated": True, "origin_id": origin_id}
-    return {"write": True, "deduplicated": False, "origin_id": origin_id}
+        return {"write": False, "deduplicated": True, "origin_id": origin_id,
+                "replace": []}
+    return {"write": True, "deduplicated": False, "origin_id": origin_id,
+            "replace": []}
+
+
+async def origin_entry_ids(redis_client, user_id: str, origin_id: str,
+                           kind: str = "") -> List[str]:
+    """Every stream entry id carrying this user's ingest of this type for
+    this origin. A full scan, on the replace path only: the SET says
+    whether an origin landed, never where, and a correction is rare."""
+    out: List[str] = []
+    cursor = "-"
+    while True:
+        entries = await redis_client.xrange(STREAM_KEY, min=cursor, count=STREAM_SCAN_BATCH)
+        if not entries:
+            return out
+        for entry_id, fields in entries:
+            if entry_is_origin(fields.get("data"), user_id, origin_id, kind):
+                out.append(entry_id)
+        if len(entries) < STREAM_SCAN_BATCH:
+            return out
+        cursor = "(" + entries[-1][0]
+
+
+async def write(redis_client, payload: Dict[str, Any],
+                verdict: Mapping[str, Any]) -> Dict[str, Any]:
+    """Write the entry the verdict admitted, then retire what it replaces.
+
+    NEW FIRST, OLD SECOND. If anything fails between the two, the stream
+    holds both transcripts, which a later correction or the dedupe script
+    can resolve; the reverse order could leave it holding neither, and
+    since 2026-09-09 the stream is the only copy of a raw transcript.
+
+    `replaced_entries` is stamped on the NEW entry before it is written,
+    because the worker reads it to decide whether to skip extraction
+    (ingest_markers.skips_extraction), and it must say what this write
+    superseded rather than what a later scan would find.
+    """
+    replace = list(verdict.get("replace") or [])
+    if replace:
+        payload["replaced_entries"] = len(replace)
+    entry_id = await redis_client.xadd(STREAM_KEY, {"data": json.dumps(payload)})
+    await remember(redis_client, payload)
+    removed = 0
+    if replace:
+        removed = int(await redis_client.xdel(STREAM_KEY, *replace) or 0)
+    return {"entry_id": entry_id, "replaced": removed}
 
 
 # --- one-time cleanup of the duplicates that already exist ----------------

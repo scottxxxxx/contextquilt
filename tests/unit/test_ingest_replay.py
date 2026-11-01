@@ -101,8 +101,10 @@ async def test_a_marked_replay_of_a_landed_origin_writes_nothing():
     r = FakeRedis()
     first = await _post(r, _payload(), marker=None)
     second = await _post(r, _payload(), marker="pending-ingest-sweep")
-    assert first == {"write": True, "deduplicated": False, "origin_id": "m-1"}
-    assert second == {"write": False, "deduplicated": True, "origin_id": "m-1"}
+    assert first == {"write": True, "deduplicated": False, "origin_id": "m-1",
+                     "replace": []}
+    assert second == {"write": False, "deduplicated": True, "origin_id": "m-1",
+                      "replace": []}
     assert len(r.streams[STREAM_KEY]) == 1
 
 
@@ -288,7 +290,7 @@ def _handler() -> str:
 def test_the_route_admits_before_it_writes():
     h = _handler()
     assert "await ingest_replay.admit(redis_client, payload, marker)" in h
-    assert h.index("ingest_replay.admit(") < h.index("redis_client.xadd(")
+    assert h.index("ingest_replay.admit(") < h.index("ingest_replay.write(")
 
 
 def test_a_deduplicated_replay_returns_without_an_xadd_and_says_so():
@@ -299,9 +301,13 @@ def test_a_deduplicated_replay_returns_without_an_xadd_and_says_so():
     assert "xadd" not in branch
 
 
-def test_the_route_indexes_the_origin_after_writing():
+def test_the_route_writes_through_the_service():
+    """The XADD, the index and the replace live in ingest_replay.write,
+    where the order is EXECUTED by test_a_correction_writes_new_before_
+    removing_old; the route must not grow a second writer beside it."""
     h = _handler()
-    assert h.index("redis_client.xadd(") < h.index("ingest_replay.remember(redis_client, payload)")
+    assert "await ingest_replay.write(redis_client, payload, verdict)" in h
+    assert "redis_client.xadd(" not in h
 
 
 def test_the_markers_meaning_is_written_where_the_dedupe_lives():
@@ -463,3 +469,120 @@ def test_cleanup_does_not_treat_two_types_as_duplicates():
     assert plan["delete"] == []
     assert plan["ambiguous"] == {}
     assert len(plan["keep"]) == 2
+
+
+# --------------------------------------------------------------------
+# word-correction: the one marker that REPLACES (2026-10-31)
+# --------------------------------------------------------------------
+
+from src.contextquilt.services.ingest_replay import write  # noqa: E402
+from src.contextquilt.services.ingest_markers import (  # noqa: E402
+    REPLACE_MARKER, skips_extraction,
+)
+
+
+class OrderedRedis(FakeRedis):
+    """Records the order of writes, so NEW-before-OLD is executed, not
+    read off the source."""
+
+    def __init__(self):
+        super().__init__()
+        self.ops = []
+
+    async def xadd(self, key, fields):
+        self.ops.append("xadd")
+        return await super().xadd(key, fields)
+
+    async def xdel(self, key, *ids):
+        self.ops.append("xdel")
+        return await super().xdel(key, *ids)
+
+
+def _transcript(text):
+    p = _payload(text=text)
+    p["type"] = "meeting_transcript"
+    return p
+
+
+async def _route(redis, payload, marker=None):
+    """The route's path since 2026-10-31: admit, then write."""
+    verdict = await admit(redis, payload, marker)
+    if not verdict["write"]:
+        return verdict, None
+    return verdict, await write(redis, payload, verdict)
+
+
+@pytest.mark.asyncio
+async def test_a_correction_replaces_the_stored_transcript():
+    r = OrderedRedis()
+    await _route(r, _transcript("ask Cora"))
+    payload = _transcript("ask Kore.ai")
+    payload["recovery"] = REPLACE_MARKER
+    verdict, written = await _route(r, payload, marker=REPLACE_MARKER)
+    entries = r.streams[STREAM_KEY]
+    assert len(entries) == 1
+    stored = json.loads(entries[0][1]["data"])
+    assert stored["content"] == "ask Kore.ai"
+    assert stored["replaced_entries"] == 1
+    assert written["replaced"] == 1
+    assert skips_extraction(stored) is True
+
+
+@pytest.mark.asyncio
+async def test_a_correction_writes_new_before_removing_old():
+    """If anything fails between the two, the stream holds BOTH, never
+    neither: it is the only copy of a raw transcript."""
+    r = OrderedRedis()
+    await _route(r, _transcript("ask Cora"))
+    r.ops.clear()
+    payload = _transcript("ask Kore.ai")
+    payload["recovery"] = REPLACE_MARKER
+    await _route(r, payload, marker=REPLACE_MARKER)
+    assert r.ops == ["xadd", "xdel"]
+
+
+@pytest.mark.asyncio
+async def test_a_correction_with_nothing_to_replace_is_a_first_delivery():
+    """No earlier entry: the corrected transcript IS the meeting's first
+    delivery and must extract, so nothing marks it as a replacement."""
+    r = OrderedRedis()
+    payload = _transcript("ask Kore.ai")
+    payload["recovery"] = REPLACE_MARKER
+    verdict, written = await _route(r, payload, marker=REPLACE_MARKER)
+    stored = json.loads(r.streams[STREAM_KEY][0][1]["data"])
+    assert verdict["replace"] == [] and written["replaced"] == 0
+    assert "replaced_entries" not in stored
+    assert skips_extraction(stored) is False
+    assert r.ops == ["xadd"]
+
+
+@pytest.mark.asyncio
+async def test_a_correction_replaces_only_its_own_type():
+    """An analysis for the same meeting is a different record and stays."""
+    r = OrderedRedis()
+    await _route(r, _payload(text="analysis of Cora"))       # meeting_summary
+    await _route(r, _transcript("ask Cora"))
+    payload = _transcript("ask Kore.ai")
+    payload["recovery"] = REPLACE_MARKER
+    await _route(r, payload, marker=REPLACE_MARKER)
+    kinds = sorted(json.loads(e[1]["data"])["type"] for e in r.streams[STREAM_KEY])
+    assert kinds == ["meeting_summary", "meeting_transcript"]
+    texts = sorted(json.loads(e[1]["data"])["content"] for e in r.streams[STREAM_KEY])
+    assert texts == ["analysis of Cora", "ask Kore.ai"]
+
+
+@pytest.mark.asyncio
+async def test_every_other_marker_still_writes_nothing_for_a_landed_origin():
+    """The replace is THIS marker's alone; the 09-14 ruling stands for
+    every other value."""
+    r = OrderedRedis()
+    await _route(r, _transcript("ask Cora"))
+    verdict, written = await _route(r, _transcript("ask Kore.ai"), marker="report-404-replay")
+    assert verdict["deduplicated"] is True and written is None
+    assert json.loads(r.streams[STREAM_KEY][0][1]["data"])["content"] == "ask Cora"
+
+
+def test_the_route_echoes_the_replace_count():
+    h = _handler()
+    assert "if marker == REPLACE_MARKER:" in h
+    assert 'body["replaced"] = written["replaced"]' in h
