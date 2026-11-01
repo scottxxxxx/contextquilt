@@ -393,6 +393,27 @@ components:
           example: updated
         patch_id:
           type: string
+        # Everything below is read back from the stored row after every
+        # write on the route, so a caller compares rather than assumes.
+        fact:
+          type: string
+          nullable: true
+        patch_type:
+          type: string
+        owner:
+          type: string
+          nullable: true
+        deadline_date:
+          type: string
+          format: date
+          nullable: true
+          description: Null when cleared or never set.
+        project_id:
+          type: string
+          nullable: true
+        permanence_override:
+          type: string
+          nullable: true
 
     PatchDeleteResponse:
       type: object
