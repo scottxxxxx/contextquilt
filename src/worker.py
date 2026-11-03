@@ -6289,6 +6289,57 @@ class ColdPathWorker:
             if meeting_date else ""
         )
 
+        # THE DAY THE MEETING HAPPENED, recorded rather than spent.
+        #
+        # Until 2026-08-27 this timestamp built the `Meeting date:`
+        # prompt line and was dropped, so every date CQ held was an
+        # ingest clock and no surface could honestly bucket by month
+        # (doc 21, ruled by Scott). A meeting's date is like the
+        # transcript, available exactly once.
+        #
+        # WRITTEN HERE, BEFORE ANY LANE DECIDES ANYTHING, because the date
+        # is a property of the meeting and not of what extraction made of
+        # it. It sat after the LLM call until 2026-11-03, which meant the
+        # length gate's early return (and the listening return) skipped
+        # it: the first demo seed, 33 chars under the floor, came back
+        # with four behavior moments and a hero reading "since November"
+        # for a September meeting, because the only row that knew the
+        # date was never written. Doc 19.11: when a path returns early,
+        # enumerate everything that rode past that return.
+        #
+        # Failure is swallowed on purpose. This is bookkeeping beside
+        # the ingest, never a reason to lose an extraction, and the
+        # table may not exist on the MCP deployment's lagging
+        # Postgres, which is the same degradation entity_aliases and
+        # patch_cues already take.
+        # Gated on the PARSED date (computed above for the prompt's
+        # `Meeting date:` line), never on the raw string: that parse
+        # already handles the Z suffix and yields None on anything it
+        # cannot read, and slicing the string instead would write a
+        # confident wrong day for any format it does not expect.
+        if origin_id and meeting_date:
+            try:
+                await self.db.execute(
+                    """
+                    INSERT INTO meeting_origins
+                        (user_id, origin_id, origin_type, meeting_date)
+                    VALUES ($1, $2, $3, $4::date)
+                    ON CONFLICT (user_id, origin_id) DO UPDATE
+                       SET meeting_date = EXCLUDED.meeting_date,
+                           origin_type  = COALESCE(EXCLUDED.origin_type,
+                                                   meeting_origins.origin_type),
+                           updated_at   = NOW()
+                     WHERE meeting_origins.meeting_date
+                           IS DISTINCT FROM EXCLUDED.meeting_date
+                    """,
+                    user_id, str(origin_id),
+                    str(origin_type) if origin_type else None,
+                    meeting_date,
+                )
+            except Exception as exc:
+                logger.debug("meeting_origin_not_recorded",
+                             origin_id=str(origin_id), error=str(exc)[:140])
+
         # Memory language. Apps pass metadata.language (BCP-47, e.g. "es")
         # so extraction writes patch text in the user's language. Without
         # it, the prompt's LANGUAGE section falls back to the dominant
@@ -6761,48 +6812,9 @@ class ColdPathWorker:
                     logger.warning("origin_project_not_recorded",
                                    origin_id=str(origin_id), error=str(exc)[:140])
 
-            # THE DAY THE MEETING HAPPENED, recorded rather than spent.
-            #
-            # Until 2026-08-27 this timestamp built the `Meeting date:`
-            # prompt line and was dropped, so every date CQ held was an
-            # ingest clock and no surface could honestly bucket by month
-            # (doc 21, ruled by Scott). It is written here and read by
-            # nothing yet; the point is that history starts accruing now,
-            # because a meeting's date is like the transcript, available
-            # exactly once.
-            #
-            # Failure is swallowed on purpose. This is bookkeeping beside
-            # the ingest, never a reason to lose an extraction, and the
-            # table may not exist on the MCP deployment's lagging
-            # Postgres, which is the same degradation entity_aliases and
-            # patch_cues already take.
-            # Gated on the PARSED date (computed above for the prompt's
-            # `Meeting date:` line), never on the raw string: that parse
-            # already handles the Z suffix and yields None on anything it
-            # cannot read, and slicing the string instead would write a
-            # confident wrong day for any format it does not expect.
-            if origin_id and meeting_date:
-                try:
-                    await self.db.execute(
-                        """
-                        INSERT INTO meeting_origins
-                            (user_id, origin_id, origin_type, meeting_date)
-                        VALUES ($1, $2, $3, $4::date)
-                        ON CONFLICT (user_id, origin_id) DO UPDATE
-                           SET meeting_date = EXCLUDED.meeting_date,
-                               origin_type  = COALESCE(EXCLUDED.origin_type,
-                                                       meeting_origins.origin_type),
-                               updated_at   = NOW()
-                         WHERE meeting_origins.meeting_date
-                               IS DISTINCT FROM EXCLUDED.meeting_date
-                        """,
-                        user_id, str(origin_id),
-                        str(origin_type) if origin_type else None,
-                        meeting_date,
-                    )
-                except Exception as exc:
-                    logger.debug("meeting_origin_not_recorded",
-                                 origin_id=str(origin_id), error=str(exc)[:140])
+            # The meeting_origins row (the meeting's date) is written
+            # ABOVE, before the gate and the listening return, since
+            # 2026-11-03. Nothing about it depends on the extraction.
 
             # Auto-register project if project_id provided
             if project_id and project:

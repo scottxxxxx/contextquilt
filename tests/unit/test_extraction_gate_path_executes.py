@@ -130,6 +130,18 @@ def _build(gate_reason: str | None, listening: bool, listening_types: set[str]):
     async def _apply_speaker_identities(user_id, summary, metadata, person_type):
         return summary, False
 
+    class _DB:
+        """Records every statement the handler runs on the gate path. The
+        only one that belongs there is the meeting_origins upsert."""
+
+        def __init__(self) -> None:
+            self.executed: list[tuple[str, tuple]] = []
+
+        async def execute(self, sql, *args):
+            self.executed.append((" ".join(sql.split()), args))
+
+    rec.db = _DB()
+
     selfish = SimpleNamespace(
         _extract_behavior_observations=_behavior,
         _generate_headlines=_headlines,
@@ -139,6 +151,7 @@ def _build(gate_reason: str | None, listening: bool, listening_types: set[str]):
         _resolve_extraction_prompt=_resolve_prompt,
         _app_manifest=_app_manifest,
         _apply_speaker_identities=_apply_speaker_identities,
+        db=rec.db,
     )
 
     namespace: dict = {
@@ -329,3 +342,98 @@ async def test_listening_material_with_no_declared_types_logs_and_returns():
     # recording owes the listener a behavior observation.
     assert rec.behavior_args is None
     assert rec.headline_args is None
+
+
+# ----------------------------------------------------------------------
+# The meeting's date survives every early return
+# ----------------------------------------------------------------------
+
+def _meeting_origin_writes(rec):
+    return [(sql, args) for sql, args in rec.db.executed
+            if "INSERT INTO meeting_origins" in sql]
+
+
+@pytest.mark.asyncio
+async def test_a_gated_meeting_still_records_its_date():
+    """The first Vendor switch demo seed (2026-11-03, 1167 chars, 33
+    under the floor) came back with four behavior moments and a Memory
+    hero reading "since November" for a 2026-09-16 meeting. The
+    `meeting_origins` upsert, #497's only carrier for the date, sat
+    after the LLM call, below the gate's return, so a gated meeting's
+    date was never written and the hero fell back to the ingest clock.
+
+    The date is a property of the meeting, not of what extraction made
+    of it, so the row is written before any lane decides anything.
+    Asserted on the EXECUTED statement and its bound values, against the
+    real resolver: `PAYLOAD` has no recording_started_at, so the parse
+    falls back to the 2026-09-03 timestamp, and that is the day expected.
+    """
+    handler, selfish, rec = _build("too_short", listening=False, listening_types=set())
+
+    await handler(selfish, PAYLOAD)
+
+    writes = _meeting_origin_writes(rec)
+    assert len(writes) == 1, f"expected one meeting_origins upsert, saw {len(writes)}"
+    sql, args = writes[0]
+    assert args[0] == PAYLOAD["user_id"]
+    assert args[1] == ORIGIN
+    assert args[2] == "meeting"
+    assert args[3].isoformat() == "2026-09-03"
+    # And it is the write that cannot erase a date on a re-ingest.
+    assert "IS DISTINCT FROM EXCLUDED.meeting_date" in sql
+
+
+@pytest.mark.asyncio
+async def test_the_date_is_written_before_the_gate_decides():
+    """Order, executed: the upsert happens before `extraction_skipped` is
+    logged, so no future early return inserted between the two can lose
+    it again."""
+    handler, selfish, rec = _build("too_short", listening=False, listening_types=set())
+    order: list[str] = []
+    real_execute = rec.db.execute
+
+    async def _execute(sql, *args):
+        if "meeting_origins" in sql:
+            order.append("date_written")
+        return await real_execute(sql, *args)
+
+    rec.db.execute = _execute
+    real_log = rec.log
+
+    def _log(event, **kw):
+        if event == "extraction_skipped":
+            order.append("gate_returned")
+        real_log(event, **kw)
+
+    rec.log = _log
+
+    await handler(selfish, PAYLOAD)
+
+    assert order == ["date_written", "gate_returned"], order
+
+
+@pytest.mark.asyncio
+async def test_listening_material_still_records_its_date():
+    """The other early return above the old write site. A recording the
+    user only heard still happened on a day."""
+    handler, selfish, rec = _build("too_short", listening=True, listening_types=set())
+
+    await handler(selfish, PAYLOAD)
+
+    assert "listening_no_declared_types" in rec.events()
+    writes = _meeting_origin_writes(rec)
+    assert len(writes) == 1 and writes[0][1][1] == ORIGIN
+
+
+@pytest.mark.asyncio
+async def test_a_payload_with_no_resolvable_date_writes_no_row():
+    """The parse gates the write: no date, no row, never a confident
+    wrong day. Same payload with the timestamp removed."""
+    handler, selfish, rec = _build("too_short", listening=False, listening_types=set())
+    payload = {**PAYLOAD}
+    payload.pop("timestamp")
+
+    await handler(selfish, payload)
+
+    assert rec.failure() is None, rec.failure()
+    assert _meeting_origin_writes(rec) == []
